@@ -2137,6 +2137,8 @@ class PedidoProgramarTests(TestCase):
 
     @classmethod
     def _pedido(cls, folio, cotizacion=None):
+        # Confirmado por mesa de control: solo se programa un pedido confirmado y
+        # no cancelado (EC-750, ``test_sin_confirmar_o_cancelado_no_se_programa``).
         return Pedido.objects.create(
             empresa=cls.empresa,
             sucursal=cls.sucursal,
@@ -2144,6 +2146,7 @@ class PedidoProgramarTests(TestCase):
             cotizacion=cotizacion,
             moneda=cls.moneda,
             estatus=3,
+            fecha_confirmacion=timezone.now(),
             folio=folio,
             persona_pagos="Pagos",
             correo_facturas="pagos@acme.test",
@@ -2159,6 +2162,34 @@ class PedidoProgramarTests(TestCase):
         return client.patch(
             pedido_programar_url((pedido or self.pedido).pk), payload, format="json"
         )
+
+    def test_sin_confirmar_o_cancelado_no_se_programa(self):
+        """EC-750: ``GET`` y ``PATCH`` responden 400 si el pedido no está
+        confirmado o está CANCELADO, y el ``PATCH`` no guarda nada."""
+        client = APIClient()
+        client.force_authenticate(user=self.admin_mesa)
+        payload = {"programaciones": [{"destino": "EMBARQUE", "cantidad": 10}]}
+        casos = (
+            ({"fecha_confirmacion": None}, "fecha_confirmacion",
+             "Confirma el pedido antes de programarlo."),
+            ({"estatus": Pedido.ESTATUS_CANCELADO}, "estatus",
+             "El pedido está CANCELADO; no se puede programar."),
+        )
+        for cambios, campo, mensaje in casos:
+            with self.subTest(campo=campo):
+                Pedido.objects.filter(pk=self.pedido.pk).update(
+                    **{"fecha_confirmacion": timezone.now(), "estatus": 3, **cambios}
+                )
+
+                resp = client.get(pedido_programar_url(self.pedido.pk))
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {campo: mensaje})
+
+                resp = self._patch(self.admin_mesa, payload)
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {campo: mensaje})
+                self.pedido.refresh_from_db()
+                self.assertEqual(self.pedido.programacion_conf, {})
 
     def test_get_contexto_con_stock_en_alm00(self):
         alm00 = Almacen.objects.create(empresa=self.empresa, sucursal=self.sucursal, codigo="ALM-00",
@@ -3145,12 +3176,14 @@ class PedidoDestinosAplicablesTests(TestCase):
         )
 
         def _pedido(folio):
+            # Confirmado: ``programar`` exige pedido confirmado y no cancelado (EC-750).
             return Pedido.objects.create(
                 empresa=cls.empresa,
                 sucursal=cls.sucursal,
                 cliente=cls.cliente,
                 moneda=cls.moneda,
                 estatus=3,
+                fecha_confirmacion=timezone.now(),
                 folio=folio,
                 persona_pagos="Pagos",
                 correo_facturas="pagos@acme.test",
@@ -7652,11 +7685,12 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
         self.assertFalse(PedidoDetalle.objects.filter(pedido=pedido).exists())
 
     # --- endpoints de renglón ----------------------------------------------
-    def _pedido_con_talla(self, producto, **talla):
+    def _pedido_con_talla(self, producto, confirmado=False, **talla):
         pedido = Pedido.objects.create(
             empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
             persona_pagos="P", correo_facturas="p@x.test", telefono_pagos="8100000000",
             forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            fecha_confirmacion=timezone.now() if confirmado else None,
         )
         detalle = PedidoDetalle.objects.create(pedido=pedido, producto=producto, precio_unitario="10.00")
         return detalle, PedidoDetalleTalla.objects.create(pedido_detalle=detalle, talla=self.talla, cantidad=2, **talla)
@@ -7726,11 +7760,12 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
                 self.assertEqual(sin_proceso.estatus, estatus)
 
     def test_programar_con_la_regla_por_categoria(self):
+        # Solo se programa un pedido confirmado (EC-750).
         payload = {"programaciones": [{"destino": "EMBARQUE", "cantidad": 1}]}
-        _, libre = self._pedido_con_talla(self.p_libre, lleva_bordado=True)
+        _, libre = self._pedido_con_talla(self.p_libre, confirmado=True, lleva_bordado=True)
         resp = self.api.patch(f"{PEDIDOS_URL}{libre.pedido_detalle.pedido_id}/programar/", payload, format="json")
         self.assertEqual(resp.status_code, 200, resp.content)
-        _, sin_proceso = self._pedido_con_talla(self.p_pantalon, lleva_bordado=True)
+        _, sin_proceso = self._pedido_con_talla(self.p_pantalon, confirmado=True, lleva_bordado=True)
         self._rechazo(
             self.api.patch(f"{PEDIDOS_URL}{sin_proceso.pedido_detalle.pedido_id}/programar/", payload, format="json"),
             "La categoría «Pantalón» no admite Bordado.",
