@@ -14,7 +14,9 @@ from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
+from django.db import connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -29,6 +31,8 @@ from compras.models import (
     OrdenCompraRutaCritica,
     Recepcion,
     RecepcionDetalle,
+    RecepcionRFIDEncuadre,
+    RecepcionRFIDLectura,
 )
 from finanzas.models import FacturaProveedor, FacturaProveedorDetalle
 from hr.models import Empleado, Puesto
@@ -2882,3 +2886,293 @@ class OrdenCompraKpisDashboardTests(_OrdenesModoServidorBase, TestCase):
         with CaptureQueriesContext(connection) as despues:
             self._get(self.URL_KPIS)
         self.assertEqual(len(despues), len(antes))
+
+
+class _EncuadresRFIDFixture:
+    """Encuadres RFID de OC y de OP con 0, 1 y varias lecturas, recibido parcial,
+    rechazo de Calidad y una recepción cancelada que no debe contar (EC-778)."""
+
+    URL_ENCUADRES = "/api/v1/compras/recepcion-rfid-encuadres/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import Talla
+        from nucleo.models import UnidadMedida
+        from produccion.models import ListaMaterialBom
+
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Una exhibición")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.unidad = UnidadMedida.objects.create(clave="PZA-778", nombre="Pieza")
+        color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        tallas = [Talla.objects.create(nombre=t) for t in ("CH", "M", "G")]
+        tipo = _tipo_producto()
+        cls.folios = 0
+        cls.t = {}
+        for clave in ("a", "b"):
+            empresa = Empresa.objects.create(codigo=f"ec778-{clave}", razon_social=f"EC778 {clave} SA")
+            sucursal = Sucursal.objects.create(empresa=empresa, codigo=f"E7{clave}", nombre=f"Suc {clave}")
+            departamento = Departamento.objects.create(
+                empresa=empresa, sucursal=sucursal, codigo="CAL", nombre="Calidad",
+            )
+            producto = Producto.objects.create(empresa=empresa, nombre=f"Playera {clave}", tipo=tipo)
+            variantes = [
+                ProductoVariante.objects.create(
+                    producto=producto, empresa=empresa, color=color, talla=talla,
+                    sku=f"PLA-{clave}-{talla.nombre}", precio_base="1",
+                )
+                for talla in tallas
+            ]
+            cls.t[clave] = {
+                "empresa": empresa,
+                "sucursal": sucursal,
+                "almacen": Almacen.objects.create(
+                    empresa=empresa, sucursal=sucursal, codigo="ALM", nombre=f"Almacén {clave}",
+                ),
+                "proveedor": Proveedor.objects.create(
+                    empresa=empresa, nombre=f"Proveedor {clave}", moneda=cls.moneda, sat_regimen_fiscal=regimen,
+                    sat_forma_pago=forma, sat_metodo_pago=metodo, codigo=f"P778{clave}", razon_social="P",
+                    telefono="8100000000", contacto_principal="Ana", rfc="XAXX010101000",
+                    email=f"p778{clave}@p.test",
+                ),
+                "usuario": Usuario.objects.create(
+                    username=f"rfid778-{clave}", email=f"rfid778-{clave}@ec778.test", empresa=empresa,
+                    sucursal_default=sucursal, is_admin_empresa=True,
+                ),
+                "producto": producto,
+                "variantes": variantes,
+                "bom": ListaMaterialBom.objects.create(empresa=empresa, producto_variante=variantes[0], activo=True),
+                "inspector": Empleado.objects.create(
+                    empresa=empresa, sucursal=sucursal, departamento=departamento,
+                    puesto=Puesto.objects.create(empresa=empresa, nombre="Inspector"),
+                    numero_empleado=f"EMP-778{clave}", nombre="Ana", apellido_paterno="Lopez",
+                    fecha_ingreso=timezone.localdate(),
+                ),
+            }
+
+        # OC con dos renglones: recibido 4 del primero, 1 rechazado por Calidad
+        # y 5 en una recepción cancelada que no cuenta.
+        cls.oc1, (cls.r1, r2) = cls._oc("a", [10, 10])
+        rd = cls._recibir("a", cls.r1, 4, orden_compra=cls.oc1)
+        cls._rechazar("a", rd, 1)
+        cls._recibir("a", cls.r1, 5, orden_compra=cls.oc1, estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        cls.e_oc_varias = cls._encuadre("a", orden_compra=cls.oc1)
+        cls._leer(cls.e_oc_varias, cls.r1, 2)
+        cls._leer(cls.e_oc_varias, r2, 1)
+        cls._leer(cls.e_oc_varias, None, 1)  # tag sin resolver: suma a total_sin_asignar
+        cls.e_oc_vacio = cls._encuadre("a", orden_compra=cls.oc1)  # misma OC, cero lecturas
+        # OP con dos renglones: recibido 6 del primero y 2 rechazados.
+        cls.op1, (d1, d2) = cls._op("a", [20, 5])
+        rd = cls._recibir("a", d1, 6, op=cls.op1)
+        cls._rechazar("a", rd, 2)
+        cls.e_op_una = cls._encuadre("a", op=cls.op1)
+        cls._leer(cls.e_op_una, d2, 1)
+        oc2, (r3,) = cls._oc("a", [3])
+        cls.e_oc_una = cls._encuadre("a", orden_compra=oc2)
+        cls._leer(cls.e_oc_una, r3, 1)
+        # Otra empresa.
+        oc_b, (rb,) = cls._oc("b", [7])
+        cls.e_b = cls._encuadre("b", orden_compra=oc_b)
+        cls._leer(cls.e_b, rb, 1)
+        # Orden del listado: -created_at, -id.
+        cls.ids_a = [cls.e_oc_una.pk, cls.e_op_una.pk, cls.e_oc_vacio.pk, cls.e_oc_varias.pk]
+
+    @classmethod
+    def _oc(cls, clave, cantidades):
+        t = cls.t[clave]
+        oc = OrdenCompra.objects.create(
+            empresa=t["empresa"], sucursal=t["sucursal"], proveedor=t["proveedor"], moneda=cls.moneda,
+            usuario=t["usuario"], fecha_oc=timezone.localdate(), tipo_compra="PT",
+        )
+        renglones = [
+            OrdenCompraDetalle.objects.create(
+                orden_compra=oc, producto=t["producto"], producto_variante=t["variantes"][i],
+                sucursal=t["sucursal"], cantidad=cantidad,
+            )
+            for i, cantidad in enumerate(cantidades)
+        ]
+        return oc, renglones
+
+    @classmethod
+    def _op(cls, clave, cantidades):
+        from produccion.models import OrdenProduccion, OrdenProduccionDetalle
+
+        t = cls.t[clave]
+        cls.folios += 1
+        op = OrdenProduccion.objects.create(
+            empresa=t["empresa"], sucursal=t["sucursal"], folio_op=f"OP-778-{clave}-{cls.folios}",
+        )
+        renglones = [
+            OrdenProduccionDetalle.objects.create(
+                op=op, bom=t["bom"], cantidad=cantidad, unidad=cls.unidad, producto_variante=t["variantes"][i],
+            )
+            for i, cantidad in enumerate(cantidades)
+        ]
+        return op, renglones
+
+    @classmethod
+    def _recibir(cls, clave, renglon, cantidad, orden_compra=None, op=None,
+                 estatus=Recepcion.EstatusRecepcion.RECIBIDA):
+        t = cls.t[clave]
+        cls.folios += 1
+        recepcion = Recepcion.objects.create(
+            tipo_origen="OC" if orden_compra else "OP", orden_compra=orden_compra, op=op,
+            empresa=t["empresa"], sucursal=t["sucursal"], proveedor=t["proveedor"] if orden_compra else None,
+            almacen=t["almacen"], usuario=t["usuario"], folio=f"RC-778-{cls.folios}",
+            fecha_recepcion=timezone.now(), estatus=estatus,
+        )
+        return RecepcionDetalle.objects.create(
+            recepcion=recepcion, producto=t["producto"], cantidad_recibida=cantidad,
+            orden_compra_detalle=renglon if orden_compra else None,
+            orden_produccion_detalle=renglon if op else None,
+        )
+
+    @classmethod
+    def _rechazar(cls, clave, recepcion_detalle, cantidad):
+        inspeccion = CalidadInspeccion.objects.create(
+            recepcion=recepcion_detalle.recepcion, inspector=cls.t[clave]["inspector"],
+            fecha=timezone.localdate(), estado="rechazada",
+        )
+        CalidadInspeccionDetalle.objects.create(
+            calidad_inspeccion=inspeccion, recepcion_detalle=recepcion_detalle,
+            cantidad_inspeccionada=recepcion_detalle.cantidad_recibida,
+            cantidad_aprobada=recepcion_detalle.cantidad_recibida - cantidad,
+            cantidad_rechazada=cantidad, resultado="rechazo", motivo_rechazo="x",
+        )
+
+    @classmethod
+    def _encuadre(cls, clave, orden_compra=None, op=None):
+        t = cls.t[clave]
+        return RecepcionRFIDEncuadre.objects.create(
+            tipo_origen="OC" if orden_compra else "OP", orden_compra=orden_compra, op=op,
+            empresa=t["empresa"], sucursal=t["sucursal"], proveedor=t["proveedor"] if orden_compra else None,
+            almacen=t["almacen"], usuario=t["usuario"], fecha_recepcion=timezone.now(),
+        )
+
+    @classmethod
+    def _leer(cls, encuadre, renglon, n):
+        """``n`` lecturas del renglón (OC u OP según el encuadre); sin renglón, tags sin resolver."""
+        variante = renglon.producto_variante if renglon is not None else None
+        inicio = encuadre.lecturas.count()
+        for i in range(inicio, inicio + n):
+            RecepcionRFIDLectura.objects.create(
+                encuadre=encuadre, codigo_tag=f"TAG-{encuadre.pk}-{i}",
+                orden_compra_detalle=renglon if renglon is not None and encuadre.orden_compra_id else None,
+                orden_produccion_detalle=renglon if renglon is not None and encuadre.op_id else None,
+                producto=variante.producto if variante else None, producto_variante=variante,
+                cantidad_leida=Decimal("1"),
+            )
+
+    def _agregar_lote(self, n_encuadres=3, n_lecturas=5):
+        """Más encuadres (OC y OP alternados) con varias lecturas cada uno."""
+        for i in range(n_encuadres):
+            if i % 2:
+                op, renglones = self._op("a", [8, 8])
+                encuadre = self._encuadre("a", op=op)
+            else:
+                oc, renglones = self._oc("a", [8, 8, 8])
+                encuadre = self._encuadre("a", orden_compra=oc)
+                self._recibir("a", renglones[0], 2, orden_compra=oc)
+            for j in range(n_lecturas):
+                self._leer(encuadre, renglones[j % len(renglones)], 1)
+
+    def _api(self, clave="a"):
+        api = APIClient()
+        api.force_authenticate(self.t[clave]["usuario"])
+        return api
+
+
+class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
+    """EC-778: el listado y el detalle de encuadres RFID no crecen en consultas con
+    el número de encuadres ni de lecturas, y el resumen en bloque del listado es el
+    mismo que el que el detalle calcula encuadre por encuadre."""
+
+    # Listado: encuadres; lecturas con sus productos y variantes; renglones de OC
+    # y de OP; recibido + rechazado de cada lado. Detalle: encuadre; lecturas,
+    # productos y variantes; renglones, recibido y rechazado. Sin lecturas,
+    # Django no consulta productos ni variantes.
+    CONSULTAS_LISTADO = 10
+    CONSULTAS_DETALLE = 7
+    CONSULTAS_DETALLE_SIN_LECTURAS = 5
+
+    def test_listado_no_crece_con_encuadres_ni_lecturas(self):
+        api = self._api()
+        with self.assertNumQueries(self.CONSULTAS_LISTADO):
+            self.assertEqual(len(api.get(self.URL_ENCUADRES).json()), 4)
+        self._agregar_lote(n_encuadres=4, n_lecturas=6)
+        with self.assertNumQueries(self.CONSULTAS_LISTADO):
+            self.assertEqual(len(api.get(self.URL_ENCUADRES).json()), 8)
+
+    def test_detalle_no_crece_con_lecturas(self):
+        api = self._api()
+        for encuadre, consultas in (
+            (self.e_oc_vacio, self.CONSULTAS_DETALLE_SIN_LECTURAS),
+            (self.e_oc_una, self.CONSULTAS_DETALLE),
+            (self.e_oc_varias, self.CONSULTAS_DETALLE),
+            (self.e_op_una, self.CONSULTAS_DETALLE),
+        ):
+            with self.subTest(encuadre=encuadre.pk), self.assertNumQueries(consultas):
+                self.assertEqual(api.get(f"{self.URL_ENCUADRES}{encuadre.pk}/").status_code, 200)
+        self._leer(self.e_oc_varias, self.r1, 12)
+        with self.assertNumQueries(self.CONSULTAS_DETALLE):
+            self.assertEqual(api.get(f"{self.URL_ENCUADRES}{self.e_oc_varias.pk}/").status_code, 200)
+
+    def test_aceptar_no_crece_con_lecturas(self):
+        api = self._api()
+        with CaptureQueriesContext(connection) as pocas:
+            self.assertEqual(api.post(f"{self.URL_ENCUADRES}{self.e_oc_una.pk}/aceptar/").status_code, 200)
+        with CaptureQueriesContext(connection) as muchas:
+            self.assertEqual(api.post(f"{self.URL_ENCUADRES}{self.e_oc_varias.pk}/aceptar/").status_code, 200)
+        self.assertEqual(len(muchas), len(pocas))
+
+    def test_listado_igual_al_detalle_de_cada_encuadre(self):
+        """OC y OP, con y sin lecturas, en el mismo orden de lecturas y renglones."""
+        self._agregar_lote(n_encuadres=3, n_lecturas=4)
+        api = self._api()
+        listado = api.get(self.URL_ENCUADRES).json()
+        self.assertEqual(len(listado), 7)
+        for fila in listado:
+            with self.subTest(encuadre=fila["id"]):
+                self.assertEqual(fila, api.get(f"{self.URL_ENCUADRES}{fila['id']}/").json())
+
+    def test_resumen_resta_recibido_y_rechazo_sin_cancelados(self):
+        listado = {e["id"]: e for e in self._api().get(self.URL_ENCUADRES).json()}
+        oc = listado[self.e_oc_varias.pk]["resumen"]
+        self.assertEqual(
+            [(d["ordenado"], d["ya_recibido"], d["esperado"], d["leido"], d["diferencia"]) for d in oc["detalle"]],
+            [("10", "3.0000", "7.0000", "2.0000", "5.0000"), ("10", "0", "10", "1.0000", "9.0000")],
+        )
+        self.assertEqual(
+            (oc["total_esperado"], oc["total_leido"], oc["total_sin_asignar"], oc["completo"]),
+            ("17.0000", "4.0000", "1.0000", False),
+        )
+        vacio = listado[self.e_oc_vacio.pk]
+        self.assertEqual(vacio["lecturas"], [])
+        self.assertEqual([d["esperado"] for d in vacio["resumen"]["detalle"]], ["7.0000", "10"])
+        self.assertEqual((vacio["resumen"]["total_leido"], vacio["resumen"]["total_sin_asignar"]), ("0", "0"))
+        op = listado[self.e_op_una.pk]
+        self.assertEqual(
+            [(d["ordenado"], d["ya_recibido"], d["esperado"], d["leido"]) for d in op["resumen"]["detalle"]],
+            [("20.00", "4.0000", "16.0000", "0"), ("5.00", "0", "5.00", "1.0000")],
+        )
+        self.assertEqual([(l["producto_nombre"], l["producto_variante_nombre"]) for l in op["lecturas"]],
+                         [("Playera a", self.t["a"]["variantes"][1].nombre)])
+
+    def test_aislamiento_por_empresa(self):
+        api = self._api()
+        self.assertEqual([e["id"] for e in api.get(self.URL_ENCUADRES).json()], self.ids_a)
+        self.assertEqual(api.get(f"{self.URL_ENCUADRES}{self.e_b.pk}/").status_code, 404)
+        resp = api.post(f"{self.URL_ENCUADRES}{self.e_b.pk}/lecturas/", {"codigo_tag": "PLA-b-CH"}, format="json")
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(api.post(f"{self.URL_ENCUADRES}{self.e_b.pk}/aceptar/").status_code, 404)
+        self.e_b.refresh_from_db()
+        self.assertEqual((self.e_b.lecturas.count(), self.e_b.estatus), (1, "PENDIENTE"))
+        self.assertEqual([e["id"] for e in self._api("b").get(self.URL_ENCUADRES).json()], [self.e_b.pk])
+
+        sin_empresa = APIClient()
+        sin_empresa.force_authenticate(Usuario.objects.create(username="sin778", email="sin778@ec778.test"))
+        self.assertEqual(sin_empresa.get(self.URL_ENCUADRES).json(), [])
+        root = APIClient()
+        root.force_authenticate(Usuario.objects.create(username="su778", email="su778@ec778.test", is_superuser=True))
+        self.assertLessEqual({self.e_b.pk, *self.ids_a}, {e["id"] for e in root.get(self.URL_ENCUADRES).json()})
