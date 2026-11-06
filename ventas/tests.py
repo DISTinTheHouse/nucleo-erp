@@ -4723,7 +4723,10 @@ class PedidoReglasEstatusTests(TestCase):
 
     def test_cancelar_es_rapido(self):
         inicio = time.perf_counter()
-        with self.assertNumQueries(10):
+        # 17 desde EC-583 (bloqueo, devolución de inventario, reservas y auditoría).
+        # Incluye la carga perezosa evitable de ``pedido.empresa`` (la de
+        # ``pedido.sucursal`` solo ocurre al devolver inventario): EC-803, debe bajar a 16.
+        with self.assertNumQueries(17):
             self._cancelar(self.mesa)
         self.assertLess(time.perf_counter() - inicio, 0.5)
 
