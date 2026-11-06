@@ -2137,6 +2137,8 @@ class PedidoProgramarTests(TestCase):
 
     @classmethod
     def _pedido(cls, folio, cotizacion=None):
+        # Confirmado por mesa de control: solo se programa un pedido confirmado y
+        # no cancelado (EC-750, ``test_sin_confirmar_o_cancelado_no_se_programa``).
         return Pedido.objects.create(
             empresa=cls.empresa,
             sucursal=cls.sucursal,
@@ -2144,6 +2146,7 @@ class PedidoProgramarTests(TestCase):
             cotizacion=cotizacion,
             moneda=cls.moneda,
             estatus=3,
+            fecha_confirmacion=timezone.now(),
             folio=folio,
             persona_pagos="Pagos",
             correo_facturas="pagos@acme.test",
@@ -2159,6 +2162,83 @@ class PedidoProgramarTests(TestCase):
         return client.patch(
             pedido_programar_url((pedido or self.pedido).pk), payload, format="json"
         )
+
+    def _get(self, user, pedido=None):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(pedido_programar_url((pedido or self.pedido).pk))
+
+    def test_sin_confirmar_o_cancelado_no_se_programa(self):
+        """EC-750: ``GET`` y ``PATCH`` responden 400 si el pedido no está
+        confirmado o está CANCELADO, y el ``PATCH`` no guarda nada. El caso
+        CANCELADO con ``activo=True`` es dato inconsistente o heredado: el flujo
+        real lo da de baja (``test_cancelado_por_cancelar_no_se_encuentra``)."""
+        payload = {"programaciones": [{"destino": "EMBARQUE", "cantidad": 10}]}
+        casos = (
+            ({"fecha_confirmacion": None}, "fecha_confirmacion",
+             "Confirma el pedido antes de programarlo."),
+            ({"estatus": Pedido.ESTATUS_CANCELADO}, "estatus",
+             "El pedido está CANCELADO; no se puede programar."),
+        )
+        for cambios, campo, mensaje in casos:
+            with self.subTest(campo=campo):
+                Pedido.objects.filter(pk=self.pedido.pk).update(
+                    **{"fecha_confirmacion": timezone.now(), "estatus": 3, **cambios}
+                )
+
+                resp = self._get(self.admin_mesa)
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {campo: mensaje})
+
+                resp = self._patch(self.admin_mesa, payload)
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {campo: mensaje})
+                self.pedido.refresh_from_db()
+                self.assertEqual(self.pedido.programacion_conf, {})
+
+    def test_pedido_programado_no_pierde_la_confirmacion(self):
+        """EC-750: ``PATCH /pedidos/{id}/`` no vacía ``fecha_confirmacion`` de un
+        pedido con programación; uno sin programar sí se desconfirma."""
+        client = APIClient()
+        client.force_authenticate(user=self.admin_mesa)
+
+        def desconfirmar(pedido):
+            return client.patch(f"{PEDIDOS_URL}{pedido.pk}/", {"fecha_confirmacion": None}, format="json")
+
+        ok = self._patch(self.admin_mesa, {"programaciones": [{"destino": "EMBARQUE", "cantidad": 10}]})
+        self.assertEqual(ok.status_code, 200, ok.content)
+        resp = desconfirmar(self.pedido)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"fecha_confirmacion": (
+            "El pedido ya está programado; quita la programación antes de vaciar la confirmación."
+        )})
+        self.pedido.refresh_from_db()
+        self.assertIsNotNone(self.pedido.fecha_confirmacion)
+        self.assertEqual(len(self.pedido.programacion_conf["programaciones"]), 1)
+
+        for pedido in (self.pedido_sin_tallas, self.pedido):
+            with self.subTest(pedido=pedido.folio):
+                if pedido is self.pedido:  # primero se quita la programación
+                    self.assertEqual(self._patch(self.admin_mesa, {"programaciones": []}).status_code, 200)
+                resp = desconfirmar(pedido)
+                self.assertEqual(resp.status_code, 200, resp.content)
+                pedido.refresh_from_db()
+                self.assertIsNone(pedido.fecha_confirmacion)
+
+    def test_cancelado_por_cancelar_no_se_encuentra(self):
+        """Un pedido cancelado por ``cancelar/`` queda con ``activo=False`` y sale
+        del alcance: ``GET`` y ``PATCH programar/`` responden 404 y no se guarda nada."""
+        pedido = self._pedido("P-CANC-750")
+        client = APIClient()
+        client.force_authenticate(user=self.admin_mesa)
+        resp = client.post(f"{PEDIDOS_URL}{pedido.pk}/cancelar/", {"motivo": "Cliente canceló"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        self.assertEqual(self._get(self.admin_mesa, pedido=pedido).status_code, 404)
+        resp = self._patch(self.admin_mesa, {"programaciones": []}, pedido=pedido)
+        self.assertEqual(resp.status_code, 404, resp.content)
+        pedido.refresh_from_db()
+        self.assertEqual((pedido.estatus, pedido.activo, pedido.programacion_conf), (Pedido.ESTATUS_CANCELADO, False, {}))
 
     def test_get_contexto_con_stock_en_alm00(self):
         alm00 = Almacen.objects.create(empresa=self.empresa, sucursal=self.sucursal, codigo="ALM-00",
@@ -2479,11 +2559,10 @@ class PedidoProgramarTests(TestCase):
         self.assertEqual(body["programacion_conf"], self._programacion_db())
         self.assertEqual(body["total_piezas"], 120)
 
-    def test_total_piezas_excluye_lineas_de_muestra_sin_sku(self):
-        """Regresión: una línea de MUESTRA (``producto_nombre_externo``, sin
-        catálogo/SKU) no debe contar para lo que mesa de control puede
-        programar -- tiene su propio flujo (``PedidoEspecialViewSet.
-        variante_onboarding``), no se surte/embarca/borda por este genérico.
+    def test_total_piezas_incluye_lineas_de_muestra_sin_sku(self):
+        """Una línea de MUESTRA (``producto_nombre_externo``, sin catálogo/SKU)
+        cuenta para lo que mesa de control puede programar (#912): un pedido de
+        solo muestras también se programa. El tope sigue siendo el total.
         """
         pedido = self._pedido("P-000003")
         det_catalogo = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
@@ -2499,21 +2578,19 @@ class PedidoProgramarTests(TestCase):
             lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
         )
 
-        # Las 20 piezas de muestra no cuentan: el total programable son las 50
-        # de catálogo, no 70.
+        # Las 20 piezas de muestra cuentan: el total programable es 50 + 20 = 70.
         ok = self._patch(
-            self.admin_mesa, {"programaciones": [{"destino": "BORDADO", "cantidad": 50}]}, pedido=pedido
-        )
-        self.assertEqual(ok.status_code, 200, ok.json())
-        self.assertEqual(ok.json()["total_piezas"], 50)
-
-        # Antes del fix, 70 (50 catálogo + 20 muestra) pasaba la validación.
-        excedido = self._patch(
             self.admin_mesa, {"programaciones": [{"destino": "BORDADO", "cantidad": 70}]}, pedido=pedido
         )
+        self.assertEqual(ok.status_code, 200, ok.json())
+        self.assertEqual(ok.json()["total_piezas"], 70)
+
+        excedido = self._patch(
+            self.admin_mesa, {"programaciones": [{"destino": "BORDADO", "cantidad": 71}]}, pedido=pedido
+        )
         self.assertEqual(excedido.status_code, 400, excedido.json())
+        self.assertIn("71", str(excedido.json()["programaciones"]))
         self.assertIn("70", str(excedido.json()["programaciones"]))
-        self.assertIn("50", str(excedido.json()["programaciones"]))
 
     def test_parcialidades_expone_el_mismo_arreglo_en_list_y_retrieve(self):
         response = self._patch(
@@ -3145,12 +3222,14 @@ class PedidoDestinosAplicablesTests(TestCase):
         )
 
         def _pedido(folio):
+            # Confirmado: ``programar`` exige pedido confirmado y no cancelado (EC-750).
             return Pedido.objects.create(
                 empresa=cls.empresa,
                 sucursal=cls.sucursal,
                 cliente=cls.cliente,
                 moneda=cls.moneda,
                 estatus=3,
+                fecha_confirmacion=timezone.now(),
                 folio=folio,
                 persona_pagos="Pagos",
                 correo_facturas="pagos@acme.test",
@@ -3328,7 +3407,9 @@ class PedidoMovimientoInventarioVarianteTests(TestCase):
         detalle_entrada = MovimientoInventarioDetalle.objects.get(movimiento_inventario=entrada)
         self.assertEqual(detalle_entrada.producto_variante_id, self.variante.pk)
         self.assertEqual(detalle_entrada.cantidad, Decimal("2"))
-        self.assertEqual(detalle_entrada.ubicacion_origen_id, self.ub1.pk)  # comportamiento actual
+        # Una ENTRADA guarda la ubicación en destino, como las demás entradas (EC-590).
+        self.assertEqual(detalle_entrada.ubicacion_destino_id, self.ub1.pk)
+        self.assertIsNone(detalle_entrada.ubicacion_origen_id)
         self.ex_var_1.refresh_from_db()
         self.assertEqual(self.ex_var_1.cantidad, Decimal("2"))
 
@@ -3500,7 +3581,8 @@ class RechazarCambiosCotizacionTests(TestCase):
                                         talla=Talla.objects.create(nombre="XG"), sku="SKU-731", precio_base="1")
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")
         self.assertEqual(resp.status_code, 400, resp.content)
-        self.assertIn(self.producto.nombre, resp.json()["color"][0])
+        # ``{"color": "texto"}``, como el resto de los errores del backend.
+        self.assertEqual(resp.json(), {"color": f"Elige el color de: {self.producto.nombre}."})
         self.assertFalse(Pedido.objects.filter(cotizacion=self.cotizacion).exists())
 
     def test_autorizar_responde_pedido_nuevo_sin_consultar_documentos_vacios(self):
@@ -4614,8 +4696,9 @@ class PedidoReglasEstatusTests(TestCase):
     def _estatus(self, user, estatus):
         return self._client(user).patch(self.url, {"estatus": estatus}, format="json")
 
-    def _cancelar(self, user):
-        return self._client(user).post(f"{self.url}cancelar/")
+    def _cancelar(self, user, motivo="Cliente canceló la compra"):
+        # ``motivo`` es obligatorio desde EC-583.
+        return self._client(user).post(f"{self.url}cancelar/", {"motivo": motivo}, format="json")
 
     def test_solo_mesa_de_control_cancela(self):
         self.assertEqual(self._cancelar(self.vendedor).status_code, 400)
@@ -4626,6 +4709,21 @@ class PedidoReglasEstatusTests(TestCase):
         self.pedido.refresh_from_db()
         self.assertEqual((self.pedido.estatus, self.pedido.activo), (5, False))
         self.assertEqual(self._client(self.mesa).get(self.url).status_code, 404)
+
+    def test_cancelar_sin_motivo_responde_400_y_no_cambia_nada(self):
+        """EC-583: ``motivo`` es obligatorio; vacío o solo espacios también se rechaza."""
+        for motivo in (None, "", "   "):
+            with self.subTest(motivo=motivo):
+                body = {} if motivo is None else {"motivo": motivo}
+                resp = self._client(self.mesa).post(f"{self.url}cancelar/", body, format="json")
+
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {"motivo": "Indica el motivo de la cancelación."})
+                self.pedido.refresh_from_db()
+                self.assertEqual((self.pedido.estatus, self.pedido.activo), (3, True))
+                self.assertFalse(
+                    AuditoriaEvento.objects.filter(modulo="ventas", accion="CANCELAR", id_registro=str(self.pedido.pk)).exists()
+                )
 
     def test_patch_no_cancela_ni_hay_delete(self):
         self.assertEqual(self._estatus(self.mesa, 5).status_code, 400)
@@ -4672,9 +4770,69 @@ class PedidoReglasEstatusTests(TestCase):
         OrdenesCorteManga.objects.filter(pk=orden.pk).update(estatus_corte=OrdenesCorteManga.EstatusCorte.CANCELADO)
         self.assertEqual(self._cancelar(self.mesa).status_code, 200)
 
+    def test_cancelar_devuelve_inventario_y_libera_reservas(self):
+        """EC-583: cancelar devuelve a cada existencia lo que el pedido descontó al
+        autorizar (con movimiento ENTRADA), libera sus reservas ACTIVA y audita el
+        motivo. Queries fijas sin importar cuántos renglones devuelva."""
+        almacen = Almacen.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, codigo="A583", nombre="A583", permite_salida=True,
+        )
+        productos = [Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre=f"P583-{i}")
+                     for i in range(2)]
+        existencias = [Existencia.objects.create(producto=p, almacen=almacen, cantidad=Decimal("10"))
+                       for p in productos]
+        # El descuento de autorizar, con sus mismos helpers (deja la auditoría SALIDA).
+        inventario = CotizacionViewSet()
+        consumos = inventario._discount_existencias_pedido(
+            plan=[{"producto": p, "producto_id": p.pk, "producto_variante_id": None, "cantidad": Decimal(c)}
+                  for p, c in zip(productos, ("4", "3"))],
+            empresa=self.empresa, sucursal=self.sucursal,
+        )
+        inventario._registrar_auditoria_inventario_pedido(
+            pedido=self.pedido, user=self.mesa, items=consumos, accion="SALIDA",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=self.pedido, producto=productos[0])
+        talla = PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=Talla.objects.create(nombre="M583"), cantidad=4,
+        )
+        reserva = inventario_reservas.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido_detalle=detalle, pedido_detalle_talla=talla,
+            existencia=existencias[0], almacen=almacen, cantidad=2,
+            estado=inventario_reservas.Estado.ACTIVA, usuario=self.mesa,
+        )
+
+        # 23 con inventario que devolver; incluye la carga perezosa evitable de
+        # ``pedido.sucursal`` al registrar el movimiento: EC-803, debe bajar en uno.
+        with self.assertNumQueries(23):
+            resp = self._cancelar(self.mesa)
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["reservas_liberadas"], 1)
+        self.assertEqual(
+            sorted((d["producto_id"], d["cantidad"]) for d in resp.json()["inventario_devuelto"]),
+            sorted([(productos[0].pk, "4.0000"), (productos[1].pk, "3.0000")]),
+        )
+        for existencia in existencias:
+            existencia.refresh_from_db()
+            self.assertEqual(existencia.cantidad, Decimal("10"))
+        movimiento = MovimientoInventario.objects.get(pedido=self.pedido, tipo_movimiento=TipoMovimiento.ENTRADA)
+        self.assertEqual(
+            sorted(MovimientoInventarioDetalle.objects.filter(movimiento_inventario=movimiento)
+                   .values_list("producto_id", "cantidad", "almacen_id")),
+            sorted([(productos[0].pk, Decimal("4"), almacen.pk), (productos[1].pk, Decimal("3"), almacen.pk)]),
+        )
+        reserva.refresh_from_db()
+        self.assertEqual(reserva.estado, inventario_reservas.Estado.LIBERADA)
+        self.assertIsNotNone(reserva.fecha_devolucion)
+        auditoria = AuditoriaEvento.objects.get(modulo="ventas", accion="CANCELAR", id_registro=str(self.pedido.pk))
+        self.assertEqual(auditoria.despues_json["motivo"], "Cliente canceló la compra")
+
     def test_cancelar_es_rapido(self):
         inicio = time.perf_counter()
-        with self.assertNumQueries(10):
+        # 17 desde EC-583 (bloqueo, devolución de inventario, reservas y auditoría).
+        # Incluye la carga perezosa evitable de ``pedido.empresa`` (la de
+        # ``pedido.sucursal`` solo ocurre al devolver inventario): EC-803, debe bajar a 16.
+        with self.assertNumQueries(17):
             self._cancelar(self.mesa)
         self.assertLess(time.perf_counter() - inicio, 0.5)
 
@@ -7535,6 +7693,11 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
             empresa=cls.empresa, nombre=nombre, codigo=nombre[:3].upper(), descripcion="x"
         )
         cls.playera, cls.pantalon, cls.libre = categoria("Playera"), categoria("Pantalón"), categoria("Libre")
+        # Una categoría sin tallas configuradas no acepta ninguna en las muestras
+        # (#927): las tres admiten la talla de estas pruebas.
+        from catalogo.models import CategoriaProductoTalla
+        for cat in (cls.playera, cls.pantalon, cls.libre):
+            CategoriaProductoTalla.objects.create(categoria_producto=cat, talla=cls.talla)
         producto = lambda nombre, cat: Producto.objects.create(
             tipo=_tipo_producto(),
             empresa=cls.empresa, nombre=nombre, codigo=nombre[:4], categoria_producto=cat
@@ -7631,6 +7794,17 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
                       "La categoría «Pantalón» no admite Bordado.")
         self.assertEqual(self._guardar(categoria=self.libre, lleva_bordado=True).status_code, 201)
 
+    def test_muestra_con_categoria_sin_tallas_se_rechaza_y_no_guarda(self):
+        """#927: una categoría sin tallas configuradas no acepta ninguna (no es comodín)."""
+        sin_tallas = CategoriaProducto.objects.create(
+            empresa=self.empresa, nombre="Sin tallas", codigo="SIN", descripcion="x"
+        )
+        antes = Cotizacion.objects.count()
+        resp = self._guardar(categoria=sin_tallas)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"detalle": "Partida 1: la categoría Sin tallas no tiene tallas configuradas."})
+        self.assertEqual(Cotizacion.objects.count(), antes)
+
     # --- aceptar-cambios ---------------------------------------------------
     def test_aceptar_cambios_rechaza_antes_de_copiar(self):
         cot = Cotizacion.objects.create(
@@ -7652,11 +7826,12 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
         self.assertFalse(PedidoDetalle.objects.filter(pedido=pedido).exists())
 
     # --- endpoints de renglón ----------------------------------------------
-    def _pedido_con_talla(self, producto, **talla):
+    def _pedido_con_talla(self, producto, confirmado=False, **talla):
         pedido = Pedido.objects.create(
             empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
             persona_pagos="P", correo_facturas="p@x.test", telefono_pagos="8100000000",
             forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            fecha_confirmacion=timezone.now() if confirmado else None,
         )
         detalle = PedidoDetalle.objects.create(pedido=pedido, producto=producto, precio_unitario="10.00")
         return detalle, PedidoDetalleTalla.objects.create(pedido_detalle=detalle, talla=self.talla, cantidad=2, **talla)
@@ -7726,11 +7901,12 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
                 self.assertEqual(sin_proceso.estatus, estatus)
 
     def test_programar_con_la_regla_por_categoria(self):
+        # Solo se programa un pedido confirmado (EC-750).
         payload = {"programaciones": [{"destino": "EMBARQUE", "cantidad": 1}]}
-        _, libre = self._pedido_con_talla(self.p_libre, lleva_bordado=True)
+        _, libre = self._pedido_con_talla(self.p_libre, confirmado=True, lleva_bordado=True)
         resp = self.api.patch(f"{PEDIDOS_URL}{libre.pedido_detalle.pedido_id}/programar/", payload, format="json")
         self.assertEqual(resp.status_code, 200, resp.content)
-        _, sin_proceso = self._pedido_con_talla(self.p_pantalon, lleva_bordado=True)
+        _, sin_proceso = self._pedido_con_talla(self.p_pantalon, confirmado=True, lleva_bordado=True)
         self._rechazo(
             self.api.patch(f"{PEDIDOS_URL}{sin_proceso.pedido_detalle.pedido_id}/programar/", payload, format="json"),
             "La categoría «Pantalón» no admite Bordado.",
