@@ -3532,7 +3532,8 @@ class RechazarCambiosCotizacionTests(TestCase):
                                         talla=Talla.objects.create(nombre="XG"), sku="SKU-731", precio_base="1")
         resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/autorizar/")
         self.assertEqual(resp.status_code, 400, resp.content)
-        self.assertIn(self.producto.nombre, resp.json()["color"][0])
+        # ``{"color": "texto"}``, como el resto de los errores del backend.
+        self.assertEqual(resp.json(), {"color": f"Elige el color de: {self.producto.nombre}."})
         self.assertFalse(Pedido.objects.filter(cotizacion=self.cotizacion).exists())
 
     def test_autorizar_responde_pedido_nuevo_sin_consultar_documentos_vacios(self):
