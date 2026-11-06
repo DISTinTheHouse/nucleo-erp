@@ -8839,3 +8839,11 @@ class PedidoOpcionesFiltrosTests(_PedidosModoServidorBase, TestCase):
         with CaptureQueriesContext(connection) as ctx:
             self._get(self.URL)
         self.assertEqual(len(ctx), 1)
+
+    def test_acepta_los_parametros_de_drf(self):
+        """``?format=json`` es de DRF (negociación de contenido), no un filtro: el
+        listado y ``kpis-mesa/`` lo aceptan y ``opciones/`` respondía 400."""
+        resp = self._get(self.URL, {"format": "json"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["cliente"], self._get(self.URL).json()["cliente"])
+        self.assertEqual(self._get(self.URL, {"format": "json", "otro": "1"}).status_code, 400)

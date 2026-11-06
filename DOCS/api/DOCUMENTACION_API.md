@@ -1719,7 +1719,7 @@ Las tarjetas de Mesa de Control **con los mismos filtros que el listado** (todos
 
 #### Opciones de filtros — `GET /api/v1/ventas/pedidos/opciones/`
 
-Valores de los filtros de encabezado, en el estilo de `existencias/por-almacen/resumen/` (EC-774): sobre **todos** los pedidos que el usuario ve, sin reaccionar a los filtros. Una consulta. Único parámetro: `mis_pedidos=true` (otro → `400`).
+Valores de los filtros de encabezado, en el estilo de `existencias/por-almacen/resumen/` (EC-774): sobre **todos** los pedidos que el usuario ve, sin reaccionar a los filtros. Una consulta. Único parámetro: `mis_pedidos=true` (otro → `400`; `format` de DRF siempre se acepta, como en todos los endpoints que rechazan parámetros desconocidos).
 
 ```json
 { "cliente": [{ "value": 12, "label": "Cliente SA" }],

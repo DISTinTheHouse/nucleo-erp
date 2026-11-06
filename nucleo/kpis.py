@@ -7,13 +7,18 @@ cuándo un ``drill_down`` está truncado.
 
 from rest_framework.exceptions import ValidationError
 from django.utils.dateparse import parse_date
+from rest_framework.settings import api_settings
 
 TOPE_DRILL_DOWN = 20
+# Parámetros que interpreta DRF mismo, no la vista.
+PARAMETROS_DRF = frozenset(p for p in (api_settings.URL_FORMAT_OVERRIDE,) if p)
 
 
 def validar_parametros(request, permitidos):
-    """400 si el query string trae parámetros que el endpoint no soporta."""
-    extra = sorted(set(request.query_params) - set(permitidos))
+    """400 si el query string trae parámetros que el endpoint no soporta. Los de DRF
+    (``?format=``, ``URL_FORMAT_OVERRIDE``) no son filtros y siempre pasan (EC-782):
+    los listados los aceptan y estos endpoints respondían 400."""
+    extra = sorted(set(request.query_params) - set(permitidos) - PARAMETROS_DRF)
     if extra:
         raise ValidationError({
             "parametros": (
