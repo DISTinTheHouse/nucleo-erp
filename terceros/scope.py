@@ -34,6 +34,26 @@ def ve_clientes_sin_asignacion(user):
     return bool(getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False))
 
 
+def ve_cartera_de_todos(user):
+    """Facturación y cartera (CxC) de cualquier cliente de la empresa (EC-789): superusuario,
+    admin de empresa y Contabilidad (``R-CONTABILIDAD`` o su departamento). Mesa de Control
+    ve todos los clientes, pero sus importes solo de los que tiene asignados."""
+    from nucleo.permisos import permisos_efectivos
+
+    if ve_clientes_sin_asignacion(user) or "R-CONTABILIDAD" in permisos_efectivos(user):
+        return True
+    empresa = getattr(user, "empresa", None)
+    return bool(empresa) and CLAVE_DEPARTAMENTO_CONTABILIDAD in claves_departamento_usuario(user, empresa=empresa)
+
+
+def clientes_con_cartera_visible(qs, user, ve_todos=None):
+    """Los de ``qs`` cuya facturación y cartera ve ``user``: todos para ``ve_cartera_de_todos``,
+    al resto solo sus clientes asignados (``vendedores``) (EC-789)."""
+    if ve_todos is None:
+        ve_todos = ve_cartera_de_todos(user)
+    return qs if ve_todos else qs.filter(vendedores__id=getattr(user, "id", None))
+
+
 def clientes_visibles_entre(user, ids):
     """Cuáles de ``ids`` puede ver ``user`` como cliente, o ``None`` si los ve todos.
 

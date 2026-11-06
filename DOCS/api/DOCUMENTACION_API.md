@@ -1207,12 +1207,14 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
   - `total_pedidos` cuenta todos los pedidos no borrados del cliente (incluye cancelados); `pedidos_por_estatus` desglosa cuántos hay en cada estatus (usa las mismas etiquetas de `Pedido.CHOICES_ESTATUS`: BORRADOR, POR AUTORIZAR, AUTORIZADA, EN PROCESO, CANCELADO) — útil para mostrar chips/badges.
   - `montos_por_moneda` **excluye pedidos CANCELADO** (no se sumaron a la venta real) y viene separado por moneda por si el cliente compra en más de una — no asumas que solo hay un elemento en el arreglo.
   - `ultimo_pedido` es `null` si el cliente no tiene pedidos todavía; si existe, es el mismo objeto que aparece primero en `pedidos_recientes`.
-  - **Importes (EC-784)**: misma regla que el listado y el detalle de pedidos (contabilidad de ventas **o** de compras). `resumen_comercial` trae `"puede_ver_importes": true|false`; sin permiso **no viene** `montos_por_moneda` y se omite `gran_total` de `pedidos_recientes[]` y de `ultimo_pedido`. Conteos, folios, fechas, estatus y `cartera` no cambian. El front debe tolerar la ausencia de esas claves y decidir con `puede_ver_importes`.
+  - **Importes (EC-784)**: misma regla que el listado y el detalle de pedidos (contabilidad de ventas **o** de compras). `resumen_comercial` trae `"puede_ver_importes": true|false`; sin permiso **no viene** `montos_por_moneda` y se omite `gran_total` de `pedidos_recientes[]` y de `ultimo_pedido`. Conteos, folios, fechas y estatus no cambian. El front debe tolerar la ausencia de esas claves y decidir con `puede_ver_importes`.
+  - **Cartera (EC-789)**: `cartera` la ven superusuario, admin de empresa y Contabilidad (`R-CONTABILIDAD` o departamento) en cualquier cliente; el resto, solo en sus clientes asignados (`vendedores`). Si no, `"cartera": null` y `"puede_ver_cartera": false`.
   - `pedidos_recientes` trae como máximo los 5 pedidos más nuevos (por fecha de creación), pensado para una mini-tabla o timeline en la ficha del cliente — no es un listado paginado; si se necesita el historial completo, usar `GET /api/v1/ventas/pedidos/?cliente={id}`.
 
 ### KPIs de Clientes (EC-422)
 
 - **Endpoint**: `GET /api/v1/terceros/clientes/kpis/`. Sin query params: cualquiera responde `400`.
+- **Facturación y cartera (EC-789)**: `ventas_por_cliente` y `cartera_antiguedad` cubren todos los clientes visibles solo si `puede_ver_cartera_de_todos` es `true` (superusuario, admin, Contabilidad); para los demás (Mesa de Control incluida), solo sus clientes asignados.
 - Facturas, pedidos y CxC cuentan solo si son de la **misma empresa que su cliente**; un documento de otra empresa que apunte al cliente no entra.
 - Alcance = mismo que el listado de clientes (`clientes_visibles`): un vendedor normal solo ve KPIs de **sus propios clientes** (M2M `vendedores`); Mesa de Control/`is_admin_empresa`/superuser ven toda la empresa.
 - Solo **3 de 4 KPIs son reales**. `reclamos_devoluciones` viene `"disponible": false` — `Devolucion`/`Entrega` no registran cantidad de piezas, solo los FKs.
