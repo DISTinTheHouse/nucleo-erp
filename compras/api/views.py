@@ -244,6 +244,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             qs = filtrar_listado_compras(
                 self.request, qs, OrdenCompra.EstatusOrdenCompra.values, "fecha_oc",
             )
+            # ``?moneda=`` (#974): igual que el listado de pedidos.
+            moneda = entero_param(self.request, "moneda")
+            if moneda is not None:
+                qs = qs.filter(moneda_id=moneda)
             # ``?con_proveedor=`` (EC-782): el selector de OC de facturas de proveedor
             # sólo ofrece OC con proveedor (el FK es ``SET_NULL``); sin el filtro
             # tenía que bajar la lista completa para descartarlas en memoria.
