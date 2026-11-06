@@ -4647,8 +4647,9 @@ class PedidoReglasEstatusTests(TestCase):
     def _estatus(self, user, estatus):
         return self._client(user).patch(self.url, {"estatus": estatus}, format="json")
 
-    def _cancelar(self, user):
-        return self._client(user).post(f"{self.url}cancelar/")
+    def _cancelar(self, user, motivo="Cliente canceló la compra"):
+        # ``motivo`` es obligatorio desde EC-583.
+        return self._client(user).post(f"{self.url}cancelar/", {"motivo": motivo}, format="json")
 
     def test_solo_mesa_de_control_cancela(self):
         self.assertEqual(self._cancelar(self.vendedor).status_code, 400)
@@ -4659,6 +4660,21 @@ class PedidoReglasEstatusTests(TestCase):
         self.pedido.refresh_from_db()
         self.assertEqual((self.pedido.estatus, self.pedido.activo), (5, False))
         self.assertEqual(self._client(self.mesa).get(self.url).status_code, 404)
+
+    def test_cancelar_sin_motivo_responde_400_y_no_cambia_nada(self):
+        """EC-583: ``motivo`` es obligatorio; vacío o solo espacios también se rechaza."""
+        for motivo in (None, "", "   "):
+            with self.subTest(motivo=motivo):
+                body = {} if motivo is None else {"motivo": motivo}
+                resp = self._client(self.mesa).post(f"{self.url}cancelar/", body, format="json")
+
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {"motivo": "Indica el motivo de la cancelación."})
+                self.pedido.refresh_from_db()
+                self.assertEqual((self.pedido.estatus, self.pedido.activo), (3, True))
+                self.assertFalse(
+                    AuditoriaEvento.objects.filter(modulo="ventas", accion="CANCELAR", id_registro=str(self.pedido.pk)).exists()
+                )
 
     def test_patch_no_cancela_ni_hay_delete(self):
         self.assertEqual(self._estatus(self.mesa, 5).status_code, 400)
