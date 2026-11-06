@@ -9,7 +9,7 @@ from django.db.models import (
 )
 from django.db.models.functions import Coalesce, RowNumber
 from django.utils import timezone
-from rest_framework import status, viewsets
+from rest_framework import generics, status, viewsets
 from rest_framework.filters import OrderingFilter
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -3057,10 +3057,11 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = self.queryset.select_related("orden_compra", "op", "almacen", "proveedor", "sucursal")
-        # POST lecturas/ solo responde la lectura nueva: no necesita las demás.
-        if self.action != "lecturas":
-            qs = qs.prefetch_related(prefetch_lecturas_rfid())
+        qs = (
+            self.queryset
+            .select_related("orden_compra", "op", "almacen", "proveedor", "sucursal")
+            .prefetch_related(prefetch_lecturas_rfid())
+        )
         if getattr(user, "is_superuser", False):
             return qs.order_by("-created_at", "-id")
         empresa = getattr(user, "empresa", None)
@@ -3145,7 +3146,12 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def lecturas(self, request, pk=None):
-        encuadre = self.get_object()
+        # Igual que get_object (mismo alcance, filtros y permisos) pero sin el
+        # prefetch de lecturas: solo se responde la lectura nueva.
+        encuadre = generics.get_object_or_404(
+            self.filter_queryset(self.get_queryset().prefetch_related(None)), pk=pk
+        )
+        self.check_object_permissions(request, encuadre)
         if encuadre.estatus != RecepcionRFIDEncuadre.Estatus.PENDIENTE:
             raise ValidationError({"estatus": "Solo se puede escanear un encuadre pendiente."})
 
