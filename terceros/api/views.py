@@ -34,7 +34,7 @@ from terceros import csf, facturama
 from finanzas.services.facturama.acceso import puede_consultar_cfdis
 from finanzas.services.facturama.client import FacturamaClient
 from finanzas.services.facturama.exceptions import FacturamaAPIException
-from terceros.scope import clientes_base, clientes_visibles
+from terceros.scope import clientes_base, clientes_con_cartera_visible, clientes_visibles, ve_cartera_de_todos
 import logging
 
 logger = logging.getLogger(__name__)
@@ -121,6 +121,9 @@ class ClienteViewSet(viewsets.ModelViewSet):
         # Las claves de departamento ya las consultó el alcance (``clientes_visibles``)
         # y quedaron guardadas en el usuario: no se consultan dos veces.
         ver_importes = puede_ver_contabilidad(self.request.user)
+        ver_cartera = ve_cartera_de_todos(self.request.user) or cliente.vendedores.filter(
+            id=self.request.user.id
+        ).exists()
 
         estatus_pedido = dict(Pedido.CHOICES_ESTATUS)
         # Sólo documentos de la empresa del cliente: sin este filtro, un pedido o
@@ -159,9 +162,11 @@ class ClienteViewSet(viewsets.ModelViewSet):
             "pedidos_por_estatus": pedidos_por_estatus,
             "ultimo_pedido": pedidos_recientes[0] if pedidos_recientes else None,
             "pedidos_recientes": pedidos_recientes,
-            "cartera": cartera_de_cliente(cliente),
+            # EC-789: Contabilidad ve la de todos; el resto, solo de sus clientes.
+            "cartera": cartera_de_cliente(cliente) if ver_cartera else None,
             # Señal explícita para el front, como los ``kpis/`` (#841).
             "puede_ver_importes": ver_importes,
+            "puede_ver_cartera": ver_cartera,
         }
         if ver_importes:
             # Excluye CANCELADO (5) para no inflar el monto histórico con pedidos
@@ -248,15 +253,19 @@ class ClienteViewSet(viewsets.ModelViewSet):
         # normal solo ve los KPIs de SUS clientes, Mesa de Control/admin ven
         # toda la empresa. Import local: ver nota en ``_resumen_comercial``.
         clientes_qs = clientes_visibles(clientes_base(), user)
+        # Facturación y cartera (EC-789): Contabilidad, de todos; el resto, de sus clientes.
+        ve_todos = ve_cartera_de_todos(user)
+        con_importes = clientes_con_cartera_visible(clientes_qs, user, ve_todos)
         data = {
             "generado_en": timezone.now(),
-            "ventas_por_cliente": self._kpi_ventas_por_cliente(clientes_qs),
+            "puede_ver_cartera_de_todos": ve_todos,
+            "ventas_por_cliente": self._kpi_ventas_por_cliente(con_importes),
             "clientes_activos": self._kpi_clientes_activos(clientes_qs),
             "reclamos_devoluciones": {
                 "disponible": False,
                 "motivo": "Devolucion/DevolucionDetalle no registran cantidad de piezas (solo los FKs); Entrega tampoco, así que no hay piezas devueltas ni piezas embarcadas que dividir.",
             },
-            "cartera_antiguedad": self._kpi_cartera_antiguedad(clientes_qs),
+            "cartera_antiguedad": self._kpi_cartera_antiguedad(con_importes),
         }
         return Response(data)
 
