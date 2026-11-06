@@ -4770,6 +4770,63 @@ class PedidoReglasEstatusTests(TestCase):
         OrdenesCorteManga.objects.filter(pk=orden.pk).update(estatus_corte=OrdenesCorteManga.EstatusCorte.CANCELADO)
         self.assertEqual(self._cancelar(self.mesa).status_code, 200)
 
+    def test_cancelar_devuelve_inventario_y_libera_reservas(self):
+        """EC-583: cancelar devuelve a cada existencia lo que el pedido descontó al
+        autorizar (con movimiento ENTRADA), libera sus reservas ACTIVA y audita el
+        motivo. Queries fijas sin importar cuántos renglones devuelva."""
+        almacen = Almacen.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, codigo="A583", nombre="A583", permite_salida=True,
+        )
+        productos = [Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre=f"P583-{i}")
+                     for i in range(2)]
+        existencias = [Existencia.objects.create(producto=p, almacen=almacen, cantidad=Decimal("10"))
+                       for p in productos]
+        # El descuento de autorizar, con sus mismos helpers (deja la auditoría SALIDA).
+        inventario = CotizacionViewSet()
+        consumos = inventario._discount_existencias_pedido(
+            plan=[{"producto": p, "producto_id": p.pk, "producto_variante_id": None, "cantidad": Decimal(c)}
+                  for p, c in zip(productos, ("4", "3"))],
+            empresa=self.empresa, sucursal=self.sucursal,
+        )
+        inventario._registrar_auditoria_inventario_pedido(
+            pedido=self.pedido, user=self.mesa, items=consumos, accion="SALIDA",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=self.pedido, producto=productos[0])
+        talla = PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=Talla.objects.create(nombre="M583"), cantidad=4,
+        )
+        reserva = inventario_reservas.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido_detalle=detalle, pedido_detalle_talla=talla,
+            existencia=existencias[0], almacen=almacen, cantidad=2,
+            estado=inventario_reservas.Estado.ACTIVA, usuario=self.mesa,
+        )
+
+        # 23 con inventario que devolver; incluye la carga perezosa evitable de
+        # ``pedido.sucursal`` al registrar el movimiento: EC-803, debe bajar en uno.
+        with self.assertNumQueries(23):
+            resp = self._cancelar(self.mesa)
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["reservas_liberadas"], 1)
+        self.assertEqual(
+            sorted((d["producto_id"], d["cantidad"]) for d in resp.json()["inventario_devuelto"]),
+            sorted([(productos[0].pk, "4.0000"), (productos[1].pk, "3.0000")]),
+        )
+        for existencia in existencias:
+            existencia.refresh_from_db()
+            self.assertEqual(existencia.cantidad, Decimal("10"))
+        movimiento = MovimientoInventario.objects.get(pedido=self.pedido, tipo_movimiento=TipoMovimiento.ENTRADA)
+        self.assertEqual(
+            sorted(MovimientoInventarioDetalle.objects.filter(movimiento_inventario=movimiento)
+                   .values_list("producto_id", "cantidad", "almacen_id")),
+            sorted([(productos[0].pk, Decimal("4"), almacen.pk), (productos[1].pk, Decimal("3"), almacen.pk)]),
+        )
+        reserva.refresh_from_db()
+        self.assertEqual(reserva.estado, inventario_reservas.Estado.LIBERADA)
+        self.assertIsNotNone(reserva.fecha_devolucion)
+        auditoria = AuditoriaEvento.objects.get(modulo="ventas", accion="CANCELAR", id_registro=str(self.pedido.pk))
+        self.assertEqual(auditoria.despues_json["motivo"], "Cliente canceló la compra")
+
     def test_cancelar_es_rapido(self):
         inicio = time.perf_counter()
         # 17 desde EC-583 (bloqueo, devolución de inventario, reservas y auditoría).
