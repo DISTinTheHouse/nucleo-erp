@@ -560,6 +560,23 @@ class CotizacionFullSerializer(_ImportesIvaMixin, serializers.ModelSerializer):
         model = Cotizacion
         fields = "__all__"
 
+
+class CotizacionDelPedidoSerializer(CotizacionFullSerializer):
+    """``GET /pedidos/{id}/cotizacion/`` (EC-787): ``CotizacionFullSerializer`` sin
+    ``aprobado_snapshot``, para todos los perfiles (EC-794).
+
+    El snapshot es una copia JSON de la cotización autorizada con todos sus importes
+    (y los snapshots anteriores anidados), y el filtro de contabilidad del pedido no
+    entra en él. Ningún consumidor de este endpoint lo lee; ``rechazar-cambios`` usa
+    el guardado en la BD, no esta respuesta. El resto de lecturas de cotización
+    (``/cotizaciones/``, ``mesa-control/``) lo siguen devolviendo.
+    """
+
+    class Meta(CotizacionFullSerializer.Meta):
+        fields = None
+        exclude = ["aprobado_snapshot"]
+
+
 class PedidoDetalleTallaReadSerializer(serializers.ModelSerializer):
     """Talla anidada de un renglón de pedido (solo lectura).
 

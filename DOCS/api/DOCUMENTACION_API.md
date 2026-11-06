@@ -1955,6 +1955,17 @@ Botón "Recompra" en el detalle del pedido: crea una **Cotización nueva** (no u
 - Uso recomendado en Next.js: al recibir la respuesta, navegar a la pantalla de edición de cotización con `cotizacion_id = cotizacion.id` (la misma pantalla que usa `POST /cotizaciones/onboarding/` con `cotizacion_id` para editar) — el vendedor ajusta lo que necesite y de ahí sigue el flujo normal (enviar a revisión → autorizar → se genera un `Pedido` nuevo).
 - Alcance: mismo aislamiento multi-tenant que el resto de `PedidoViewSet` (`get_object()` ya está acotado por `pedidos_visibles`); no hay restricción adicional de rol — cualquier usuario que pueda ver el pedido puede recomprarlo.
 
+### Cotización del pedido (Pedido 360°, EC-787 / EC-794)
+
+La cotización que dio origen al pedido, para quien ve el pedido aunque no vea la cotización en `/cotizaciones/{id}/` (cuyo alcance es el de ventas: vendedor propio o admin) — mesa de control, WMS, compras, producción.
+
+- **Endpoint**: `GET /api/v1/ventas/pedidos/{id}/cotizacion/`
+- Solo lectura.
+- **Alcance**: el del pedido (`pedidos_visibles`, por empresa; el superusuario ve todos). La cotización debe ser de la misma empresa que el pedido.
+- **Respuesta** (`200`): la misma forma que `GET /cotizaciones/{id}/` (`detalles[]` con `tallas[]`, `servicios_extras[]`, `piezas`, `importe_sin_iva`/`importe_iva`…) **sin `aprobado_snapshot`**, para todos los perfiles. El snapshot copia los importes de la cotización autorizada fuera del alcance del filtro de contabilidad; quien lo necesite lo sigue leyendo en `/cotizaciones/{id}/` o `mesa-control/{id}/`.
+- **Importes**: misma regla de lectura que el detalle del pedido (`puede_ver_contabilidad`, EC-784). Sin ella se **eliminan** del JSON (no vienen en `null`) los campos de `CAMPOS_CONTABILIDAD_PEDIDO` en la cabecera, `precio_lista`/`precio_unitario`/`costo_unitario`/`subtotal_linea` en `detalles[]`, `precio_unitario`/`subtotal_talla` en `detalles[].tallas[]` y `monto` en `servicios_extras[]`.
+- **`404`**: pedido inexistente, dado de baja o de otra empresa; pedido sin cotización; cotización de otra empresa que el pedido. El frontend lo pinta como "sin cotización disponible", no como error.
+
 ### Revisar inventario (disponibilidad del pedido)
 
 Botón "Revisar inventario" en el detalle del pedido: por cada producto/talla del pedido, compara cuánto se pidió contra cuánto hay en existencia. **Se movió aquí desde Cotizaciones/Mesa de Control** — ahí vivía como `GET /mesa-control/{id}/stock-detalle/`, pero una cotización nunca se rechaza por falta de stock, así que el dato no tenía a dónde ir. Ese endpoint **ya no existe** (`404`); en el pedido sí tiene uso real, para decidir si hace falta reponer existencia o solicitar producción especial (ver más abajo).

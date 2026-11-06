@@ -56,6 +56,7 @@ from ventas.api.serializers import (
     CotizacionDetalleSerializer,
     CotizacionDetalleWithTallasSerializer,
     CotizacionFullSerializer,
+    CotizacionDelPedidoSerializer,
     PedidoSerializer,
     PedidoListSerializer,
     PedidoDetalleSerializer,
@@ -2747,6 +2748,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
             quitar_campos_contabilidad_pedido(fila)
         return response
 
+    @extend_schema(
+        summary="Cotización ligada al pedido, con el alcance del pedido (Pedido 360°)",
+        responses=CotizacionDelPedidoSerializer,
+    )
     @action(detail=True, methods=["get"], url_path="cotizacion")
     def cotizacion(self, request, pk=None):
         """Cotización ligada al pedido con el alcance del pedido (EC-787).
@@ -2755,6 +2760,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
         ventas (vendedor/estatus): mesa de control, WMS, compras y producción
         recibían 404. Aquí basta ver el pedido; la cotización debe ser de la
         misma empresa y los importes se ocultan con la regla de #537.
+
+        Sin ``aprobado_snapshot`` para nadie (EC-794): lleva los importes de la
+        cotización autorizada fuera del alcance del filtro. Tampoco se lee de la BD.
         """
         pedido = get_object_or_404(
             pedidos_visibles(pedidos_base(), request.user).only("id", "empresa_id", "cotizacion_id"),
@@ -2767,13 +2775,14 @@ class PedidoViewSet(viewsets.ModelViewSet):
         )
         cotizacion = (
             Cotizacion.objects.filter(pk=pedido.cotizacion_id, empresa_id=pedido.empresa_id)
+            .defer("aprobado_snapshot")
             .select_related("cliente", "sucursal", "moneda", "vendedor")
             .prefetch_related(Prefetch("cotizaciondetalle", queryset=detalles_qs), "servicios_extras")
             .first()
         )
         if cotizacion is None:
             raise NotFound("Cotización no encontrada.")
-        data = CotizacionFullSerializer(cotizacion, context=self.get_serializer_context()).data
+        data = CotizacionDelPedidoSerializer(cotizacion, context=self.get_serializer_context()).data
         return Response(filtrar_campos_contabilidad_pedido(data, request.user))
 
     def retrieve(self, request, *args, **kwargs):
