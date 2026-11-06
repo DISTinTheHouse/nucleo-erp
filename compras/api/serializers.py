@@ -134,7 +134,14 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
         return [p.pk for p in self._pedidos_de(obj)]
 
     def get_pedidos_vinculados(self, obj):
-        return [{'id': p.pk, 'folio': p.folio} for p in self._pedidos_de(obj)]
+        # ``estatus``/``activo``/``cliente_nombre`` (EC-782): la OC avisa si un pedido
+        # ligado se canceló o se dio de baja sin consultar cada pedido aparte. Son
+        # columnas de la fila que ya trae el prefetch de ``pedidos`` (o el
+        # ``select_related`` del FK legado): ninguna consulta más.
+        return [
+            {'id': p.pk, 'folio': p.folio, 'estatus': p.estatus, 'activo': p.activo, 'cliente_nombre': p.cliente_nombre}
+            for p in self._pedidos_de(obj)
+        ]
 
     class Meta:
         model = OrdenCompra

@@ -2711,3 +2711,63 @@ class OrdenCompraConProveedorTests(_OrdenesModoServidorBase, TestCase):
         # El selector: con proveedor y sin canceladas.
         self.assertEqual(len(self._ids({"con_proveedor": "true", "estatus": "1,2,3,4,5"})), 6)
         self.assertEqual(self._get(self.URL, {"con_proveedor": "tal-vez"}).status_code, 400)
+
+
+class OrdenCompraPedidosVinculadosEstatusTests(_OrdenesModoServidorBase, TestCase):
+    """EC-782: ``pedidos_vinculados`` trae ``estatus``, ``activo`` y ``cliente_nombre``
+    del pedido, sin consultas extra."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from terceros.models import Cliente
+        from ventas.models import Pedido
+
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 782")
+
+        def pedido(folio, **extra):
+            return Pedido.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=cls.mxn, folio=folio,
+                persona_pagos="P", correo_facturas="p@acme.test", telefono_pagos="8100000000",
+                forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", cliente_nombre="Cliente 782", **extra,
+            )
+
+        cls.vigente = pedido("P-V782", estatus=3)
+        cls.cancelado = pedido("P-C782", estatus=Pedido.ESTATUS_CANCELADO)
+        cls.baja = pedido("P-B782", estatus=3, activo=False)
+        cls.oc = cls.ocs[OrdenCompra.EstatusOrdenCompra.AUTORIZADA]
+        cls.oc.pedido = cls.vigente
+        cls.oc.save(update_fields=["pedido"])
+        cls.oc.pedidos.set([cls.vigente, cls.cancelado, cls.baja])
+
+    def test_listado_y_detalle(self):
+        esperado = [
+            {"id": self.vigente.pk, "folio": "P-V782", "estatus": 3, "activo": True, "cliente_nombre": "Cliente 782"},
+            {"id": self.cancelado.pk, "folio": "P-C782", "estatus": 5, "activo": True, "cliente_nombre": "Cliente 782"},
+            {"id": self.baja.pk, "folio": "P-B782", "estatus": 3, "activo": False, "cliente_nombre": "Cliente 782"},
+        ]
+        detalle = self._get(f"{self.URL}{self.oc.pk}/").json()
+        self.assertEqual(detalle["pedidos_vinculados"], esperado)
+        fila = next(r for r in self._get(self.URL).json() if r["id"] == self.oc.pk)
+        self.assertEqual(fila["pedidos_vinculados"], esperado)
+        self.assertEqual(fila["pedidos"], [p["id"] for p in esperado])
+
+    def test_legado_solo_fk(self):
+        oc = self.ocs[OrdenCompra.EstatusOrdenCompra.BORRADOR]
+        oc.pedido = self.cancelado
+        oc.save(update_fields=["pedido"])
+        detalle = self._get(f"{self.URL}{oc.pk}/").json()
+        self.assertEqual([(p["id"], p["estatus"]) for p in detalle["pedidos_vinculados"]], [(self.cancelado.pk, 5)])
+
+    def test_sin_consultas_extra(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._get(self.URL)
+        with CaptureQueriesContext(connection) as antes:
+            self._get(self.URL)
+        for oc in self.ocs.values():
+            oc.pedidos.add(self.vigente, self.cancelado)
+        with CaptureQueriesContext(connection) as despues:
+            self._get(self.URL)
+        self.assertEqual(len(despues), len(antes))

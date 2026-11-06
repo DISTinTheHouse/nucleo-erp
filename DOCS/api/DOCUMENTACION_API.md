@@ -2570,10 +2570,12 @@ Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) aña
 ```json
 { "pedido": 12, "pedido_folio": "PED-000012",
   "pedidos": [12, 15],
-  "pedidos_vinculados": [ {"id": 12, "folio": "PED-000012"}, {"id": 15, "folio": "PED-000015"} ],
+  "pedidos_vinculados": [ {"id": 12, "folio": "PED-000012", "estatus": 3, "activo": true, "cliente_nombre": "Cliente SA"},
+                          {"id": 15, "folio": "PED-000015", "estatus": 5, "activo": true, "cliente_nombre": "Otro SA"} ],
   "tipo_compra": "PT", "tipo_compra_label": "Producto terminado" }
 ```
 
+- `pedidos_vinculados[]` trae además `estatus`, `activo` y `cliente_nombre` del pedido (EC-782): la OC avisa si un pedido ligado está cancelado (`estatus` 5) o dado de baja (`activo: false`) sin consultar cada pedido. Salen del mismo prefetch: no agregan consultas.
 - `pedido` / `pedido_folio` / `pedido_vinculado` **se conservan** y reflejan el primer pedido de `pedidos` (o `null`): ninguna integración existente se rompe. Una OC creada antes (o desde el admin) con solo `pedido` aparece también en `pedidos`.
 - **Folios**: `aceptar` toma la serie activa de la sucursal por `tipo_compra`: `MP` → `SerieFolio.tipo_documento` `ORDEN_COMPRA` u `Orden de Compra` (serie `OC`), `PT` → `ORDEN_COMPRA_PT` u `Orden de Compra PT` (serie `O`). Si no hay serie configurada se usa el folio de respaldo `OC-{empresa}-{id}` / `O-{empresa}-{id}`.
 - Rendimiento: crear/editar/aceptar una OC ya no hace consultas por renglón (alta de 10 renglones: 47 → 15 consultas; edición: 62 → 30; aceptar: 16 → 11). Los renglones se insertan en lote conservando su historial.
