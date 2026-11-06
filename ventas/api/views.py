@@ -3276,6 +3276,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # su propio prefetch.
         if getattr(self, "action", None) not in (
             "list", "cancelar", "editar_mesa_control_contexto", "editar_mesa_control",
+            "exportar",
         ):
             qs = qs.prefetch_related(
                 _pedido_detalles_prefetch(),
@@ -4201,6 +4202,22 @@ class PedidoViewSet(viewsets.ModelViewSet):
             resultados.append(item)
 
         return Response(resultados)
+
+    # --- Modo servidor de Mesa de Control y Compras › Pedidos (EC-782) ----------
+    # Detalle en ``ventas/api/pedidos_listado.py``.
+
+    @extend_schema(
+        summary="Pedidos filtrados sin paginar, para exportar (Compras › Pedidos)",
+        parameters=PARAMETROS_LISTADO_PEDIDOS,
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="exportar")
+    def exportar(self, request):
+        """Mismos filtros, ``search``, ``ordering`` y regla de importes que el
+        listado (parte de ``get_queryset`` y ``filter_queryset``: un filtro nuevo del
+        listado aplica solo), sin paginar y con sólo las columnas de la exportación."""
+        qs = self.filter_queryset(self.get_queryset())
+        return Response(pedidos_listado.filas_exportacion(qs, puede_ver_contabilidad(request.user)))
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-420): mismo
     # criterio que ``OrdenProduccionViewSet.kpis``/``OrdenBordadoViewSet.kpis``

@@ -1683,6 +1683,20 @@ Además de la lista blanca de EC-757 (`id`, `folio`, `estatus`, `clasificacion`,
 - `subtotal`, `gran_total`: solo para quien ve importes; para el resto se ignoran y queda el orden por defecto (como OC, #837).
 - `id` es siempre el último desempate (`-id` si el primer campo es descendente): las páginas con `offset` no repiten ni pierden filas. Son subconsultas por pedido, sin JOINs que multipliquen filas; el `count` no cambia.
 
+#### Exportar — `GET /api/v1/ventas/pedidos/exportar/`
+
+El conjunto filtrado **completo, sin paginar** (para el CSV/PDF de Compras › Pedidos): mismos filtros, `search`, `ordering`, alcance y regla de importes que el listado; `limit`/`offset` no aplican. Una consulta. Arreglo de:
+
+```json
+[{ "id": 88, "folio": "P-00088-2026", "estatus": 3, "estatus_display": "AUTORIZADA", "oc": "OC-1",
+   "cliente": 12, "cliente_razon_social": "Cliente SA", "cliente_nombre": "Cliente",
+   "created_at": "2026-10-01T15:00:00Z", "fecha_confirmacion": null, "clasificacion": "B",
+   "piezas": 120, "vendedor_nombre": "Ana López", "subtotal": 10000.0, "gran_total": 11600.0,
+   "moneda": 1, "moneda_codigo": "MXN" }]
+```
+
+Sin permiso de importes no vienen `subtotal` ni `gran_total`.
+
 #### Automatización de Órdenes de Trabajo (Producción)
 
 > 🚨 **Decisión de negocio (Presidencia) — v2 en producción**

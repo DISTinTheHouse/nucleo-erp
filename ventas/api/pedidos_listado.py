@@ -46,9 +46,9 @@ from wms.models import Picking, PickingDetalle
 # Acciones que pasan por los filtros del listado en ``PedidoViewSet.get_queryset``.
 # Las de detalle no: un filtro suelto en una acción de detalle (``get_object()``
 # también pasa por ``get_queryset``) puede dar 404 sobre un pedido visible.
-ACCIONES_FILTRADAS = ("list",)
+ACCIONES_FILTRADAS = ("list", "exportar")
 # Las que además ordenan y serializan columnas: llevan todas las anotaciones.
-ACCIONES_CON_COLUMNAS = ("list",)
+ACCIONES_CON_COLUMNAS = ("list", "exportar")
 
 CAMPOS_IMPORTE = ("subtotal", "gran_total")
 # ``?ordering=`` sobre anotaciones de ``anotar_columnas`` (sólo en
@@ -270,5 +270,26 @@ def _orden(campo):
     if nombre not in CAMPOS_ORDEN_NULOS_AL_FINAL:
         return campo
     return F(nombre).desc(nulls_last=True) if campo.startswith("-") else F(nombre).asc(nulls_last=True)
+
+
+# --- Exportación -----------------------------------------------------------------
+
+COLUMNAS_EXPORTACION = (
+    "id", "folio", "estatus", "oc", "cliente", "cliente_razon_social", "cliente_nombre",
+    "created_at", "fecha_confirmacion", "clasificacion", "piezas", "vendedor_nombre",
+    "subtotal", "gran_total", "moneda",
+)
+
+
+def filas_exportacion(qs, ver_importes):
+    """Todas las filas filtradas y ordenadas, sin paginar, en UNA consulta
+    (``.values()``, sin instanciar pedidos ni serializer)."""
+    columnas = [c for c in COLUMNAS_EXPORTACION if ver_importes or c not in CAMPOS_IMPORTE]
+    etiquetas = dict(Pedido.CHOICES_ESTATUS)
+    filas = []
+    for fila in qs.values(*columnas, moneda_codigo=F("moneda__codigo_iso")):
+        fila["estatus_display"] = etiquetas.get(fila["estatus"], str(fila["estatus"]))
+        filas.append(fila)
+    return filas
 
 

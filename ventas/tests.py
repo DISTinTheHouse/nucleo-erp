@@ -8637,3 +8637,41 @@ class PedidoListadoOrdenColumnasTests(_PedidosModoServidorBase, TestCase):
         self.assertEqual(resp.status_code, 200, resp.content)
         resp = self._get(f"{PEDIDOS_URL}kpis/", {"ordering": "vendedor_nombre"})
         self.assertEqual(resp.status_code, 200, resp.content)
+
+
+class PedidoExportarTests(_PedidosModoServidorBase, TestCase):
+    """EC-782: ``pedidos/exportar/`` = el conjunto filtrado completo, sin paginar,
+    con las mismas reglas de alcance e importes que el listado."""
+
+    URL = f"{PEDIDOS_URL}exportar/"
+
+    def test_mismos_filtros_y_orden_que_el_listado(self):
+        for params in ({}, {"confirmado": "false"}, {"muestras": "con", "ordering": "-piezas"}, {"search": "782-3"}):
+            with self.subTest(params=params):
+                listado = self._ids(params)
+                resp = self._get(self.URL, {**params, "limit": 1})  # ``limit`` no pagina aquí
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.assertEqual([f["id"] for f in resp.json()], listado)
+
+    def test_columnas(self):
+        fila = next(f for f in self._get(self.URL).json() if f["id"] == self.p2.pk)
+        self.assertEqual(fila["folio"], "P-782-2")
+        self.assertEqual(fila["estatus_display"], "AUTORIZADA")
+        self.assertEqual(fila["moneda_codigo"], "USD")
+        self.assertEqual(fila["piezas"], 5)
+        self.assertEqual(fila["vendedor_nombre"], "Beto Arce")
+        self.assertEqual(Decimal(str(fila["gran_total"])), Decimal("23200"))
+
+    def test_sin_permiso_no_trae_importes_ni_filtra_por_ellos(self):
+        filas = self._get(self.URL, {"gran_total_min": "1000000", "ordering": "-gran_total"}, self.sin_importes).json()
+        self.assertEqual(len(filas), 4)
+        self.assertTrue(all("gran_total" not in f and "subtotal" not in f for f in filas))
+
+    def test_otra_empresa(self):
+        self.assertEqual([f["id"] for f in self._get(self.URL, user=self.admin_b).json()], [self.p_globex.pk])
+
+    def test_una_sola_consulta(self):
+        self._get(self.URL)
+        with CaptureQueriesContext(connection) as ctx:
+            self._get(self.URL, {"ordering": "-piezas_programadas", "muestras": "con"})
+        self.assertEqual(len(ctx), 1)
