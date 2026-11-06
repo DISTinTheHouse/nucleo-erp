@@ -3403,6 +3403,21 @@ class ServicioExtraCantidadCopiaTests(TestCase):
         esperadas = [(n, 7 if n == "Bordado" else c) for n, c in self._esperadas()]
         self.assertEqual(self._cantidades(PedidoServicioExtra.objects.filter(pedido=pedido)), esperadas)
 
+    def test_aceptar_cambios_conserva_claves_sat(self):
+        # EC-791: la cotización no guarda claves SAT; se conservan las del pedido.
+        from nucleo.models import SatClaveProdServ, SatClaveUnidad
+
+        prodserv = SatClaveProdServ.objects.create(codigo="80141600", descripcion="Ventas")
+        unidad = SatClaveUnidad.objects.create(codigo="E48", descripcion="Servicio")
+        pedido = self._autorizar()
+        PedidoServicioExtra.objects.filter(pedido=pedido).update(sat_prodserv=prodserv, sat_unidad=unidad)
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=5)
+
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/aceptar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        claves = PedidoServicioExtra.objects.filter(pedido=pedido).values_list("sat_prodserv_id", "sat_unidad_id")
+        self.assertEqual(set(claves), {(prodserv.pk, unidad.pk)})
+
     def test_snapshot_aprobado_guarda_cantidad(self):
         # ``rechazar-cambios`` reconstruye los servicios desde este snapshot.
         self._autorizar()

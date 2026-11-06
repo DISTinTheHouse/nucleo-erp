@@ -262,9 +262,13 @@ def _cotizacion_detalles_prefetch_qs(cotizacion):
     )
 
 
-def _copiar_renglones_cotizacion_a_pedido(cotizacion, pedido):
+def _copiar_renglones_cotizacion_a_pedido(cotizacion, pedido, claves_sat_servicios=()):
     """Copia renglones, tallas y servicios extra de ``cotizacion`` a ``pedido``
-    con inserciones en lote (``bulk_create``) en vez de un INSERT por fila."""
+    con inserciones en lote (``bulk_create``) en vez de un INSERT por fila.
+
+    La cotización no guarda claves SAT de sus servicios: ``claves_sat_servicios``
+    trae las ``(sat_prodserv_id, sat_unidad_id)`` que tenía el pedido, por
+    posición (orden por ``id``, como ``_save_pedido_servicios_extras``) (EC-791)."""
     detalles = list(_cotizacion_detalles_prefetch_qs(cotizacion))
     pedido_detalles = PedidoDetalle.objects.bulk_create(
         [
@@ -309,18 +313,22 @@ def _copiar_renglones_cotizacion_a_pedido(cotizacion, pedido):
                 )
             )
     PedidoDetalleTalla.objects.bulk_create(tallas)
-    PedidoServicioExtra.objects.bulk_create(
-        [
+    claves_sat_servicios = list(claves_sat_servicios)
+    servicios = []
+    for i, s in enumerate(CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id")):
+        prodserv_id, unidad_id = claves_sat_servicios[i] if i < len(claves_sat_servicios) else (None, None)
+        servicios.append(
             PedidoServicioExtra(
                 pedido=pedido,
                 nombre=s.nombre,
                 monto=s.monto,
                 cantidad=s.cantidad,
                 visible_en_factura=s.visible_en_factura,
+                sat_prodserv_id=prodserv_id,
+                sat_unidad_id=unidad_id,
             )
-            for s in CotizacionServicioExtra.objects.filter(cotizacion=cotizacion).order_by("id")
-        ]
-    )
+        )
+    PedidoServicioExtra.objects.bulk_create(servicios)
 
 
 class PedidoConDependencias(APIException):
@@ -2142,8 +2150,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             PedidoDetalle.objects.filter(pedido=pedido).delete()
         except (ProtectedError, RestrictedError) as exc:
             raise PedidoConDependencias(_etiquetas(_objetos_bloqueantes(exc))) from exc
-        PedidoServicioExtra.objects.filter(pedido=pedido).delete()
-        _copiar_renglones_cotizacion_a_pedido(cotizacion, pedido)
+        servicios = PedidoServicioExtra.objects.filter(pedido=pedido)
+        claves_sat = list(servicios.order_by("id").values_list("sat_prodserv_id", "sat_unidad_id"))
+        servicios.delete()
+        _copiar_renglones_cotizacion_a_pedido(cotizacion, pedido, claves_sat)
 
     @action(detail=True, methods=["post"], url_path="enviar-revision")
     def enviar_revision(self, request, pk=None):
