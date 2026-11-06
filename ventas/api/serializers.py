@@ -767,10 +767,16 @@ class PedidoListSerializer(serializers.ModelSerializer):
     piezas_muestra = serializers.IntegerField(read_only=True)
     # Σ surtido de sus pickings (= ``tracker_picking.total_surtido`` del detalle), entero.
     piezas_surtidas = serializers.SerializerMethodField()
+    # Σ ``programacion_conf.programaciones[].cantidad``: el mismo valor con el que
+    # ordena ``?ordering=piezas_programadas``; 0 sin programación.
+    piezas_programadas = serializers.SerializerMethodField()
     vendedor_nombre = serializers.CharField(read_only=True, allow_null=True)
 
     def get_piezas_surtidas(self, obj):
         return int(obj.piezas_surtidas or 0)
+
+    def get_piezas_programadas(self, obj):
+        return int(getattr(obj, "piezas_programadas", 0) or 0)
 
     def get_fecha_entrega_min(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
@@ -815,6 +821,7 @@ class PedidoListSerializer(serializers.ModelSerializer):
             "piezas_programables",
             "piezas_muestra",
             "piezas_surtidas",
+            "piezas_programadas",
             "vendedor_nombre",
         ]
 

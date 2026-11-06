@@ -69,7 +69,7 @@ from ventas.api.serializers import (
 )
 
 from nucleo.kpis import entero_param, rango_fechas, validar_parametros
-from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset
+from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, estatus_param
 from nucleo.models import SerieFolio, Empresa
 from notificaciones.services.notificacion_service import crear_notificacion_usuario
 from produccion.models import (
@@ -3214,17 +3214,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # ``pedidos_listado.ACCIONES_FILTRADAS`` (EC-782) filtran igual que el listado.
         accion = getattr(self, "action", None)
         if accion in pedidos_listado.ACCIONES_FILTRADAS:
-            estatus = self.request.query_params.get("estatus")
-            if estatus:
-                try:
-                    estatus_list = [
-                        int(x) for x in str(estatus).split(",") if str(x).strip()
-                    ]
-                    qs = qs.filter(estatus__in=estatus_list)
-                except Exception:
-                    raise ValidationError(
-                        {"estatus": "Filtro inválido. Usa números separados por coma."}
-                    )
+            estatus_list = estatus_param(
+                self.request, {e for e, _ in Pedido.CHOICES_ESTATUS}
+            )
+            if estatus_list:
+                qs = qs.filter(estatus__in=estatus_list)
             sin_clasificar = self.request.query_params.get("sin_clasificar", "")
             if sin_clasificar.lower() in ("true", "1"):
                 qs = qs.filter(clasificacion__isnull=True)
@@ -4260,7 +4254,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
         qs = pedidos_visibles(pedidos_base(), request.user)
         if (request.query_params.get("mis_pedidos") or "").lower() in ("true", "1"):
             qs = qs.filter(cotizacion__vendedor=request.user)
-        return Response(pedidos_listado.opciones(qs))
+        datos = pedidos_listado.opciones(qs)
+        datos["puede_ver_importes"] = puede_ver_contabilidad(request.user)
+        return Response(datos)
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-420): mismo
     # criterio que ``OrdenProduccionViewSet.kpis``/``OrdenBordadoViewSet.kpis``
