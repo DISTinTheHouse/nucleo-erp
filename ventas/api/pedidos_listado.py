@@ -29,8 +29,6 @@ Todo se resuelve en la consulta del listado (subconsultas por FK indexada) o en
 una sola consulta agregada: nada por fila.
 """
 
-import re
-import unicodedata
 from decimal import Decimal
 
 from django.contrib.postgres.aggregates import ArrayAgg
@@ -41,6 +39,7 @@ from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param
 from nucleo.listados import OrdenamientoEstableFilter, booleano_param
+from nucleo.opciones_filtros import clave_orden, mes_param, opciones_meses
 from ventas.models import Pedido, PedidoDetalleTalla
 from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
 from ventas.services.sku_produccion_service import TALLAS_DE_LINEA_NO_MUESTRA_Q
@@ -64,12 +63,6 @@ CAMPOS_ORDEN = (*CAMPOS_ORDEN_ANOTADOS, *CAMPOS_IMPORTE)
 
 MUESTRAS = ("con", "solo", "sin")
 SIN_CONFIRMAR = "sin_confirmar"
-
-_MES_RE = re.compile(r"^(\d{4})-(\d{2})$")
-_MESES = (
-    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
-)
 
 
 # --- Anotaciones -----------------------------------------------------------------
@@ -155,21 +148,6 @@ def _texto(request, nombre):
     return (request.query_params.get(nombre) or "").strip()
 
 
-def _mes(request, nombre, permitir=()):
-    """``(año, mes)`` de un ``AAAA-MM``; vacío → ``None``; un valor de ``permitir``
-    se devuelve tal cual; otro formato → 400."""
-    valor = _texto(request, nombre)
-    if not valor:
-        return None
-    if valor in permitir:
-        return valor
-    coincide = _MES_RE.match(valor)
-    if not coincide or not 1 <= int(coincide.group(2)) <= 12:
-        extra = f" o {', '.join(permitir)}" if permitir else ""
-        raise ValidationError({nombre: f"Formato AAAA-MM{extra}."})
-    return int(coincide.group(1)), int(coincide.group(2))
-
-
 def _entero(request, nombre, campo=None):
     """Entero del query string (``entero_param``: vacío → ``None``, una fracción o
     texto → 400); ``piezas`` es entero y truncar ``0.5`` a ``0`` cambiaba el rango."""
@@ -229,11 +207,11 @@ def filtrar(request, qs, ver_importes):
     if confirmado is not None:
         qs = qs.filter(fecha_confirmacion__isnull=not confirmado)
 
-    mes = _mes(request, "mes")
+    mes = mes_param(request, "mes")
     if mes:
         qs = qs.filter(created_at__year=mes[0], created_at__month=mes[1])
 
-    mes_confirmacion = _mes(request, "mes_confirmacion", permitir=(SIN_CONFIRMAR,))
+    mes_confirmacion = mes_param(request, "mes_confirmacion", permitir=(SIN_CONFIRMAR,))
     if mes_confirmacion == SIN_CONFIRMAR:
         qs = qs.filter(fecha_confirmacion__isnull=True)
     elif mes_confirmacion:
@@ -361,19 +339,6 @@ def kpis_mesa(qs, ver_importes):
 # --- Opciones de filtros -----------------------------------------------------------
 
 
-def _clave_orden(texto):
-    """Orden alfabético aproximado al ``localeCompare(..., "es")`` del front."""
-    sin_acentos = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
-    return (sin_acentos.casefold(), texto)
-
-
-def _meses(fechas):
-    return [
-        {"value": f"{m.year:04d}-{m.month:02d}", "label": f"{_MESES[m.month - 1]} {m.year}"}
-        for m in sorted(fechas or [], reverse=True)
-    ]
-
-
 def opciones(qs):
     """Opciones de los filtros de encabezado sobre el conjunto visible completo (no
     reaccionan a filtros, como ``por-almacen/resumen/`` de EC-774), en UNA consulta.
@@ -414,23 +379,23 @@ def opciones(qs):
 
     clientes = sorted(
         ({"value": c["value"], "label": (c["label"] or "").strip()} for c in datos["clientes"] or []),
-        key=lambda o: _clave_orden(o["label"]),
+        key=lambda o: clave_orden(o["label"]),
     )
     vendedores = sorted(
         (
             {"value": v["value"], "label": nombre_para_mostrar(v["first_name"], v["last_name"], v["email"])}
             for v in datos["vendedores"] or []
         ),
-        key=lambda o: _clave_orden(o["label"] or ""),
+        key=lambda o: clave_orden(o["label"] or ""),
     )
     etiquetas = dict(Pedido.Clasificacion.choices)
-    meses_confirmacion = _meses(datos["meses_confirmacion"])
+    meses_confirmacion = opciones_meses(datos["meses_confirmacion"])
     if datos["sin_confirmar"]:
         meses_confirmacion.append({"value": SIN_CONFIRMAR, "label": "Sin confirmar"})
     return {
         "cliente": clientes,
         "vendedor": vendedores,
-        "mes": _meses(datos["meses"]),
+        "mes": opciones_meses(datos["meses"]),
         "mes_confirmacion": meses_confirmacion,
         "clasificacion": [
             {"value": c, "label": etiquetas.get(c, c)} for c in sorted(datos["clasificaciones"] or [])
