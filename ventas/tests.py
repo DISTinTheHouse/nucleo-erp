@@ -2510,11 +2510,10 @@ class PedidoProgramarTests(TestCase):
         self.assertEqual(body["programacion_conf"], self._programacion_db())
         self.assertEqual(body["total_piezas"], 120)
 
-    def test_total_piezas_excluye_lineas_de_muestra_sin_sku(self):
-        """Regresión: una línea de MUESTRA (``producto_nombre_externo``, sin
-        catálogo/SKU) no debe contar para lo que mesa de control puede
-        programar -- tiene su propio flujo (``PedidoEspecialViewSet.
-        variante_onboarding``), no se surte/embarca/borda por este genérico.
+    def test_total_piezas_incluye_lineas_de_muestra_sin_sku(self):
+        """Una línea de MUESTRA (``producto_nombre_externo``, sin catálogo/SKU)
+        cuenta para lo que mesa de control puede programar (#912): un pedido de
+        solo muestras también se programa. El tope sigue siendo el total.
         """
         pedido = self._pedido("P-000003")
         det_catalogo = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
@@ -2530,21 +2529,19 @@ class PedidoProgramarTests(TestCase):
             lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
         )
 
-        # Las 20 piezas de muestra no cuentan: el total programable son las 50
-        # de catálogo, no 70.
+        # Las 20 piezas de muestra cuentan: el total programable es 50 + 20 = 70.
         ok = self._patch(
-            self.admin_mesa, {"programaciones": [{"destino": "BORDADO", "cantidad": 50}]}, pedido=pedido
-        )
-        self.assertEqual(ok.status_code, 200, ok.json())
-        self.assertEqual(ok.json()["total_piezas"], 50)
-
-        # Antes del fix, 70 (50 catálogo + 20 muestra) pasaba la validación.
-        excedido = self._patch(
             self.admin_mesa, {"programaciones": [{"destino": "BORDADO", "cantidad": 70}]}, pedido=pedido
         )
+        self.assertEqual(ok.status_code, 200, ok.json())
+        self.assertEqual(ok.json()["total_piezas"], 70)
+
+        excedido = self._patch(
+            self.admin_mesa, {"programaciones": [{"destino": "BORDADO", "cantidad": 71}]}, pedido=pedido
+        )
         self.assertEqual(excedido.status_code, 400, excedido.json())
+        self.assertIn("71", str(excedido.json()["programaciones"]))
         self.assertIn("70", str(excedido.json()["programaciones"]))
-        self.assertIn("50", str(excedido.json()["programaciones"]))
 
     def test_parcialidades_expone_el_mismo_arreglo_en_list_y_retrieve(self):
         response = self._patch(
