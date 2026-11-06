@@ -5,7 +5,10 @@ import binascii
 import json
 import logging
 
+from django.db.models import F, Q
 from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
 from django.utils import timezone
 
 from wms.models import EtiquetaRFIDDetalle, LectorRFID, RfidScan
@@ -37,17 +40,25 @@ def variantes_epc(epc):
     return {v for v in out if len(v) >= 8}
 
 
-def etiquetas_por_epc(epcs, empresa_id):
-    """``{epc_leido: EtiquetaRFIDDetalle}`` de la empresa, en una sola consulta."""
+def etiquetas_por_epc(epcs, empresa_id=None):
+    """``{epc_leido: EtiquetaRFIDDetalle}`` en una sola consulta.
+
+    Con ``empresa_id`` (lector con token) solo busca en esa empresa. Sin ella
+    (``/api/receive-scan/``) busca en todas: el EPC es único global. Cada
+    detalle trae ``empresa_id_`` de su impresión.
+    """
     variantes = {epc: variantes_epc(epc) for epc in epcs}
     todas = set().union(*variantes.values()) if variantes else set()
-    if not todas or not empresa_id:
+    if not todas:
         return {}
+    qs = EtiquetaRFIDDetalle.objects.filter(epc__in=todas)
+    if empresa_id:
+        qs = qs.filter(impresion__empresa_id=empresa_id)
     por_variante = {
         d.epc: d
-        for d in EtiquetaRFIDDetalle.objects.filter(
-            epc__in=todas, impresion__empresa_id=empresa_id
-        ).only("id", "epc", "estado", "leida_at")
+        for d in qs.annotate(empresa_id_=F("impresion__empresa_id")).only(
+            "id", "epc", "estado", "leida_at"
+        )
     }
     out = {}
     for epc, vs in variantes.items():
@@ -89,7 +100,9 @@ def ligar_lecturas_previas(impresion):
     buscar = set(detalles) | {e.lower() for e in detalles}
     scans = list(
         RfidScan.objects.filter(
-            empresa_id=impresion.empresa_id, etiqueta__isnull=True, epc__in=buscar
+            Q(empresa_id=impresion.empresa_id) | Q(empresa__isnull=True, lector__isnull=True),
+            etiqueta__isnull=True,
+            epc__in=buscar,
         ).only("id", "epc", "created_at")
     )
     if not scans:
@@ -98,9 +111,11 @@ def ligar_lecturas_previas(impresion):
     for scan in scans:
         detalle = detalles[normalizar_epc(scan.epc)]
         scan.etiqueta_id = detalle.pk
+        # Lecturas sin token: toman la empresa de la etiqueta.
+        scan.empresa_id = impresion.empresa_id
         if detalle.pk not in primera or scan.created_at < primera[detalle.pk]:
             primera[detalle.pk] = scan.created_at
-    RfidScan.objects.bulk_update(scans, ["etiqueta"], batch_size=500)
+    RfidScan.objects.bulk_update(scans, ["etiqueta", "empresa"], batch_size=500)
     for detalle_id, cuando in primera.items():
         marcar_leidas([detalle_id], cuando=cuando)
     return len(scans)
@@ -696,7 +711,7 @@ def recibir_lecturas(request, lector):
 
             tags_to_create.append(
                 RfidScan(
-                    empresa_id=lector.empresa_id,
+                    empresa_id=lector.empresa_id if lector else None,
                     lector=lector,
                     epc=epc_norm,
                     reader_ip=remote_addr,
@@ -724,14 +739,21 @@ def recibir_lecturas(request, lector):
             )
             # Liga cada lectura a la etiqueta que imprimimos con ese EPC (misma
             # empresa del lector). Los tags ajenos quedan sin etiqueta.
-            match = etiquetas_por_epc([s.epc for s in tags_to_create], lector.empresa_id)
+            # Sin lector (/api/receive-scan/) busca en todas las empresas y la
+            # lectura toma la empresa de su etiqueta; un tag ajeno queda sin
+            # empresa (solo lo ve el superusuario).
+            match = etiquetas_por_epc(
+                [s.epc for s in tags_to_create], lector.empresa_id if lector else None
+            )
             for scan in tags_to_create:
                 detalle = match.get(scan.epc)
                 if detalle is not None:
                     scan.etiqueta_id = detalle.pk
+                    scan.empresa_id = detalle.empresa_id_
             RfidScan.objects.bulk_create(tags_to_create, batch_size=200)
             marcar_leidas({d.pk for d in match.values()})
-            LectorRFID.objects.filter(pk=lector.pk).update(ultima_lectura=timezone.now())
+            if lector is not None:
+                LectorRFID.objects.filter(pk=lector.pk).update(ultima_lectura=timezone.now())
             debug_payload["etiquetas_ligadas"] = len(match)
             debug_payload["created_epcs_sample"] = summary["unique_epcs_sample"]
             debug_payload["antenna_values"] = summary["antenna_values"]
@@ -765,3 +787,15 @@ def recibir_lecturas(request, lector):
             {"status": "error", "message": str(e), "debug": debug_payload},
             status=500,
         )
+
+
+@csrf_exempt
+@require_POST
+def receive_scan_sin_token(request):
+    """``POST /api/receive-scan/``: la URL que ya tiene configurada el FX.
+
+    Misma lógica que ``scans/receive/`` pero sin token. Si llega un token
+    válido se usa su lector; si no, cada lectura toma la empresa de la
+    etiqueta impresa con su EPC.
+    """
+    return recibir_lecturas(request, lector_desde_request(request))
