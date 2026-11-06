@@ -40,7 +40,12 @@ from compras.services.kpi_criterios import (
     rechazos_oc,
 )
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
-from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, filtrar_listado_compras
+from nucleo.listados import (
+    OrdenamientoEstableFilter,
+    PaginacionOpcionalLimitOffset,
+    booleano_param,
+    filtrar_listado_compras,
+)
 from compras.api.serializers import (
     direccion_sucursal,
     CalidadInspeccionInputSerializer,
@@ -236,6 +241,12 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             qs = filtrar_listado_compras(
                 self.request, qs, OrdenCompra.EstatusOrdenCompra.values, "fecha_oc",
             )
+            # ``?con_proveedor=`` (EC-782): el selector de OC de facturas de proveedor
+            # sólo ofrece OC con proveedor (el FK es ``SET_NULL``); sin el filtro
+            # tenía que bajar la lista completa para descartarlas en memoria.
+            con_proveedor = booleano_param(self.request, "con_proveedor", None)
+            if con_proveedor is not None:
+                qs = qs.filter(proveedor__isnull=not con_proveedor)
         # Listado más reciente primero; ``-id`` como desempate estable. Es el
         # orden de las órdenes de compra en sí: el ``order_by`` de arriba es del
         # Prefetch de recepciones anidadas y solo aplica en ``retrieve``.

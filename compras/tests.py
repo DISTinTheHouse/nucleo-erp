@@ -2697,3 +2697,17 @@ class EstatusMultivalorListadosComprasTests(_OrdenesModoServidorBase, TestCase):
         )
         self.assertEqual(self._get(RECEPCIONES_URL, {"estatus": "9"}).status_code, 400)
         self.assertEqual(self._get(RECEPCIONES_URL, {"estatus": "1,x"}).status_code, 400)
+
+
+class OrdenCompraConProveedorTests(_OrdenesModoServidorBase, TestCase):
+    """EC-782: ``?con_proveedor=`` para el selector de OC de facturas de proveedor."""
+
+    def test_filtro(self):
+        todas = self._ids({})
+        con = self._ids({"con_proveedor": "true"})
+        self.assertNotIn(self.oc_sin_proveedor.pk, con)
+        self.assertEqual(sorted(con + [self.oc_sin_proveedor.pk]), todas)
+        self.assertEqual(self._ids({"con_proveedor": "false"}), [self.oc_sin_proveedor.pk])
+        # El selector: con proveedor y sin canceladas.
+        self.assertEqual(len(self._ids({"con_proveedor": "true", "estatus": "1,2,3,4,5"})), 6)
+        self.assertEqual(self._get(self.URL, {"con_proveedor": "tal-vez"}).status_code, 400)
