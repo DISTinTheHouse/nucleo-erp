@@ -39,7 +39,7 @@ from compras.services.kpi_criterios import (
     porcentaje,
     rechazos_oc,
 )
-from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
+from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, marcar_tope, rango_fechas, validar_parametros
 from nucleo.listados import (
     OrdenamientoEstableFilter,
     PaginacionOpcionalLimitOffset,
@@ -1231,8 +1231,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             "ocs_por_grupo": self._kpi_ocs_por_grupo(base),
             "valor_ocs_activas": self._kpi_valor_ocs_activas(base),
             "top_ocs_por_moneda": self._kpi_top_ocs_por_moneda(base),
-            "ocs_en_curso_proxima_entrega": self._kpi_ocs_en_curso(base),
         }
+        data["ocs_en_curso_proxima_entrega"] = self._kpi_ocs_en_curso(base, data["ocs_por_grupo"]["en_curso"])
         # Señal explícita para el front (#841): no puede deducirla de las claves
         # de departamento de los roles, que no viajan en la sesión.
         data["puede_ver_importes"] = puede_ver_contabilidad(user)
@@ -1358,27 +1358,27 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             })
         return {"disponible": True, "monedas": [{"moneda": m, "ocs": ocs} for m, ocs in monedas.items()]}
 
-    def _kpi_ocs_en_curso(self, base):
+    def _kpi_ocs_en_curso(self, base, total):
         """Las ``TOPE_OCS_EN_CURSO`` OC en estatus 4 con la ``fecha_entrega_estimada``
-        más próxima; las que no tienen fecha van al final. El total ya está en
-        ``ocs_por_grupo.en_curso``."""
+        más próxima; las que no tienen fecha van al final. ``drill_down_total`` y
+        ``drill_down_truncado`` con ``marcar_tope``, como los demás drill-downs; el
+        total es ``ocs_por_grupo.en_curso`` (``con_tope`` repetiría ese conteo en
+        otra consulta)."""
         filas = (
             base.filter(estatus=OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA)
             .order_by(F("fecha_entrega_estimada").asc(nulls_last=True), "id")
             .values("id", "folio", "fecha_entrega_estimada", "proveedor__nombre")[: self.TOPE_OCS_EN_CURSO]
         )
-        return {
-            "disponible": True,
-            "drill_down": [
-                {
-                    "id": f["id"],
-                    "folio": f["folio"],
-                    "proveedor_nombre": f["proveedor__nombre"],
-                    "fecha_entrega_estimada": f["fecha_entrega_estimada"],
-                }
-                for f in filas
-            ],
-        }
+        drill_down = [
+            {
+                "id": f["id"],
+                "folio": f["folio"],
+                "proveedor_nombre": f["proveedor__nombre"],
+                "fecha_entrega_estimada": f["fecha_entrega_estimada"],
+            }
+            for f in filas
+        ]
+        return marcar_tope({"disponible": True, "drill_down": drill_down}, total, drill_down)
 
     def _kpi_ocs_vencidas(self, base):
         hoy = timezone.localdate()

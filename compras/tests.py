@@ -2821,6 +2821,16 @@ class OrdenCompraKpisDashboardTests(_OrdenesModoServidorBase, TestCase):
         self.assertEqual(drill[0]["proveedor_nombre"], "Telas Norte")
         self.assertIsNone(drill[1]["fecha_entrega_estimada"])
 
+    def test_en_curso_marca_el_tope(self):
+        """Mismas llaves que los demás drill-downs (``marcar_tope``): tope de 8."""
+        bloque = self._get(self.URL_KPIS).json()["ocs_en_curso_proxima_entrega"]
+        self.assertEqual((bloque["drill_down_total"], bloque["drill_down_truncado"]), (2, False))
+        for i in range(7):
+            self._oc(OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA, "1", self.mxn, None)
+        bloque = self._get(self.URL_KPIS).json()["ocs_en_curso_proxima_entrega"]
+        self.assertEqual(len(bloque["drill_down"]), 8)
+        self.assertEqual((bloque["drill_down_total"], bloque["drill_down_truncado"]), (9, True))
+
     def test_sin_permiso_sin_importes(self):
         data = self._get(self.URL_KPIS, user=self.almacenista).json()
         self.assertFalse(data["puede_ver_importes"])
