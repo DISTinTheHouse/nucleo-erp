@@ -7708,6 +7708,17 @@ class CompatibilidadPrendaProcesoVentasTests(TestCase):
                       "La categoría «Pantalón» no admite Bordado.")
         self.assertEqual(self._guardar(categoria=self.libre, lleva_bordado=True).status_code, 201)
 
+    def test_muestra_con_categoria_sin_tallas_se_rechaza_y_no_guarda(self):
+        """#927: una categoría sin tallas configuradas no acepta ninguna (no es comodín)."""
+        sin_tallas = CategoriaProducto.objects.create(
+            empresa=self.empresa, nombre="Sin tallas", codigo="SIN", descripcion="x"
+        )
+        antes = Cotizacion.objects.count()
+        resp = self._guardar(categoria=sin_tallas)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"detalle": "Partida 1: la categoría Sin tallas no tiene tallas configuradas."})
+        self.assertEqual(Cotizacion.objects.count(), antes)
+
     # --- aceptar-cambios ---------------------------------------------------
     def test_aceptar_cambios_rechaza_antes_de_copiar(self):
         cot = Cotizacion.objects.create(
