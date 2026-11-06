@@ -1669,7 +1669,7 @@ Se suman a los que ya había (`q`, `search`, `folio`, `cliente`, `vendedor`, `su
 | `confirmado` | `true` / `false` | `fecha_confirmacion` puesta / vacía (EC-748). **No** es el booleano contable `por_confirmar`. |
 | `mes` | `AAAA-MM` | mes de `created_at` en hora de México. |
 | `mes_confirmacion` | `AAAA-MM` o `sin_confirmar` | mes de `fecha_confirmacion` en hora de México, o los que no la tienen. |
-| `piezas_min` / `piezas_max` | número | `piezas` (todas las tallas, muestras incluidas). |
+| `piezas_min` / `piezas_max` | entero (una fracción como `0.5` → `400`) | `piezas` (todas las tallas, muestras incluidas). |
 | `subtotal_min` / `subtotal_max` | número | `subtotal`. Ignorado sin permiso de importes. |
 | `gran_total_min` / `gran_total_max` | número | `gran_total`. Ignorado sin permiso de importes. |
 | `muestras` | `con` / `solo` / `sin` | `con`: alguna pieza de muestra; `solo`: todas las piezas son de muestra; `sin`: ninguna (sobre `piezas_muestra` y `piezas`, igual que la etiqueta del front). `?con_muestras=true` sigue igual (alguna **línea** de muestra). |

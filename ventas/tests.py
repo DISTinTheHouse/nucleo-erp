@@ -8554,6 +8554,18 @@ class PedidoListadoFiltrosColumnaTests(_PedidosModoServidorBase, TestCase):
         # El máximo representable sigue valiendo.
         self.assertEqual(self._get(PEDIDOS_URL, {"gran_total_max": "99999999.99"}).status_code, 200)
 
+    def test_piezas_solo_enteros(self):
+        """``piezas`` es entero: una fracción → 400, sin truncar (``piezas_max=0.5`` se
+        volvía ``piezas < 0`` y dejaba fuera los pedidos de 0 piezas)."""
+        for url in (PEDIDOS_URL, f"{PEDIDOS_URL}exportar/", f"{PEDIDOS_URL}kpis-mesa/"):
+            for params in ({"piezas_max": "0.5"}, {"piezas_min": "1.5"}, {"piezas_min": "1.0"}, {"piezas_max": "1e3"}):
+                with self.subTest(url=url, params=params):
+                    resp = self._get(url, params)
+                    self.assertEqual(resp.status_code, 400, resp.content)
+                    self.assertEqual(set(resp.json()), {next(iter(params))})
+        self.assertEqual(self._ids({"piezas_max": "1"}), [self.p4.pk])
+        self.assertEqual(sorted(self._ids({"piezas_min": " -5 "})), sorted([self.p1.pk, self.p2.pk, self.p3.pk, self.p4.pk]))
+
     def test_sin_permiso_de_importes_se_ignoran_los_rangos_de_importe(self):
         """Contar las filas de un rango dejaría deducir el importe oculto."""
         todos = sorted(self._ids({}, self.sin_importes))

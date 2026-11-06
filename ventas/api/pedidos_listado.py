@@ -31,7 +31,7 @@ una sola consulta agregada: nada por fila.
 
 import re
 import unicodedata
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.db.models import CharField, Count, DateField, F, Func, IntegerField, OuterRef, Q, Subquery, Sum, Value
@@ -170,18 +170,10 @@ def _mes(request, nombre, permitir=()):
     return int(coincide.group(1)), int(coincide.group(2))
 
 
-def _numero(request, nombre, campo=None):
-    """Número (entero o decimal) del query string; vacío → ``None``; inválido → 400."""
-    valor = _texto(request, nombre)
-    if not valor:
-        return None
-    try:
-        numero = Decimal(valor)
-    except InvalidOperation:
-        numero = None
-    if numero is None or not numero.is_finite():
-        raise ValidationError({nombre: "Debe ser un número."})
-    return numero
+def _entero(request, nombre, campo=None):
+    """Entero del query string (``entero_param``: vacío → ``None``, una fracción o
+    texto → 400); ``piezas`` es entero y truncar ``0.5`` a ``0`` cambiaba el rango."""
+    return entero_param(request, nombre)
 
 
 def _importe(request, nombre, campo):
@@ -261,7 +253,7 @@ def filtrar(request, qs, ver_importes):
 
 def filtrar_piezas(request, qs):
     """Rangos de ``piezas`` y ``?muestras=``; requiere ``anotar_piezas``."""
-    qs = _rango(request, qs, "piezas", _numero)
+    qs = _rango(request, qs, "piezas", _entero)
     muestras = _texto(request, "muestras")
     if muestras == "con":
         qs = qs.filter(piezas_muestra__gt=0)
