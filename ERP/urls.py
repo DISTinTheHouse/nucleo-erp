@@ -6,6 +6,7 @@ from django.urls import path, include
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from django.contrib.auth.views import LoginView
 from terceros.views import RfcStatusView, ClientCreateView
+from wms.services.rfid_scan_service import receive_scan_sin_token
 
 
 def serve_favicon(_request):
@@ -44,6 +45,8 @@ urlpatterns = [
     path('api/v1/ai/', include('ia.api.urls')),
     path('api/v1/hr/', include('hr.api.urls')),
     path('api/v1/wms/', include('wms.api.urls')),
+    # Lector FX (IoT Connector) sin token; ver wms/services/rfid_scan_service.py
+    path('api/receive-scan/', receive_scan_sin_token, name='rfid_receive_scan'),
     path('api/v1/logistica/', include('logistica.api.urls')),
     path('api/v1/notificaciones/', include('notificaciones.api.urls')),
     path('auditoria/', include('auditoria.urls')),

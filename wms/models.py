@@ -615,7 +615,13 @@ class RfidScanQuerySet(models.QuerySet):
         qs = self.filter(empresa_id=empresa_id)
         if getattr(user, "is_admin_empresa", False):
             return qs
-        return qs.filter(lector__sucursal_id__in=user.sucursales_permitidas())
+        sucursales = user.sucursales_permitidas()
+        # Sin lector (POST /api/receive-scan/, sin token): la sucursal es la de
+        # la etiqueta impresa con ese EPC.
+        return qs.filter(
+            models.Q(lector__sucursal_id__in=sucursales)
+            | models.Q(lector__isnull=True, etiqueta__impresion__sucursal_id__in=sucursales)
+        )
 
 
 class RfidScan(models.Model):
