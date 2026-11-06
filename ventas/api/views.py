@@ -2748,6 +2748,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
             quitar_campos_contabilidad_pedido(fila)
         return response
 
+    @extend_schema(
+        summary="Cotización ligada al pedido, con el alcance del pedido (Pedido 360°)",
+        responses=CotizacionDelPedidoSerializer,
+    )
     @action(detail=True, methods=["get"], url_path="cotizacion")
     def cotizacion(self, request, pk=None):
         """Cotización ligada al pedido con el alcance del pedido (EC-787).
