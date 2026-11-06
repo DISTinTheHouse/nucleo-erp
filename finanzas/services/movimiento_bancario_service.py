@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Q, Sum
 from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
@@ -79,27 +80,18 @@ class MovimientoBancarioService:
         hoy = timezone.localdate()
         mes_inicio = hoy.replace(day=1)
 
-        cargos_mes = MovimientoBancario.objects.filter(
-            cuenta_bancaria=cuenta,
-            fecha__gte=mes_inicio,
-            fecha__lte=hoy,
-            tipo_movimiento=MovimientoBancario.TipoMovimiento.CARGO,
-            estatus=MovimientoBancario.Estatus.CONCILIADO
-            if False
-            else MovimientoBancario.Estatus.PENDIENTE,
+        # Mismo criterio en ambos lados: todo menos cancelados, sumado en la BD (#898).
+        TM = MovimientoBancario.TipoMovimiento
+        totales = (
+            MovimientoBancario.objects.filter(cuenta_bancaria=cuenta, fecha__gte=mes_inicio, fecha__lte=hoy)
+            .exclude(estatus=MovimientoBancario.Estatus.CANCELADO)
+            .aggregate(
+                cargos=Sum("importe", filter=Q(tipo_movimiento=TM.CARGO)),
+                abonos=Sum("importe", filter=Q(tipo_movimiento=TM.ABONO)),
+            )
         )
-        abonos_mes = MovimientoBancario.objects.filter(
-            cuenta_bancaria=cuenta,
-            fecha__gte=mes_inicio,
-            fecha__lte=hoy,
-            tipo_movimiento=MovimientoBancario.TipoMovimiento.ABONO,
-        )
-        total_cargos = sum(
-            (Decimal(str(m.importe or 0)) for m in cargos_mes), Decimal("0.00")
-        )
-        total_abonos = sum(
-            (Decimal(str(m.importe or 0)) for m in abonos_mes), Decimal("0.00")
-        )
+        total_cargos = Decimal(totales["cargos"] or 0).quantize(Decimal("0.01"))
+        total_abonos = Decimal(totales["abonos"] or 0).quantize(Decimal("0.01"))
         ultimos = list(
             MovimientoBancario.objects.filter(cuenta_bancaria=cuenta)
             .select_related("cobro", "pago")

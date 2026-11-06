@@ -1,4 +1,5 @@
 import hashlib
+import logging
 from datetime import datetime
 from django.db import IntegrityError, transaction
 from django.utils.dateparse import parse_datetime
@@ -6,7 +7,10 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from finanzas.models import SyncfyWebhookNotification, SyncfyWebhookEvent
+from .exceptions import SyncfyWebhookException
 from .validators import verfy_syncfy_signature
+
+logger = logging.getLogger(__name__)
 
 
 class SyncfyWebhookView(APIView):
@@ -30,8 +34,12 @@ class SyncfyWebhookView(APIView):
 
         try:
             verfy_syncfy_signature(signature=signature)
-        except ValueError as exc:
-            return Response({"status": "unsigned", "detail": str(exc)}, status=status.HTTP_401_UNAUTHORIZED)
+        except SyncfyWebhookException as exc:
+            # Firma inválida -> 401; llave ausente o mal configurada -> 500 sin traza (#895).
+            if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+                return Response({"status": "unsigned", "detail": exc.message}, status=status.HTTP_401_UNAUTHORIZED)
+            logger.error("Syncfy webhook: llave de firma no configurada o inválida (%s).", exc.code)
+            return Response({"detail": exc.message}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         raw_body = request.body
         body_hash = hashlib.sha256(raw_body).hexdigest()
@@ -97,10 +105,18 @@ class SyncfyWebhookView(APIView):
                 return Response({"status": "already_received",}, status=status.HTTP_200_OK)
 
         except ValueError as exc:
-            if "notification" in locals():
-                notification.status = (SyncfyWebhookNotification.Status.FAILED)
-                notification.error_message = str(exc)
-                notification.save(update_fields=["status","error_message"])
+            # La transacción ya revirtió la notificación: se guarda de nuevo, FAILED,
+            # para dejar rastro (#895). Si choca con otra igual, basta el 400.
+            try:
+                SyncfyWebhookNotification.objects.create(
+                    rid=data.get("rid"),
+                    body_hash=body_hash,
+                    payload=data,
+                    status=SyncfyWebhookNotification.Status.FAILED,
+                    error_message=str(exc),
+                )
+            except IntegrityError:
+                pass
             return Response({"detail": str(exc),}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({"status": "received", "id": str(notification.id)}, status=status.HTTP_200_OK)
