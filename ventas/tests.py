@@ -2196,6 +2196,35 @@ class PedidoProgramarTests(TestCase):
                 self.pedido.refresh_from_db()
                 self.assertEqual(self.pedido.programacion_conf, {})
 
+    def test_pedido_programado_no_pierde_la_confirmacion(self):
+        """EC-750: ``PATCH /pedidos/{id}/`` no vacía ``fecha_confirmacion`` de un
+        pedido con programación; uno sin programar sí se desconfirma."""
+        client = APIClient()
+        client.force_authenticate(user=self.admin_mesa)
+
+        def desconfirmar(pedido):
+            return client.patch(f"{PEDIDOS_URL}{pedido.pk}/", {"fecha_confirmacion": None}, format="json")
+
+        ok = self._patch(self.admin_mesa, {"programaciones": [{"destino": "EMBARQUE", "cantidad": 10}]})
+        self.assertEqual(ok.status_code, 200, ok.content)
+        resp = desconfirmar(self.pedido)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"fecha_confirmacion": (
+            "El pedido ya está programado; quita la programación antes de vaciar la confirmación."
+        )})
+        self.pedido.refresh_from_db()
+        self.assertIsNotNone(self.pedido.fecha_confirmacion)
+        self.assertEqual(len(self.pedido.programacion_conf["programaciones"]), 1)
+
+        for pedido in (self.pedido_sin_tallas, self.pedido):
+            with self.subTest(pedido=pedido.folio):
+                if pedido is self.pedido:  # primero se quita la programación
+                    self.assertEqual(self._patch(self.admin_mesa, {"programaciones": []}).status_code, 200)
+                resp = desconfirmar(pedido)
+                self.assertEqual(resp.status_code, 200, resp.content)
+                pedido.refresh_from_db()
+                self.assertIsNone(pedido.fecha_confirmacion)
+
     def test_cancelado_por_cancelar_no_se_encuentra(self):
         """Un pedido cancelado por ``cancelar/`` queda con ``activo=False`` y sale
         del alcance: ``GET`` y ``PATCH programar/`` responden 404 y no se guarda nada."""
