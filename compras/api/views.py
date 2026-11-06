@@ -2909,35 +2909,83 @@ def _resolver_tag_rfid(encuadre, codigo_tag):
     }
 
 
-def resumen_encuadre_rfid(encuadre):
+def _renglones_oc_rfid(orden_compra_ids):
+    return (
+        OrdenCompraDetalle.objects.filter(orden_compra_id__in=orden_compra_ids)
+        .select_related("producto", "producto_variante__talla").order_by("id")
+    )
+
+
+def _renglones_op_rfid(op_ids):
+    return (
+        OrdenProduccionDetalle.objects.filter(op_id__in=op_ids)
+        .select_related("producto_variante__producto", "producto_variante__talla").order_by("op_detalle_id")
+    )
+
+
+def mapas_resumen_encuadres_rfid(encuadres):
+    """Renglones y recibido de todos los encuadres de un listado, en bloque.
+
+    Constante en consultas: renglones de OC, renglones de OP y recibido +
+    rechazado de cada lado, en lugar de tres consultas por encuadre. Mismos
+    filtros y orden que ``resumen_encuadre_rfid`` encuadre por encuadre: el
+    recibido se agrupa por renglón, así que juntar los renglones de varias
+    órdenes en un ``IN`` da el mismo total por renglón.
+    """
+    oc_ids = {e.orden_compra_id for e in encuadres if e.orden_compra_id}
+    op_ids = {e.op_id for e in encuadres if not e.orden_compra_id and e.op_id}
+    renglones_oc, renglones_op = {}, {}
+    if oc_ids:
+        for detalle in _renglones_oc_rfid(oc_ids):
+            renglones_oc.setdefault(detalle.orden_compra_id, []).append(detalle)
+    if op_ids:
+        for detalle in _renglones_op_rfid(op_ids):
+            renglones_op.setdefault(detalle.op_id, []).append(detalle)
+    recepcion_vs = RecepcionViewSet()
+    return {
+        "renglones_oc": renglones_oc,
+        "renglones_op": renglones_op,
+        "recibido_oc": recepcion_vs._recibido_por_detalle(
+            "orden_compra_detalle_id", [d.pk for ds in renglones_oc.values() for d in ds]
+        ),
+        "recibido_op": recepcion_vs._recibido_por_detalle(
+            "orden_produccion_detalle_id", [d.pk for ds in renglones_op.values() for d in ds]
+        ),
+    }
+
+
+def resumen_encuadre_rfid(encuadre, mapas=None):
     """Esperado = ordenado - ya recibido (no solo lo contratado, ver B1 del audit).
 
     Reutiliza ``RecepcionViewSet._recibido_por_detalle`` -- ya resta lo que
     Calidad rechaza, una sola fuente de verdad para "cuánto falta". Va en
     bloque: antes eran dos consultas por renglón de la orden.
+
+    ``mapas`` (de ``mapas_resumen_encuadres_rfid``) trae los renglones y el
+    recibido ya calculados para un listado; sin él se consultan aquí.
     """
-    recepcion_vs = RecepcionViewSet()
     lecturas = list(encuadre.lecturas.all())
 
     if encuadre.orden_compra_id:
-        detalle_qs = list(
-            OrdenCompraDetalle.objects.filter(orden_compra_id=encuadre.orden_compra_id)
-            .select_related("producto", "producto_variante__talla").order_by("id")
-        )
         campo_recibido = "orden_compra_detalle_id"
+        if mapas is not None:
+            detalle_qs = mapas["renglones_oc"].get(encuadre.orden_compra_id, [])
+            recibido_map = mapas["recibido_oc"]
+        else:
+            detalle_qs = list(_renglones_oc_rfid([encuadre.orden_compra_id]))
     elif encuadre.op_id:
-        detalle_qs = list(
-            OrdenProduccionDetalle.objects.filter(op_id=encuadre.op_id)
-            .select_related("producto_variante__producto", "producto_variante__talla").order_by("op_detalle_id")
-        )
         campo_recibido = "orden_produccion_detalle_id"
+        if mapas is not None:
+            detalle_qs = mapas["renglones_op"].get(encuadre.op_id, [])
+            recibido_map = mapas["recibido_op"]
+        else:
+            detalle_qs = list(_renglones_op_rfid([encuadre.op_id]))
     else:
         detalle_qs = []
         campo_recibido = None
-    recibido_map = (
-        recepcion_vs._recibido_por_detalle(campo_recibido, [d.pk for d in detalle_qs])
-        if campo_recibido else {}
-    )
+        recibido_map = {}
+    if mapas is None and campo_recibido:
+        recibido_map = RecepcionViewSet()._recibido_por_detalle(campo_recibido, [d.pk for d in detalle_qs])
 
     detalles = []
     total_esperado = Decimal("0")
@@ -3025,6 +3073,20 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         if self.action == "create":
             return RecepcionRFIDEncuadreCreateSerializer
         return RecepcionRFIDEncuadreSerializer
+
+    def list(self, request, *args, **kwargs):
+        # El resumen de cada encuadre se calcula con renglones y recibido ya
+        # traídos en bloque para toda la respuesta (antes, 3 consultas por
+        # encuadre). Mismos filtros, orden y paginación que ``ListModelMixin``.
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        encuadres = list(page if page is not None else queryset)
+        context = self.get_serializer_context()
+        context["resumen_mapas"] = mapas_resumen_encuadres_rfid(encuadres)
+        serializer = self.get_serializer(encuadres, many=True, context=context)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     @action(detail=False, methods=["get"])
     def onboarding(self, request):

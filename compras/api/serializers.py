@@ -686,7 +686,9 @@ class RecepcionRFIDEncuadreSerializer(serializers.ModelSerializer):
 
     def get_resumen(self, obj):
         from compras.api.views import resumen_encuadre_rfid
-        return resumen_encuadre_rfid(obj)
+        # El listado manda los renglones y el recibido en bloque (EC-778); el
+        # detalle, create y aceptar los calculan para su único encuadre.
+        return resumen_encuadre_rfid(obj, self.context.get("resumen_mapas"))
 
 
 class RecepcionRFIDEncuadreCreateSerializer(serializers.ModelSerializer):
