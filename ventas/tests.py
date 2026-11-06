@@ -4827,11 +4827,21 @@ class PedidoReglasEstatusTests(TestCase):
         self.assertIsNotNone(reserva.fecha_devolucion)
         auditoria = AuditoriaEvento.objects.get(modulo="ventas", accion="CANCELAR", id_registro=str(self.pedido.pk))
         self.assertEqual(auditoria.despues_json["motivo"], "Cliente canceló la compra")
+        # EC-803: se guardan por ``_id`` la misma empresa y sucursal del pedido.
+        auditoria_entrada = AuditoriaEvento.objects.get(
+            modulo="inventarios", accion="ENTRADA", id_registro=str(self.pedido.pk)
+        )
+        self.assertEqual(
+            (movimiento.empresa_id, movimiento.sucursal_id), (self.pedido.empresa_id, self.pedido.sucursal_id)
+        )
+        self.assertEqual(auditoria_entrada.empresa_id, self.pedido.empresa_id)
+        self.assertEqual(auditoria.empresa_id, self.pedido.empresa_id)
 
     def test_cancelar_es_rapido(self):
         inicio = time.perf_counter()
-        # 16: bloqueo, devolución de inventario, reservas y auditoría (EC-583), sin
-        # cargar ``pedido.empresa`` para la auditoría (EC-803).
+        # 16: bloqueo, documentos vivos, lectura de la auditoría de inventario (sin nada
+        # que devolver: no hay bloqueo, UPDATE ni movimiento), reservas y auditoría
+        # (EC-583), sin cargar ``pedido.empresa`` para la auditoría (EC-803).
         with self.assertNumQueries(16):
             self._cancelar(self.mesa)
         self.assertLess(time.perf_counter() - inicio, 0.5)
