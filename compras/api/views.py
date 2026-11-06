@@ -2909,6 +2909,16 @@ def _resolver_tag_rfid(encuadre, codigo_tag):
     }
 
 
+def prefetch_lecturas_rfid():
+    """Lecturas del encuadre con producto y variante en la misma consulta (antes,
+    dos consultas por lectura), en orden de captura: ``id`` explícito, porque sin
+    ``order_by`` el orden dependía del plan de Postgres (con el JOIN cambiaba)."""
+    return Prefetch(
+        "lecturas",
+        queryset=RecepcionRFIDLectura.objects.select_related("producto", "producto_variante").order_by("id"),
+    )
+
+
 def _renglones_oc_rfid(orden_compra_ids):
     return (
         OrdenCompraDetalle.objects.filter(orden_compra_id__in=orden_compra_ids)
@@ -3055,12 +3065,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         qs = self.queryset.select_related("orden_compra", "op", "almacen", "proveedor", "sucursal")
         # POST lecturas/ solo responde la lectura nueva: no necesita las demás.
         if self.action != "lecturas":
-            # producto_nombre / producto_variante_nombre de las lecturas en una
-            # consulta por relación (antes, dos por lectura). Prefetch y no
-            # select_related: la consulta de lecturas no cambia, y con ella el
-            # orden en que salen (no tiene order_by); con el JOIN, Postgres las
-            # devolvía en otro orden.
-            qs = qs.prefetch_related("lecturas", "lecturas__producto", "lecturas__producto_variante")
+            qs = qs.prefetch_related(prefetch_lecturas_rfid())
         if getattr(user, "is_superuser", False):
             return qs.order_by("-created_at", "-id")
         empresa = getattr(user, "empresa", None)

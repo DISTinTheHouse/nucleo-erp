@@ -3088,13 +3088,11 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
     el número de encuadres ni de lecturas, y el resumen en bloque del listado es el
     mismo que el que el detalle calcula encuadre por encuadre."""
 
-    # Listado: encuadres; lecturas con sus productos y variantes; renglones de OC
-    # y de OP; recibido + rechazado de cada lado. Detalle: encuadre; lecturas,
-    # productos y variantes; renglones, recibido y rechazado. Sin lecturas,
-    # Django no consulta productos ni variantes.
-    CONSULTAS_LISTADO = 10
-    CONSULTAS_DETALLE = 7
-    CONSULTAS_DETALLE_SIN_LECTURAS = 5
+    # Listado: encuadres; lecturas (con producto y variante por JOIN); renglones
+    # de OC y de OP; recibido + rechazado de cada lado. Detalle: encuadre,
+    # lecturas, renglones, recibido y rechazado.
+    CONSULTAS_LISTADO = 8
+    CONSULTAS_DETALLE = 5
 
     def test_listado_no_crece_con_encuadres_ni_lecturas(self):
         api = self._api()
@@ -3106,13 +3104,8 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
 
     def test_detalle_no_crece_con_lecturas(self):
         api = self._api()
-        for encuadre, consultas in (
-            (self.e_oc_vacio, self.CONSULTAS_DETALLE_SIN_LECTURAS),
-            (self.e_oc_una, self.CONSULTAS_DETALLE),
-            (self.e_oc_varias, self.CONSULTAS_DETALLE),
-            (self.e_op_una, self.CONSULTAS_DETALLE),
-        ):
-            with self.subTest(encuadre=encuadre.pk), self.assertNumQueries(consultas):
+        for encuadre in (self.e_oc_vacio, self.e_oc_una, self.e_oc_varias, self.e_op_una):
+            with self.subTest(encuadre=encuadre.pk), self.assertNumQueries(self.CONSULTAS_DETALLE):
                 self.assertEqual(api.get(f"{self.URL_ENCUADRES}{encuadre.pk}/").status_code, 200)
         self._leer(self.e_oc_varias, self.r1, 12)
         with self.assertNumQueries(self.CONSULTAS_DETALLE):
@@ -3127,13 +3120,15 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
         self.assertEqual(len(muchas), len(pocas))
 
     def test_listado_igual_al_detalle_de_cada_encuadre(self):
-        """OC y OP, con y sin lecturas, en el mismo orden de lecturas y renglones."""
+        """OC y OP, con y sin lecturas; las lecturas en orden de captura (id)."""
         self._agregar_lote(n_encuadres=3, n_lecturas=4)
         api = self._api()
         listado = api.get(self.URL_ENCUADRES).json()
         self.assertEqual(len(listado), 7)
         for fila in listado:
             with self.subTest(encuadre=fila["id"]):
+                ids_lecturas = [l["id"] for l in fila["lecturas"]]
+                self.assertEqual(ids_lecturas, sorted(ids_lecturas))
                 self.assertEqual(fila, api.get(f"{self.URL_ENCUADRES}{fila['id']}/").json())
 
     def test_resumen_resta_recibido_y_rechazo_sin_cancelados(self):
