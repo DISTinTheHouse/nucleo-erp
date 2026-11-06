@@ -1676,6 +1676,8 @@ Se suman a los que ya había (`q`, `search`, `folio`, `cliente`, `vendedor`, `su
 
 Los rangos son como `matchesRangeFilter` del front: **mínimo inclusivo, máximo exclusivo** (`1 a 50 piezas` = `piezas_min=1&piezas_max=51`; `Hasta 10,000` = `subtotal_max=10000`).
 
+Los rangos de importe usan la precisión de la columna (`subtotal`/`gran_total`: 10 dígitos, 2 decimales): un valor con más dígitos o decimales (p. ej. `1e999999` o `1.234`) responde `400 {"gran_total_max": ["..."]}`, igual en `exportar/` y `kpis-mesa/`.
+
 #### Orden por columnas — `?ordering=`
 
 Además de la lista blanca de EC-757 (`id`, `folio`, `estatus`, `clasificacion`, `oc`, `created_at`, `updated_at`, `fecha_confirmacion`, `cliente_nombre`, `cliente_razon_social`, `cliente_rfc`), en el listado y en `exportar/`:

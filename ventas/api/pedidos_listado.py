@@ -36,6 +36,7 @@ from decimal import Decimal, InvalidOperation
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.db.models import CharField, Count, DateField, F, Func, IntegerField, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.functions import Coalesce, Concat, JSONObject, NullIf, Trim, Trunc
+from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param
@@ -169,7 +170,7 @@ def _mes(request, nombre, permitir=()):
     return int(coincide.group(1)), int(coincide.group(2))
 
 
-def _numero(request, nombre):
+def _numero(request, nombre, campo=None):
     """Número (entero o decimal) del query string; vacío → ``None``; inválido → 400."""
     valor = _texto(request, nombre)
     if not valor:
@@ -183,10 +184,27 @@ def _numero(request, nombre):
     return numero
 
 
-def _rango(request, qs, campo):
-    """``?{campo}_min=`` (inclusivo) y ``?{campo}_max=`` (exclusivo)."""
-    minimo = _numero(request, f"{campo}_min")
-    maximo = _numero(request, f"{campo}_max")
+def _importe(request, nombre, campo):
+    """Importe del query string con la precisión de ``Pedido.{campo}``
+    (``max_digits``/``decimal_places``, el mismo ``DecimalField`` de DRF que valida la
+    escritura); vacío → ``None``. Fuera de rango → 400: sin esto, un valor que la
+    columna no puede representar llegaba a Postgres y respondía 500."""
+    valor = _texto(request, nombre)
+    if not valor:
+        return None
+    modelo = Pedido._meta.get_field(campo)
+    validador = serializers.DecimalField(max_digits=modelo.max_digits, decimal_places=modelo.decimal_places)
+    try:
+        return validador.run_validation(valor)
+    except ValidationError as error:
+        raise ValidationError({nombre: error.detail})
+
+
+def _rango(request, qs, campo, lector):
+    """``?{campo}_min=`` (inclusivo) y ``?{campo}_max=`` (exclusivo); ``lector(request,
+    nombre, campo)`` lee y valida cada uno."""
+    minimo = lector(request, f"{campo}_min", campo)
+    maximo = lector(request, f"{campo}_max", campo)
     if minimo is not None:
         qs = qs.filter(**{f"{campo}__gte": minimo})
     if maximo is not None:
@@ -237,13 +255,13 @@ def filtrar(request, qs, ver_importes):
 
     if ver_importes:
         for campo in CAMPOS_IMPORTE:
-            qs = _rango(request, qs, campo)
+            qs = _rango(request, qs, campo, _importe)
     return qs
 
 
 def filtrar_piezas(request, qs):
     """Rangos de ``piezas`` y ``?muestras=``; requiere ``anotar_piezas``."""
-    qs = _rango(request, qs, "piezas")
+    qs = _rango(request, qs, "piezas", _numero)
     muestras = _texto(request, "muestras")
     if muestras == "con":
         qs = qs.filter(piezas_muestra__gt=0)

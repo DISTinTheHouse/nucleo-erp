@@ -8541,6 +8541,19 @@ class PedidoListadoFiltrosColumnaTests(_PedidosModoServidorBase, TestCase):
                 self.assertEqual(resp.status_code, 400, resp.content)
                 self.assertEqual(set(resp.json()), {next(iter(params))})
 
+    def test_importe_fuera_de_rango_responde_400(self):
+        """Más dígitos o decimales que ``subtotal``/``gran_total`` (10, 2) → 400, no un
+        500 de Postgres (``value overflows numeric format``)."""
+        for url in (PEDIDOS_URL, f"{PEDIDOS_URL}exportar/", f"{PEDIDOS_URL}kpis-mesa/"):
+            for params in ({"gran_total_max": "1e999999"}, {"gran_total_min": "-1e999999"},
+                           {"subtotal_min": "100000000"}, {"subtotal_max": "1.234"}):
+                with self.subTest(url=url, params=params):
+                    resp = self._get(url, params)
+                    self.assertEqual(resp.status_code, 400, resp.content)
+                    self.assertEqual(set(resp.json()), {next(iter(params))})
+        # El máximo representable sigue valiendo.
+        self.assertEqual(self._get(PEDIDOS_URL, {"gran_total_max": "99999999.99"}).status_code, 200)
+
     def test_sin_permiso_de_importes_se_ignoran_los_rangos_de_importe(self):
         """Contar las filas de un rango dejaría deducir el importe oculto."""
         todos = sorted(self._ids({}, self.sin_importes))
