@@ -1,5 +1,6 @@
 import logging
 from decimal import Decimal
+from types import SimpleNamespace
 
 from django.db import transaction
 from django.db.models import Count, DecimalField, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum, Value
@@ -41,6 +42,7 @@ from compras.services.kpi_criterios import (
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
 from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, filtrar_listado_compras
 from compras.api.serializers import (
+    direccion_sucursal,
     CalidadInspeccionInputSerializer,
     CalidadInspeccionSerializer,
     OrdenCompraOnboardingHeaderSerializer,
@@ -210,6 +212,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             'solicitud_compra',
             'empresa',
             'sucursal',
+            'almacen',
             'moneda',
             'usuario',
         )
@@ -495,6 +498,16 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             return m
         return Moneda.objects.filter(empresa__isnull=True, activo=True).order_by("codigo_iso").first()
 
+    def _validar_almacen_oc(self, empresa, almacen_id, sucursal_id):
+        # El almacén destino debe ser activo, de la empresa y de la sucursal de la OC.
+        if not almacen_id:
+            return
+        almacen = Almacen.objects.filter(pk=almacen_id, empresa_id=getattr(empresa, "pk", None), estatus="ACTIVO").first()
+        if almacen is None:
+            raise ValidationError({"almacen": "El almacén no existe, está inactivo o no pertenece a la empresa de la orden."})
+        if almacen.sucursal_id and str(almacen.sucursal_id) != str(sucursal_id):
+            raise ValidationError({"almacen": "El almacén no pertenece a la sucursal de la orden."})
+
     def _validar_encabezado_empresa(self, empresa, sucursal_id=None, proveedor_id=None, moneda_id=None):
         # Aislamiento multi-tenant, para TODOS (superusuario incluido): lo que
         # escribe la OC debe ser de la empresa de la orden. Solo se validan los
@@ -655,7 +668,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     def _oc_para_respuesta(self, pk):
         return (
             OrdenCompra.objects.select_related(
-                "proveedor", "pedido", "solicitud_compra", "empresa", "sucursal", "moneda", "usuario",
+                "proveedor", "pedido", "solicitud_compra", "empresa", "sucursal", "almacen", "moneda", "usuario",
             )
             .prefetch_related("pedidos")
             .get(pk=pk)
@@ -776,7 +789,17 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         sucursales = list(
             self._sucursales_del_usuario(user, empresa)
             .order_by("codigo")
-            .values("id_sucursal", "codigo", "nombre")
+            .values(
+                "id_sucursal", "codigo", "nombre", "direccion_linea1", "direccion_linea2",
+                "ciudad", "estado", "cp", "pais", "telefono",
+            )
+        )
+        for suc in sucursales:
+            suc["direccion"] = direccion_sucursal(SimpleNamespace(**suc))
+        almacenes = list(
+            Almacen.objects.filter(empresa=empresa, estatus="ACTIVO")
+            .order_by("codigo")
+            .values("id_almacen", "codigo", "nombre", "sucursal_id")
         )
         monedas = list(
             Moneda.objects.filter(Q(empresa__isnull=True) | Q(empresa=empresa), activo=True)
@@ -788,6 +811,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             "empresa_id": getattr(empresa, "pk", None),
             "catalogos": {
                 "sucursales": sucursales,
+                "almacenes": almacenes,
                 "monedas": monedas,
             },
             "busqueda": {
@@ -879,6 +903,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 self._sucursales_del_usuario(user, empresa).filter(pk=sucursal_id).exists()
             ):
                 raise ValidationError({"sucursal": "No tienes asignada esta sucursal."})
+            has_almacen = "almacen" in header
+            if has_almacen:
+                self._validar_almacen_oc(empresa, header.get("almacen"), sucursal_id)
             self._validar_renglones_empresa(empresa, detalle, header.get("tipo_compra") or oc.tipo_compra, oc)
             pedidos_ids = self._validar_pedidos_empresa(empresa, header)
 
@@ -886,6 +913,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             oc.usuario = user
             if not oc.pk or has_sucursal:
                 oc.sucursal_id = sucursal_id
+            if has_almacen:
+                oc.almacen_id = header.get("almacen")
+            elif oc.pk and has_sucursal and oc.almacen_id and str(oc.almacen.sucursal_id or sucursal_id) != str(sucursal_id):
+                oc.almacen_id = None
             if not oc.pk or has_proveedor:
                 oc.proveedor_id = proveedor_id
             # Al editar, ``moneda: null`` conserva la guardada, igual que el PUT (#824).
@@ -1050,6 +1081,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 proveedor_id=proveedor_id if has_proveedor else None,
                 moneda_id=moneda_id if has_moneda else None,
             )
+            has_almacen = "almacen" in header
+            if has_almacen:
+                self._validar_almacen_oc(oc.empresa, header.get("almacen"), sucursal_id if (has_sucursal and sucursal_id) else oc.sucursal_id)
             self._validar_renglones_empresa(oc.empresa, detalle, header.get("tipo_compra") or oc.tipo_compra, oc)
             pedidos_ids = self._validar_pedidos_empresa(oc.empresa, header)
             # El folio sale de la serie del tipo de compra: con folio ya asignado
@@ -1066,6 +1100,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             oc.usuario = user
             if has_sucursal and sucursal_id:
                 oc.sucursal_id = sucursal_id
+            if has_almacen:
+                oc.almacen_id = header.get("almacen")
             if has_proveedor:
                 oc.proveedor_id = proveedor_id
             if has_moneda and moneda_id:
@@ -1690,6 +1726,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     "proveedor_id": oc.proveedor_id,
                     "proveedor_nombre": getattr(oc.proveedor, "nombre", None),
                     "sucursal_id": oc.sucursal_id,
+                    "almacen_id": oc.almacen_id,
                     "fecha_oc": oc.fecha_oc,
                     "detalle": oc_detalles_map.get(oc.pk, []),
                 }

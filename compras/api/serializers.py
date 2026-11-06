@@ -56,6 +56,17 @@ class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
         ]
 
 
+def direccion_sucursal(sucursal):
+    """Dirección de la sucursal en una línea (``None`` si no tiene ninguna)."""
+    if sucursal is None:
+        return None
+    partes = [
+        sucursal.direccion_linea1, sucursal.direccion_linea2, sucursal.ciudad, sucursal.estado,
+        f"C.P. {sucursal.cp}" if sucursal.cp else None, sucursal.pais,
+    ]
+    return ", ".join(p.strip() for p in partes if p and p.strip()) or None
+
+
 class OrdenCompraSerializer(serializers.ModelSerializer):
     estatus_label = serializers.SerializerMethodField()
     proveedor_nombre = serializers.SerializerMethodField()
@@ -68,6 +79,10 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
     # campo (``SkipField``) en vez de devolver ``null``.
     empresa_nombre = serializers.CharField(source='empresa.razon_social', read_only=True)
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
+    # Dirección de entrega para el proveedor: la de la sucursal de la OC.
+    sucursal_direccion = serializers.SerializerMethodField()
+    sucursal_telefono = serializers.CharField(source='sucursal.telefono', read_only=True, default=None)
+    almacen_nombre = serializers.CharField(source='almacen.nombre', read_only=True, default=None)
     usuario_nombre = serializers.SerializerMethodField()
     moneda_codigo = serializers.CharField(source='moneda.codigo_iso', read_only=True)
     moneda_simbolo = serializers.CharField(source='moneda.simbolo', read_only=True, allow_null=True)
@@ -129,6 +144,10 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'empresa_nombre',
             'sucursal',
             'sucursal_nombre',
+            'sucursal_direccion',
+            'sucursal_telefono',
+            'almacen',
+            'almacen_nombre',
             'proveedor',
             'proveedor_nombre',
             'proveedor_correo',
@@ -184,6 +203,9 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
 
     def get_estatus_label(self, obj):
         return obj.get_estatus_display()
+
+    def get_sucursal_direccion(self, obj):
+        return direccion_sucursal(obj.sucursal)
 
     def get_proveedor_nombre(self, obj):
         return obj.proveedor.nombre if obj.proveedor_id else None
@@ -322,6 +344,8 @@ class OrdenCompraRetrieveSerializer(OrdenCompraSerializer):
 
 class OrdenCompraOnboardingHeaderSerializer(serializers.Serializer):
     sucursal = serializers.IntegerField(required=False, allow_null=True)
+    # Almacén destino de la recepción; ``null`` lo quita.
+    almacen = serializers.IntegerField(required=False, allow_null=True)
     proveedor = serializers.IntegerField(required=False, allow_null=True)
     moneda = serializers.IntegerField(required=False, allow_null=True)
     # ``fecha_oc`` (fecha de generación) ya NO se acepta aquí: la fija el
