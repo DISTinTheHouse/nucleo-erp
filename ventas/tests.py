@@ -8705,6 +8705,35 @@ class PedidoKpisMesaTests(_PedidosModoServidorBase, TestCase):
                 self.assertEqual(data["confirmados"], sum(1 for f in vigentes if f["fecha_confirmacion"]))
                 self.assertEqual(data["total"], data["confirmados"] + data["por_confirmar"])
 
+    def test_cancelados_cuadran_con_el_count_del_listado(self):
+        """``total`` + ``cancelados`` = ``count`` del listado con los mismos filtros; los
+        cancelados (estatus 5) no entran en ``total`` ni en ``por_moneda``."""
+        # Cancelado en USD (moneda sin vigentes con estos filtros) y uno dado de baja
+        # por ``POST /cancelar/`` (``activo=False``): fuera del listado y de los KPIs.
+        self._pedido("P-782-C1", self.cliente_b, self.usd, estatus=Pedido.ESTATUS_CANCELADO, gran_total="999")
+        baja = self._pedido("P-782-C2", self.cliente_b, self.mxn, estatus=Pedido.ESTATUS_CANCELADO)
+        Pedido.objects.filter(pk=baja.pk).update(activo=False)
+        casos = [
+            ({}, (3, 2)),                                   # p1, p2, p3 + p4, C1
+            ({"confirmado": "false"}, (2, 1)),              # p2, p3 + C1
+            ({"confirmado": "true"}, (1, 1)),               # p1 + p4
+            ({"cliente": self.cliente_b.pk, "moneda": self.mxn.pk}, (0, 1)),  # p4
+            ({"estatus": "5"}, (0, 2)),
+        ]
+        for params, (total, cancelados) in casos:
+            with self.subTest(params=params):
+                count = self._get(PEDIDOS_URL, {**params, "limit": 1}).json()["count"]
+                data = self._get(self.URL, params).json()
+                self.assertEqual((data["total"], data["cancelados"]), (total, cancelados))
+                self.assertEqual(data["total"] + data["cancelados"], count)
+                self.assertEqual(data["total"], data["confirmados"] + data["por_confirmar"])
+        data = self._get(self.URL, {"cliente": self.cliente_b.pk, "moneda": self.usd.pk}).json()
+        # p2 vigente en USD; C1 (cancelado, $999) no suma al valor.
+        self.assertEqual(Decimal(str(data["por_moneda"][0]["valor"])), Decimal("23200"))
+        data = self._get(self.URL, {"estatus": "5"}).json()
+        self.assertEqual(data["por_moneda"], [])
+        self.assertEqual(self._get(self.URL, {"estatus": "5"}, self.sin_importes).json()["cancelados"], 2)
+
     def test_sin_permiso_sin_valor(self):
         data = self._get(self.URL, {"gran_total_min": "1000000"}, self.sin_importes).json()
         self.assertFalse(data["puede_ver_importes"])

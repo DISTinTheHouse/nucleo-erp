@@ -310,15 +310,21 @@ def filas_exportacion(qs, ver_importes):
 
 
 def kpis_mesa(qs, ver_importes):
-    """Conteos y valor por moneda del conjunto filtrado, sin cancelados: ``total`` =
-    ``confirmados`` + ``por_confirmar``. UNA consulta agrupada por moneda."""
-    vigentes = qs.exclude(estatus=Pedido.ESTATUS_CANCELADO).order_by()
+    """Conteos y valor por moneda del conjunto filtrado, en UNA consulta agrupada por
+    moneda. ``total``, ``confirmados``, ``por_confirmar`` y ``por_moneda`` excluyen
+    los cancelados (``estatus`` 5): ``total`` = ``confirmados`` + ``por_confirmar``.
+    ``cancelados`` los cuenta aparte, así que ``total`` + ``cancelados`` = filas del
+    listado con los mismos filtros. Los cancelados con ``POST /cancelar/`` quedan
+    además ``activo=False`` y no están en ninguno de los dos (``pedidos_base``)."""
+    vigente = ~Q(estatus=Pedido.ESTATUS_CANCELADO)
     filas = list(
-        vigentes.values("moneda_id", "moneda__codigo_iso")
+        qs.order_by()
+        .values("moneda_id", "moneda__codigo_iso")
         .annotate(
-            total=Count("id"),
-            confirmados=Count("id", filter=Q(fecha_confirmacion__isnull=False)),
-            valor=Sum("gran_total"),
+            total=Count("id", filter=vigente),
+            confirmados=Count("id", filter=vigente & Q(fecha_confirmacion__isnull=False)),
+            cancelados=Count("id", filter=~vigente),
+            valor=Sum("gran_total", filter=vigente),
         )
         .order_by("moneda__codigo_iso", "moneda_id")
     )
@@ -326,6 +332,8 @@ def kpis_mesa(qs, ver_importes):
     total = sum(f["total"] for f in filas)
     por_moneda = []
     for f in filas:
+        if not f["total"]:
+            continue  # moneda con solo cancelados: no aporta valor ni pedidos vigentes
         fila = {"moneda_id": f["moneda_id"], "moneda": f["moneda__codigo_iso"], "total": f["total"]}
         if ver_importes:
             fila["valor"] = f["valor"] or Decimal("0")
@@ -334,6 +342,7 @@ def kpis_mesa(qs, ver_importes):
         "total": total,
         "confirmados": confirmados,
         "por_confirmar": total - confirmados,
+        "cancelados": sum(f["cancelados"] for f in filas),
         "por_moneda": por_moneda,
         "puede_ver_importes": ver_importes,
     }

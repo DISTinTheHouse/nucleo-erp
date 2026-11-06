@@ -1704,13 +1704,14 @@ Las tarjetas de Mesa de Control **con los mismos filtros que el listado** (todos
 
 ```json
 { "generado_en": "2026-11-06T12:00:00Z",
-  "total": 116, "confirmados": 39, "por_confirmar": 77,
+  "total": 116, "confirmados": 39, "por_confirmar": 77, "cancelados": 1,
   "por_moneda": [{ "moneda_id": 1, "moneda": "MXN", "total": 101, "valor": 8909627.16 },
                  { "moneda_id": 7, "moneda": "USD", "total": 15, "valor": 910942.2 }],
   "puede_ver_importes": true }
 ```
 
-- **Los cancelados (estatus 5) no cuentan**: `total` = `confirmados` + `por_confirmar`. Con `?estatus=5` todo sale en 0.
+- **Los cancelados (estatus 5) no cuentan** en `total`, `confirmados`, `por_confirmar` ni `por_moneda`: `total` = `confirmados` + `por_confirmar`. Van aparte en `cancelados` (mismos filtros), así que `total` + `cancelados` = `count` del listado con los mismos parámetros. Con `?estatus=5` todo sale en 0 salvo `cancelados`.
+- Un pedido cancelado con `POST /pedidos/{id}/cancelar/` queda además `activo=false` y ya no está ni en el listado ni aquí; `cancelados` cuenta los que siguen activos con estatus 5 (p. ej. anteriores a esa regla).
 - `confirmados` = con `fecha_confirmacion`. `valor` = Σ `gran_total` por moneda (nunca se suman monedas).
 - Sin permiso de importes: `puede_ver_importes: false` y cada fila de `por_moneda` sin `valor` (los conteos quedan). Sin empresa: todo en 0.
 
