@@ -1,7 +1,8 @@
 import math
 from decimal import Decimal
 
-from django.db.models import Sum, Count, Exists, F, OuterRef, Prefetch, Q, prefetch_related_objects
+from django.db.models import Sum, Count, Exists, F, IntegerField, OuterRef, Prefetch, Q, Subquery, Value, prefetch_related_objects
+from django.db.models.functions import Coalesce
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status, viewsets, mixins
@@ -2131,6 +2132,182 @@ def _require_produccion(user):
     raise ValidationError({"permiso": "Acción disponible solo para producción."})
 
 
+def _contadores_tallas_especiales():
+    """``tallas_total``/``tallas_con_sku``/``tallas_en_catalogo`` por pedido.
+
+    Tres subconsultas correlacionadas (una por contador) sobre las tallas con
+    ``cantidad > 0`` de las líneas de muestra; ninguna consulta por fila.
+    Mismas reglas que el detalle: ``sku_produccion`` = variante de producción
+    ACTIVA con ``sku`` no vacío; ``sku_catalogo`` = existe un
+    ``ProductoVariante`` (producto_base, color, talla) de esa variante.
+    """
+    def base():
+        return PedidoDetalleTalla.objects.filter(
+            pedido_detalle__pedido_id=OuterRef("pk"),
+            cantidad__gt=0,
+        ).exclude(pedido_detalle__producto_nombre_externo__isnull=True).exclude(
+            pedido_detalle__producto_nombre_externo=""
+        )
+
+    def variantes_con_sku():
+        return VarianteProductoProduccion.objects.filter(
+            activo=True,
+            pedido_detalle_id=OuterRef("pedido_detalle_id"),
+            talla_id=OuterRef("talla_id"),
+        ).exclude(sku__isnull=True).exclude(sku="")
+
+    en_catalogo = VarianteProductoProduccion.objects.filter(
+        activo=True,
+        pedido_detalle_id=OuterRef("pedido_detalle_id"),
+        talla_id=OuterRef("talla_id"),
+    ).filter(
+        Exists(ProductoVariante.objects.filter(
+            producto_id=OuterRef("producto_base_id"),
+            color_id=OuterRef("color_id"),
+            talla_id=OuterRef("talla_id"),
+        ))
+    )
+
+    def contar(qs):
+        return Coalesce(
+            Subquery(
+                qs.order_by().values("pedido_detalle__pedido_id")
+                .annotate(n=Count("id")).values("n")[:1],
+                output_field=IntegerField(),
+            ),
+            Value(0),
+        )
+
+    return {
+        "tallas_total": contar(base()),
+        "tallas_con_sku": contar(base().filter(Exists(variantes_con_sku()))),
+        "tallas_en_catalogo": contar(base().filter(Exists(en_catalogo))),
+    }
+
+
+def _repartir(total, renglones):
+    """Reparte ``total`` piezas entre ``[(clave, programado)]`` en proporción a
+    lo programado, en enteros (residuo mayor), sin pasar de lo programado.
+
+    Para los avances que se registran por ORDEN (reflejante, corte de manga y
+    los de bordado sin talla): la orden no dice a qué talla corresponde cada
+    pieza, así que se atribuye en proporción.
+    """
+    import math as _m
+    renglones = [(k, float(p or 0)) for k, p in renglones if (p or 0) > 0]
+    prog = sum(p for _, p in renglones)
+    total = min(float(total or 0), prog)
+    if total <= 0 or prog <= 0:
+        return {}
+    exactos = [(k, p, total * p / prog) for k, p in renglones]
+    out = {k: min(_m.floor(x), p) for k, p, x in exactos}
+    faltan = int(round(total)) - int(sum(out.values()))
+    for k, p, x in sorted(exactos, key=lambda e: e[2] - _m.floor(e[2]), reverse=True):
+        if faltan <= 0:
+            break
+        if out[k] + 1 <= p:
+            out[k] += 1
+            faltan -= 1
+    return out
+
+
+def _avance_por_talla_especial(pedido, tallas):
+    """``{pdt_id: {surtido, bordado, reflejante, corte_manga}}`` para todo el
+    pedido en 2 consultas constantes: picking y un ``UNION ALL`` con los
+    renglones y los avances de los servicios que el pedido sí lleva.
+
+    - ``surtido``: Σ ``cantidad_surtida`` de picking (mismo alcance que el
+      pipeline: picking y renglón no cancelados).
+    - ``programado``: Σ renglones de las órdenes ACTIVAS de ese servicio en la
+      misma (pedido_detalle, talla).
+    - ``realizado``: avances activos. Bordado los trae por talla
+      (``pedido_detalle_talla`` u ``orden_bordado_detalle``); reflejante y
+      corte de manga son por orden y se reparten en proporción a lo programado
+      por renglón (``_repartir``).
+    - ``null`` si la talla no lleva ese servicio.
+    """
+    from collections import defaultdict
+    from django.db.models import CharField, FloatField
+    from wms.services.picking_pipeline.pendientes import historical_maps
+
+    _, surtido_map = historical_maps(pedido)
+    clave_de_pdt = {dt.pk: (dt.pedido_detalle_id, dt.talla_id) for dt in tallas}
+
+    nulo = lambda: Value(None, output_field=IntegerField())
+    servicios = [
+        # (clave, lleva, modelo renglón, fk, modelo avance, campo cantidad)
+        ("bordado", "lleva_bordado", OrdenBordadoDetalle, "ob", BordadoAvances, "cantidad_bordada"),
+        ("reflejante", "lleva_reflejante", OrdenReflejanteDetalle, "orden_r", ReflejanteAvances, "cantidad_aplicada"),
+        ("corte_manga", "lleva_corte_manga", OrdenCorteMangaDetalle, "ocm", CorteMangaAvances, "cantidad"),
+    ]
+    activos = [sv for sv in servicios if any(getattr(dt, sv[1]) for dt in tallas)]
+
+    partes = []
+    for clave, _lleva, det_model, fk, av_model, campo in activos:
+        filtro = {f"{fk}__pedido_id": pedido.pk, f"{fk}__activo": True}
+        partes.append(
+            det_model.objects.filter(**filtro).order_by()
+            .annotate(
+                t=Value(f"{clave}:d", output_field=CharField()),
+                o=F(f"{fk}_id"), pd=F("pedido_detalle_id"), ta=F("talla_id"),
+                c=F("cantidad"), x1=nulo(), x2=F("id"),
+            ).values_list("t", "o", "pd", "ta", "c", "x1", "x2")
+        )
+        es_bordado = av_model is BordadoAvances
+        partes.append(
+            av_model.objects.filter(**filtro, activo=True).order_by()
+            .annotate(
+                t=Value(f"{clave}:a", output_field=CharField()),
+                o=F(f"{fk}_id"), pd=nulo(), ta=nulo(),
+                c=F(campo),
+                x1=F("pedido_detalle_talla_id") if es_bordado else nulo(),
+                x2=F("orden_bordado_detalle_id") if es_bordado else nulo(),
+            ).values_list("t", "o", "pd", "ta", "c", "x1", "x2")
+        )
+
+    programado = defaultdict(lambda: defaultdict(float))
+    realizado = defaultdict(lambda: defaultdict(float))
+    por_orden = defaultdict(list)       # (servicio, orden_id) -> [(clave, prog)]
+    renglon_clave = {}                  # (servicio, renglon_id) -> clave
+    avances = []
+    if partes:
+        union = partes[0].union(*partes[1:], all=True) if len(partes) > 1 else partes[0]
+        for t, oid, pd_id, talla_id, cant, x1, x2 in union:
+            serv, tipo = t.split(":")
+            if tipo == "d":
+                k = (pd_id, talla_id)
+                programado[serv][k] += float(cant or 0)
+                por_orden[(serv, oid)].append((k, float(cant or 0)))
+                renglon_clave[(serv, x2)] = k
+            else:
+                avances.append((serv, oid, float(cant or 0), x1, x2))
+
+    sin_talla = defaultdict(float)
+    for serv, oid, cant, pdt_id, obd_id in avances:
+        k = clave_de_pdt.get(pdt_id) if pdt_id is not None else None
+        if k is None and obd_id is not None:
+            k = renglon_clave.get((serv, obd_id))
+        if k is not None:
+            realizado[serv][k] += cant
+        else:
+            sin_talla[(serv, oid)] += cant
+    for (serv, oid), cant in sin_talla.items():
+        for k, n in _repartir(cant, por_orden.get((serv, oid), [])).items():
+            realizado[serv][k] += n
+
+    out = {}
+    for dt in tallas:
+        k = (dt.pedido_detalle_id, dt.talla_id)
+        fila = {"surtido": float(surtido_map.get(dt.pk, 0) or 0)}
+        for clave, lleva, *_ in servicios:
+            fila[clave] = (
+                {"programado": programado[clave].get(k, 0.0), "realizado": realizado[clave].get(k, 0.0)}
+                if getattr(dt, lleva) else None
+            )
+        out[dt.pk] = fila
+    return out
+
+
 class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
     """Pedidos con produccion especial (muestras sin SKU de catalogo).
 
@@ -2163,6 +2340,7 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             # entrega real sobre el que producción pueda planear.
             .filter(clasificacion__isnull=False, fecha_confirmacion__isnull=False)
             .only("id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "empresa", "cotizacion")
+            .annotate(**_contadores_tallas_especiales())
             .order_by("-fecha_confirmacion", "-id")
         )
 
@@ -2209,6 +2387,13 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             for dt in det.tallas_especiales:
                 dt.variante_produccion = variantes_por_talla.get((det.id, dt.talla_id))
                 dt.tiene_variante = (det.id, dt.talla_id) in con_variante
+
+        avance_por_talla = _avance_por_talla_especial(
+            pedido, [dt for det in detalles for dt in det.tallas_especiales]
+        )
+        for det in detalles:
+            for dt in det.tallas_especiales:
+                dt.avance = avance_por_talla[dt.pk]
 
         pedido.detalles_especiales = detalles
         serializer = self.get_serializer(pedido)

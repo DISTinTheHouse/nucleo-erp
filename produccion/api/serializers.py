@@ -2473,7 +2473,16 @@ class PedidoEspecialListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Pedido
-        fields = ["id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion"]
+        fields = [
+            "id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion",
+            # Anotados en ``PedidoEspecialViewSet.get_queryset`` (subconsultas):
+            # tallas con cantidad > 0 de las líneas de muestra.
+            "tallas_total", "tallas_con_sku", "tallas_en_catalogo",
+        ]
+
+    tallas_total = serializers.IntegerField(read_only=True)
+    tallas_con_sku = serializers.IntegerField(read_only=True)
+    tallas_en_catalogo = serializers.IntegerField(read_only=True)
 
 
 class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
@@ -2485,6 +2494,11 @@ class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
     sku_siguiente = serializers.SerializerMethodField()
     aplica_catalogo = serializers.SerializerMethodField()
     sku_catalogo = serializers.SerializerMethodField()
+    # Llenado en ``PedidoEspecialViewSet.retrieve`` (``_avance_por_talla_especial``).
+    avance = serializers.SerializerMethodField()
+
+    def get_avance(self, obj):
+        return getattr(obj, "avance", None)
 
     def get_aplica_catalogo(self, obj):
         return bool(getattr(getattr(obj, "variante_produccion", None), "aplica_catalogo", False))
@@ -2525,6 +2539,7 @@ class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
             "corte_manga_config",
             "lleva_cambio_talla",
             "cambio_talla_config",
+            "avance",
         ]
 
 

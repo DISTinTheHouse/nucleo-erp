@@ -7487,3 +7487,24 @@ class AvancesPiezasYSkuContratoTests(TestCase):
             resumen_avance_piezas(det, av),
             {"cantidad_programada": 40.0, "cantidad_realizada_total": 10.0, "porcentaje_avance": 25.0},
         )
+
+
+class PedidosEspecialesAvanceContratoTests(TestCase):
+    """Documentación del contrato (no se ejecuta en CI; ver CLAUDE.md).
+
+    - Listado ``/pedidos-especiales/``: ``tallas_total``/``tallas_con_sku``/
+      ``tallas_en_catalogo`` (tallas con cantidad > 0 de líneas de muestra),
+      anotados con subconsultas: sigue en 1 query.
+    - Detalle: ``detalles[].tallas[].avance`` =
+      ``{surtido, bordado, reflejante, corte_manga}``; cada servicio
+      ``{programado, realizado}`` o ``null`` si la talla no lo lleva. 2 queries
+      constantes (picking + UNION ALL de renglones y avances). Avances por
+      orden (reflejante, corte de manga, bordado sin talla) se reparten en
+      proporción a lo programado por renglón.
+    """
+
+    def test_reparto_proporcional(self):
+        from produccion.api.views import _repartir
+        self.assertEqual(_repartir(10, [("a", 30), ("b", 20)]), {"a": 6, "b": 4})
+        self.assertEqual(_repartir(99, [("a", 3), ("b", 2)]), {"a": 3, "b": 2})
+        self.assertEqual(_repartir(0, [("a", 3)]), {})
