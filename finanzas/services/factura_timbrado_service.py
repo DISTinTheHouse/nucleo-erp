@@ -17,7 +17,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from finanzas.exceptions import ErrorDeNegocio
-from finanzas.models import Cobro, Factura, NotaCredito
+from finanzas.models import Cobro, Factura, MotivoCancelacionSat, NotaCredito
 from finanzas.services.nota_credito_service import NotaCreditoService
 from finanzas.services.facturama.acceso import empresa_usa_facturama
 from finanzas.services.facturama.cfdi_payload import _receptor, construir_payload_cfdi, construir_payload_nota_credito, construir_payload_rep
@@ -103,6 +103,33 @@ def _exigir_empresa_duena(empresa, clave):
         raise ErrorDeNegocio({clave: "Solo la empresa dueña de la cuenta de Facturama puede timbrar."})
 
 
+def normalizar_motivo_sat(valor):
+    """``motivo_sat`` del body: ``""`` si no vino; si vino, debe ser 02 o 03 (EC-806)."""
+    motivo = "" if valor is None else str(valor).strip()
+    if motivo and motivo not in MotivoCancelacionSat.values:
+        raise ErrorDeNegocio({"motivo_sat": f"Motivo SAT no válido ({motivo[:10]}): usa {MOTIVOS_SAT_TEXTO}."})
+    return motivo
+
+
+def _motivo_sat(recibido, guardado, solicitada):
+    """Motivo con que se pide la cancelación ante el SAT; lo elige el usuario, sin default (EC-806).
+
+    Con la cancelación ya solicitada (falta que el receptor acepte), el reintento reenvía el
+    motivo de la primera solicitud: si no viene se reusa, y uno distinto es 400.
+    """
+    recibido = normalizar_motivo_sat(recibido)
+    if solicitada and guardado:
+        if recibido and recibido != guardado:
+            raise ErrorDeNegocio({"motivo_sat": (
+                f"La cancelación ya se solicitó ante el SAT con motivo {guardado} "
+                f"({MotivoCancelacionSat(guardado).label}); reintenta con el mismo motivo."
+            )})
+        return guardado
+    if not recibido:
+        raise ErrorDeNegocio({"motivo_sat": f"Elige el motivo de cancelación ante el SAT: {MOTIVOS_SAT_TEXTO}."})
+    return recibido
+
+
 def _copiar(origen, destino, campos):
     for campo in campos:
         setattr(destino, campo, getattr(origen, campo))
@@ -110,11 +137,14 @@ def _copiar(origen, destino, campos):
 
 CAMPOS_CFDI = ("cfdi_uuid", "facturama_id", "cfdi_fecha_timbrado", "cfdi_pendiente")
 CAMPOS_REP = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado", "rep_pendiente")
+CAMPOS_REP_CANCELACION = ("rep_cancelado_uuid", "rep_fecha_cancelacion", "rep_cancelacion_solicitada", "rep_cancelacion_motivo")
+CAMPOS_CFDI_CANCELACION = ("cfdi_cancelado", "cfdi_cancelacion_solicitada", "cfdi_cancelacion_motivo")
 # Facturama documenta ``pending``; ``requested`` es el valor que el ERP ya manejaba (#630).
 CANCELACION_PENDIENTE = ("pending", "requested")
 MSG_CANCELACION_PENDIENTE = "El receptor debe aceptar la cancelación ante el SAT; vuelve a cancelar cuando la acepte."
 PENDIENTE = "Hay un timbrado sin confirmar: revísalo en Facturama y desmarca '{}' en el admin."
 PENDIENTE_CFDI = "Hay un timbrado sin confirmar: usa conciliar-cfdi/ para traer el timbre de Facturama o liberarlo."
+MOTIVOS_SAT_TEXTO = " o ".join(f"{m.value} ({m.label})" for m in MotivoCancelacionSat)
 # Páginas de ``GET /cfdi`` (10 por página) que se revisan al buscar un timbre sin confirmar.
 PAGINAS_CONCILIAR = 30
 
@@ -204,8 +234,8 @@ class FacturaTimbradoService:
         return cobro
 
     @staticmethod
-    def cancelar_rep(cobro):
-        """Cancela el REP ante el SAT (motivo 02). Facturama va fuera de toda transacción (#627).
+    def cancelar_rep(cobro, motivo_sat=None):
+        """Cancela el REP ante el SAT con el motivo elegido (EC-806). Facturama va fuera de toda transacción (#627).
 
         ``canceled``: el UUID pasa a ``rep_cancelado_uuid`` (#625). ``pending``/``requested``:
         queda ``rep_cancelacion_solicitada`` (#624) y se reintenta cuando el receptor acepte.
@@ -216,9 +246,10 @@ class FacturaTimbradoService:
         _exigir_empresa_duena(actual.empresa, "rep")
         if not actual.rep_facturama_id:
             raise ErrorDeNegocio({"rep": "El cobro no tiene un REP en Facturama que cancelar."})
+        motivo = _motivo_sat(motivo_sat, actual.rep_cancelacion_motivo, actual.rep_cancelacion_solicitada)
         error = None
         try:
-            respuesta = FacturamaService().cancel_cfdi(actual.rep_facturama_id)
+            respuesta = FacturamaService().cancel_cfdi(actual.rep_facturama_id, motivo)
         except FacturamaAPIException as exc:
             if exc.status_code and 400 <= exc.status_code < 500 and exc.status_code != 408:
                 raise ErrorDeNegocio({"rep": f"Facturama no canceló el REP: {_mensaje(exc)}"})
@@ -227,6 +258,7 @@ class FacturaTimbradoService:
         estatus = str((respuesta or {}).get("Status") or "").lower()
         with transaction.atomic():
             bloqueado = Cobro.objects.select_for_update(of=("self",)).get(pk=cobro.pk)
+            bloqueado.rep_cancelacion_motivo = motivo
             if estatus == "canceled":
                 bloqueado.rep_cancelado_uuid = bloqueado.rep_uuid or bloqueado.rep_cancelado_uuid
                 bloqueado.rep_fecha_cancelacion = timezone.now()
@@ -238,8 +270,8 @@ class FacturaTimbradoService:
             else:
                 bloqueado.rep_cancelacion_solicitada = False
                 error = ErrorDeNegocio({"rep": f"El SAT no canceló el REP (estatus: {estatus or 'vacío'})."})
-            bloqueado.save(update_fields=[*CAMPOS_REP, "rep_cancelado_uuid", "rep_fecha_cancelacion", "rep_cancelacion_solicitada", "updated_at"])
-        _copiar(bloqueado, cobro, [*CAMPOS_REP, "rep_cancelado_uuid", "rep_fecha_cancelacion", "rep_cancelacion_solicitada"])
+            bloqueado.save(update_fields=[*CAMPOS_REP, *CAMPOS_REP_CANCELACION, "updated_at"])
+        _copiar(bloqueado, cobro, [*CAMPOS_REP, *CAMPOS_REP_CANCELACION])
         if error:
             raise error
         return cobro
@@ -402,39 +434,45 @@ class FacturaTimbradoService:
         return "timbrado", aviso
 
     @staticmethod
-    def cancelar_cfdi(factura):
-        """Cancela el CFDI ante el SAT (motivo 02) y guarda el resultado. Levanta si no quedó cancelado."""
-        error = FacturaTimbradoService._cancelar_cfdi(factura)
+    def cancelar_cfdi(factura, motivo_sat=None):
+        """Cancela el CFDI ante el SAT con el motivo elegido (02/03, EC-806) y guarda el resultado.
+        Levanta si no quedó cancelado."""
+        error = FacturaTimbradoService._cancelar_cfdi(factura, motivo_sat)
         if error:
             raise error
 
     @staticmethod
-    @transaction.atomic
-    def _cancelar_cfdi(factura):
-        bloqueada = Factura.objects.select_for_update(of=("self",)).select_related("empresa").get(pk=factura.pk)
-        if bloqueada.cfdi_cancelado:
+    def _cancelar_cfdi(factura, motivo_sat):
+        """Como ``cancelar_rep`` (#627): Facturama va fuera de toda transacción y sin la fila
+        bloqueada; solo guardar el resultado la bloquea."""
+        actual = Factura.objects.select_related("empresa").get(pk=factura.pk)
+        if actual.cfdi_cancelado:
             return None
-        _exigir_empresa_duena(bloqueada.empresa, "cfdi")  # #564
+        _exigir_empresa_duena(actual.empresa, "cfdi")  # #564
+        motivo = _motivo_sat(motivo_sat, actual.cfdi_cancelacion_motivo, actual.cfdi_cancelacion_solicitada)
         try:
-            respuesta = FacturamaService().cancel_cfdi(bloqueada.facturama_id)
+            respuesta = FacturamaService().cancel_cfdi(actual.facturama_id, motivo)
         except FacturamaAPIException as exc:
             if exc.status_code and 400 <= exc.status_code < 500 and exc.status_code != 408:
                 return ErrorDeNegocio({"cfdi": f"Facturama no canceló el CFDI: {_mensaje(exc)}"})
             # #563: sin respuesta no se sabe si se canceló; reintentar es seguro.
             return ErrorDeNegocio({"cfdi": f"Facturama no respondió ({_mensaje(exc)}); no se sabe si se canceló. Vuelve a intentar."})
         estatus = str((respuesta or {}).get("Status") or "").lower()
-        if estatus == "canceled":
-            bloqueada.cfdi_cancelado, bloqueada.cfdi_cancelacion_solicitada = True, False
-        elif estatus in CANCELACION_PENDIENTE:  # #565, #630
-            bloqueada.cfdi_cancelacion_solicitada = True
-        else:
-            # Rechazo del receptor (``active``): ya no hay solicitud en curso (#633).
-            bloqueada.cfdi_cancelacion_solicitada = False
-        bloqueada.save(update_fields=["cfdi_cancelado", "cfdi_cancelacion_solicitada", "updated_at"])
-        factura.cfdi_cancelado = bloqueada.cfdi_cancelado
-        factura.cfdi_cancelacion_solicitada = bloqueada.cfdi_cancelacion_solicitada
+        with transaction.atomic():
+            bloqueada = Factura.objects.select_for_update(of=("self",)).get(pk=factura.pk)
+            if not bloqueada.cfdi_cancelado:  # otra petición pudo guardarlo mientras tanto
+                bloqueada.cfdi_cancelacion_motivo = motivo
+                if estatus == "canceled":
+                    bloqueada.cfdi_cancelado, bloqueada.cfdi_cancelacion_solicitada = True, False
+                elif estatus in CANCELACION_PENDIENTE:  # #565, #630
+                    bloqueada.cfdi_cancelacion_solicitada = True
+                else:
+                    # Rechazo del receptor (``active``): ya no hay solicitud en curso (#633).
+                    bloqueada.cfdi_cancelacion_solicitada = False
+                bloqueada.save(update_fields=[*CAMPOS_CFDI_CANCELACION, "updated_at"])
+        _copiar(bloqueada, factura, CAMPOS_CFDI_CANCELACION)
+        if bloqueada.cfdi_cancelado:
+            return None
         if estatus in CANCELACION_PENDIENTE:
             return ErrorDeNegocio({"cancelacion_pendiente": MSG_CANCELACION_PENDIENTE})
-        if not bloqueada.cfdi_cancelado:
-            return ErrorDeNegocio({"cfdi": f"El SAT no canceló el CFDI (estatus: {estatus or 'vacío'})."})
-        return None
+        return ErrorDeNegocio({"cfdi": f"El SAT no canceló el CFDI (estatus: {estatus or 'vacío'})."})

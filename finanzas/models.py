@@ -16,6 +16,15 @@ class MetodoPago(models.TextChoices):
     TARJETA = 'Tarjeta', 'Tarjeta'
     CHEQUE = 'Cheque', 'Cheque'
 
+class MotivoCancelacionSat(models.TextChoices):
+    """Motivos del SAT que el ERP ofrece al cancelar un CFDI de factura o REP (EC-806).
+
+    El 01 (con relación) no se ofrece: el ERP no timbra el sustituto con relación 04. El 04
+    (factura global) tampoco: el ERP no emite facturas globales.
+    """
+    ERRORES_SIN_RELACION = '02', 'Comprobante emitido con errores sin relación'
+    NO_SE_LLEVO_A_CABO = '03', 'No se llevó a cabo la operación'
+
 class CuentaContable(models.Model):
     class CuentaTipo(models.TextChoices):
         ACTIVO = 'Activo', 'Activo'
@@ -296,6 +305,11 @@ class Factura(StatusLifecycleModel):
     cfdi_cancelado = models.BooleanField(default=False)
     # Cancelación solicitada; falta que el receptor la acepte (#565).
     cfdi_cancelacion_solicitada = models.BooleanField(default=False)
+    # Motivo SAT de la última solicitud de cancelación (EC-806). Mientras está solicitada,
+    # el reintento reenvía este mismo motivo.
+    cfdi_cancelacion_motivo = models.CharField(
+        max_length=2, choices=MotivoCancelacionSat.choices, null=True, blank=True
+    )
     # Pesos por unidad de ``moneda`` (EC-581). Obligatorio para emitir o timbrar si no es MXN.
     tipo_cambio = models.DecimalField(max_digits=18, decimal_places=6, null=True, blank=True)
 
@@ -606,6 +620,10 @@ class Cobro(models.Model):
     rep_fecha_timbrado = models.DateTimeField(null=True, blank=True)
     # Cancelación del REP: en espera de aceptación del receptor, o ya cancelado (trazabilidad).
     rep_cancelacion_solicitada = models.BooleanField(default=False)
+    # Motivo SAT de la última solicitud de cancelación del REP (EC-806); ver ``Factura``.
+    rep_cancelacion_motivo = models.CharField(
+        max_length=2, choices=MotivoCancelacionSat.choices, null=True, blank=True
+    )
     rep_cancelado_uuid = models.CharField(max_length=36, null=True, blank=True)
     rep_fecha_cancelacion = models.DateTimeField(null=True, blank=True)
     rep_pendiente = models.BooleanField(default=False)

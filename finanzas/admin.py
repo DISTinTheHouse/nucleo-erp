@@ -120,7 +120,7 @@ class FacturaAdmin(admin.ModelAdmin):
     # Emitir, timbrar y el tipo de cambio van por la API, con CxC y póliza (#669).
     readonly_fields = (
         "estatus", "tipo_cambio", "cfdi_uuid", "facturama_id", "cfdi_fecha_timbrado",
-        "cfdi_pendiente", "cfdi_cancelado", "cfdi_cancelacion_solicitada",
+        "cfdi_pendiente", "cfdi_cancelado", "cfdi_cancelacion_solicitada", "cfdi_cancelacion_motivo",
     )
     inlines = (FacturaDetalleInline,)
 

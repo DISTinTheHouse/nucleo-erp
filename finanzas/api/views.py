@@ -920,7 +920,10 @@ class FacturaViewSet(FinanzasBaseViewSet):
         if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
             raise PermissionDenied('No tienes permiso para cancelar facturas.')
         motivo = (request.data.get('motivo') or '').strip()[:200]
-        contrapoliza = FacturaCancelacionService.cancelar(factura, request.user, motivo)
+        # ``motivo`` es la nota interna; ``motivo_sat`` (02/03) el que va al SAT (EC-806).
+        contrapoliza = FacturaCancelacionService.cancelar(
+            factura, request.user, motivo, motivo_sat=request.data.get('motivo_sat')
+        )
         data = dict(FacturaSerializer(factura).data)
         data['contrapoliza_id'] = contrapoliza.pk if contrapoliza else None
         return Response(data)
@@ -2231,9 +2234,9 @@ class CobroViewSet(FinanzasBaseViewSet):
 
     @action(detail=True, methods=["post"], url_path="cancelar-rep", url_name="cancelar-rep")
     def cancelar_rep(self, request, pk=None):
-        """Cancela el REP del cobro ante el SAT (Facturama)."""
+        """Cancela el REP del cobro ante el SAT (Facturama) con ``motivo_sat`` 02 o 03 (EC-806)."""
         cobro = self.get_object()  # otra empresa -> 404; sin E-FIN-FACTURAS ya es 403 (check_permissions)
-        FacturaTimbradoService.cancelar_rep(cobro)
+        FacturaTimbradoService.cancelar_rep(cobro, request.data.get("motivo_sat"))
         return Response(CobroSerializer(cobro).data)
 
 

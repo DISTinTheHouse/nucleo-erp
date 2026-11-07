@@ -1,3 +1,5 @@
+from finanzas.models import MotivoCancelacionSat
+
 from .client import FacturamaClient
 
 class FacturamaService:
@@ -30,8 +32,14 @@ class FacturamaService:
     def get_cfdi(self, cfdi_id):
         return self.client.get(f"/cfdi/{cfdi_id}", params={"type": "issued"})
 
-    def cancel_cfdi(self, cfdi_id, motive="02"):
-        """``DELETE /cfdi/{id}``: ``Status`` = canceled | requested | rejected."""
+    def cancel_cfdi(self, cfdi_id, motive):
+        """``DELETE /cfdi/{id}``: ``Status`` = canceled | requested | rejected.
+
+        ``motive`` es obligatorio y solo 02 o 03 (EC-806). Nunca se manda ``uuidReplacement``:
+        es solo del 01, y mandarlo con otro motivo (aunque vacío) puede impedir la cancelación.
+        """
+        if motive not in MotivoCancelacionSat.values:
+            raise ValueError(f"Motivo SAT no soportado: {motive!r}")
         return self.client.delete(f"/cfdi/{cfdi_id}", params={"type": "issued", "motive": motive})
 
     def get_cfdi_file(
