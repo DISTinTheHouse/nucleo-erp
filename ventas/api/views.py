@@ -572,8 +572,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         # ella (``get_*_display``, campos inexistentes) se ignora y queda este orden.
         # ``nulls_last``: ``Cotizacion.created_at`` es NULL-able y las filas
         # anteriores a la migración que lo agregó siguen en NULL; en PostgreSQL
-        # un DESC las pondría al principio del listado.
-        qs = qs.order_by(F("created_at").desc(nulls_last=True), "-id")
+        # un DESC las pondría al principio del listado. El tablero ordena cada
+        # columna con el mismo ``ORDEN_POR_DEFECTO`` (EC-811).
+        qs = qs.order_by(*cotizaciones_listado.ORDEN_POR_DEFECTO)
 
         return qs
 
@@ -2674,6 +2675,40 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         Sin ``ordering``/``limit``/``offset``: un parámetro que no es filtro → 400."""
         validar_parametros(request, cotizaciones_listado.PARAMETROS_FILTRO)
         return Response({"generado_en": timezone.now(), **cotizaciones_listado.kpis(self.get_queryset())})
+
+    @extend_schema(
+        summary="Tablero de cotizaciones: primeras N de cada estatus y su total",
+        parameters=[
+            *PARAMETROS_FILTRO_COTIZACIONES,
+            OpenApiParameter("por_columna", OpenApiTypes.INT, description=(
+                f"Cotizaciones por columna, 1-{cotizaciones_listado.POR_COLUMNA_MAXIMO} "
+                f"(default {cotizaciones_listado.POR_COLUMNA_DEFECTO}). "
+                "Las siguientes de una columna: el listado con `?estatus=N&limit=…&offset=…` y los mismos filtros."
+            )),
+        ],
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="tablero")
+    def tablero(self, request):
+        """Las 5 columnas del tablero en una respuesta y DOS consultas: la ventana
+        ligera (ids + total por estatus, ``cotizaciones_listado.ventana_tablero``) y
+        las filas del listado por id, con sus mismas anotaciones y serializer. Sin
+        ``?ordering=``: cada columna va en el orden por defecto del listado, el
+        mismo que sigue "ver más" con ``?estatus=N&offset=k``."""
+        validar_parametros(request, cotizaciones_listado.PARAMETROS_FILTRO | {"por_columna"})
+        por_columna = cotizaciones_listado.por_columna_param(request)
+        ventana = cotizaciones_listado.ventana_tablero(self.get_queryset(), por_columna)
+        filas = {}
+        if ventana:
+            # Otra vez por ``get_queryset()`` (alcance y filtros) aunque los ids ya
+            # salen de él: no cuesta consulta y no depende de que lo sigan haciendo.
+            qs = self._anotar_listado(self.get_queryset().filter(pk__in=[pk for pk, _, _ in ventana]))
+            datos = CotizacionDashboardItemSerializer(qs, many=True, context=self.get_serializer_context()).data
+            filas = {fila["id"]: fila for fila in datos}
+        return Response({
+            "por_columna": por_columna,
+            "columnas": cotizaciones_listado.columnas_tablero(ventana, filas),
+        })
 
 
 class CotizacionDetalleViewSet(viewsets.ModelViewSet):

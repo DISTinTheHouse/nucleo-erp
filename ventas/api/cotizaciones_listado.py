@@ -18,8 +18,8 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.contrib.postgres.aggregates import ArrayAgg
-from django.db.models import Count, F, Q, Sum, Value
-from django.db.models.functions import Coalesce, JSONObject, NullIf, Trim
+from django.db.models import Count, F, Q, Sum, Value, Window
+from django.db.models.functions import Coalesce, JSONObject, NullIf, RowNumber, Trim
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -32,7 +32,18 @@ from ventas.models import Cotizacion
 # Las de detalle no: un filtro suelto en una acción de detalle (``get_object()``
 # también pasa por ``get_queryset``) puede dar 404 sobre una cotización visible.
 ACCION_KPIS = "kpis"
-ACCIONES_FILTRADAS = ("list", ACCION_KPIS)
+ACCION_TABLERO = "tablero"
+ACCIONES_FILTRADAS = ("list", ACCION_KPIS, ACCION_TABLERO)
+
+# Orden por defecto del listado (EC-619): más reciente primero, ``-id`` de desempate.
+# ``nulls_last``: ``created_at`` es NULL-able (filas anteriores a la migración que lo
+# agregó); en PostgreSQL un DESC las pondría al principio. El tablero ordena cada
+# columna con ESTE mismo orden, para que "ver más" (``?estatus=N&offset=k``) continúe
+# justo donde terminó la columna.
+ORDEN_POR_DEFECTO = (F("created_at").desc(nulls_last=True), F("id").desc())
+
+POR_COLUMNA_DEFECTO = 20
+POR_COLUMNA_MAXIMO = 100
 
 ESTATUS_VALIDOS = frozenset(e for e, _ in Cotizacion.CHOICES_ESTATUS)
 SIN_CLIENTE = "sin_cliente"
@@ -147,6 +158,54 @@ def kpis(qs):
         ],
         "por_moneda": [{**m, "gran_total": _importe(m["gran_total"])} for m in por_moneda.values()],
     }
+
+
+# --- Tablero -----------------------------------------------------------------------
+
+
+def por_columna_param(request):
+    """``?por_columna=`` entero de 1 a ``POR_COLUMNA_MAXIMO``; vacío → el default."""
+    valor = entero_param(request, "por_columna")
+    if valor is None:
+        return POR_COLUMNA_DEFECTO
+    if not 1 <= valor <= POR_COLUMNA_MAXIMO:
+        raise ValidationError({"por_columna": f"Debe ser un entero entre 1 y {POR_COLUMNA_MAXIMO}."})
+    return valor
+
+
+def ventana_tablero(qs, por_columna):
+    """``[(id, estatus, total_del_estatus)]`` de las primeras ``por_columna``
+    cotizaciones de cada estatus, en el orden del listado, en UNA consulta.
+
+    Ventana ligera a propósito: sólo ids y conteos sobre el queryset filtrado SIN las
+    anotaciones del listado. Con ellas (subconsultas de ``piezas``/``pedido_*``),
+    Postgres las calcula para todas las filas antes de recortar por ``fila``: ~950 ms
+    con 50 000 cotizaciones contra ~75 ms así (EC-811). ``total_del_estatus`` es el
+    ``count`` que daría el listado con ``?estatus=N`` y los mismos filtros. Un
+    estatus sin filas no aparece."""
+    return list(
+        qs.annotate(
+            fila_tablero=Window(RowNumber(), partition_by=[F("estatus")], order_by=ORDEN_POR_DEFECTO),
+            total_estatus=Window(Count("id"), partition_by=[F("estatus")]),
+        )
+        .filter(fila_tablero__lte=por_columna)
+        .order_by("estatus", "fila_tablero")
+        .values_list("id", "estatus", "total_estatus")
+    )
+
+
+def columnas_tablero(ventana, filas_serializadas):
+    """Las 5 columnas del catálogo con su ``total`` y sus filas, en el orden de la
+    ventana. ``filas_serializadas``: ``{id: fila}``."""
+    totales, results = {}, {e: [] for e in ESTATUS_VALIDOS}
+    for pk, estatus, total in ventana:
+        totales[estatus] = total
+        if pk in filas_serializadas:
+            results[estatus].append(filas_serializadas[pk])
+    return [
+        {"estatus": e, "estatus_label": etiqueta, "total": totales.get(e, 0), "results": results[e]}
+        for e, etiqueta in Cotizacion.CHOICES_ESTATUS
+    ]
 
 
 # --- Opciones de filtros -----------------------------------------------------------

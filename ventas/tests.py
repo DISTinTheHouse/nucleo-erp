@@ -9465,3 +9465,113 @@ class CotizacionKpisTests(_CotizacionesModoServidorBase, TestCase):
             self._cotizacion(self.empresa, self.ana, self.acme, (self.mxn, self.usd, None)[i % 3], 5, "1.00", self.base)
         with self.assertNumQueries(1):
             self.assertEqual(self._kpis()["total"], 12)
+
+
+class CotizacionTableroTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``GET /cotizaciones/tablero/``: las primeras N de cada estatus con su
+    total, idénticas (ids, orden y filas) a ``?estatus=N&limit=N`` del listado."""
+
+    URL = f"{COTIZACIONES_URL}tablero/"
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Columna 5 con más filas que ``por_columna``: un empate de ``created_at``
+        # (decide ``-id``) y una sin ``created_at`` (va al final, ``nulls_last``).
+        cls.col5 = []
+        for i, horas in enumerate((10, 11, 11, 12, 13, 14, None)):
+            creada = cls.base - timedelta(hours=horas) if horas is not None else None
+            cot = cls._cotizacion(cls.empresa, cls.ana, cls.acme, cls.mxn, 5, f"{i + 1}.00", cls.base)
+            Cotizacion.objects.filter(pk=cot.pk).update(created_at=creada)
+            cls.col5.append(cot.pk)
+
+    def _tablero(self, params=None, user=None):
+        resp = self._get(params=params, user=user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def _listado(self, params, user=None):
+        resp = self._get(COTIZACIONES_URL, params, user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def test_cinco_columnas_con_su_total_y_en_cero(self):
+        data = self._tablero()
+        self.assertEqual(data["por_columna"], 20)
+        self.assertEqual(
+            [(c["estatus"], c["estatus_label"], c["total"], len(c["results"])) for c in data["columnas"]],
+            [(1, "BORRADOR", 1, 1), (2, "EN REVISION", 1, 1), (3, "AUTORIZADA", 3, 3),
+             (4, "RECHAZADA", 1, 1), (5, "CAMBIOS SOLICITADOS", 7, 7)],
+        )
+        vacio = self._tablero({"cliente": "sin_cliente"})
+        self.assertEqual([c["total"] for c in vacio["columnas"]], [0, 0, 1, 0, 0])
+        self.assertEqual([c["results"] for c in vacio["columnas"] if c["estatus"] != 3], [[], [], [], []])
+
+    def test_columnas_identicas_al_listado(self):
+        """Mismos ids, mismo orden y mismas filas que ``?estatus=N&limit=N`` con los
+        mismos filtros; ``total`` = ``count`` del listado."""
+        for por_columna in (1, 3, 20):
+            for filtros in ({}, {"cliente": self.acme.pk}, {"q": "acme"}, {"vendedor": self.ana.pk}):
+                with self.subTest(por_columna=por_columna, filtros=filtros):
+                    data = self._tablero({**filtros, "por_columna": por_columna})
+                    for columna in data["columnas"]:
+                        listado = self._listado({**filtros, "estatus": columna["estatus"], "limit": por_columna})
+                        self.assertEqual(columna["results"], listado["results"])
+                        self.assertEqual(columna["total"], listado["count"])
+
+    def test_orden_de_la_columna_con_empates_y_nulos(self):
+        col5 = next(c for c in self._tablero()["columnas"] if c["estatus"] == 5)
+        # horas antes de ``base``: 10, 11, 11 (empate → -id), 12, 13, 14, NULL al final.
+        esperado = [self.col5[0], self.col5[2], self.col5[1], self.col5[3], self.col5[4], self.col5[5], self.col5[6]]
+        self.assertEqual([f["id"] for f in col5["results"]], esperado)
+
+    def test_ver_mas_con_el_listado_sin_huecos_ni_duplicados(self):
+        col5 = next(c for c in self._tablero({"por_columna": 3})["columnas"] if c["estatus"] == 5)
+        ids = [f["id"] for f in col5["results"]]
+        offset = 3
+        while offset < col5["total"]:
+            pagina = self._listado({"estatus": 5, "limit": 3, "offset": offset})
+            ids += [f["id"] for f in pagina["results"]]
+            offset += 3
+        self.assertEqual(ids, [f["id"] for f in self._listado({"estatus": 5})])
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(len(ids), 7)
+
+    def test_dos_consultas_que_no_crecen_con_las_filas(self):
+        self._tablero()
+        with self.assertNumQueries(2):
+            self._tablero()
+        for i in range(10):
+            self._cotizacion(self.empresa, self.beto, self.zeta, self.usd, (i % 5) + 1, "1.00", self.base)
+        with self.assertNumQueries(2):
+            data = self._tablero({"por_columna": 100})
+        self.assertEqual(sum(c["total"] for c in data["columnas"]), 23)
+
+    def test_por_columna_y_parametros_invalidos_400(self):
+        for params in (
+            {"por_columna": "0"}, {"por_columna": "101"}, {"por_columna": "abc"}, {"por_columna": "-1"},
+            {"ordering": "id"}, {"limit": "5"}, {"offset": "5"}, {"otro": "1"}, {"estatus": "9"},
+        ):
+            with self.subTest(params=params):
+                self.assertEqual(self._get(params=params).status_code, 400)
+        self.assertEqual(self._tablero({"por_columna": "100"})["por_columna"], 100)
+        self.assertEqual(self._tablero({"por_columna": "1", "format": "json"})["por_columna"], 1)
+
+    def test_aislamiento(self):
+        ana = self._tablero(user=self.ana)
+        ids_ana = {f["id"] for c in ana["columnas"] for f in c["results"]}
+        self.assertEqual(
+            ids_ana, {*self._pks("ana_acme_mxn_1", "ana_zeta_usd_2", "ana_sin_cliente_3"), *self.col5},
+        )
+        self.assertEqual(
+            sum(c["total"] for c in self._tablero({"vendedor": self.beto.pk}, self.ana)["columnas"]), 0,
+        )
+        otra = self._tablero(user=self.admin_b)
+        self.assertEqual(
+            [f["id"] for c in otra["columnas"] for f in c["results"]], self._pks("b_secreto_mxn_3"),
+        )
+        self.assertEqual(sum(c["total"] for c in self._tablero({"cliente": self.acme.pk}, self.admin_b)["columnas"]), 0)
+        self.assertNotIn("Secreto", str(self._tablero()))
+        with self.assertNumQueries(0):
+            nada = self._tablero({"estatus": "9"}, self.sin_empresa)
+        self.assertEqual([(c["total"], c["results"]) for c in nada["columnas"]], [(0, [])] * 5)
