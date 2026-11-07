@@ -7421,11 +7421,13 @@ class VentasOrderingServidorTests(TestCase):
     """EC-757 (reemplaza a EC-619, #949): cotizaciones, mesa de control y pedidos
     respetan ``?ordering=`` de su lista blanca (``ordering_fields``), con ``id`` como
     desempate en la dirección del primer campo. Lo que queda fuera de la lista
-    (importes por #537, ``get_*_display``, campos inexistentes) se ignora sin 500 y
-    deja el orden por defecto: más reciente primero (``-created_at, -id``). El
-    ``created_at`` va escalonado al revés del id para que ``-id`` o un orden
-    ascendente se distingan del orden por defecto."""
+    (``get_*_display``, campos inexistentes, y en cotizaciones el ``gran_total``
+    crudo) se ignora sin 500 y deja el orden por defecto: más reciente primero
+    (``-created_at, -id``). El ``created_at`` va escalonado al revés del id para que
+    ``-id`` o un orden ascendente se distingan del orden por defecto."""
 
+    # En cotizaciones el importe se ordena con ``importe_sin_iva`` agrupado por moneda
+    # (EC-811, ``CotizacionOrdenImporteTests``), no por ``gran_total`` suelto.
     IGNORADOS_COTIZACION = (
         "gran_total", "-gran_total", "moneda__codigo_iso",
         "get_estatus_display", "-get_tipo_pedido_display", "no_existe",
@@ -7530,17 +7532,23 @@ class VentasOrderingServidorTests(TestCase):
         from nucleo.listados import OrdenamientoEstableFilter
         from ventas.api.views import MesaControlViewSet
 
+        from ventas.api.cotizaciones_listado import OrdenamientoCotizacionesFilter
         from ventas.api.pedidos_listado import OrdenamientoPedidosFilter
 
         # Los globales sin el ``OrderingFilter`` de DRF, más el de lista blanca y desempate.
         for viewset in (CotizacionViewSet, MesaControlViewSet):
             with self.subTest(viewset=viewset.__name__):
                 self.assertEqual(
-                    tuple(viewset.filter_backends), (DjangoFilterBackend, SearchFilter, OrdenamientoEstableFilter),
+                    tuple(viewset.filter_backends),
+                    (DjangoFilterBackend, SearchFilter, OrdenamientoCotizacionesFilter),
                 )
-                # Ningún importe en la lista blanca (#537): ordenar por él dejaría deducirlo.
+                # Los importes de cotización no se le ocultan a nadie: el orden por
+                # importe (agrupado por moneda, EC-811) sí entra; ``gran_total`` crudo no.
+                self.assertIn("importe_sin_iva", viewset.ordering_fields)
                 self.assertFalse({"gran_total", "subtotal"} & set(viewset.ordering_fields))
-        # Pedidos (EC-782): el mismo desempate, y los importes solo para quien los ve.
+        self.assertTrue(issubclass(OrdenamientoCotizacionesFilter, OrdenamientoEstableFilter))
+        # Pedidos (EC-782): el mismo desempate, y los importes solo para quien los ve
+        # (#537: ordenar por un monto oculto dejaría deducirlo).
         self.assertEqual(
             tuple(PedidoViewSet.filter_backends), (DjangoFilterBackend, SearchFilter, OrdenamientoPedidosFilter),
         )
@@ -9604,3 +9612,116 @@ class MesaControlSinAccionesModoServidorTests(_CotizacionesModoServidorBase, Tes
         self.assertEqual(self._ids(url=MESA_CONTROL_URL), self._pks("ana_zeta_usd_2"))
         pk = self.c["ana_zeta_usd_2"].pk
         self.assertEqual(self._get(f"{MESA_CONTROL_URL}{pk}/").status_code, 200)
+
+
+class CotizacionOrdenImporteTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``?ordering=importe_sin_iva`` reproduce la columna "Importe sin IVA"
+    del front (``compareQuoteAmounts`` en ``quoteAmountSorting.ts`` + TanStack Table):
+    moneda (código, sin moneda al final) y dentro de ella el importe; en descendente se
+    invierte todo. Desempate por ``id`` en la dirección del primer campo."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        eur = Moneda.objects.create(codigo_iso="EUR", nombre="Euro")
+        # Minúsculas: el front compara con ``<`` de JS ("USD" < "aaa"); una collation
+        # lingüística las pondría antes.
+        minusculas = Moneda.objects.create(codigo_iso="aaa", nombre="Prueba")
+        # Código vacío: el front lo trata como sin moneda (``moneda_codigo || null``).
+        vacia = Moneda.objects.create(codigo_iso="", nombre="Vacía")
+        for moneda, total, iva in (
+            (cls.mxn, "116.00", 16),  # 100.00 sin IVA
+            (cls.mxn, "100.00", 0),   # 100.00: empata con la anterior, decide el id
+            (cls.mxn, "50.00", 16),
+            (cls.usd, "10.00", 16),
+            (eur, "999.00", 8),
+            (minusculas, "1.00", 16),
+            (vacia, "3.00", 16),
+            (None, "5.00", 16),
+        ):
+            cot = cls._cotizacion(cls.empresa, cls.ana, cls.acme, moneda, 1, total, cls.base)
+            Cotizacion.objects.filter(pk=cot.pk).update(iva=iva)
+
+    @staticmethod
+    def _orden_del_front(filas, descendente):
+        import functools
+
+        def comparar(a, b):
+            moneda_a, moneda_b = a["moneda_codigo"] or None, b["moneda_codigo"] or None
+            if moneda_a != moneda_b:
+                if moneda_a is None:
+                    r = 1
+                elif moneda_b is None:
+                    r = -1
+                else:
+                    r = -1 if moneda_a < moneda_b else 1
+            else:
+                importe_a, importe_b = Decimal(str(a["importe_sin_iva"])), Decimal(str(b["importe_sin_iva"]))
+                r = 0 if importe_a == importe_b else (-1 if importe_a < importe_b else 1)
+            if r == 0:
+                r = -1 if a["id"] < b["id"] else 1  # desempate por id (no por posición)
+            return -r if descendente else r
+
+        return [f["id"] for f in sorted(filas, key=functools.cmp_to_key(comparar))]
+
+    def _filas(self, params=None, user=None):
+        resp = self._get(params=params, user=user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def test_ascendente_y_descendente_como_el_front(self):
+        filas = self._filas()
+        self.assertEqual(len(filas), 14)
+        for termino, descendente in (("importe_sin_iva", False), ("-importe_sin_iva", True)):
+            with self.subTest(ordering=termino):
+                ids = [f["id"] for f in self._filas({"ordering": termino})]
+                self.assertEqual(ids, self._orden_del_front(filas, descendente))
+
+    def test_grupos_de_moneda_y_desempate(self):
+        filas = self._filas({"ordering": "importe_sin_iva"})
+        codigos = []
+        for f in filas:
+            codigo = f["moneda_codigo"] or None
+            if not codigos or codigos[-1] != codigo:
+                codigos.append(codigo)
+        self.assertEqual(codigos, ["EUR", "MXN", "USD", "aaa", None])
+        # Los dos de 100.00 MXN: ascendente por id; descendente al revés.
+        cien = [f["id"] for f in filas if f["moneda_codigo"] == "MXN" and Decimal(str(f["importe_sin_iva"])) == 100]
+        self.assertEqual(cien, sorted(cien))
+        desc = [f["id"] for f in self._filas({"ordering": "-importe_sin_iva"})]
+        self.assertEqual([i for i in desc if i in cien], sorted(cien, reverse=True))
+        self.assertIsNone(self._filas({"ordering": "-importe_sin_iva"})[0]["moneda_codigo"] or None)
+
+    def test_estable_entre_paginas(self):
+        completo = [f["id"] for f in self._filas({"ordering": "-importe_sin_iva"})]
+        paginas = []
+        for offset in range(0, len(completo), 4):
+            data = self._filas({"ordering": "-importe_sin_iva", "limit": 4, "offset": offset})
+            paginas += [f["id"] for f in data["results"]]
+        self.assertEqual(paginas, completo)
+
+    def test_combinado_con_otro_campo_y_filtros(self):
+        filas = self._filas({"estatus": "1"})
+        ids = [f["id"] for f in self._filas({"estatus": "1", "ordering": "importe_sin_iva,created_at"})]
+        self.assertEqual(ids, self._orden_del_front(filas, False))
+
+    def test_vendedor_tambien_ordena_y_sin_consultas_extra(self):
+        filas = self._filas(user=self.ana)
+        ids = [f["id"] for f in self._filas({"ordering": "importe_sin_iva"}, self.ana)]
+        self.assertEqual(ids, self._orden_del_front(filas, False))
+        self._filas()
+        with CaptureQueriesContext(connection) as base:
+            self._filas()
+        with self.assertNumQueries(len(base)):
+            self._filas({"ordering": "-importe_sin_iva"})
+
+    def test_mesa_control_tambien(self):
+        Cotizacion.objects.filter(empresa=self.empresa).update(estatus=2)
+        filas = self._filas()
+        ids = [f["id"] for f in self._ids_mesa({"ordering": "-importe_sin_iva"})]
+        self.assertEqual(ids, self._orden_del_front(filas, True))
+
+    def _ids_mesa(self, params):
+        resp = self._get(MESA_CONTROL_URL, params)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()

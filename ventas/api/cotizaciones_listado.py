@@ -18,13 +18,13 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.contrib.postgres.aggregates import ArrayAgg
-from django.db.models import Count, F, Q, Sum, Value, Window
-from django.db.models.functions import Coalesce, JSONObject, NullIf, RowNumber, Trim
+from django.db.models import Case, Count, DecimalField, F, Q, Sum, Value, When, Window
+from django.db.models.functions import Coalesce, Collate, JSONObject, NullIf, Round, RowNumber, Trim
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param, rango_fechas
-from nucleo.listados import estatus_param
+from nucleo.listados import OrdenamientoEstableFilter, estatus_param
 from nucleo.opciones_filtros import clave_orden
 from ventas.models import Cotizacion
 
@@ -206,6 +206,59 @@ def columnas_tablero(ventana, filas_serializadas):
         {"estatus": e, "estatus_label": etiqueta, "total": totales.get(e, 0), "results": results[e]}
         for e, etiqueta in Cotizacion.CHOICES_ESTATUS
     ]
+
+
+# --- Ordenamiento ------------------------------------------------------------------
+
+CAMPO_ORDEN_IMPORTE = "importe_sin_iva"
+
+# El mismo importe que pinta el listado (``serializers.importes_iva``): ``gran_total``
+# sin el IVA, redondeado a centavos; con ``iva`` <= 0, ``gran_total`` tal cual.
+# ``importes_iva`` redondea con ``ROUND_HALF_EVEN`` y Postgres a la mitad hacia
+# arriba: sólo difieren en un empate exacto de medio centavo, que con IVA de 16 u 8
+# no puede darse (``gran_total`` tiene dos decimales). ``gran_total * 100 / (100 + iva)``
+# y no ``gran_total / (1 + iva / 100)``: en Postgres ``iva / 100`` es división entera (0).
+IMPORTE_SIN_IVA = Case(
+    When(
+        iva__gt=0,
+        then=Round(F("gran_total") * Value(Decimal("100")) / (Value(100) + F("iva")), 2),
+    ),
+    default=F("gran_total"),
+    output_field=DecimalField(max_digits=14, decimal_places=2),
+)
+# Código de la moneda; vacío cuenta como sin moneda (``moneda_codigo || null`` del
+# front). Collation ``C``: el front compara con ``<`` de JavaScript (unidades de
+# código), no con el orden lingüístico de la base.
+MONEDA_ORDEN = Collate(NullIf(F("moneda__codigo_iso"), Value("")), "C")
+
+
+def _orden(campo):
+    """Expresiones de ``order_by`` de un término de ``?ordering=``.
+
+    ``importe_sin_iva`` reproduce ``compareQuoteAmounts`` + TanStack Table del front
+    (``quoteAmountSorting.ts``): primero la moneda (código ascendente, sin moneda al
+    final) y dentro de ella el importe. En descendente TanStack invierte la
+    comparación completa: códigos al revés, sin moneda PRIMERO e importe de mayor a
+    menor. El desempate por ``id`` lo agrega ``OrdenamientoEstableFilter``."""
+    if campo.lstrip("-") != CAMPO_ORDEN_IMPORTE:
+        return [campo]
+    if campo.startswith("-"):
+        return [F("orden_moneda").desc(nulls_first=True), F("orden_importe_sin_iva").desc()]
+    return [F("orden_moneda").asc(nulls_last=True), F("orden_importe_sin_iva").asc()]
+
+
+class OrdenamientoCotizacionesFilter(OrdenamientoEstableFilter):
+    """``?ordering=`` del listado de cotizaciones (y de mesa de control): la lista
+    blanca de la vista, con ``id`` de desempate, y ``importe_sin_iva`` agrupado por
+    moneda. Las dos columnas de orden se anotan sólo cuando se piden."""
+
+    def filter_queryset(self, request, queryset, view):
+        ordering = self.get_ordering(request, queryset, view)
+        if not ordering:
+            return queryset
+        if any(campo.lstrip("-") == CAMPO_ORDEN_IMPORTE for campo in ordering):
+            queryset = queryset.annotate(orden_moneda=MONEDA_ORDEN, orden_importe_sin_iva=IMPORTE_SIN_IVA)
+        return queryset.order_by(*[expr for campo in ordering for expr in _orden(campo)])
 
 
 # --- Opciones de filtros -----------------------------------------------------------

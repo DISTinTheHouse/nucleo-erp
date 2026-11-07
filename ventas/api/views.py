@@ -69,7 +69,7 @@ from ventas.api.serializers import (
 )
 
 from nucleo.kpis import entero_param, rango_fechas, validar_parametros
-from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, estatus_param
+from nucleo.listados import PaginacionOpcionalLimitOffset, estatus_param
 from nucleo.models import SerieFolio, Empresa
 from ventas.api import cotizaciones_listado
 from notificaciones.services.notificacion_service import crear_notificacion_usuario
@@ -422,18 +422,20 @@ def _texto_comentario(data):
 # Los backends globales menos el ``OrderingFilter`` de DRF (EC-619): sin
 # ``ordering_fields``, DRF acepta en ``?ordering=`` los ``source`` del serializer,
 # que reemplazaban el orden por defecto y daban 500 con los que no son columnas
-# (``get_estatus_display``). Su lugar lo toma ``OrdenamientoEstableFilter`` en
-# ``FILTER_BACKENDS_LISTADO``. Tupla: el mismo objeto lo comparten varios ViewSets
+# (``get_estatus_display``). Su lugar lo toma un ``OrdenamientoEstableFilter`` con
+# la lista blanca de cada vista. Tupla: el mismo objeto lo comparten varios ViewSets
 # y ninguno debe poder mutarlo.
 FILTER_BACKENDS_SIN_ORDERING = tuple(
     backend for backend in api_settings.DEFAULT_FILTER_BACKENDS if not issubclass(backend, OrderingFilter)
 )
-# Modo servidor (EC-757): ``?ordering=`` solo con la lista blanca de cada vista y
-# ``id`` como desempate. Sin el parámetro queda el orden fijo de ``get_queryset``
-# (más reciente primero, EC-619). Los importes no entran: el listado y el detalle
-# se los ocultan a quien no ve contabilidad (#537, #947, EC-784), y ordenar por un
-# monto oculto dejaría deducirlo.
-FILTER_BACKENDS_LISTADO = (*FILTER_BACKENDS_SIN_ORDERING, OrdenamientoEstableFilter)
+# Modo servidor de cotizaciones y mesa de control (EC-757): ``?ordering=`` solo con
+# la lista blanca ``ordering_fields`` e ``id`` como desempate. Sin el parámetro queda
+# el orden fijo de ``get_queryset`` (más reciente primero, EC-619). Los importes de
+# cotización no se le ocultan a nadie (el listado y el detalle siempre los traen),
+# así que se puede ordenar por ``importe_sin_iva``, agrupado por moneda como el front
+# (EC-811, ``OrdenamientoCotizacionesFilter``). La regla de no ordenar por un monto
+# que el usuario no ve (#537, #947, EC-784) es de pedidos: ``OrdenamientoPedidosFilter``.
+FILTER_BACKENDS_LISTADO = (*FILTER_BACKENDS_SIN_ORDERING, cotizaciones_listado.OrdenamientoCotizacionesFilter)
 
 # Filtros del listado de cotizaciones (``cotizaciones_listado.filtrar``, EC-811).
 PARAMETROS_FILTRO_COTIZACIONES = [
@@ -458,6 +460,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
     ordering_fields = [
         "id", "estatus", "tipo_pedido", "oc", "created_at", "updated_at", "autorizada_at",
         "cliente__nombre", "cliente__razon_social",
+        # EC-811: agrupado por moneda, como la columna "Importe sin IVA" del front.
+        cotizaciones_listado.CAMPO_ORDEN_IMPORTE,
     ]
     filter_backends = FILTER_BACKENDS_LISTADO
 
@@ -566,7 +570,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             qs = self._anotar_listado(qs)
 
         # Orden por defecto: más reciente primero, con ``-id`` como desempate
-        # estable (EC-619). ``OrdenamientoEstableFilter`` (EC-757) corre después
+        # estable (EC-619). ``OrdenamientoCotizacionesFilter`` (EC-757, EC-811) corre después
         # de ``get_queryset`` y solo lo reemplaza con un ``?ordering=`` de la lista
         # blanca ``ordering_fields``, con ``id`` como desempate; un término fuera de
         # ella (``get_*_display``, campos inexistentes) se ignora y queda este orden.
