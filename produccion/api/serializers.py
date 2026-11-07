@@ -313,7 +313,20 @@ class OrdenProduccionDetalleSerializer(serializers.ModelSerializer):
     producto_variante_id = serializers.PrimaryKeyRelatedField(
         queryset=ProductoVariante.objects.all(),
         source='producto_variante',
-        write_only=True
+        write_only=True,
+        required=False,
+        allow_null=True,
+    )
+    # Alternativa a ``producto_variante_id`` para muestras sin alta en catálogo
+    # (SKU ``MP…``): el BOM se resuelve desde la variante de producción.
+    variante_produccion_id = serializers.PrimaryKeyRelatedField(
+        queryset=VarianteProductoProduccion.objects.select_related('pedido_detalle'),
+        source='variante_produccion',
+        required=False,
+        allow_null=True,
+    )
+    variante_produccion_sku = serializers.CharField(
+        source='variante_produccion.sku', read_only=True, allow_null=True, default=None
     )
     bom_detalle = BomDetalleSerializer(
         source='bom.materia_prima_detalle',
@@ -327,6 +340,31 @@ class OrdenProduccionDetalleSerializer(serializers.ModelSerializer):
     # OP lo revisa ``OrdenProduccionSerializer.validate`` (necesita el encabezado).
     def validate_producto_variante_id(self, producto_variante):
         return _fk_de_la_empresa_del_usuario(self, 'producto_variante_id', producto_variante)
+
+    def validate_variante_produccion_id(self, variante_produccion):
+        if variante_produccion is not None and not variante_produccion.activo:
+            raise serializers.ValidationError('La variante de producción está inactiva.')
+        return _fk_de_la_empresa_del_usuario(self, 'variante_produccion_id', variante_produccion)
+
+    def validate(self, attrs):
+        variante_produccion = attrs.get('variante_produccion')
+        if self.instance is None or 'producto_variante' in attrs or 'variante_produccion' in attrs:
+            if bool(attrs.get('producto_variante')) == bool(variante_produccion):
+                raise serializers.ValidationError(
+                    'Cada renglón lleva producto_variante_id o variante_produccion_id (uno de los dos).'
+                )
+        if variante_produccion is not None and variante_produccion.pedido_detalle_id:
+            # La variante nace de una línea de muestra: el renglón queda ligado a
+            # ella (y ``OrdenProduccionSerializer.validate`` exige que sea del
+            # pedido de la OP).
+            pedido_detalle = attrs.get('pedido_detalle')
+            if pedido_detalle is None:
+                attrs['pedido_detalle'] = variante_produccion.pedido_detalle
+            elif pedido_detalle.pk != variante_produccion.pedido_detalle_id:
+                raise serializers.ValidationError(
+                    {'pedido_detalle': 'No corresponde a la línea de muestra de la variante de producción.'}
+                )
+        return attrs
 
     def validate_pedido_detalle(self, pedido_detalle):
         return _fk_de_la_empresa_del_usuario(
@@ -352,13 +390,15 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
     (el nested pesado) para evitar el N+1. Campos explícitos, no ``__all__``.
     """
     estatus_op_display = serializers.CharField(source="get_estatus_op_display", read_only=True)
+    # ``select_related("pedido")`` en el listado: mismo query, sin viaje extra.
+    pedido_folio = serializers.CharField(source="pedido.folio", read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = OrdenProduccion
         fields = [
             "op_id", "folio_op", "estatus_op", "estatus_op_display",
             "prioridad", "fecha_inicio", "fecha_fin", "fecha_entrega_estimada", "activo",
-            "pedido", "sucursal",
+            "pedido", "pedido_folio", "sucursal",
         ]
 
 class OrdenProduccionSerializer(serializers.ModelSerializer):
@@ -2468,6 +2508,25 @@ class OrdenesCorteMangaRetrieveSerializer(OrdenesCorteMangaSerializer):
 # catalogo); la seleccion vive en ``ventas.services.sku_produccion_service.detalles_de_muestra``.
 # Aqui solo se serializa lo que la vista ya filtro.
 
+class VarianteProduccionListSerializer(serializers.ModelSerializer):
+    """Variantes de producción (SKU ``MP…``) para elegir en el onboarding de OP.
+
+    ``tiene_bom`` viene anotado (``Exists``) en ``VarianteProduccionViewSet``.
+    """
+    talla_nombre = serializers.CharField(source="talla.nombre", read_only=True, allow_null=True, default=None)
+    color_nombre = serializers.CharField(source="color.nombre", read_only=True, allow_null=True, default=None)
+    pedido_id = serializers.IntegerField(source="pedido_detalle.pedido_id", read_only=True, allow_null=True, default=None)
+    pedido_folio = serializers.CharField(source="pedido_detalle.pedido.folio", read_only=True, allow_null=True, default=None)
+    tiene_bom = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = VarianteProductoProduccion
+        fields = [
+            "id", "sku", "nombre", "talla_nombre", "color_nombre",
+            "pedido_detalle", "pedido_id", "pedido_folio", "aplica_catalogo", "tiene_bom",
+        ]
+
+
 class PedidoEspecialListSerializer(serializers.ModelSerializer):
     """Listado ligero: solo lo necesario para que produccion elija cual abrir."""
 
@@ -2478,11 +2537,38 @@ class PedidoEspecialListSerializer(serializers.ModelSerializer):
             # Anotados en ``PedidoEspecialViewSet.get_queryset`` (subconsultas):
             # tallas con cantidad > 0 de las líneas de muestra.
             "tallas_total", "tallas_con_sku", "tallas_en_catalogo",
+            "fecha_compromiso", "prendas_total", "piezas_total", "servicios",
+            "ordenes_produccion",
         ]
 
     tallas_total = serializers.IntegerField(read_only=True)
     tallas_con_sku = serializers.IntegerField(read_only=True)
     tallas_en_catalogo = serializers.IntegerField(read_only=True)
+    prendas_total = serializers.IntegerField(read_only=True)
+    piezas_total = serializers.FloatField(read_only=True)
+    fecha_compromiso = serializers.SerializerMethodField()
+    servicios = serializers.SerializerMethodField()
+    ordenes_produccion = serializers.SerializerMethodField()
+
+    def get_fecha_compromiso(self, obj):
+        # Límite del rango de la clasificación desde la confirmación (el mismo
+        # ``fecha_entrega_max`` que muestra ventas); ``X`` no tiene compromiso.
+        from ventas.services.clasificacion_service import rango_fecha_entrega
+        return rango_fecha_entrega(obj)[1]
+
+    def get_servicios(self, obj):
+        return {
+            "bordado": bool(obj.lleva_bordado_any),
+            "reflejante": bool(obj.lleva_reflejante_any),
+            "corte_manga": bool(obj.lleva_corte_manga_any),
+        }
+
+    def get_ordenes_produccion(self, obj):
+        etiquetas = dict(OrdenProduccion.EstatusOrdenProduccion.choices)
+        return [
+            {**op, "estatus_op_display": etiquetas.get(op["estatus_op"])}
+            for op in (obj.ops_json or [])
+        ]
 
 
 class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):

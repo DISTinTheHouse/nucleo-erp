@@ -108,6 +108,13 @@ class OrdenProduccionDetalle(models.Model):
     observaciones = models.TextField(blank=True, null=True)
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, null=True, blank=True)
     producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.CASCADE, null=True, blank=True)
+    # Muestra sin alta en catálogo (SKU ``MP…``): el renglón lleva la variante de
+    # producción en lugar de ``producto_variante`` y su BOM sale de ella. Uno de
+    # los dos, nunca ambos (lo valida ``OrdenProduccionDetalleSerializer``).
+    variante_produccion = models.ForeignKey(
+        VarianteProductoProduccion, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='ordenes_produccion_detalle',
+    )
 
     activo = models.BooleanField(default=True)
 

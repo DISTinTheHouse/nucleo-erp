@@ -32,12 +32,13 @@ class OrdenProduccionService:
 
         for idx, row in enumerate(op_rows, start=1):
             producto_variante = row.get("producto_variante")
+            variante_produccion = row.get("variante_produccion")
             bom = row.get("bom")
             cantidad_op = OrdenProduccionService._to_decimal(row.get("cantidad"))
 
-            if not producto_variante:
+            if not producto_variante and not variante_produccion:
                 raise ValidationError(
-                    {"orden_produccion_detalle": f"Detalle #{idx}: producto_variante es requerido."}
+                    {"orden_produccion_detalle": f"Detalle #{idx}: producto_variante o variante_produccion es requerido."}
                 )
             if not bom:
                 raise ValidationError(
@@ -47,7 +48,12 @@ class OrdenProduccionService:
                 raise ValidationError(
                     {"orden_produccion_detalle": f"Detalle #{idx}: el BOM no pertenece a la empresa actual."}
                 )
-            if bom.producto_variante_id and bom.producto_variante_id != producto_variante.pk:
+            if variante_produccion is not None:
+                if bom.variante_produccion_id != variante_produccion.pk:
+                    raise ValidationError(
+                        {"orden_produccion_detalle": f"Detalle #{idx}: el BOM no corresponde a la variante_produccion enviada."}
+                    )
+            elif bom.producto_variante_id and bom.producto_variante_id != producto_variante.pk:
                 raise ValidationError(
                     {"orden_produccion_detalle": f"Detalle #{idx}: el BOM no corresponde al producto_variante enviado."}
                 )
@@ -307,6 +313,8 @@ class OrdenProduccionService:
             'orden_produccion_detalle__producto_variante__producto',
             'orden_produccion_detalle__producto_variante__talla',
             'orden_produccion_detalle__producto_variante__color',
+            'orden_produccion_detalle__variante_produccion__talla',
+            'orden_produccion_detalle__variante_produccion__color',
             'orden_produccion_detalle__bom__materia_prima_detalle__componente',
             'orden_produccion_detalle__bom__materia_prima_detalle__unidad',
             'consumoproduccion_set__detalles__producto',
@@ -319,16 +327,23 @@ class OrdenProduccionService:
 
         for detail in op.orden_produccion_detalle.all():
             variant = detail.producto_variante
-            if not variant:
-                continue
-            product = variant.producto
-            if not product:
+            if variant is not None:
+                product = variant.producto
+                if not product:
+                    continue
+                product_id, product_nombre = product.id, product.nombre
+            elif detail.variante_produccion is not None:
+                # Muestra sin catálogo: se agrupa por la línea de muestra que la
+                # originó (cada talla es una variante de producción distinta).
+                variant = detail.variante_produccion
+                product_id = f"mp-{variant.pedido_detalle_id or variant.pk}"
+                product_nombre = variant.nombre or variant.sku
+            else:
                 continue
 
-            product_id = product.id
             if product_id not in products_data:
                 products_data[product_id] = {
-                    "nombre": product.nombre,
+                    "nombre": product_nombre,
                     "cantidades": {
                         "total": 0.0,
                         "tallas": {}

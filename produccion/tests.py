@@ -7508,3 +7508,27 @@ class PedidosEspecialesAvanceContratoTests(TestCase):
         self.assertEqual(_repartir(10, [("a", 30), ("b", 20)]), {"a": 6, "b": 4})
         self.assertEqual(_repartir(99, [("a", 3), ("b", 2)]), {"a": 3, "b": 2})
         self.assertEqual(_repartir(0, [("a", 3)]), {})
+
+
+class ContratoProduccionListadosYOnboardingMuestraTests(TestCase):
+    """Documentación ejecutable (no es gate de CI).
+
+    - ``pedidos-especiales`` (listado): ``fecha_compromiso`` (= ``fecha_entrega_max``
+      de la clasificación), ``prendas_total``, ``piezas_total``, ``servicios`` y
+      ``ordenes_produccion`` (OP activas), en la misma consulta.
+    - ``orden-produccion`` (listado): ``pedido_folio`` vía ``select_related``.
+    - Onboarding de OP: cada renglón lleva ``producto_variante_id`` o
+      ``variante_produccion_id`` (uno de los dos); con variante de producción el
+      BOM sale de ella y ``pedido_detalle`` se toma de su línea de muestra.
+    - ``variantes-produccion``: id, sku, nombre, talla/color, pedido_folio y
+      ``tiene_bom``.
+    """
+
+    def test_contrato_documentado(self):
+        from produccion.api.serializers import (
+            OrdenProduccionListSerializer, PedidoEspecialListSerializer, VarianteProduccionListSerializer,
+        )
+        self.assertIn("pedido_folio", OrdenProduccionListSerializer.Meta.fields)
+        for campo in ("fecha_compromiso", "prendas_total", "piezas_total", "servicios", "ordenes_produccion"):
+            self.assertIn(campo, PedidoEspecialListSerializer.Meta.fields)
+        self.assertIn("tiene_bom", VarianteProduccionListSerializer.Meta.fields)
