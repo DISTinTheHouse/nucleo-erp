@@ -9133,3 +9133,186 @@ class PedidoOpcionesFiltrosTests(_PedidosModoServidorBase, TestCase):
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(resp.json()["cliente"], self._get(self.URL).json()["cliente"])
         self.assertEqual(self._get(self.URL, {"format": "json", "otro": "1"}).status_code, 400)
+
+
+class _CotizacionesModoServidorBase:
+    """Datos de EC-811: dos empresas, un admin y dos vendedores en la A, un admin en
+    la B y un usuario sin empresa. ``created_at`` va fijado por cotización para que el
+    orden por defecto (más reciente primero) sea predecible."""
+
+    URL = COTIZACIONES_URL
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="ec811-a", razon_social="EC811 A SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="811A", nombre="811A")
+        cls.empresa_b = Empresa.objects.create(codigo="ec811-b", razon_social="EC811 B SA")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="811B", nombre="811B")
+        cls.mxn = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        cls.acme = Cliente.objects.create(empresa=cls.empresa, nombre="acme", razon_social="ACME SA")
+        cls.zeta = Cliente.objects.create(empresa=cls.empresa, nombre="Zeta comercial", razon_social="  ")
+        cls.secreto = Cliente.objects.create(empresa=cls.empresa_b, nombre="secreto", razon_social="Secreto SA")
+        cls.admin = Usuario.objects.create(
+            username="adm@811.test", email="adm@811.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.ana = Usuario.objects.create(username="ana@811.test", email="ana@811.test", empresa=cls.empresa)
+        cls.beto = Usuario.objects.create(username="beto@811.test", email="beto@811.test", empresa=cls.empresa)
+        cls.admin_b = Usuario.objects.create(
+            username="adm-b@811.test", email="adm-b@811.test", empresa=cls.empresa_b, is_admin_empresa=True,
+        )
+        cls.sin_empresa = Usuario.objects.create(username="se@811.test", email="se@811.test")
+        cls.base = timezone.make_aware(datetime(2026, 3, 10, 12, 0))
+        cls.c = {}
+        # nombre: (vendedor, cliente, moneda, estatus, gran_total, horas antes de ``base``)
+        datos = {
+            "ana_acme_mxn_1": ("ana", "acme", "mxn", 1, "100.00", 1),
+            "ana_zeta_usd_2": ("ana", "zeta", "usd", 2, "50.00", 2),
+            "ana_sin_cliente_3": ("ana", None, "mxn", 3, "10.00", 3),
+            "beto_acme_none_3": ("beto", "acme", None, 3, "7.00", 4),
+            "beto_zeta_mxn_4": ("beto", "zeta", "mxn", 4, "20.00", 5),
+            "admin_acme_mxn_3": ("admin", "acme", "mxn", 3, "30.00", 6),
+        }
+        for nombre, (vendedor, cliente, moneda, estatus, total, horas) in datos.items():
+            cls.c[nombre] = cls._cotizacion(
+                cls.empresa, getattr(cls, vendedor), cliente and getattr(cls, cliente),
+                moneda and getattr(cls, moneda), estatus, total, cls.base - timedelta(hours=horas),
+            )
+        cls.c["b_secreto_mxn_3"] = cls._cotizacion(
+            cls.empresa_b, cls.admin_b, cls.secreto, cls.mxn, 3, "999.00", cls.base,
+        )
+
+    @classmethod
+    def _cotizacion(cls, empresa, vendedor, cliente, moneda, estatus, total, creada):
+        sucursal = cls.sucursal if empresa == cls.empresa else cls.sucursal_b
+        cot = Cotizacion.objects.create(
+            empresa=empresa, sucursal=sucursal, vendedor=vendedor, cliente=cliente, moneda=moneda,
+            estatus=estatus, gran_total=Decimal(total),
+        )
+        Cotizacion.objects.filter(pk=cot.pk).update(created_at=creada)
+        cot.refresh_from_db()
+        return cot
+
+    def _get(self, url=None, params=None, user=None):
+        api = APIClient()
+        api.force_authenticate(user or self.admin)
+        return api.get(url or self.URL, params or {})
+
+    def _ids(self, params=None, user=None, url=None):
+        resp = self._get(url, params, user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        return [f["id"] for f in (data["results"] if isinstance(data, dict) else data)]
+
+    def _pks(self, *nombres):
+        return [self.c[n].pk for n in nombres]
+
+
+class CotizacionListadoFiltrosTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``cliente``, ``vendedor``, fechas y ``estatus`` del catálogo, encima del alcance."""
+
+    TODAS_A = (
+        "ana_acme_mxn_1", "ana_zeta_usd_2", "ana_sin_cliente_3",
+        "beto_acme_none_3", "beto_zeta_mxn_4", "admin_acme_mxn_3",
+    )
+
+    def test_sin_filtros_queda_igual(self):
+        self.assertEqual(self._ids(), self._pks(*self.TODAS_A))
+
+    def test_cliente_propio_y_sin_cliente(self):
+        self.assertEqual(
+            self._ids({"cliente": self.acme.pk}), self._pks("ana_acme_mxn_1", "beto_acme_none_3", "admin_acme_mxn_3"),
+        )
+        self.assertEqual(self._ids({"cliente": "sin_cliente"}), self._pks("ana_sin_cliente_3"))
+        # Con el alcance del vendedor: solo las suyas.
+        self.assertEqual(self._ids({"cliente": self.acme.pk}, self.ana), self._pks("ana_acme_mxn_1"))
+
+    def test_cliente_ajeno_no_trae_filas(self):
+        """Un id de otra empresa o inexistente da ``[]``, nunca 400 (sin oráculo)."""
+        for cliente in (self.secreto.pk, 999999):
+            with self.subTest(cliente=cliente):
+                self.assertEqual(self._ids({"cliente": cliente}), [])
+        # El admin de la B tampoco alcanza las de la A por el cliente de la A.
+        self.assertEqual(self._ids({"cliente": self.acme.pk}, self.admin_b), [])
+
+    def test_cliente_invalido_400(self):
+        for valor in ("abc", "1,2", "Sin cliente", "1.5"):
+            with self.subTest(cliente=valor):
+                resp = self._get(params={"cliente": valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("cliente", resp.json())
+
+    def test_vendedor(self):
+        self.assertEqual(self._ids({"vendedor": self.beto.pk}), self._pks("beto_acme_none_3", "beto_zeta_mxn_4"))
+        # Un vendedor no ve las de otro aunque lo pida.
+        self.assertEqual(self._ids({"vendedor": self.beto.pk}, self.ana), [])
+        self.assertEqual(self._ids({"vendedor": self.admin_b.pk}), [])
+        self.assertEqual(self._get(params={"vendedor": "x"}).status_code, 400)
+
+    def test_fechas_inclusivas_en_la_medianoche_local(self):
+        dia = date(2026, 4, 2)
+        medianoche = timezone.make_aware(datetime(2026, 4, 2, 0, 0))
+        bordes = {
+            "antes": medianoche - timedelta(microseconds=1),
+            "inicio": medianoche,
+            "fin": medianoche + timedelta(days=1) - timedelta(microseconds=1),
+            "despues": medianoche + timedelta(days=1),
+        }
+        pks = {
+            nombre: self._cotizacion(self.empresa, self.admin, self.acme, self.mxn, 1, "1.00", cuando).pk
+            for nombre, cuando in bordes.items()
+        }
+        ids = set(self._ids({"fecha_desde": dia.isoformat(), "fecha_hasta": dia.isoformat()}))
+        self.assertEqual(ids, {pks["inicio"], pks["fin"]})
+        self.assertEqual(
+            set(self._ids({"fecha_desde": dia.isoformat()})) & set(pks.values()),
+            {pks["inicio"], pks["fin"], pks["despues"]},
+        )
+        self.assertEqual(
+            set(self._ids({"fecha_hasta": dia.isoformat()})) & set(pks.values()),
+            {pks["antes"], pks["inicio"], pks["fin"]},
+        )
+
+    def test_fechas_invalidas_o_invertidas_400(self):
+        for params in (
+            {"fecha_desde": "basura"}, {"fecha_hasta": "2026-13-01"},
+            {"fecha_desde": "2026-03-10", "fecha_hasta": "2026-03-09"},
+        ):
+            with self.subTest(params=params):
+                self.assertEqual(self._get(params=params).status_code, 400)
+
+    def test_estatus_del_catalogo(self):
+        self.assertEqual(
+            self._ids({"estatus": "1,3"}),
+            self._pks("ana_acme_mxn_1", "ana_sin_cliente_3", "beto_acme_none_3", "admin_acme_mxn_3"),
+        )
+        for valor in ("9", "1,9", ",", "abc", "0"):
+            with self.subTest(estatus=valor):
+                resp = self._get(params={"estatus": valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("estatus", resp.json())
+
+    def test_sin_alcance_con_parametros_invalidos_sigue_en_200(self):
+        params = {"estatus": "9", "cliente": "abc", "fecha_desde": "basura", "vendedor": "x"}
+        resp = self._get(params=params, user=self.sin_empresa)
+        self.assertEqual((resp.status_code, resp.json()), (200, []))
+
+    def test_filtros_combinados_y_paginados(self):
+        resp = self._get(params={"cliente": self.acme.pk, "estatus": "3", "limit": 1})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["count"], 2)
+        self.assertEqual([f["id"] for f in data["results"]], self._pks("beto_acme_none_3"))
+
+    def test_filtros_no_alcanzan_el_detalle(self):
+        """El detalle no pasa por los filtros: un parámetro suelto no da 404."""
+        pk = self.c["ana_acme_mxn_1"].pk
+        resp = self._get(f"{self.URL}{pk}/", {"estatus": "3", "cliente": "sin_cliente"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_mesa_control_aplica_los_mismos_filtros_de_listado(self):
+        """``/mesa-control/`` sigue en estatus [2, 5]; los filtros nuevos sólo acotan."""
+        self.assertEqual(self._ids(url=MESA_CONTROL_URL), self._pks("ana_zeta_usd_2"))
+        self.assertEqual(self._ids({"cliente": self.acme.pk}, url=MESA_CONTROL_URL), [])
+        self.assertEqual(self._ids({"estatus": "1"}, url=MESA_CONTROL_URL), [])
+        self.assertEqual(self._get(MESA_CONTROL_URL, {"estatus": "9"}).status_code, 400)
