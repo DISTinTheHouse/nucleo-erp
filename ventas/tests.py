@@ -7421,11 +7421,13 @@ class VentasOrderingServidorTests(TestCase):
     """EC-757 (reemplaza a EC-619, #949): cotizaciones, mesa de control y pedidos
     respetan ``?ordering=`` de su lista blanca (``ordering_fields``), con ``id`` como
     desempate en la dirección del primer campo. Lo que queda fuera de la lista
-    (importes por #537, ``get_*_display``, campos inexistentes) se ignora sin 500 y
-    deja el orden por defecto: más reciente primero (``-created_at, -id``). El
-    ``created_at`` va escalonado al revés del id para que ``-id`` o un orden
-    ascendente se distingan del orden por defecto."""
+    (``get_*_display``, campos inexistentes, y en cotizaciones el ``gran_total``
+    crudo) se ignora sin 500 y deja el orden por defecto: más reciente primero
+    (``-created_at, -id``). El ``created_at`` va escalonado al revés del id para que
+    ``-id`` o un orden ascendente se distingan del orden por defecto."""
 
+    # En cotizaciones el importe se ordena con ``importe_sin_iva`` agrupado por moneda
+    # (EC-811, ``CotizacionOrdenImporteTests``), no por ``gran_total`` suelto.
     IGNORADOS_COTIZACION = (
         "gran_total", "-gran_total", "moneda__codigo_iso",
         "get_estatus_display", "-get_tipo_pedido_display", "no_existe",
@@ -7530,17 +7532,23 @@ class VentasOrderingServidorTests(TestCase):
         from nucleo.listados import OrdenamientoEstableFilter
         from ventas.api.views import MesaControlViewSet
 
+        from ventas.api.cotizaciones_listado import OrdenamientoCotizacionesFilter
         from ventas.api.pedidos_listado import OrdenamientoPedidosFilter
 
         # Los globales sin el ``OrderingFilter`` de DRF, más el de lista blanca y desempate.
         for viewset in (CotizacionViewSet, MesaControlViewSet):
             with self.subTest(viewset=viewset.__name__):
                 self.assertEqual(
-                    tuple(viewset.filter_backends), (DjangoFilterBackend, SearchFilter, OrdenamientoEstableFilter),
+                    tuple(viewset.filter_backends),
+                    (DjangoFilterBackend, SearchFilter, OrdenamientoCotizacionesFilter),
                 )
-                # Ningún importe en la lista blanca (#537): ordenar por él dejaría deducirlo.
+                # Los importes de cotización no se le ocultan a nadie: el orden por
+                # importe (agrupado por moneda, EC-811) sí entra; ``gran_total`` crudo no.
+                self.assertIn("importe_sin_iva", viewset.ordering_fields)
                 self.assertFalse({"gran_total", "subtotal"} & set(viewset.ordering_fields))
-        # Pedidos (EC-782): el mismo desempate, y los importes solo para quien los ve.
+        self.assertTrue(issubclass(OrdenamientoCotizacionesFilter, OrdenamientoEstableFilter))
+        # Pedidos (EC-782): el mismo desempate, y los importes solo para quien los ve
+        # (#537: ordenar por un monto oculto dejaría deducirlo).
         self.assertEqual(
             tuple(PedidoViewSet.filter_backends), (DjangoFilterBackend, SearchFilter, OrdenamientoPedidosFilter),
         )
@@ -9133,3 +9141,842 @@ class PedidoOpcionesFiltrosTests(_PedidosModoServidorBase, TestCase):
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(resp.json()["cliente"], self._get(self.URL).json()["cliente"])
         self.assertEqual(self._get(self.URL, {"format": "json", "otro": "1"}).status_code, 400)
+
+
+class _CotizacionesModoServidorBase:
+    """Datos de EC-811: dos empresas, un admin y dos vendedores en la A, un admin en
+    la B y un usuario sin empresa. ``created_at`` va fijado por cotización para que el
+    orden por defecto (más reciente primero) sea predecible."""
+
+    URL = COTIZACIONES_URL
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="ec811-a", razon_social="EC811 A SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="811A", nombre="811A")
+        cls.empresa_b = Empresa.objects.create(codigo="ec811-b", razon_social="EC811 B SA")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="811B", nombre="811B")
+        cls.mxn = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        cls.acme = Cliente.objects.create(empresa=cls.empresa, nombre="acme", razon_social="ACME SA")
+        cls.zeta = Cliente.objects.create(empresa=cls.empresa, nombre="Zeta comercial", razon_social="  ")
+        cls.secreto = Cliente.objects.create(empresa=cls.empresa_b, nombre="secreto", razon_social="Secreto SA")
+        cls.admin = Usuario.objects.create(
+            username="adm@811.test", email="adm@811.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.ana = Usuario.objects.create(username="ana@811.test", email="ana@811.test", empresa=cls.empresa)
+        cls.beto = Usuario.objects.create(username="beto@811.test", email="beto@811.test", empresa=cls.empresa)
+        cls.admin_b = Usuario.objects.create(
+            username="adm-b@811.test", email="adm-b@811.test", empresa=cls.empresa_b, is_admin_empresa=True,
+        )
+        cls.sin_empresa = Usuario.objects.create(username="se@811.test", email="se@811.test")
+        cls.base = timezone.make_aware(datetime(2026, 3, 10, 12, 0))
+        cls.c = {}
+        # nombre: (vendedor, cliente, moneda, estatus, gran_total, horas antes de ``base``)
+        datos = {
+            "ana_acme_mxn_1": ("ana", "acme", "mxn", 1, "100.00", 1),
+            "ana_zeta_usd_2": ("ana", "zeta", "usd", 2, "50.00", 2),
+            "ana_sin_cliente_3": ("ana", None, "mxn", 3, "10.00", 3),
+            "beto_acme_none_3": ("beto", "acme", None, 3, "7.00", 4),
+            "beto_zeta_mxn_4": ("beto", "zeta", "mxn", 4, "20.00", 5),
+            "admin_acme_mxn_3": ("admin", "acme", "mxn", 3, "30.00", 6),
+        }
+        for nombre, (vendedor, cliente, moneda, estatus, total, horas) in datos.items():
+            cls.c[nombre] = cls._cotizacion(
+                cls.empresa, getattr(cls, vendedor), cliente and getattr(cls, cliente),
+                moneda and getattr(cls, moneda), estatus, total, cls.base - timedelta(hours=horas),
+            )
+        cls.c["b_secreto_mxn_3"] = cls._cotizacion(
+            cls.empresa_b, cls.admin_b, cls.secreto, cls.mxn, 3, "999.00", cls.base,
+        )
+
+    @classmethod
+    def _cotizacion(cls, empresa, vendedor, cliente, moneda, estatus, total, creada):
+        sucursal = cls.sucursal if empresa == cls.empresa else cls.sucursal_b
+        cot = Cotizacion.objects.create(
+            empresa=empresa, sucursal=sucursal, vendedor=vendedor, cliente=cliente, moneda=moneda,
+            estatus=estatus, gran_total=Decimal(total),
+        )
+        Cotizacion.objects.filter(pk=cot.pk).update(created_at=creada)
+        cot.refresh_from_db()
+        return cot
+
+    def _get(self, url=None, params=None, user=None):
+        api = APIClient()
+        api.force_authenticate(user or self.admin)
+        return api.get(url or self.URL, params or {})
+
+    def _ids(self, params=None, user=None, url=None):
+        resp = self._get(url, params, user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        return [f["id"] for f in (data["results"] if isinstance(data, dict) else data)]
+
+    def _pks(self, *nombres):
+        return [self.c[n].pk for n in nombres]
+
+
+class CotizacionListadoFiltrosTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``cliente``, ``vendedor``, fechas y ``estatus`` del catálogo, encima del alcance."""
+
+    TODAS_A = (
+        "ana_acme_mxn_1", "ana_zeta_usd_2", "ana_sin_cliente_3",
+        "beto_acme_none_3", "beto_zeta_mxn_4", "admin_acme_mxn_3",
+    )
+
+    def test_sin_filtros_queda_igual(self):
+        self.assertEqual(self._ids(), self._pks(*self.TODAS_A))
+
+    def test_cliente_propio_y_sin_cliente(self):
+        self.assertEqual(
+            self._ids({"cliente": self.acme.pk}), self._pks("ana_acme_mxn_1", "beto_acme_none_3", "admin_acme_mxn_3"),
+        )
+        self.assertEqual(self._ids({"cliente": "sin_cliente"}), self._pks("ana_sin_cliente_3"))
+        # Con el alcance del vendedor: solo las suyas.
+        self.assertEqual(self._ids({"cliente": self.acme.pk}, self.ana), self._pks("ana_acme_mxn_1"))
+
+    def test_cliente_ajeno_no_trae_filas(self):
+        """Un id de otra empresa o inexistente da ``[]``, nunca 400 (sin oráculo)."""
+        for cliente in (self.secreto.pk, 999999):
+            with self.subTest(cliente=cliente):
+                self.assertEqual(self._ids({"cliente": cliente}), [])
+        # El admin de la B tampoco alcanza las de la A por el cliente de la A.
+        self.assertEqual(self._ids({"cliente": self.acme.pk}, self.admin_b), [])
+
+    def test_cliente_invalido_400(self):
+        for valor in ("abc", "1,2", "Sin cliente", "1.5"):
+            with self.subTest(cliente=valor):
+                resp = self._get(params={"cliente": valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("cliente", resp.json())
+
+    def test_vendedor(self):
+        self.assertEqual(self._ids({"vendedor": self.beto.pk}), self._pks("beto_acme_none_3", "beto_zeta_mxn_4"))
+        # Un vendedor no ve las de otro aunque lo pida.
+        self.assertEqual(self._ids({"vendedor": self.beto.pk}, self.ana), [])
+        self.assertEqual(self._ids({"vendedor": self.admin_b.pk}), [])
+        self.assertEqual(self._get(params={"vendedor": "x"}).status_code, 400)
+
+    def test_fechas_inclusivas_en_la_medianoche_local(self):
+        dia = date(2026, 4, 2)
+        medianoche = timezone.make_aware(datetime(2026, 4, 2, 0, 0))
+        bordes = {
+            "antes": medianoche - timedelta(microseconds=1),
+            "inicio": medianoche,
+            "fin": medianoche + timedelta(days=1) - timedelta(microseconds=1),
+            "despues": medianoche + timedelta(days=1),
+        }
+        pks = {
+            nombre: self._cotizacion(self.empresa, self.admin, self.acme, self.mxn, 1, "1.00", cuando).pk
+            for nombre, cuando in bordes.items()
+        }
+        ids = set(self._ids({"fecha_desde": dia.isoformat(), "fecha_hasta": dia.isoformat()}))
+        self.assertEqual(ids, {pks["inicio"], pks["fin"]})
+        self.assertEqual(
+            set(self._ids({"fecha_desde": dia.isoformat()})) & set(pks.values()),
+            {pks["inicio"], pks["fin"], pks["despues"]},
+        )
+        self.assertEqual(
+            set(self._ids({"fecha_hasta": dia.isoformat()})) & set(pks.values()),
+            {pks["antes"], pks["inicio"], pks["fin"]},
+        )
+
+    def test_fechas_invalidas_o_invertidas_400(self):
+        for params in (
+            {"fecha_desde": "basura"}, {"fecha_hasta": "2026-13-01"},
+            {"fecha_desde": "2026-03-10", "fecha_hasta": "2026-03-09"},
+        ):
+            with self.subTest(params=params):
+                self.assertEqual(self._get(params=params).status_code, 400)
+
+    def test_estatus_del_catalogo(self):
+        self.assertEqual(
+            self._ids({"estatus": "1,3"}),
+            self._pks("ana_acme_mxn_1", "ana_sin_cliente_3", "beto_acme_none_3", "admin_acme_mxn_3"),
+        )
+        for valor in ("9", "1,9", ",", "abc", "0"):
+            with self.subTest(estatus=valor):
+                resp = self._get(params={"estatus": valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("estatus", resp.json())
+
+    def test_sin_alcance_con_parametros_invalidos_sigue_en_200(self):
+        params = {"estatus": "9", "cliente": "abc", "fecha_desde": "basura", "vendedor": "x"}
+        resp = self._get(params=params, user=self.sin_empresa)
+        self.assertEqual((resp.status_code, resp.json()), (200, []))
+
+    def test_filtros_combinados_y_paginados(self):
+        resp = self._get(params={"cliente": self.acme.pk, "estatus": "3", "limit": 1})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["count"], 2)
+        self.assertEqual([f["id"] for f in data["results"]], self._pks("beto_acme_none_3"))
+
+    def test_filtros_no_alcanzan_el_detalle(self):
+        """El detalle no pasa por los filtros: un parámetro suelto no da 404."""
+        pk = self.c["ana_acme_mxn_1"].pk
+        resp = self._get(f"{self.URL}{pk}/", {"estatus": "3", "cliente": "sin_cliente"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_mesa_control_aplica_los_mismos_filtros_de_listado(self):
+        """``/mesa-control/`` sigue en estatus [2, 5]; los filtros nuevos sólo acotan."""
+        self.assertEqual(self._ids(url=MESA_CONTROL_URL), self._pks("ana_zeta_usd_2"))
+        self.assertEqual(self._ids({"cliente": self.acme.pk}, url=MESA_CONTROL_URL), [])
+        self.assertEqual(self._ids({"estatus": "1"}, url=MESA_CONTROL_URL), [])
+        self.assertEqual(self._get(MESA_CONTROL_URL, {"estatus": "9"}).status_code, 400)
+
+
+class CotizacionOpcionesTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``GET /cotizaciones/opciones/``: clientes del alcance y "Sin cliente"."""
+
+    URL = f"{COTIZACIONES_URL}opciones/"
+
+    def _opciones(self, user=None, params=None):
+        resp = self._get(params=params, user=user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def test_admin_ve_los_clientes_de_su_empresa_y_sin_cliente(self):
+        self.assertEqual(self._opciones(), {"cliente": [
+            {"value": self.acme.pk, "label": "ACME SA"},
+            # Razón social en blanco: cae al nombre.
+            {"value": self.zeta.pk, "label": "Zeta comercial"},
+            {"value": "sin_cliente", "label": "Sin cliente"},
+        ]})
+
+    def test_sin_cliente_solo_si_existe_en_el_alcance(self):
+        # Beto no tiene cotizaciones sin cliente: no aparece la opción.
+        self.assertEqual(
+            [o["value"] for o in self._opciones(self.beto)["cliente"]], [self.acme.pk, self.zeta.pk],
+        )
+        self.assertEqual(
+            [o["value"] for o in self._opciones(self.ana)["cliente"]], [self.acme.pk, self.zeta.pk, "sin_cliente"],
+        )
+
+    def test_alcance_por_empresa_y_sin_empresa(self):
+        self.assertEqual(self._opciones(self.admin_b), {"cliente": [{"value": self.secreto.pk, "label": "Secreto SA"}]})
+        self.assertNotIn("Secreto", str(self._opciones()))
+        self.assertEqual(self._opciones(self.sin_empresa), {"cliente": []})
+
+    def test_vendedor_solo_ve_clientes_de_sus_cotizaciones(self):
+        solo_admin = Cliente.objects.create(empresa=self.empresa, nombre="Solo admin")
+        self._cotizacion(self.empresa, self.admin, solo_admin, self.mxn, 1, "1.00", self.base)
+        self.assertNotIn(solo_admin.pk, [o["value"] for o in self._opciones(self.ana)["cliente"]])
+        self.assertIn(solo_admin.pk, [o["value"] for o in self._opciones()["cliente"]])
+
+    def test_no_reacciona_a_filtros_y_rechaza_parametros(self):
+        for params in ({"estatus": "1"}, {"cliente": self.acme.pk}, {"q": "acme"}, {"otro": "1"}):
+            with self.subTest(params=params):
+                self.assertEqual(self._get(params=params).status_code, 400)
+        # ``?format=json`` es de DRF, no un filtro.
+        self.assertEqual(self._opciones(params={"format": "json"}), self._opciones())
+
+    def test_una_consulta_que_no_crece_con_las_filas(self):
+        self._opciones()
+        with CaptureQueriesContext(connection) as ctx:
+            self._opciones()
+        self.assertEqual(len(ctx), 1)
+        for i in range(5):
+            otro = Cliente.objects.create(empresa=self.empresa, nombre=f"Otro {i}")
+            self._cotizacion(self.empresa, self.admin, otro, self.mxn, 1, "1.00", self.base)
+        with self.assertNumQueries(1):
+            self.assertEqual(len(self._opciones()["cliente"]), 8)
+
+
+class CotizacionKpisTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``GET /cotizaciones/kpis/``: conteos por estatus y ``gran_total`` por
+    moneda con los filtros del listado, en una consulta."""
+
+    URL = f"{COTIZACIONES_URL}kpis/"
+
+    def _kpis(self, params=None, user=None):
+        resp = self._get(params=params, user=user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertIn("generado_en", data)
+        return data
+
+    def _moneda(self, moneda, total, gran_total):
+        return {"moneda": moneda.codigo_iso if moneda else None, "total": total, "gran_total": gran_total}
+
+    def test_agrupa_por_codigo_aunque_cada_empresa_tenga_su_moneda(self):
+        """``Moneda`` es por empresa: dos "MXN" con distinto id son un solo grupo."""
+        mxn_b = Moneda.objects.create(codigo_iso="MXN", nombre="Peso B", empresa=self.empresa_b)
+        self._cotizacion(self.empresa_b, self.admin_b, self.secreto, mxn_b, 3, "1.00", self.base)
+        superusuario = Usuario.objects.create(
+            username="su@811.test", email="su@811.test", is_superuser=True, empresa=self.empresa,
+        )
+        data = self._kpis(user=superusuario)
+        self.assertEqual(data["por_moneda"], [
+            self._moneda(self.mxn, 6, "1160.00"),
+            self._moneda(self.usd, 1, "50.00"),
+            self._moneda(None, 1, "7.00"),
+        ])
+        autorizadas = data["por_estatus"][2]
+        self.assertEqual(autorizadas["por_moneda"], [self._moneda(self.mxn, 4, "1040.00"), self._moneda(None, 1, "7.00")])
+        for bloque in [*data["por_moneda"], *(m for e in data["por_estatus"] for m in e["por_moneda"])]:
+            self.assertNotIn("moneda_id", bloque)
+
+    def test_admin_por_estatus_y_por_moneda_con_moneda_nula(self):
+        data = self._kpis()
+        self.assertEqual(data["total"], 6)
+        self.assertEqual(data["por_moneda"], [
+            self._moneda(self.mxn, 4, "160.00"),
+            self._moneda(self.usd, 1, "50.00"),
+            self._moneda(None, 1, "7.00"),
+        ])
+        self.assertEqual(data["por_estatus"], [
+            {"estatus": 1, "estatus_label": "BORRADOR", "total": 1, "por_moneda": [self._moneda(self.mxn, 1, "100.00")]},
+            {"estatus": 2, "estatus_label": "EN REVISION", "total": 1, "por_moneda": [self._moneda(self.usd, 1, "50.00")]},
+            {"estatus": 3, "estatus_label": "AUTORIZADA", "total": 3, "por_moneda": [
+                self._moneda(self.mxn, 2, "40.00"), self._moneda(None, 1, "7.00"),
+            ]},
+            {"estatus": 4, "estatus_label": "RECHAZADA", "total": 1, "por_moneda": [self._moneda(self.mxn, 1, "20.00")]},
+            {"estatus": 5, "estatus_label": "CAMBIOS SOLICITADOS", "total": 0, "por_moneda": []},
+        ])
+
+    def test_coincide_con_el_listado_con_los_mismos_filtros(self):
+        for params in (
+            {}, {"cliente": self.acme.pk}, {"cliente": "sin_cliente"}, {"estatus": "3,4"},
+            {"vendedor": self.beto.pk}, {"q": "acme"}, {"fecha_desde": "2026-03-10", "fecha_hasta": "2026-03-10"},
+        ):
+            with self.subTest(params=params):
+                data = self._kpis(params)
+                self.assertEqual(data["total"], len(self._ids(params, url=COTIZACIONES_URL)))
+                self.assertEqual(sum(e["total"] for e in data["por_estatus"]), data["total"])
+                self.assertEqual(sum(m["total"] for m in data["por_moneda"]), data["total"])
+
+    def test_respeta_los_filtros(self):
+        data = self._kpis({"cliente": self.acme.pk})
+        self.assertEqual(data["por_moneda"], [self._moneda(self.mxn, 2, "130.00"), self._moneda(None, 1, "7.00")])
+        data = self._kpis({"estatus": "5"})
+        self.assertEqual((data["total"], data["por_moneda"]), (0, []))
+        self.assertEqual([e["total"] for e in data["por_estatus"]], [0, 0, 0, 0, 0])
+
+    def test_vendedor_contra_admin_y_otra_empresa(self):
+        ana = self._kpis(user=self.ana)
+        self.assertEqual(ana["total"], 3)
+        self.assertEqual(ana["por_moneda"], [self._moneda(self.mxn, 2, "110.00"), self._moneda(self.usd, 1, "50.00")])
+        # Pedir las de otro vendedor no amplía el alcance.
+        self.assertEqual(self._kpis({"vendedor": self.beto.pk}, self.ana)["total"], 0)
+        otra = self._kpis(user=self.admin_b)
+        self.assertEqual((otra["total"], otra["por_moneda"]), (1, [self._moneda(self.mxn, 1, "999.00")]))
+        self.assertEqual(self._kpis({"cliente": self.acme.pk}, self.admin_b)["total"], 0)
+        self.assertEqual(self._kpis({"cliente": self.secreto.pk})["total"], 0)
+
+    def test_sin_empresa_en_cero_aun_con_parametros_invalidos(self):
+        for params in ({}, {"estatus": "9", "cliente": "abc"}):
+            with self.subTest(params=params):
+                data = self._kpis(params, self.sin_empresa)
+                self.assertEqual((data["total"], data["por_moneda"]), (0, []))
+                self.assertEqual([e["total"] for e in data["por_estatus"]], [0, 0, 0, 0, 0])
+
+    def test_parametros_invalidos_400(self):
+        for params in (
+            {"ordering": "id"}, {"limit": "10"}, {"offset": "0"}, {"otro": "1"},
+            {"estatus": "9"}, {"cliente": "abc"}, {"fecha_desde": "basura"},
+        ):
+            with self.subTest(params=params):
+                self.assertEqual(self._get(params=params).status_code, 400)
+        self.assertEqual(self._get(params={"format": "json"}).status_code, 200)
+
+    def test_una_consulta_que_no_crece_con_las_filas(self):
+        self._kpis()
+        with self.assertNumQueries(1):
+            self._kpis()
+        for i in range(6):
+            self._cotizacion(self.empresa, self.ana, self.acme, (self.mxn, self.usd, None)[i % 3], 5, "1.00", self.base)
+        with self.assertNumQueries(1):
+            self.assertEqual(self._kpis()["total"], 12)
+
+
+class CotizacionTableroTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``GET /cotizaciones/tablero/``: las primeras N de cada estatus con su
+    total, idénticas (ids, orden y filas) a ``?estatus=N&limit=N`` del listado."""
+
+    URL = f"{COTIZACIONES_URL}tablero/"
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Columna 5 con más filas que ``por_columna``: un empate de ``created_at``
+        # (decide ``-id``) y una sin ``created_at`` (va al final, ``nulls_last``).
+        cls.col5 = []
+        for i, horas in enumerate((10, 11, 11, 12, 13, 14, None)):
+            creada = cls.base - timedelta(hours=horas) if horas is not None else None
+            cot = cls._cotizacion(cls.empresa, cls.ana, cls.acme, cls.mxn, 5, f"{i + 1}.00", cls.base)
+            Cotizacion.objects.filter(pk=cot.pk).update(created_at=creada)
+            cls.col5.append(cot.pk)
+
+    def _tablero(self, params=None, user=None):
+        resp = self._get(params=params, user=user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def _listado(self, params, user=None):
+        resp = self._get(COTIZACIONES_URL, params, user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def test_cinco_columnas_con_su_total_y_en_cero(self):
+        data = self._tablero()
+        self.assertEqual(data["por_columna"], 20)
+        self.assertEqual(
+            [(c["estatus"], c["estatus_label"], c["total"], len(c["results"])) for c in data["columnas"]],
+            [(1, "BORRADOR", 1, 1), (2, "EN REVISION", 1, 1), (3, "AUTORIZADA", 3, 3),
+             (4, "RECHAZADA", 1, 1), (5, "CAMBIOS SOLICITADOS", 7, 7)],
+        )
+        vacio = self._tablero({"cliente": "sin_cliente"})
+        self.assertEqual([c["total"] for c in vacio["columnas"]], [0, 0, 1, 0, 0])
+        self.assertEqual([c["results"] for c in vacio["columnas"] if c["estatus"] != 3], [[], [], [], []])
+
+    def test_columnas_identicas_al_listado(self):
+        """Mismos ids, mismo orden y mismas filas que ``?estatus=N&limit=N`` con los
+        mismos filtros; ``total`` = ``count`` del listado."""
+        for por_columna in (1, 3, 20):
+            for filtros in ({}, {"cliente": self.acme.pk}, {"q": "acme"}, {"vendedor": self.ana.pk}):
+                with self.subTest(por_columna=por_columna, filtros=filtros):
+                    data = self._tablero({**filtros, "por_columna": por_columna})
+                    for columna in data["columnas"]:
+                        listado = self._listado({**filtros, "estatus": columna["estatus"], "limit": por_columna})
+                        self.assertEqual(columna["results"], listado["results"])
+                        self.assertEqual(columna["total"], listado["count"])
+
+    def test_orden_de_la_columna_con_empates_y_nulos(self):
+        col5 = next(c for c in self._tablero()["columnas"] if c["estatus"] == 5)
+        # horas antes de ``base``: 10, 11, 11 (empate → -id), 12, 13, 14, NULL al final.
+        esperado = [self.col5[0], self.col5[2], self.col5[1], self.col5[3], self.col5[4], self.col5[5], self.col5[6]]
+        self.assertEqual([f["id"] for f in col5["results"]], esperado)
+
+    def test_ver_mas_con_el_listado_sin_huecos_ni_duplicados(self):
+        col5 = next(c for c in self._tablero({"por_columna": 3})["columnas"] if c["estatus"] == 5)
+        ids = [f["id"] for f in col5["results"]]
+        offset = 3
+        while offset < col5["total"]:
+            pagina = self._listado({"estatus": 5, "limit": 3, "offset": offset})
+            ids += [f["id"] for f in pagina["results"]]
+            offset += 3
+        self.assertEqual(ids, [f["id"] for f in self._listado({"estatus": 5})])
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(len(ids), 7)
+
+    def test_dos_consultas_que_no_crecen_con_las_filas(self):
+        self._tablero()
+        with self.assertNumQueries(2):
+            self._tablero()
+        for i in range(10):
+            self._cotizacion(self.empresa, self.beto, self.zeta, self.usd, (i % 5) + 1, "1.00", self.base)
+        with self.assertNumQueries(2):
+            data = self._tablero({"por_columna": 100})
+        self.assertEqual(sum(c["total"] for c in data["columnas"]), 23)
+
+    def test_por_columna_y_parametros_invalidos_400(self):
+        for params in (
+            {"por_columna": "0"}, {"por_columna": "101"}, {"por_columna": "abc"}, {"por_columna": "-1"},
+            {"ordering": "id"}, {"limit": "5"}, {"offset": "5"}, {"otro": "1"}, {"estatus": "9"},
+        ):
+            with self.subTest(params=params):
+                self.assertEqual(self._get(params=params).status_code, 400)
+        self.assertEqual(self._tablero({"por_columna": "100"})["por_columna"], 100)
+        self.assertEqual(self._tablero({"por_columna": "1", "format": "json"})["por_columna"], 1)
+
+    def test_aislamiento(self):
+        ana = self._tablero(user=self.ana)
+        ids_ana = {f["id"] for c in ana["columnas"] for f in c["results"]}
+        self.assertEqual(
+            ids_ana, {*self._pks("ana_acme_mxn_1", "ana_zeta_usd_2", "ana_sin_cliente_3"), *self.col5},
+        )
+        self.assertEqual(
+            sum(c["total"] for c in self._tablero({"vendedor": self.beto.pk}, self.ana)["columnas"]), 0,
+        )
+        otra = self._tablero(user=self.admin_b)
+        self.assertEqual(
+            [f["id"] for c in otra["columnas"] for f in c["results"]], self._pks("b_secreto_mxn_3"),
+        )
+        self.assertEqual(sum(c["total"] for c in self._tablero({"cliente": self.acme.pk}, self.admin_b)["columnas"]), 0)
+        self.assertNotIn("Secreto", str(self._tablero()))
+        with self.assertNumQueries(0):
+            nada = self._tablero({"estatus": "9"}, self.sin_empresa)
+        self.assertEqual([(c["total"], c["results"]) for c in nada["columnas"]], [(0, [])] * 5)
+
+
+class MesaControlSinAccionesModoServidorTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``opciones/``, ``kpis/`` y ``tablero/`` no se publican en
+    ``/mesa-control/`` (heredaría de ``CotizacionViewSet``); su listado no cambia y
+    las acciones que ya heredaba siguen."""
+
+    def test_acciones_nuevas_responden_404(self):
+        for accion in ("opciones", "kpis", "tablero"):
+            for user in (self.admin, self.admin_b):
+                with self.subTest(accion=accion, user=user.username):
+                    self.assertEqual(self._get(f"{MESA_CONTROL_URL}{accion}/", user=user).status_code, 404)
+                    self.assertEqual(self._get(f"{COTIZACIONES_URL}{accion}/", user=user).status_code, 200)
+
+    def test_no_estan_entre_sus_rutas(self):
+        from ventas.api.views import MesaControlViewSet
+
+        acciones = {a.__name__ for a in MesaControlViewSet.get_extra_actions()}
+        self.assertFalse({"opciones", "kpis", "tablero"} & acciones)
+        # Las heredadas de antes siguen.
+        self.assertLessEqual({"onboarding", "enviar_revision", "autorizar", "rechazar"}, acciones)
+        self.assertLessEqual(
+            {"opciones", "kpis", "tablero"}, {a.__name__ for a in CotizacionViewSet.get_extra_actions()},
+        )
+
+    def test_listado_y_detalle_de_mesa_sin_cambios(self):
+        self.assertEqual(self._ids(url=MESA_CONTROL_URL), self._pks("ana_zeta_usd_2"))
+        pk = self.c["ana_zeta_usd_2"].pk
+        self.assertEqual(self._get(f"{MESA_CONTROL_URL}{pk}/").status_code, 200)
+
+
+class CotizacionOrdenImporteTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``?ordering=importe_sin_iva`` reproduce la columna "Importe sin IVA"
+    del front (``compareQuoteAmounts`` en ``quoteAmountSorting.ts`` + TanStack Table):
+    moneda (código, sin moneda al final) y dentro de ella el importe; en descendente se
+    invierte todo. Desempate por ``id`` en la dirección del primer campo."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        eur = Moneda.objects.create(codigo_iso="EUR", nombre="Euro")
+        # Minúsculas: el front compara con ``<`` de JS ("USD" < "aaa"); una collation
+        # lingüística las pondría antes.
+        minusculas = Moneda.objects.create(codigo_iso="aaa", nombre="Prueba")
+        # Código vacío: el front lo trata como sin moneda (``moneda_codigo || null``).
+        vacia = Moneda.objects.create(codigo_iso="", nombre="Vacía")
+        for moneda, total, iva in (
+            (cls.mxn, "116.00", 16),  # 100.00 sin IVA
+            (cls.mxn, "100.00", 0),   # 100.00: empata con la anterior, decide el id
+            (cls.mxn, "50.00", 16),
+            (cls.usd, "10.00", 16),
+            (eur, "999.00", 8),
+            (minusculas, "1.00", 16),
+            (vacia, "3.00", 16),
+            (None, "5.00", 16),
+        ):
+            cot = cls._cotizacion(cls.empresa, cls.ana, cls.acme, moneda, 1, total, cls.base)
+            Cotizacion.objects.filter(pk=cot.pk).update(iva=iva)
+
+    @staticmethod
+    def _orden_del_front(filas, descendente):
+        import functools
+
+        def comparar(a, b):
+            moneda_a, moneda_b = a["moneda_codigo"] or None, b["moneda_codigo"] or None
+            if moneda_a != moneda_b:
+                if moneda_a is None:
+                    r = 1
+                elif moneda_b is None:
+                    r = -1
+                else:
+                    r = -1 if moneda_a < moneda_b else 1
+            else:
+                importe_a, importe_b = Decimal(str(a["importe_sin_iva"])), Decimal(str(b["importe_sin_iva"]))
+                r = 0 if importe_a == importe_b else (-1 if importe_a < importe_b else 1)
+            if r == 0:
+                r = -1 if a["id"] < b["id"] else 1  # desempate por id (no por posición)
+            return -r if descendente else r
+
+        return [f["id"] for f in sorted(filas, key=functools.cmp_to_key(comparar))]
+
+    def _filas(self, params=None, user=None):
+        resp = self._get(params=params, user=user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def test_ascendente_y_descendente_como_el_front(self):
+        filas = self._filas()
+        self.assertEqual(len(filas), 14)
+        for termino, descendente in (("importe_sin_iva", False), ("-importe_sin_iva", True)):
+            with self.subTest(ordering=termino):
+                ids = [f["id"] for f in self._filas({"ordering": termino})]
+                self.assertEqual(ids, self._orden_del_front(filas, descendente))
+
+    def test_grupos_de_moneda_y_desempate(self):
+        filas = self._filas({"ordering": "importe_sin_iva"})
+        codigos = []
+        for f in filas:
+            codigo = f["moneda_codigo"] or None
+            if not codigos or codigos[-1] != codigo:
+                codigos.append(codigo)
+        self.assertEqual(codigos, ["EUR", "MXN", "USD", "aaa", None])
+        # Los dos de 100.00 MXN: ascendente por id; descendente al revés.
+        cien = [f["id"] for f in filas if f["moneda_codigo"] == "MXN" and Decimal(str(f["importe_sin_iva"])) == 100]
+        self.assertEqual(cien, sorted(cien))
+        desc = [f["id"] for f in self._filas({"ordering": "-importe_sin_iva"})]
+        self.assertEqual([i for i in desc if i in cien], sorted(cien, reverse=True))
+        self.assertIsNone(self._filas({"ordering": "-importe_sin_iva"})[0]["moneda_codigo"] or None)
+
+    def test_estable_entre_paginas(self):
+        completo = [f["id"] for f in self._filas({"ordering": "-importe_sin_iva"})]
+        paginas = []
+        for offset in range(0, len(completo), 4):
+            data = self._filas({"ordering": "-importe_sin_iva", "limit": 4, "offset": offset})
+            paginas += [f["id"] for f in data["results"]]
+        self.assertEqual(paginas, completo)
+
+    def test_combinado_con_otro_campo_y_filtros(self):
+        filas = self._filas({"estatus": "1"})
+        ids = [f["id"] for f in self._filas({"estatus": "1", "ordering": "importe_sin_iva,created_at"})]
+        self.assertEqual(ids, self._orden_del_front(filas, False))
+
+    def test_vendedor_tambien_ordena_y_sin_consultas_extra(self):
+        filas = self._filas(user=self.ana)
+        ids = [f["id"] for f in self._filas({"ordering": "importe_sin_iva"}, self.ana)]
+        self.assertEqual(ids, self._orden_del_front(filas, False))
+        self._filas()
+        with CaptureQueriesContext(connection) as base:
+            self._filas()
+        with self.assertNumQueries(len(base)):
+            self._filas({"ordering": "-importe_sin_iva"})
+
+    def test_mesa_control_tambien(self):
+        Cotizacion.objects.filter(empresa=self.empresa).update(estatus=2)
+        filas = self._filas()
+        ids = [f["id"] for f in self._ids_mesa({"ordering": "-importe_sin_iva"})]
+        self.assertEqual(ids, self._orden_del_front(filas, True))
+
+    def _ids_mesa(self, params):
+        resp = self._get(MESA_CONTROL_URL, params)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+
+class CotizacionFiltrosBordesTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811 (revisión): entradas límite de los filtros no dan 500 en el listado,
+    ``kpis/`` ni ``tablero/``."""
+
+    URLS = (COTIZACIONES_URL, f"{COTIZACIONES_URL}kpis/", f"{COTIZACIONES_URL}tablero/")
+
+    def test_fecha_hasta_en_el_maximo_es_400(self):
+        for url in self.URLS:
+            with self.subTest(url=url):
+                resp = self._get(url, {"fecha_hasta": "9999-12-31"})
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("fecha_hasta", resp.json())
+
+    def test_fechas_extremas_validas(self):
+        for url in self.URLS:
+            for params in ({"fecha_hasta": "9999-12-30"}, {"fecha_desde": "9999-12-31"}, {"fecha_desde": "0001-01-01"}):
+                with self.subTest(url=url, params=params):
+                    self.assertEqual(self._get(url, params).status_code, 200)
+
+    def test_q_con_digitos_unicode_no_se_toma_como_id(self):
+        for url in self.URLS:
+            for q in ("²", "①", "١٢"):
+                with self.subTest(url=url, q=q):
+                    self.assertEqual(self._get(url, {"q": q}).status_code, 200)
+        # "١٢" (12 en arábigo-índico) no busca por id: solo texto, sin coincidencias.
+        self.assertEqual(self._ids({"q": "١٢"}), [])
+        pk = self.c["ana_acme_mxn_1"].pk
+        self.assertEqual(self._ids({"q": str(pk)}), [pk])
+
+
+class CotizacionEstatusFueraDeCatalogoTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811 (revisión): ``estatus`` no tiene CheckConstraint; una fila con un valor
+    fuera del catálogo no tumba ``kpis/`` ni ``tablero/``."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.rara = cls._cotizacion(cls.empresa, cls.ana, cls.acme, cls.usd, 1, "5.00", cls.base)
+        Cotizacion.objects.filter(pk=cls.rara.pk).update(estatus=6)
+
+    def test_kpis_cuenta_la_fila_en_total_y_moneda_pero_no_en_un_estatus(self):
+        resp = self._get(f"{COTIZACIONES_URL}kpis/")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["total"], len(self._ids()))  # = ``count`` del listado
+        self.assertEqual(data["total"], 7)
+        self.assertEqual([e["estatus"] for e in data["por_estatus"]], [1, 2, 3, 4, 5])
+        self.assertEqual(sum(e["total"] for e in data["por_estatus"]), 6)
+        self.assertEqual(sum(m["total"] for m in data["por_moneda"]), 7)
+        usd = next(m for m in data["por_moneda"] if m["moneda"] == "USD")
+        self.assertEqual((usd["total"], usd["gran_total"]), (2, "55.00"))
+
+    def test_tablero_la_omite(self):
+        resp = self._get(f"{COTIZACIONES_URL}tablero/")
+        self.assertEqual(resp.status_code, 200)
+        columnas = resp.json()["columnas"]
+        self.assertEqual([c["estatus"] for c in columnas], [1, 2, 3, 4, 5])
+        self.assertNotIn(self.rara.pk, {f["id"] for c in columnas for f in c["results"]})
+        self.assertEqual(sum(c["total"] for c in columnas), 6)
+        # El listado la sigue trayendo, como antes.
+        self.assertIn(self.rara.pk, self._ids())
+
+
+class CotizacionImporteSinIvaSqlTests(TestCase):
+    """EC-811 (revisión): ``cotizaciones_listado.IMPORTE_SIN_IVA`` (el orden por
+    importe, en SQL) es la misma cuenta que ``serializers.importes_iva`` (lo que pinta
+    el listado). Si alguna de las dos cambia, esta prueba falla.
+
+    La única diferencia admitida es la de redondeo: ``importes_iva`` usa
+    ``ROUND_HALF_EVEN`` y Postgres redondea la mitad hacia arriba, así que sólo
+    difieren en un empate EXACTO de medio centavo, que sólo existe cuando
+    ``100 + iva`` es múltiplo de 8 (IVA 4, 12, 20, 100…; nunca con 0, 8, 16 u 80).
+    ``gran_total`` es NOT NULL (default 0): el caso ``None`` de ``importes_iva`` no
+    llega desde la base; lo cubre el 0."""
+
+    IVAS = (-1, 0, 3, 4, 8, 12, 15, 16, 20, 80, 100)
+    IMPORTES = (
+        "0.00", "0.01", "0.02", "0.05", "0.13", "0.99", "1.00", "1.16", "1.17", "1.25",
+        "99.99", "100.00", "108.00", "116.00", "116.01", "180.00", "12345.67", "99999999.99",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        empresa = Empresa.objects.create(codigo="ec811-iva", razon_social="EC811 IVA SA")
+        Cotizacion.objects.bulk_create([
+            Cotizacion(empresa=empresa, gran_total=Decimal(total), iva=iva)
+            for iva in cls.IVAS for total in cls.IMPORTES
+        ])
+
+    def test_sql_igual_a_importes_iva(self):
+        from ventas.api.cotizaciones_listado import IMPORTE_SIN_IVA
+        from ventas.api.serializers import importes_iva
+
+        filas = list(Cotizacion.objects.filter(empresa__codigo="ec811-iva").annotate(sql=IMPORTE_SIN_IVA))
+        self.assertEqual(len(filas), len(self.IVAS) * len(self.IMPORTES))
+        empates = 0
+        for cot in filas:
+            python = importes_iva(cot)[0]
+            with self.subTest(gran_total=cot.gran_total, iva=cot.iva):
+                if cot.iva > 0:
+                    exacto_centavos = cot.gran_total * 100 * 100 / (100 + cot.iva)
+                    empate = exacto_centavos % 1 == Decimal("0.5")
+                else:
+                    empate = False
+                if empate:
+                    # Única diferencia admitida: la mitad hacia arriba contra al par.
+                    empates += 1
+                    self.assertIn(cot.sql - python, (Decimal("0"), Decimal("0.01")))
+                    self.assertEqual((100 + cot.iva) % 8, 0)
+                else:
+                    self.assertEqual(cot.sql, python)
+        # El caso límite existe en la malla (p. ej. 0.13 con IVA 4): la prueba lo ejerce.
+        self.assertGreater(empates, 0)
+
+    def test_sin_empates_en_las_tasas_reales(self):
+        """Con IVA 0, 8, 16 y 80 (las que hay en la base) SQL y Python coinciden siempre."""
+        from ventas.api.cotizaciones_listado import IMPORTE_SIN_IVA
+        from ventas.api.serializers import importes_iva
+
+        for cot in Cotizacion.objects.filter(empresa__codigo="ec811-iva", iva__in=(0, 8, 16, 80)).annotate(sql=IMPORTE_SIN_IVA):
+            with self.subTest(gran_total=cot.gran_total, iva=cot.iva):
+                self.assertEqual(cot.sql, importes_iva(cot)[0])
+
+
+class CotizacionParametrosFiltroTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811 (revisión): ``PARAMETROS_FILTRO`` es la única lista de los filtros. Todo
+    lo que lee ``filtrar`` debe estar en ella y lo deben aceptar ``kpis/`` y
+    ``tablero/`` (si no, el listado filtra y ellas responden 400)."""
+
+    def _leidos_por_filtrar(self):
+        from django.http import QueryDict
+        from rest_framework.request import Request
+        from rest_framework.test import APIRequestFactory
+        from ventas.api import cotizaciones_listado
+
+        leidos = set()
+
+        class Espia(QueryDict):
+            def get(self, key, default=None):
+                leidos.add(key)
+                return super().get(key, default)
+
+        request = Request(APIRequestFactory().get("/x/"))
+        request._request.GET = Espia(mutable=True)
+        cotizaciones_listado.filtrar(request, Cotizacion.objects.none())
+        return leidos
+
+    def test_filtrar_solo_lee_parametros_de_la_lista(self):
+        from ventas.api import cotizaciones_listado
+
+        leidos = self._leidos_por_filtrar()
+        self.assertTrue(leidos)
+        self.assertEqual(leidos, set(cotizaciones_listado.PARAMETROS_FILTRO))
+
+    def test_kpis_y_tablero_aceptan_cada_filtro_que_lee_filtrar(self):
+        valores = {
+            "q": "acme", "estatus": "1,3", "cliente": str(self.acme.pk), "vendedor": str(self.ana.pk),
+            "fecha_desde": "2026-03-01", "fecha_hasta": "2026-03-31",
+        }
+        leidos = self._leidos_por_filtrar()
+        self.assertLessEqual(leidos, set(valores), "falta un valor de ejemplo para un filtro nuevo")
+        for url in (f"{COTIZACIONES_URL}kpis/", f"{COTIZACIONES_URL}tablero/"):
+            for nombre in sorted(leidos):
+                with self.subTest(url=url, parametro=nombre):
+                    resp = self._get(url, {nombre: valores[nombre]})
+                    self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_schema_documenta_los_mismos(self):
+        from ventas.api import cotizaciones_listado
+        from ventas.api.views import PARAMETROS_FILTRO_COTIZACIONES
+
+        self.assertEqual({p.name for p in PARAMETROS_FILTRO_COTIZACIONES}, set(cotizaciones_listado.PARAMETROS_FILTRO))
+
+
+class CotizacionOpcionesDeduplicadasTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811 (revisión): ``opciones/`` deduplica los clientes antes de armar la
+    etiqueta. Mismas opciones, etiquetas, orden y alcance que agregar sobre cada
+    cotización, en una consulta que no crece con las cotizaciones."""
+
+    URL = f"{COTIZACIONES_URL}opciones/"
+
+    def _referencia(self, user):
+        """Lo que respondía la versión anterior: una etiqueta por cotización visible,
+        deduplicada en Python."""
+        from nucleo.opciones_filtros import clave_orden
+        from ventas.scope import cotizaciones_base, cotizaciones_visibles
+
+        visibles = cotizaciones_visibles(cotizaciones_base(), user).select_related("cliente")
+        clientes, sin_cliente = {}, False
+        for cot in visibles:
+            if cot.cliente is None:
+                sin_cliente = True
+                continue
+            etiqueta = (cot.cliente.razon_social or "").strip() or cot.cliente.nombre or ""
+            clientes[cot.cliente_id] = etiqueta.strip()
+        opciones = sorted(
+            ({"value": pk, "label": label} for pk, label in clientes.items()),
+            key=lambda o: (clave_orden(o["label"]), o["value"]),
+        )
+        if sin_cliente:
+            opciones.append({"value": "sin_cliente", "label": "Sin cliente"})
+        return {"cliente": opciones}
+
+    def test_igual_a_la_referencia_para_cada_alcance(self):
+        # Varias cotizaciones del mismo cliente y un cliente de otra empresa ligado a
+        # una cotización propia (dato anómalo que existe en la copia): se sigue viendo,
+        # como en el listado.
+        for _ in range(3):
+            self._cotizacion(self.empresa, self.ana, self.acme, self.mxn, 1, "1.00", self.base)
+        self._cotizacion(self.empresa, self.beto, self.secreto, self.mxn, 1, "1.00", self.base)
+        for user in (self.admin, self.ana, self.beto, self.admin_b, self.sin_empresa):
+            with self.subTest(user=user.username):
+                resp = self._get(user=user)
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.json(), self._referencia(user))
+
+    def test_un_cliente_con_muchas_cotizaciones_es_una_opcion(self):
+        for _ in range(5):
+            self._cotizacion(self.empresa, self.admin, self.acme, self.usd, 2, "1.00", self.base)
+        valores = [o["value"] for o in self._get().json()["cliente"]]
+        self.assertEqual(valores.count(self.acme.pk), 1)
+
+    def test_solo_sin_cliente(self):
+        solo = Usuario.objects.create(username="solo@811.test", email="solo@811.test", empresa=self.empresa)
+        self._cotizacion(self.empresa, solo, None, self.mxn, 1, "1.00", self.base)
+        self._cotizacion(self.empresa, solo, None, self.mxn, 1, "1.00", self.base)
+        self.assertEqual(self._get(user=solo).json(), {"cliente": [{"value": "sin_cliente", "label": "Sin cliente"}]})
+
+    def test_una_consulta_aunque_crezcan_cotizaciones_y_clientes(self):
+        self._get()
+        with self.assertNumQueries(1):
+            self._get()
+        for i in range(10):
+            otro = Cliente.objects.create(empresa=self.empresa, nombre=f"Más {i}")
+            for _ in range(3):
+                self._cotizacion(self.empresa, self.admin, otro, self.mxn, 1, "1.00", self.base)
+        with self.assertNumQueries(1):
+            self.assertEqual(len(self._get().json()["cliente"]), 13)

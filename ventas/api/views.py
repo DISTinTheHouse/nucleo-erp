@@ -69,8 +69,9 @@ from ventas.api.serializers import (
 )
 
 from nucleo.kpis import entero_param, rango_fechas, validar_parametros
-from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, estatus_param
+from nucleo.listados import PaginacionOpcionalLimitOffset, estatus_param
 from nucleo.models import SerieFolio, Empresa
+from ventas.api import cotizaciones_listado
 from notificaciones.services.notificacion_service import crear_notificacion_usuario
 from produccion.models import (
     OrdenProduccionDetalle,
@@ -421,18 +422,24 @@ def _texto_comentario(data):
 # Los backends globales menos el ``OrderingFilter`` de DRF (EC-619): sin
 # ``ordering_fields``, DRF acepta en ``?ordering=`` los ``source`` del serializer,
 # que reemplazaban el orden por defecto y daban 500 con los que no son columnas
-# (``get_estatus_display``). Su lugar lo toma ``OrdenamientoEstableFilter`` en
-# ``FILTER_BACKENDS_LISTADO``. Tupla: el mismo objeto lo comparten varios ViewSets
+# (``get_estatus_display``). Su lugar lo toma un ``OrdenamientoEstableFilter`` con
+# la lista blanca de cada vista. Tupla: el mismo objeto lo comparten varios ViewSets
 # y ninguno debe poder mutarlo.
 FILTER_BACKENDS_SIN_ORDERING = tuple(
     backend for backend in api_settings.DEFAULT_FILTER_BACKENDS if not issubclass(backend, OrderingFilter)
 )
-# Modo servidor (EC-757): ``?ordering=`` solo con la lista blanca de cada vista y
-# ``id`` como desempate. Sin el parámetro queda el orden fijo de ``get_queryset``
-# (más reciente primero, EC-619). Los importes no entran: el listado y el detalle
-# se los ocultan a quien no ve contabilidad (#537, #947, EC-784), y ordenar por un
-# monto oculto dejaría deducirlo.
-FILTER_BACKENDS_LISTADO = (*FILTER_BACKENDS_SIN_ORDERING, OrdenamientoEstableFilter)
+# Modo servidor de cotizaciones y mesa de control (EC-757): ``?ordering=`` solo con
+# la lista blanca ``ordering_fields`` e ``id`` como desempate. Sin el parámetro queda
+# el orden fijo de ``get_queryset`` (más reciente primero, EC-619). Los importes de
+# cotización no se le ocultan a nadie (el listado y el detalle siempre los traen),
+# así que se puede ordenar por ``importe_sin_iva``, agrupado por moneda como el front
+# (EC-811, ``OrdenamientoCotizacionesFilter``). La regla de no ordenar por un monto
+# que el usuario no ve (#537, #947, EC-784) es de pedidos: ``OrdenamientoPedidosFilter``.
+FILTER_BACKENDS_LISTADO = (*FILTER_BACKENDS_SIN_ORDERING, cotizaciones_listado.OrdenamientoCotizacionesFilter)
+
+# Filtros del listado de cotizaciones (``cotizaciones_listado.filtrar``, EC-811): la
+# lista vive allá, junto a quien los lee.
+PARAMETROS_FILTRO_COTIZACIONES = list(cotizaciones_listado.PARAMETROS_FILTRO_OPENAPI)
 
 
 class CotizacionViewSet(viewsets.ModelViewSet):
@@ -443,6 +450,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
     ordering_fields = [
         "id", "estatus", "tipo_pedido", "oc", "created_at", "updated_at", "autorizada_at",
         "cliente__nombre", "cliente__razon_social",
+        # EC-811: agrupado por moneda, como la columna "Importe sin IVA" del front.
+        cotizaciones_listado.CAMPO_ORDEN_IMPORTE,
     ]
     filter_backends = FILTER_BACKENDS_LISTADO
 
@@ -452,6 +461,10 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         if getattr(self, "action", None) == "retrieve":
             return CotizacionFullSerializer
         return super().get_serializer_class()
+
+    @extend_schema(parameters=PARAMETROS_FILTRO_COTIZACIONES)
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
 
     def get_queryset(self):
         user = self.request.user
@@ -530,95 +543,81 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 Prefetch("cotizaciondetalle", queryset=detalles_qs)
             )
 
+        # Los filtros de query param sólo en ``cotizaciones_listado.ACCIONES_FILTRADAS``
+        # (el listado y sus acciones agregadas). ``_apply_filters`` se llama desde
+        # ``get_queryset()``, así que lo atraviesan TODAS las acciones —incluidas
+        # las de detalle, que resuelven por pk vía ``get_object()``—. Sin el guard,
+        # un parámetro suelto en una URL de detalle acotaba el queryset del que sale
+        # el objeto y devolvía 404 sobre un registro que existe y es visible: en
+        # Mesa de Control, ``GET /mesa-control/5/stock-detalle/?estatus=3`` cruzaba
+        # el ``estatus__in=[2,5]`` del ViewSet con ``estatus=3`` y no quedaba nada.
+        # Las anotaciones del listado van aparte (``_anotar_listado``, sólo donde se
+        # serializan filas): los agregados no las necesitan.
+        if getattr(self, "action", None) in cotizaciones_listado.ACCIONES_FILTRADAS:
+            qs = cotizaciones_listado.filtrar(self.request, qs)
+
         if getattr(self, "action", None) == "list":
-            pedido_qs = Pedido.objects.filter(cotizacion_id=OuterRef("pk")).order_by(
-                "-id"
-            )
-            # ``piezas`` va como Subquery correlacionada, no como ``Sum`` sobre
-            # el join: un agregado obliga a Django a agrupar por TODAS las
-            # columnas seleccionadas, y con el ``select_related`` de
-            # ``get_queryset`` eso eran 143 —68 de ``cotizaciones`` + 28 de
-            # ``clientes`` + 17 de ``sucursales`` + 9 de ``monedas`` + 21 de
-            # ``usuarios``—, entre ellas ``aprobado_snapshot``, un ``jsonb`` que
-            # Postgres tiene que hashear por fila para agrupar. Y todo eso sobre
-            # el producto cartesiano detalle×talla. La subquery calcula la misma
-            # suma aparte: mismo número de queries (1), sin ``GROUP BY``, y sin
-            # los dos JOINs multivaluados en la consulta principal.
-            #
-            # Efecto colateral buscado: al no depender del join, la suma deja de
-            # ser sensible a que un filtro futuro añada otra relación
-            # multivaluada al queryset —eso habría inflado el ``Sum``—.
-            piezas_qs = (
-                CotizacionDetalleTalla.objects.filter(
-                    cotizacion_detalle__cotizacion_id=OuterRef("pk")
-                )
-                .values("cotizacion_detalle__cotizacion_id")
-                .annotate(total=Sum("cantidad"))
-                .values("total")
-            )
-            qs = qs.annotate(
-                pedido_id=Subquery(pedido_qs.values("id")[:1]),
-                pedido_folio=Subquery(pedido_qs.values("folio")[:1]),
-                piezas=Coalesce(Subquery(piezas_qs[:1]), 0),
-            )
-            # Solo las columnas que pinta ``CotizacionDashboardItemSerializer``:
-            # sin esto el ``select_related`` traía ~70 columnas por fila (JSONB de
-            # ``aprobado_snapshot`` incluido) de cotización, cliente, sucursal,
-            # moneda y vendedor (~1.6 MB por listado), y la transferencia pesaba
-            # más que la consulta. ``sucursal`` no se pinta: fuera del join.
-            qs = qs.select_related(None).select_related("cliente", "moneda", "vendedor").only(
-                "id", "estatus", "tipo_pedido", "oc", "uso_cfdi", "gran_total", "iva",
-                "autorizada_at", "cambios_solicitados_at", "motivo_rechazo", "created_at", "updated_at",
-                "cliente_id", "cliente__nombre", "cliente__razon_social",
-                "moneda_id", "moneda__codigo_iso",
-                "vendedor_id", "vendedor__first_name", "vendedor__last_name", "vendedor__email",
-            )
-
-            # Los filtros de query param viven DENTRO del guard de ``list``,
-            # igual que las anotaciones de arriba. ``_apply_filters`` se llama
-            # desde ``get_queryset()``, así que lo atraviesan TODAS las acciones
-            # —incluidas las de detalle, que resuelven por pk vía
-            # ``get_object()``—. Sin el guard, un parámetro suelto en una URL de
-            # detalle acotaba el queryset del que sale el objeto y devolvía 404
-            # sobre un registro que existe y es visible: en Mesa de Control,
-            # ``GET /mesa-control/5/stock-detalle/?estatus=3`` cruzaba el
-            # ``estatus__in=[2,5]`` del ViewSet con ``estatus=3`` y no quedaba
-            # nada. Sólo el listado devuelve una colección, y sólo él tiene
-            # sentido filtrar.
-            estatus = self.request.query_params.get("estatus")
-            if estatus:
-                try:
-                    estatus_list = [
-                        int(x) for x in str(estatus).split(",") if str(x).strip()
-                    ]
-                    qs = qs.filter(estatus__in=estatus_list)
-                except Exception:
-                    raise ValidationError(
-                        {"estatus": "Filtro inválido. Usa números separados por coma."}
-                    )
-
-            q = (self.request.query_params.get("q") or "").strip()
-            if q:
-                q_filter = (
-                    Q(oc__icontains=q)
-                    | Q(cliente__razon_social__icontains=q)
-                    | Q(cliente__nombre__icontains=q)
-                    | Q(cliente__rfc__icontains=q)
-                )
-                if q.isdigit():
-                    q_filter = q_filter | Q(id=int(q))
-                qs = qs.filter(q_filter)
+            qs = self._anotar_listado(qs)
 
         # Orden por defecto: más reciente primero, con ``-id`` como desempate
-        # estable (EC-619). ``OrdenamientoEstableFilter`` (EC-757) corre después
+        # estable (EC-619). ``OrdenamientoCotizacionesFilter`` (EC-757, EC-811) corre después
         # de ``get_queryset`` y solo lo reemplaza con un ``?ordering=`` de la lista
         # blanca ``ordering_fields``, con ``id`` como desempate; un término fuera de
-        # ella (importes, ``get_*_display``) se ignora y queda este orden.
+        # ella (``get_*_display``, campos inexistentes) se ignora y queda este orden.
         # ``nulls_last``: ``Cotizacion.created_at`` es NULL-able y las filas
         # anteriores a la migración que lo agregó siguen en NULL; en PostgreSQL
-        # un DESC las pondría al principio del listado.
-        qs = qs.order_by(F("created_at").desc(nulls_last=True), "-id")
+        # un DESC las pondría al principio del listado. El tablero ordena cada
+        # columna con el mismo ``ORDEN_POR_DEFECTO`` (EC-811).
+        qs = qs.order_by(*cotizaciones_listado.ORDEN_POR_DEFECTO)
 
+        return qs
+
+    @staticmethod
+    def _anotar_listado(qs):
+        """Anotaciones y columnas de ``CotizacionDashboardItemSerializer``: sólo donde
+        se serializan filas del listado (``list`` y las filas de ``tablero/``)."""
+        pedido_qs = Pedido.objects.filter(cotizacion_id=OuterRef("pk")).order_by(
+            "-id"
+        )
+        # ``piezas`` va como Subquery correlacionada, no como ``Sum`` sobre
+        # el join: un agregado obliga a Django a agrupar por TODAS las
+        # columnas seleccionadas, y con el ``select_related`` de
+        # ``get_queryset`` eso eran 143 —68 de ``cotizaciones`` + 28 de
+        # ``clientes`` + 17 de ``sucursales`` + 9 de ``monedas`` + 21 de
+        # ``usuarios``—, entre ellas ``aprobado_snapshot``, un ``jsonb`` que
+        # Postgres tiene que hashear por fila para agrupar. Y todo eso sobre
+        # el producto cartesiano detalle×talla. La subquery calcula la misma
+        # suma aparte: mismo número de queries (1), sin ``GROUP BY``, y sin
+        # los dos JOINs multivaluados en la consulta principal.
+        #
+        # Efecto colateral buscado: al no depender del join, la suma deja de
+        # ser sensible a que un filtro futuro añada otra relación
+        # multivaluada al queryset —eso habría inflado el ``Sum``—.
+        piezas_qs = (
+            CotizacionDetalleTalla.objects.filter(
+                cotizacion_detalle__cotizacion_id=OuterRef("pk")
+            )
+            .values("cotizacion_detalle__cotizacion_id")
+            .annotate(total=Sum("cantidad"))
+            .values("total")
+        )
+        qs = qs.annotate(
+            pedido_id=Subquery(pedido_qs.values("id")[:1]),
+            pedido_folio=Subquery(pedido_qs.values("folio")[:1]),
+            piezas=Coalesce(Subquery(piezas_qs[:1]), 0),
+        )
+        # Solo las columnas que pinta ``CotizacionDashboardItemSerializer``:
+        # sin esto el ``select_related`` traía ~70 columnas por fila (JSONB de
+        # ``aprobado_snapshot`` incluido) de cotización, cliente, sucursal,
+        # moneda y vendedor (~1.6 MB por listado), y la transferencia pesaba
+        # más que la consulta. ``sucursal`` no se pinta: fuera del join.
+        qs = qs.select_related(None).select_related("cliente", "moneda", "vendedor").only(
+            "id", "estatus", "tipo_pedido", "oc", "uso_cfdi", "gran_total", "iva",
+            "autorizada_at", "cambios_solicitados_at", "motivo_rechazo", "created_at", "updated_at",
+            "cliente_id", "cliente__nombre", "cliente__razon_social",
+            "moneda_id", "moneda__codigo_iso",
+            "vendedor_id", "vendedor__first_name", "vendedor__last_name", "vendedor__email",
+        )
         return qs
 
     def _asignar_folio_pedido(self, pedido, empresa):
@@ -2642,6 +2641,69 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             )
         return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
 
+    # --- Modo servidor del listado (EC-811) -----------------------------------
+    # Las tres acciones parten de ``self.get_queryset()``: el alcance es el del
+    # listado (y el de la subclase, si la hubiera), nunca una copia de él.
+
+    @extend_schema(
+        summary="Opciones del filtro de cliente del listado de cotizaciones",
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="opciones")
+    def opciones(self, request):
+        """Clientes presentes en las cotizaciones que el usuario ve, más "Sin
+        cliente" si alguna no tiene, en una consulta. No reaccionan a los filtros
+        (como ``pedidos/opciones/``)."""
+        validar_parametros(request, set())
+        return Response(cotizaciones_listado.opciones(self.get_queryset()))
+
+    @extend_schema(
+        summary="KPIs del listado de cotizaciones con sus filtros",
+        parameters=PARAMETROS_FILTRO_COTIZACIONES,
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="kpis")
+    def kpis(self, request):
+        """Conteos por estatus y ``gran_total`` por moneda con los mismos filtros que
+        el listado (``cotizaciones_listado.ACCIONES_FILTRADAS``), en una consulta.
+        Sin ``ordering``/``limit``/``offset``: un parámetro que no es filtro → 400."""
+        validar_parametros(request, cotizaciones_listado.PARAMETROS_FILTRO)
+        return Response({"generado_en": timezone.now(), **cotizaciones_listado.kpis(self.get_queryset())})
+
+    @extend_schema(
+        summary="Tablero de cotizaciones: primeras N de cada estatus y su total",
+        parameters=[
+            *PARAMETROS_FILTRO_COTIZACIONES,
+            OpenApiParameter("por_columna", OpenApiTypes.INT, description=(
+                f"Cotizaciones por columna, 1-{cotizaciones_listado.POR_COLUMNA_MAXIMO} "
+                f"(default {cotizaciones_listado.POR_COLUMNA_DEFECTO}). "
+                "Las siguientes de una columna: el listado con `?estatus=N&limit=…&offset=…` y los mismos filtros."
+            )),
+        ],
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="tablero")
+    def tablero(self, request):
+        """Las 5 columnas del tablero en una respuesta y DOS consultas: la ventana
+        ligera (ids + total por estatus, ``cotizaciones_listado.ventana_tablero``) y
+        las filas del listado por id, con sus mismas anotaciones y serializer. Sin
+        ``?ordering=``: cada columna va en el orden por defecto del listado, el
+        mismo que sigue "ver más" con ``?estatus=N&offset=k``."""
+        validar_parametros(request, cotizaciones_listado.PARAMETROS_FILTRO | {"por_columna"})
+        por_columna = cotizaciones_listado.por_columna_param(request)
+        ventana = cotizaciones_listado.ventana_tablero(self.get_queryset(), por_columna)
+        filas = {}
+        if ventana:
+            # Otra vez por ``get_queryset()`` (alcance y filtros) aunque los ids ya
+            # salen de él: no cuesta consulta y no depende de que lo sigan haciendo.
+            qs = self._anotar_listado(self.get_queryset().filter(pk__in=[pk for pk, _, _ in ventana]))
+            datos = CotizacionDashboardItemSerializer(qs, many=True, context=self.get_serializer_context()).data
+            filas = {fila["id"]: fila for fila in datos}
+        return Response({
+            "por_columna": por_columna,
+            "columnas": cotizaciones_listado.columnas_tablero(ventana, filas),
+        })
+
 
 class CotizacionDetalleViewSet(viewsets.ModelViewSet):
     queryset = CotizacionDetalle.objects.all()
@@ -4398,6 +4460,14 @@ class MesaControlViewSet(CotizacionViewSet):
     """
 
     http_method_names = ["get", "post"]
+
+    # Las acciones del modo servidor del listado de Ventas (EC-811) no se publican
+    # aquí: exponerlas en Mesa de Control no se ha decidido. Con ``None`` DRF no
+    # registra la ruta, y ``/mesa-control/kpis/`` cae en el detalle con un pk no
+    # numérico → 404.
+    opciones = None
+    kpis = None
+    tablero = None
 
     def get_queryset(self):
         user = self.request.user
