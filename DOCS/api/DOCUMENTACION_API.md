@@ -690,7 +690,7 @@ Permite consultar el inventario actual.
   - `almacen_id`: opcional si el usuario quiere un almacén específico; si se omite, regresa todos los almacenes visibles para el usuario
 - **Paginación**: aplica únicamente sobre `results` (el detalle por almacén/producto/variante). `fecha_inicio`, `fecha_final`, `filtros`, `resumen` y `resumen_por_almacen` son agregados de todo el periodo/consulta, no solo de la página actual.
   - `page`: opcional, número de página (default `1`)
-  - `page_size`: opcional, tamaño de página (default `200`, máximo `2000`)
+  - `page_size`: opcional, tamaño de página (default `200`, sin máximo). El reporte se calcula completo en cada página; para descargarlo entero usar `exportar/` (abajo).
 - **Fórmula de cierre**:
   - `existencia_final = existencia_inicial + entradas - salidas`
   - `costo_total_existencia_final = sum(existencia_final * costo_unitario_final)`
@@ -752,6 +752,12 @@ Permite consultar el inventario actual.
 
   - `count`/`next`/`previous`/`results` son la paginación estándar de DRF sobre el arreglo de detalle (antes expuesto como `detalle`).
   - `fecha_inicio`, `fecha_final`, `filtros`, `resumen` y `resumen_por_almacen` se mantienen igual que antes de paginar: reflejan todo el resultado filtrado, no cambian entre páginas.
+  - `filtros.almacen_id`: sin filtro de almacén trae el almacén de la ÚLTIMA fila del reporte, no `null` (comportamiento histórico que se conserva; no usarlo para saber si se filtró).
+
+- **Exportar a PDF o XLSX (EC-814)**: `GET /api/v1/inventarios/existencias/reporte-existencias-periodo/exportar/?formato=pdf|xlsx`
+  - Mismos query params, alcance (empresa + sucursales del usuario) y 400 que el JSON (`fecha_inicio`/`fecha_final` requeridos; `almacen`, `empresa`, `sucursal`, `producto`, `producto_variante` y sus alias `*_id`), con el reporte completo (sin `page`/`page_size`). `formato`: `pdf` (default) o `xlsx`; otro valor → `400 {"formato": ...}`.
+  - Mismo contenido que el PDF que armaba el front: A4 horizontal; encabezado con almacén, filtros aplicados, periodo, registros y fecha de generación (hora de México); resumen del periodo; columnas SKU, Producto, Color, Talla, Almacén, Exist. Inicial, Entradas, Salidas, Exist. Final, Costo Unitario, Costo Total. Importes sin símbolo de moneda. En XLSX las cantidades e importes son números.
+  - Archivo: `reporte-existencias-{código de almacén|todos}-{fecha_inicio}-a-{fecha_final}.{pdf|xlsx}` en `Content-Disposition: attachment`. Para leer el nombre desde el navegador, CORS tendría que exponer `Content-Disposition` (hoy no lo expone); el front puede seguir armando el suyo.
 
 - **Reporte de existencias + producción + compras (mesa de control)**: `GET /api/v1/inventarios/existencias/reporte-existencias-produccion-compras/`
 - **Para qué sirve**: reemplaza el Excel manual que mesa de control usaba para dar seguimiento a cuándo van a llegar las órdenes de producción y las compras pendientes de un SKU. Por producto muestra, con desglose por talla, lo disponible en almacenes de Producto Terminado y lo que ya está en producción; y lo que viene pendiente de compra (total y, en renglones por SKU, por talla) — cada uno con su folio, fecha de entrega estimada y comentarios, para saber cuándo llega sin cruzar pantallas de producción y compras.
@@ -996,6 +1002,11 @@ Historial operativo de entradas, salidas y ajustes.
     ]
   }
   ```
+
+- **Exportar a PDF o XLSX (EC-814)**: `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/exportar/?formato=pdf|xlsx`
+  - Mismos query params, alcance y 400 que el JSON (`tipo_movimiento`, `fecha_inicio`, `fecha_final` requeridos; `almacen`/`almacen_id` opcional), con el reporte completo (sin `page`/`page_size`). `formato`: `pdf` (default) o `xlsx`; otro valor → `400 {"formato": ...}`.
+  - Columnas: Fecha (hora de México), Tipo, Producto (`producto_nombre`, si no `producto_base_nombre`), Almacén, Ubicación, Cantidad, Costo Total, Usuario. Encabezado con tipo, almacén, periodo, registros y fecha de generación; resumen con `total_movimientos`, `total_registros` y `total_cantidad`.
+  - Archivo: `reporte-movimientos-{tipo}-{almacén|todos}-{fecha_inicio}-a-{fecha_final}.{pdf|xlsx}` en `Content-Disposition: attachment`.
 
 ### Operaciones de Inventario
 

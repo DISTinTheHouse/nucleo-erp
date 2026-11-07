@@ -5,6 +5,7 @@ from decimal import Decimal
 from django.db import models, transaction
 from django.db.models import ExpressionWrapper, F, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
+from django.http import HttpResponse
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers as drf_serializers
@@ -15,6 +16,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from inventarios.services import costeo
+from inventarios.services import reportes_exportacion as exportacion_mod
 from inventarios.models import (
     Almacen,
     TipoAlmacen,
@@ -152,6 +154,30 @@ def almacenes_en_alcance(user):
     return Almacen.objects.filter(
         models.Q(empresa_id__in=empresa_ids) & models.Q(sucursal_id__in=sucursal_ids)
     )
+
+
+# --- Exportación de los reportes por periodo (EC-814) ---------------------------
+
+PARAMETRO_FORMATO_EXPORTACION = OpenApiParameter(
+    "formato", OpenApiTypes.STR, enum=list(exportacion_mod.FORMATOS), description="pdf (por defecto) o xlsx.",
+)
+PARAMETROS_FECHAS_REPORTE = [
+    OpenApiParameter("fecha_inicio", OpenApiTypes.DATE, required=True, description="YYYY-MM-DD."),
+    OpenApiParameter("fecha_final", OpenApiTypes.DATE, required=True, description="YYYY-MM-DD."),
+]
+RESPUESTAS_EXPORTACION = {
+    (200, exportacion_mod.CONTENT_TYPES["pdf"]): OpenApiTypes.BINARY,
+    (200, exportacion_mod.CONTENT_TYPES["xlsx"]): OpenApiTypes.BINARY,
+    400: OpenApiResponse(description="Validación (formato, fechas, tipo_movimiento)."),
+}
+
+
+def respuesta_archivo(exportacion):
+    """Descarga (``attachment``) con el nombre del reporte y su rango de fechas,
+    como el ``pdf-fusionado/`` de facturas de proveedor."""
+    response = HttpResponse(exportacion.contenido, content_type=exportacion.content_type)
+    response["Content-Disposition"] = f'attachment; filename="{exportacion.nombre_archivo}"'
+    return response
 
 
 class ReporteExistenciasPeriodoPagination(PageNumberPagination):
@@ -389,6 +415,29 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         response.data["resumen"] = reporte["resumen"]
         response.data["resumen_por_almacen"] = reporte["resumen_por_almacen"]
         return response
+
+    @extend_schema(
+        summary="Reporte de existencias por periodo en PDF o XLSX",
+        description=(
+            "Mismos parámetros, alcance y validación que reporte-existencias-periodo/, "
+            "con el reporte completo (sin paginar)."
+        ),
+        parameters=[
+            PARAMETRO_FORMATO_EXPORTACION,
+            *PARAMETROS_FECHAS_REPORTE,
+            OpenApiParameter("almacen", OpenApiTypes.INT, description="Almacén (alias almacen_id)."),
+            OpenApiParameter("empresa", OpenApiTypes.INT, description="Empresa (alias empresa_id)."),
+            OpenApiParameter("sucursal", OpenApiTypes.INT, description="Sucursal (alias sucursal_id)."),
+            OpenApiParameter("producto", OpenApiTypes.INT, description="Producto (alias producto_id)."),
+            OpenApiParameter("producto_variante", OpenApiTypes.INT, description="Variante (alias producto_variante_id)."),
+        ],
+        responses=RESPUESTAS_EXPORTACION,
+    )
+    @action(detail=False, methods=["get"], url_path="reporte-existencias-periodo/exportar")
+    def reporte_existencias_periodo_exportar(self, request):
+        formato = exportacion_mod.formato_requerido(request.query_params)
+        reporte = reportes_mod.reporte_existencias(request.user, request.query_params)
+        return respuesta_archivo(exportacion_mod.exportar_existencias(reporte, formato))
 
     @action(detail=False, methods=["get"], url_path="reporte-existencias-produccion-compras")
     def reporte_existencias_produccion_compras(self, request):
@@ -1217,6 +1266,29 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         response.data["filtros"] = {"almacen_id": reporte["almacen_id"]}
         response.data["resumen"] = reporte["resumen"]
         return response
+
+    @extend_schema(
+        summary="Reporte de movimientos por periodo en PDF o XLSX",
+        description=(
+            "Mismos parámetros, alcance y validación que reporte-movimientos-periodo/, "
+            "con el reporte completo (sin paginar)."
+        ),
+        parameters=[
+            PARAMETRO_FORMATO_EXPORTACION,
+            OpenApiParameter(
+                "tipo_movimiento", OpenApiTypes.STR, required=True,
+                enum=list(reportes_mod.TIPOS_MOVIMIENTO), description="Tipo de movimiento.",
+            ),
+            *PARAMETROS_FECHAS_REPORTE,
+            OpenApiParameter("almacen", OpenApiTypes.INT, description="Almacén (alias almacen_id)."),
+        ],
+        responses=RESPUESTAS_EXPORTACION,
+    )
+    @action(detail=False, methods=["get"], url_path="reporte-movimientos-periodo/exportar")
+    def reporte_movimientos_periodo_exportar(self, request):
+        formato = exportacion_mod.formato_requerido(request.query_params)
+        reporte = reportes_mod.reporte_movimientos(request.user, request.query_params)
+        return respuesta_archivo(exportacion_mod.exportar_movimientos(reporte, formato))
 
     def _auxiliar_id(self, qp, *nombres):
         # A diferencia de ``_report_to_int``, un id no numérico es 400: ignorarlo

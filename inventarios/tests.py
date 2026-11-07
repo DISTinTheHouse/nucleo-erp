@@ -1825,3 +1825,146 @@ class ReporteMovimientosPeriodoTests(ReportesPeriodoBase):
         resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": "SALIDA", "fecha_inicio": ""})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("fecha_inicio", resp.json())
+
+
+REPORTE_EXISTENCIAS_EXPORTAR_URL = f"{REPORTE_EXISTENCIAS_PERIODO_URL}exportar/"
+REPORTE_MOVIMIENTOS_EXPORTAR_URL = f"{REPORTE_MOVIMIENTOS_PERIODO_URL}exportar/"
+CONTENT_TYPE_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
+    """``.../exportar/?formato=pdf|xlsx`` de ambos reportes (EC-814): mismo
+    cálculo, alcance y validación que el JSON."""
+
+    def _texto_pdf(self, contenido):
+        import io
+        from pypdf import PdfReader
+        return "\n".join(pagina.extract_text() for pagina in PdfReader(io.BytesIO(contenido)).pages)
+
+    def _hoja(self, contenido):
+        import io
+        from openpyxl import load_workbook
+        return load_workbook(io.BytesIO(contenido), read_only=True).active
+
+    def _tabla_xlsx(self, contenido, primer_encabezado):
+        filas = [list(f) for f in self._hoja(contenido).iter_rows(values_only=True)]
+        inicio = next(i for i, f in enumerate(filas) if f and f[0] == primer_encabezado)
+        return filas[inicio], [f for f in filas[inicio + 1:] if any(v is not None for v in f)]
+
+    def test_existencias_pdf(self):
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"almacen": self.a["almacen"].pk})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "application/pdf")
+        self.assertEqual(
+            resp["Content-Disposition"],
+            'attachment; filename="reporte-existencias-acme-rp-pt-2026-01-01-a-2026-06-30.pdf"',
+        )
+        self.assertTrue(resp.content.startswith(b"%PDF"))
+        texto = self._texto_pdf(resp.content)
+        for esperado in (
+            "Reporte de Inventario", "PRODUCTO TERMINADO acme-rp (acme-rp-PT)", "1/1/2026 — 30/6/2026",
+            "RESUMEN DEL PERIODO", "Exist. Final", "acme-rp-AZ-M", "55.00", "Página 1 de 1",
+        ):
+            self.assertIn(esperado, texto)
+
+    def test_existencias_xlsx_con_numeros_reales(self):
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], CONTENT_TYPE_XLSX)
+        self.assertIn("reporte-existencias-todos-2026-01-01-a-2026-06-30.xlsx", resp["Content-Disposition"])
+        encabezado, filas = self._tabla_xlsx(resp.content, "SKU")
+        self.assertEqual(encabezado[:6], ["SKU", "Producto", "Color", "Talla", "Almacén", "Exist. Inicial"])
+        self.assertEqual(len(filas), 1)
+        self.assertEqual(filas[0][0], "acme-rp-AZ-M")
+        self.assertEqual(filas[0][5:], [8, 3, 0, 11, 5, 55])
+        self.assertIsInstance(filas[0][8], (int, float))
+
+    def test_movimientos_pdf_y_xlsx(self):
+        self._entrada_por_ajuste(self.a)
+        params = {"tipo_movimiento": "ENTRADA", "almacen": self.a["almacen"].pk}
+        resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_EXPORTAR_URL, params)
+        self.assertEqual((resp.status_code, resp["Content-Type"]), (200, "application/pdf"))
+        self.assertIn(
+            'filename="reporte-movimientos-entrada-acme-rp-pt-2026-01-01-a-2026-06-30.pdf"', resp["Content-Disposition"],
+        )
+        texto = self._texto_pdf(resp.content)
+        for esperado in ("Reporte de Movimientos de Inventario", "Entrada · PRODUCTO TERMINADO acme-rp", "Ana acme-rp", "01 feb 2026"):
+            self.assertIn(esperado, texto)
+
+        resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_EXPORTAR_URL, {**params, "formato": "XLSX"})
+        self.assertEqual((resp.status_code, resp["Content-Type"]), (200, CONTENT_TYPE_XLSX))
+        encabezado, filas = self._tabla_xlsx(resp.content, "Fecha")
+        self.assertEqual(encabezado, ["Fecha", "Tipo", "Producto", "Almacén", "Ubicación", "Cantidad", "Costo Total", "Usuario"])
+        self.assertEqual(len(filas), 2)
+        self.assertEqual([f[5] for f in filas], [2, 10])
+        # Hora de México, sin zona (Excel no la guarda): 18:00 UTC = 12:00.
+        self.assertEqual(filas[-1][0], datetime(2026, 2, 1, 12, 0))
+
+    def test_validacion_igual_que_el_json(self):
+        casos = (
+            (REPORTE_EXISTENCIAS_EXPORTAR_URL, REPORTE_EXISTENCIAS_PERIODO_URL, {"fecha_inicio": ""}),
+            (REPORTE_EXISTENCIAS_EXPORTAR_URL, REPORTE_EXISTENCIAS_PERIODO_URL, {"fecha_final": "2025-01-01"}),
+            (REPORTE_MOVIMIENTOS_EXPORTAR_URL, REPORTE_MOVIMIENTOS_PERIODO_URL, {}),
+            (REPORTE_MOVIMIENTOS_EXPORTAR_URL, REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": "SALIDA", "fecha_final": ""}),
+        )
+        for exportar, json_url, params in casos:
+            for formato in ("pdf", "xlsx"):
+                resp = self._get(self.a["usuario"], exportar, {**params, "formato": formato})
+                esperado = self._get(self.a["usuario"], json_url, params)
+                self.assertEqual(resp.status_code, 400, (exportar, params))
+                self.assertEqual(resp.json(), esperado.json(), (exportar, params))
+
+    def test_formato_invalido_es_400(self):
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "csv"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("formato", resp.json())
+
+    def test_aislamiento_por_empresa_y_sucursal(self):
+        self._entrada_por_ajuste(self.a)
+        # Empresa ajena: el almacén de A no abre el alcance de B.
+        resp = self._get(self.b["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx", "almacen": self.a["almacen"].pk})
+        _, filas = self._tabla_xlsx(resp.content, "SKU")
+        self.assertEqual(filas, [])
+        texto = self._texto_pdf(self._get(self.b["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"almacen": self.a["almacen"].pk}).content)
+        self.assertIn("Sin existencias en el periodo.", texto)
+        self.assertNotIn("acme-rp", texto.replace(f"Almacén #{self.a['almacen'].pk}", ""))
+        # Misma empresa, sucursal sin acceso: el almacén norte no sale.
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx"})
+        _, filas = self._tabla_xlsx(resp.content, "SKU")
+        self.assertEqual([f[4] for f in filas], ["PRODUCTO TERMINADO acme-rp"])
+        # Movimientos de otra empresa.
+        resp = self._get(
+            self.b["usuario"], REPORTE_MOVIMIENTOS_EXPORTAR_URL,
+            {"formato": "xlsx", "tipo_movimiento": "ENTRADA", "almacen": self.a["almacen"].pk},
+        )
+        _, filas = self._tabla_xlsx(resp.content, "Fecha")
+        self.assertEqual(filas, [])
+        texto = self._texto_pdf(self._get(
+            self.b["usuario"], REPORTE_MOVIMIENTOS_EXPORTAR_URL, {"tipo_movimiento": "ENTRADA"},
+        ).content)
+        self.assertNotIn("acme-rp", texto)
+        self.assertIn("globex-rp", texto)
+
+    def test_muchas_filas_se_paginan_con_encabezado(self):
+        variantes = [
+            ProductoVariante(
+                producto=self.a["producto"], empresa=self.a["empresa"], color=self.color, talla=self.talla,
+                sku=f"acme-rp-X{i:03d}", precio_base="1",
+            )
+            for i in range(120)
+        ]
+        ProductoVariante.objects.bulk_create(variantes)
+        Existencia.objects.bulk_create([
+            Existencia(almacen=self.a["almacen"], producto=self.a["producto"], producto_variante=v, cantidad="1")
+            for v in variantes
+        ])
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL)
+        from pypdf import PdfReader
+        import io
+        paginas = PdfReader(io.BytesIO(resp.content)).pages
+        self.assertGreater(len(paginas), 2)
+        for pagina in paginas:
+            texto = pagina.extract_text()
+            self.assertIn("Exist. Final", texto)
+            self.assertIn(f"de {len(paginas)}", texto)
+        self.assertIn("acme-rp-X119", self._texto_pdf(resp.content))
