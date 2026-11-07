@@ -4467,6 +4467,14 @@ class MesaControlViewSet(CotizacionViewSet):
 
     http_method_names = ["get", "post"]
 
+    # Las acciones del modo servidor del listado de Ventas (EC-811) no se publican
+    # aquí: exponerlas en Mesa de Control no se ha decidido. Con ``None`` DRF no
+    # registra la ruta, y ``/mesa-control/kpis/`` cae en el detalle con un pk no
+    # numérico → 404.
+    opciones = None
+    kpis = None
+    tablero = None
+
     def get_queryset(self):
         user = self.request.user
         empresa = getattr(user, "empresa", None)

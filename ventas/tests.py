@@ -9575,3 +9575,32 @@ class CotizacionTableroTests(_CotizacionesModoServidorBase, TestCase):
         with self.assertNumQueries(0):
             nada = self._tablero({"estatus": "9"}, self.sin_empresa)
         self.assertEqual([(c["total"], c["results"]) for c in nada["columnas"]], [(0, [])] * 5)
+
+
+class MesaControlSinAccionesModoServidorTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``opciones/``, ``kpis/`` y ``tablero/`` no se publican en
+    ``/mesa-control/`` (heredaría de ``CotizacionViewSet``); su listado no cambia y
+    las acciones que ya heredaba siguen."""
+
+    def test_acciones_nuevas_responden_404(self):
+        for accion in ("opciones", "kpis", "tablero"):
+            for user in (self.admin, self.admin_b):
+                with self.subTest(accion=accion, user=user.username):
+                    self.assertEqual(self._get(f"{MESA_CONTROL_URL}{accion}/", user=user).status_code, 404)
+                    self.assertEqual(self._get(f"{COTIZACIONES_URL}{accion}/", user=user).status_code, 200)
+
+    def test_no_estan_entre_sus_rutas(self):
+        from ventas.api.views import MesaControlViewSet
+
+        acciones = {a.__name__ for a in MesaControlViewSet.get_extra_actions()}
+        self.assertFalse({"opciones", "kpis", "tablero"} & acciones)
+        # Las heredadas de antes siguen.
+        self.assertLessEqual({"onboarding", "enviar_revision", "autorizar", "rechazar"}, acciones)
+        self.assertLessEqual(
+            {"opciones", "kpis", "tablero"}, {a.__name__ for a in CotizacionViewSet.get_extra_actions()},
+        )
+
+    def test_listado_y_detalle_de_mesa_sin_cambios(self):
+        self.assertEqual(self._ids(url=MESA_CONTROL_URL), self._pks("ana_zeta_usd_2"))
+        pk = self.c["ana_zeta_usd_2"].pk
+        self.assertEqual(self._get(f"{MESA_CONTROL_URL}{pk}/").status_code, 200)
