@@ -527,7 +527,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                 ),
             )
         if getattr(self, "action", None) == "list":
-            queryset = self._filtrar_listado(queryset)
+            queryset = self._filtrar_listado(queryset.select_related("pedido"))
         return queryset
 
     def _filtrar_listado(self, queryset):
@@ -639,6 +639,24 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # confirmado) viven en ``OrdenProduccionSerializer.validate_pedido``.
         with transaction.atomic():
             for detalle in serializer.validated_data.get('orden_produccion_detalle', []):
+                variante_produccion = detalle.get('variante_produccion')
+                if variante_produccion is not None:
+                    # Muestra sin catálogo: su BOM activo (el más reciente si
+                    # hubiera más de uno).
+                    bom = (
+                        ListaMaterialBom.objects.filter(
+                            variante_produccion=variante_produccion, activo=True, empresa=empresa,
+                        ).order_by('-bom_id').first()
+                    )
+                    if bom is None:
+                        raise ValidationError({
+                            'orden_produccion_detalle': (
+                                f"No existe un BOM activo para la variante de producción "
+                                f"{variante_produccion.sku or variante_produccion.pk} en la empresa actual."
+                            )
+                        })
+                    detalle['bom'] = bom
+                    continue
                 producto_variante = detalle.get('producto_variante')
                 producto_variante_id = getattr(producto_variante, 'pk', None)
                 try:
@@ -2185,6 +2203,54 @@ def _contadores_tallas_especiales():
     }
 
 
+def _resumen_pedido_especial():
+    """Anotaciones del listado de pedidos especiales, todas en la misma consulta.
+
+    - ``prendas_total``: líneas de muestra del pedido.
+    - ``piezas_total``: Σ cantidad de sus tallas con cantidad > 0.
+    - ``lleva_*_any``: alguna de esas tallas lleva el servicio.
+    - ``ops_json``: OP activas ligadas al pedido (``ArraySubquery`` de
+      ``JSONObject``), más antigua primero.
+    """
+    from django.contrib.postgres.expressions import ArraySubquery
+    from django.db.models import DecimalField
+    from django.db.models.functions import JSONObject
+
+    def base():
+        return PedidoDetalleTalla.objects.filter(
+            pedido_detalle__pedido_id=OuterRef("pk"),
+            cantidad__gt=0,
+        ).exclude(pedido_detalle__producto_nombre_externo__isnull=True).exclude(
+            pedido_detalle__producto_nombre_externo=""
+        )
+
+    prendas = (
+        _detalles_especiales_qs().filter(pedido_id=OuterRef("pk")).order_by()
+        .values("pedido_id").annotate(n=Count("pk")).values("n")[:1]
+    )
+    piezas = (
+        base().order_by().values("pedido_detalle__pedido_id")
+        .annotate(t=Sum("cantidad")).values("t")[:1]
+    )
+    ops = (
+        OrdenProduccion.objects.filter(pedido_id=OuterRef("pk"), activo=True)
+        .order_by("op_id")
+        .values(json=JSONObject(op_id="op_id", folio_op="folio_op", estatus_op="estatus_op"))
+    )
+    return {
+        "prendas_total": Coalesce(Subquery(prendas, output_field=IntegerField()), Value(0)),
+        "piezas_total": Coalesce(
+            Subquery(piezas, output_field=DecimalField(max_digits=18, decimal_places=4)),
+            Value(Decimal("0")),
+            output_field=DecimalField(max_digits=18, decimal_places=4),
+        ),
+        "lleva_bordado_any": Exists(base().filter(lleva_bordado=True)),
+        "lleva_reflejante_any": Exists(base().filter(lleva_reflejante=True)),
+        "lleva_corte_manga_any": Exists(base().filter(lleva_corte_manga=True)),
+        "ops_json": ArraySubquery(ops),
+    }
+
+
 def _repartir(total, renglones):
     """Reparte ``total`` piezas entre ``[(clave, programado)]`` en proporción a
     lo programado, en enteros (residuo mayor), sin pasar de lo programado.
@@ -2308,6 +2374,61 @@ def _avance_por_talla_especial(pedido, tallas):
     return out
 
 
+class VarianteProduccionViewSet(mixins.ListModelMixin, GenericViewSet):
+    """``GET /produccion/variantes-produccion/``: variantes de producción activas
+    de la empresa del usuario (superusuario incluido, como el resto de OP/BOM),
+    para elegir el ``variante_produccion_id`` de un renglón de OP.
+
+    Filtros: ``?pedido=<id>``, ``?tiene_bom=true|false``, ``?search=`` (SKU o
+    nombre). Una sola consulta (JOINs + ``Exists`` del BOM activo); paginación
+    opcional con ``?page``/``?page_size``.
+    """
+
+    def get_serializer_class(self):
+        from produccion.api.serializers import VarianteProduccionListSerializer
+        return VarianteProduccionListSerializer
+
+    def get_queryset(self):
+        empresa = getattr(self.request.user, "empresa", None)
+        if empresa is None:
+            return VarianteProductoProduccion.objects.none()
+        qs = (
+            variantes_produccion_activas().filter(empresa=empresa)
+            .select_related("talla", "color", "pedido_detalle__pedido")
+            .only(
+                "id", "sku", "nombre", "aplica_catalogo", "pedido_detalle",
+                "talla__nombre", "color__nombre",
+                "pedido_detalle__pedido_id", "pedido_detalle__pedido__folio",
+            )
+            .annotate(tiene_bom=Exists(
+                ListaMaterialBom.objects.filter(
+                    variante_produccion_id=OuterRef("pk"), activo=True, empresa=empresa,
+                )
+            ))
+            .order_by("-id")
+        )
+        params = self.request.query_params
+        pedido = entero_param(self.request, "pedido")
+        if pedido is not None:
+            qs = qs.filter(pedido_detalle__pedido_id=pedido)
+        tiene_bom = (params.get("tiene_bom") or "").strip().lower()
+        if tiene_bom in ("true", "1"):
+            qs = qs.filter(tiene_bom=True)
+        elif tiene_bom in ("false", "0"):
+            qs = qs.filter(tiene_bom=False)
+        search = (params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(Q(sku__icontains=search) | Q(nombre__icontains=search))
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        if "page" in request.query_params or "page_size" in request.query_params:
+            paginator = PaginacionOpcional()
+            page = paginator.paginate_queryset(self.get_queryset(), request, view=self)
+            return paginator.get_paginated_response(self.get_serializer(page, many=True).data)
+        return super().list(request, *args, **kwargs)
+
+
 class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
     """Pedidos con produccion especial (muestras sin SKU de catalogo).
 
@@ -2339,8 +2460,9 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             # programacion_conf) -- antes de eso, no hay compromiso de
             # entrega real sobre el que producción pueda planear.
             .filter(clasificacion__isnull=False, fecha_confirmacion__isnull=False)
-            .only("id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "empresa", "cotizacion")
+            .only("id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "created_at", "empresa", "cotizacion")
             .annotate(**_contadores_tallas_especiales())
+            .annotate(**(_resumen_pedido_especial() if self.action == "list" else {}))
             .order_by("-fecha_confirmacion", "-id")
         )
 

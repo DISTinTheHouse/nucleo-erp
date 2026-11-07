@@ -15,6 +15,7 @@ from produccion.api.views import (
     CorteMangaAvancesViewSet,
     OrdenesCorteMangaViewSet,
     PedidoEspecialViewSet,
+    VarianteProduccionViewSet,
 )
 
 router = routers.DefaultRouter()
@@ -32,6 +33,7 @@ router.register(r'reflejante-incidencias', ReflejanteIncidenciasViewSet)
 router.register(r'orden-corte-manga', OrdenesCorteMangaViewSet)
 router.register(r'corte-manga-avances', CorteMangaAvancesViewSet)
 router.register(r'pedidos-especiales', PedidoEspecialViewSet, basename='pedido-especial')
+router.register(r'variantes-produccion', VarianteProduccionViewSet, basename='variante-produccion')
 
 urlpatterns = [
     path('', include(router.urls)),
