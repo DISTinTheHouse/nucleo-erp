@@ -9373,3 +9373,95 @@ class CotizacionOpcionesTests(_CotizacionesModoServidorBase, TestCase):
             self._cotizacion(self.empresa, self.admin, otro, self.mxn, 1, "1.00", self.base)
         with self.assertNumQueries(1):
             self.assertEqual(len(self._opciones()["cliente"]), 8)
+
+
+class CotizacionKpisTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``GET /cotizaciones/kpis/``: conteos por estatus y ``gran_total`` por
+    moneda con los filtros del listado, en una consulta."""
+
+    URL = f"{COTIZACIONES_URL}kpis/"
+
+    def _kpis(self, params=None, user=None):
+        resp = self._get(params=params, user=user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertIn("generado_en", data)
+        return data
+
+    def _moneda(self, moneda, total, gran_total):
+        return {
+            "moneda_id": moneda.pk if moneda else None, "moneda": moneda.codigo_iso if moneda else None,
+            "total": total, "gran_total": gran_total,
+        }
+
+    def test_admin_por_estatus_y_por_moneda_con_moneda_nula(self):
+        data = self._kpis()
+        self.assertEqual(data["total"], 6)
+        self.assertEqual(data["por_moneda"], [
+            self._moneda(self.mxn, 4, "160.00"),
+            self._moneda(self.usd, 1, "50.00"),
+            self._moneda(None, 1, "7.00"),
+        ])
+        self.assertEqual(data["por_estatus"], [
+            {"estatus": 1, "estatus_label": "BORRADOR", "total": 1, "por_moneda": [self._moneda(self.mxn, 1, "100.00")]},
+            {"estatus": 2, "estatus_label": "EN REVISION", "total": 1, "por_moneda": [self._moneda(self.usd, 1, "50.00")]},
+            {"estatus": 3, "estatus_label": "AUTORIZADA", "total": 3, "por_moneda": [
+                self._moneda(self.mxn, 2, "40.00"), self._moneda(None, 1, "7.00"),
+            ]},
+            {"estatus": 4, "estatus_label": "RECHAZADA", "total": 1, "por_moneda": [self._moneda(self.mxn, 1, "20.00")]},
+            {"estatus": 5, "estatus_label": "CAMBIOS SOLICITADOS", "total": 0, "por_moneda": []},
+        ])
+
+    def test_coincide_con_el_listado_con_los_mismos_filtros(self):
+        for params in (
+            {}, {"cliente": self.acme.pk}, {"cliente": "sin_cliente"}, {"estatus": "3,4"},
+            {"vendedor": self.beto.pk}, {"q": "acme"}, {"fecha_desde": "2026-03-10", "fecha_hasta": "2026-03-10"},
+        ):
+            with self.subTest(params=params):
+                data = self._kpis(params)
+                self.assertEqual(data["total"], len(self._ids(params, url=COTIZACIONES_URL)))
+                self.assertEqual(sum(e["total"] for e in data["por_estatus"]), data["total"])
+                self.assertEqual(sum(m["total"] for m in data["por_moneda"]), data["total"])
+
+    def test_respeta_los_filtros(self):
+        data = self._kpis({"cliente": self.acme.pk})
+        self.assertEqual(data["por_moneda"], [self._moneda(self.mxn, 2, "130.00"), self._moneda(None, 1, "7.00")])
+        data = self._kpis({"estatus": "5"})
+        self.assertEqual((data["total"], data["por_moneda"]), (0, []))
+        self.assertEqual([e["total"] for e in data["por_estatus"]], [0, 0, 0, 0, 0])
+
+    def test_vendedor_contra_admin_y_otra_empresa(self):
+        ana = self._kpis(user=self.ana)
+        self.assertEqual(ana["total"], 3)
+        self.assertEqual(ana["por_moneda"], [self._moneda(self.mxn, 2, "110.00"), self._moneda(self.usd, 1, "50.00")])
+        # Pedir las de otro vendedor no amplía el alcance.
+        self.assertEqual(self._kpis({"vendedor": self.beto.pk}, self.ana)["total"], 0)
+        otra = self._kpis(user=self.admin_b)
+        self.assertEqual((otra["total"], otra["por_moneda"]), (1, [self._moneda(self.mxn, 1, "999.00")]))
+        self.assertEqual(self._kpis({"cliente": self.acme.pk}, self.admin_b)["total"], 0)
+        self.assertEqual(self._kpis({"cliente": self.secreto.pk})["total"], 0)
+
+    def test_sin_empresa_en_cero_aun_con_parametros_invalidos(self):
+        for params in ({}, {"estatus": "9", "cliente": "abc"}):
+            with self.subTest(params=params):
+                data = self._kpis(params, self.sin_empresa)
+                self.assertEqual((data["total"], data["por_moneda"]), (0, []))
+                self.assertEqual([e["total"] for e in data["por_estatus"]], [0, 0, 0, 0, 0])
+
+    def test_parametros_invalidos_400(self):
+        for params in (
+            {"ordering": "id"}, {"limit": "10"}, {"offset": "0"}, {"otro": "1"},
+            {"estatus": "9"}, {"cliente": "abc"}, {"fecha_desde": "basura"},
+        ):
+            with self.subTest(params=params):
+                self.assertEqual(self._get(params=params).status_code, 400)
+        self.assertEqual(self._get(params={"format": "json"}).status_code, 200)
+
+    def test_una_consulta_que_no_crece_con_las_filas(self):
+        self._kpis()
+        with self.assertNumQueries(1):
+            self._kpis()
+        for i in range(6):
+            self._cotizacion(self.empresa, self.ana, self.acme, (self.mxn, self.usd, None)[i % 3], 5, "1.00", self.base)
+        with self.assertNumQueries(1):
+            self.assertEqual(self._kpis()["total"], 12)

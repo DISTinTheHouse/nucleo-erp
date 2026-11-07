@@ -2662,6 +2662,19 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         validar_parametros(request, set())
         return Response(cotizaciones_listado.opciones(self.get_queryset()))
 
+    @extend_schema(
+        summary="KPIs del listado de cotizaciones con sus filtros",
+        parameters=PARAMETROS_FILTRO_COTIZACIONES,
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="kpis")
+    def kpis(self, request):
+        """Conteos por estatus y ``gran_total`` por moneda con los mismos filtros que
+        el listado (``cotizaciones_listado.ACCIONES_FILTRADAS``), en una consulta.
+        Sin ``ordering``/``limit``/``offset``: un parámetro que no es filtro → 400."""
+        validar_parametros(request, cotizaciones_listado.PARAMETROS_FILTRO)
+        return Response({"generado_en": timezone.now(), **cotizaciones_listado.kpis(self.get_queryset())})
+
 
 class CotizacionDetalleViewSet(viewsets.ModelViewSet):
     queryset = CotizacionDetalle.objects.all()

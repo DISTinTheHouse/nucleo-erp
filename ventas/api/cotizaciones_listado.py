@@ -15,9 +15,10 @@ serializan filas.
 """
 
 from datetime import datetime, time, timedelta
+from decimal import Decimal
 
 from django.contrib.postgres.aggregates import ArrayAgg
-from django.db.models import Count, F, Q, Value
+from django.db.models import Count, F, Q, Sum, Value
 from django.db.models.functions import Coalesce, JSONObject, NullIf, Trim
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -30,11 +31,15 @@ from ventas.models import Cotizacion
 # Acciones que pasan por los filtros del listado en ``CotizacionViewSet._apply_filters``.
 # Las de detalle no: un filtro suelto en una acción de detalle (``get_object()``
 # también pasa por ``get_queryset``) puede dar 404 sobre una cotización visible.
-ACCIONES_FILTRADAS = ("list",)
+ACCION_KPIS = "kpis"
+ACCIONES_FILTRADAS = ("list", ACCION_KPIS)
 
 ESTATUS_VALIDOS = frozenset(e for e, _ in Cotizacion.CHOICES_ESTATUS)
 SIN_CLIENTE = "sin_cliente"
 ETIQUETA_SIN_CLIENTE = "Sin cliente"
+CENTAVOS = Decimal("0.01")
+# Parámetros de ``filtrar`` (los que aceptan ``kpis/`` y ``tablero/``).
+PARAMETROS_FILTRO = frozenset({"q", "estatus", "cliente", "vendedor", "fecha_desde", "fecha_hasta"})
 
 
 def cliente_param(request):
@@ -101,6 +106,47 @@ def filtrar(request, qs):
             q_filter = q_filter | Q(id=int(q))
         qs = qs.filter(q_filter)
     return qs
+
+
+# --- KPIs --------------------------------------------------------------------------
+
+
+def _importe(valor):
+    """Texto con dos decimales, como ``gran_total`` en el listado."""
+    return str((valor or Decimal("0")).quantize(CENTAVOS))
+
+
+def kpis(qs):
+    """Conteos por estatus y ``gran_total`` por moneda del conjunto filtrado, en UNA
+    consulta agrupada por ``(estatus, moneda)``. ``por_estatus`` trae siempre los 5
+    estatus del catálogo (en cero si no hay); la moneda nula es un grupo más
+    (``moneda_id``/``moneda`` en ``null``) y va al final. ``order_by()`` antes de
+    agrupar: el orden por defecto del listado entraría al ``GROUP BY``."""
+    filas = list(
+        qs.order_by()
+        .values("estatus", "moneda_id", "moneda__codigo_iso")
+        .annotate(total=Count("id"), gran_total=Sum("gran_total"))
+        .order_by("moneda__codigo_iso", "moneda_id", "estatus")
+    )
+    por_moneda = {}
+    por_estatus = {e: {"total": 0, "por_moneda": []} for e in ESTATUS_VALIDOS}
+    for f in filas:
+        moneda = {"moneda_id": f["moneda_id"], "moneda": f["moneda__codigo_iso"]}
+        acumulado = por_moneda.setdefault(f["moneda_id"], {**moneda, "total": 0, "gran_total": Decimal("0")})
+        acumulado["total"] += f["total"]
+        acumulado["gran_total"] += f["gran_total"] or Decimal("0")
+        bloque = por_estatus[f["estatus"]]
+        bloque["total"] += f["total"]
+        bloque["por_moneda"].append({**moneda, "total": f["total"], "gran_total": _importe(f["gran_total"])})
+    etiquetas = dict(Cotizacion.CHOICES_ESTATUS)
+    return {
+        "total": sum(f["total"] for f in filas),
+        "por_estatus": [
+            {"estatus": e, "estatus_label": etiquetas[e], **por_estatus[e]}
+            for e, _ in Cotizacion.CHOICES_ESTATUS
+        ],
+        "por_moneda": [{**m, "gran_total": _importe(m["gran_total"])} for m in por_moneda.values()],
+    }
 
 
 # --- Opciones de filtros -----------------------------------------------------------
