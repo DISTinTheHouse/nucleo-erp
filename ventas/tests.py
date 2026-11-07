@@ -9803,3 +9803,64 @@ class CotizacionEstatusFueraDeCatalogoTests(_CotizacionesModoServidorBase, TestC
         self.assertEqual(sum(c["total"] for c in columnas), 6)
         # El listado la sigue trayendo, como antes.
         self.assertIn(self.rara.pk, self._ids())
+
+
+class CotizacionImporteSinIvaSqlTests(TestCase):
+    """EC-811 (revisión): ``cotizaciones_listado.IMPORTE_SIN_IVA`` (el orden por
+    importe, en SQL) es la misma cuenta que ``serializers.importes_iva`` (lo que pinta
+    el listado). Si alguna de las dos cambia, esta prueba falla.
+
+    La única diferencia admitida es la de redondeo: ``importes_iva`` usa
+    ``ROUND_HALF_EVEN`` y Postgres redondea la mitad hacia arriba, así que sólo
+    difieren en un empate EXACTO de medio centavo, que sólo existe cuando
+    ``100 + iva`` es múltiplo de 8 (IVA 4, 12, 20, 100…; nunca con 0, 8, 16 u 80).
+    ``gran_total`` es NOT NULL (default 0): el caso ``None`` de ``importes_iva`` no
+    llega desde la base; lo cubre el 0."""
+
+    IVAS = (-1, 0, 3, 4, 8, 12, 15, 16, 20, 80, 100)
+    IMPORTES = (
+        "0.00", "0.01", "0.02", "0.05", "0.13", "0.99", "1.00", "1.16", "1.17", "1.25",
+        "99.99", "100.00", "108.00", "116.00", "116.01", "180.00", "12345.67", "99999999.99",
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        empresa = Empresa.objects.create(codigo="ec811-iva", razon_social="EC811 IVA SA")
+        Cotizacion.objects.bulk_create([
+            Cotizacion(empresa=empresa, gran_total=Decimal(total), iva=iva)
+            for iva in cls.IVAS for total in cls.IMPORTES
+        ])
+
+    def test_sql_igual_a_importes_iva(self):
+        from ventas.api.cotizaciones_listado import IMPORTE_SIN_IVA
+        from ventas.api.serializers import importes_iva
+
+        filas = list(Cotizacion.objects.filter(empresa__codigo="ec811-iva").annotate(sql=IMPORTE_SIN_IVA))
+        self.assertEqual(len(filas), len(self.IVAS) * len(self.IMPORTES))
+        empates = 0
+        for cot in filas:
+            python = importes_iva(cot)[0]
+            with self.subTest(gran_total=cot.gran_total, iva=cot.iva):
+                if cot.iva > 0:
+                    exacto_centavos = cot.gran_total * 100 * 100 / (100 + cot.iva)
+                    empate = exacto_centavos % 1 == Decimal("0.5")
+                else:
+                    empate = False
+                if empate:
+                    # Única diferencia admitida: la mitad hacia arriba contra al par.
+                    empates += 1
+                    self.assertIn(cot.sql - python, (Decimal("0"), Decimal("0.01")))
+                    self.assertEqual((100 + cot.iva) % 8, 0)
+                else:
+                    self.assertEqual(cot.sql, python)
+        # El caso límite existe en la malla (p. ej. 0.13 con IVA 4): la prueba lo ejerce.
+        self.assertGreater(empates, 0)
+
+    def test_sin_empates_en_las_tasas_reales(self):
+        """Con IVA 0, 8, 16 y 80 (las que hay en la base) SQL y Python coinciden siempre."""
+        from ventas.api.cotizaciones_listado import IMPORTE_SIN_IVA
+        from ventas.api.serializers import importes_iva
+
+        for cot in Cotizacion.objects.filter(empresa__codigo="ec811-iva", iva__in=(0, 8, 16, 80)).annotate(sql=IMPORTE_SIN_IVA):
+            with self.subTest(gran_total=cot.gran_total, iva=cot.iva):
+                self.assertEqual(cot.sql, importes_iva(cot)[0])

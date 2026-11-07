@@ -233,8 +233,9 @@ CAMPO_ORDEN_IMPORTE = "importe_sin_iva"
 # El mismo importe que pinta el listado (``serializers.importes_iva``): ``gran_total``
 # sin el IVA, redondeado a centavos; con ``iva`` <= 0, ``gran_total`` tal cual.
 # ``importes_iva`` redondea con ``ROUND_HALF_EVEN`` y Postgres a la mitad hacia
-# arriba: sólo difieren en un empate exacto de medio centavo, que con IVA de 16 u 8
-# no puede darse (``gran_total`` tiene dos decimales). ``gran_total * 100 / (100 + iva)``
+# arriba: sólo difieren en un empate exacto de medio centavo, que sólo existe cuando
+# ``100 + iva`` es múltiplo de 8 (IVA 4, 12, 20, 100…; nunca con 0, 8, 16 u 80, las
+# tasas que hay en la base). ``CotizacionImporteSinIvaSqlTests`` compara las dos. ``gran_total * 100 / (100 + iva)``
 # y no ``gran_total / (1 + iva / 100)``: en Postgres ``iva / 100`` es división entera (0).
 IMPORTE_SIN_IVA = Case(
     When(
