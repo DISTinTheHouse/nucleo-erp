@@ -1008,7 +1008,77 @@ class OrdenBordadoDetalleListSerializer(serializers.ModelSerializer):
         exclude = ('configuracion',)
 
 
-class OrdenBordadoListSerializer(OrdenBordadoSerializer):
+class _FechasPedidoListadoMixin(serializers.Serializer):
+    """``fecha_pedido`` (alta del pedido) y ``fecha_vence`` (la ``fecha_compromiso``
+    de pedidos especiales/OP) para los listados de OB/OR/OCM. ``pedido`` ya viene
+    en ``select_related``: sin consultas extra."""
+
+    fecha_pedido = serializers.SerializerMethodField()
+    fecha_vence = serializers.SerializerMethodField()
+
+    def get_fecha_pedido(self, obj):
+        from django.utils import timezone
+        pedido = obj.pedido
+        return timezone.localdate(pedido.created_at) if pedido and pedido.created_at else None
+
+    def get_fecha_vence(self, obj):
+        from ventas.services.clasificacion_service import rango_fecha_entrega
+        return rango_fecha_entrega(obj.pedido)[1] if obj.pedido else None
+
+
+def _num(obj, attr):
+    return float(getattr(obj, attr, 0) or 0)
+
+
+class _ResumenAvancePiezasListadoMixin(_FechasPedidoListadoMixin):
+    """``resumen_avance`` del listado de OR/OCM: misma forma que el retrieve.
+    Programado = renglones prefetcheados; realizado = ``av_cantidad`` anotada
+    en el ``get_queryset`` del listado."""
+
+    resumen_avance = serializers.SerializerMethodField()
+
+    def get_resumen_avance(self, obj):
+        programada = sum((float(d.cantidad or 0) for d in obj.detalles.all()), 0.0)
+        realizada = _num(obj, "av_cantidad")
+        return {
+            "cantidad_programada": programada,
+            "cantidad_realizada_total": realizada,
+            "porcentaje_avance": round(realizada / programada * 100.0, 2) if programada > 0 else 0.0,
+        }
+
+
+class _ResumenAvanceBordadoListadoMixin(_FechasPedidoListadoMixin):
+    """``resumen_avance`` del listado de OB: los totales del retrieve
+    (``OrdenBordadoRetrieveSerializer.get_resumen_avance``) sin ``por_detalle``.
+    Los avances llegan sumados por orden (``av_*``, anotados en el queryset)."""
+
+    resumen_avance = serializers.SerializerMethodField()
+
+    def get_resumen_avance(self, obj):
+        detalles = list(obj.detalles.all())
+        programada = sum((float(d.cantidad or 0) for d in detalles), 0.0)
+        presupuesto = sum(int(d.puntadas or 0) for d in detalles)
+        presupuesto_total = sum(int(d.puntadas or 0) * float(d.cantidad or 0) for d in detalles)
+        bordada = _num(obj, "av_cantidad")
+        puntadas_total = int(_num(obj, "av_puntadas_total"))
+        pp_den = _num(obj, "av_pp_den")
+
+        def pct(num, den):
+            return round(float(num) / float(den) * 100.0, 2) if den > 0 else 0.0
+
+        return {
+            "cantidad_programada": programada,
+            "cantidad_bordada_total": bordada,
+            "puntadas_presupuesto": presupuesto,
+            "puntadas_por_pieza_promedio": int(round(_num(obj, "av_pp_num") / pp_den)) if pp_den > 0 else 0,
+            "puntadas_realizadas": int(_num(obj, "av_puntadas_realizadas")),
+            "puntadas_total": puntadas_total,
+            "porcentaje_avance": pct(bordada, programada),
+            "puntadas_porcentaje_avance": pct(puntadas_total, presupuesto_total),
+        }
+
+
+class OrdenBordadoListSerializer(_ResumenAvanceBordadoListadoMixin, OrdenBordadoSerializer):
     """Orden de bordado para el listado."""
 
     # Hereda de ``OrdenBordadoSerializer`` para que el encabezado no pueda
@@ -1991,7 +2061,7 @@ class OrdenReflejanteDetalleListSerializer(serializers.ModelSerializer):
         exclude = ('configuracion',)
 
 
-class OrdenReflejanteListSerializer(OrdenReflejanteSerializer):
+class OrdenReflejanteListSerializer(_ResumenAvancePiezasListadoMixin, OrdenReflejanteSerializer):
     """Orden de reflejante para el listado."""
 
     # Hereda de ``OrdenReflejanteSerializer`` para que el encabezado no pueda
@@ -2461,7 +2531,7 @@ class OrdenCorteMangaDetalleListSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-class OrdenesCorteMangaListSerializer(OrdenesCorteMangaSerializer):
+class OrdenesCorteMangaListSerializer(_ResumenAvancePiezasListadoMixin, OrdenesCorteMangaSerializer):
     """Orden de corte de manga para el listado."""
 
     # Sólo cambia el anidado de ``detalles``; ver
