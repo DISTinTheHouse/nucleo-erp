@@ -9914,3 +9914,69 @@ class CotizacionParametrosFiltroTests(_CotizacionesModoServidorBase, TestCase):
         from ventas.api.views import PARAMETROS_FILTRO_COTIZACIONES
 
         self.assertEqual({p.name for p in PARAMETROS_FILTRO_COTIZACIONES}, set(cotizaciones_listado.PARAMETROS_FILTRO))
+
+
+class CotizacionOpcionesDeduplicadasTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811 (revisión): ``opciones/`` deduplica los clientes antes de armar la
+    etiqueta. Mismas opciones, etiquetas, orden y alcance que agregar sobre cada
+    cotización, en una consulta que no crece con las cotizaciones."""
+
+    URL = f"{COTIZACIONES_URL}opciones/"
+
+    def _referencia(self, user):
+        """Lo que respondía la versión anterior: una etiqueta por cotización visible,
+        deduplicada en Python."""
+        from nucleo.opciones_filtros import clave_orden
+        from ventas.scope import cotizaciones_base, cotizaciones_visibles
+
+        visibles = cotizaciones_visibles(cotizaciones_base(), user).select_related("cliente")
+        clientes, sin_cliente = {}, False
+        for cot in visibles:
+            if cot.cliente is None:
+                sin_cliente = True
+                continue
+            etiqueta = (cot.cliente.razon_social or "").strip() or cot.cliente.nombre or ""
+            clientes[cot.cliente_id] = etiqueta.strip()
+        opciones = sorted(
+            ({"value": pk, "label": label} for pk, label in clientes.items()),
+            key=lambda o: (clave_orden(o["label"]), o["value"]),
+        )
+        if sin_cliente:
+            opciones.append({"value": "sin_cliente", "label": "Sin cliente"})
+        return {"cliente": opciones}
+
+    def test_igual_a_la_referencia_para_cada_alcance(self):
+        # Varias cotizaciones del mismo cliente y un cliente de otra empresa ligado a
+        # una cotización propia (dato anómalo que existe en la copia): se sigue viendo,
+        # como en el listado.
+        for _ in range(3):
+            self._cotizacion(self.empresa, self.ana, self.acme, self.mxn, 1, "1.00", self.base)
+        self._cotizacion(self.empresa, self.beto, self.secreto, self.mxn, 1, "1.00", self.base)
+        for user in (self.admin, self.ana, self.beto, self.admin_b, self.sin_empresa):
+            with self.subTest(user=user.username):
+                resp = self._get(user=user)
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.json(), self._referencia(user))
+
+    def test_un_cliente_con_muchas_cotizaciones_es_una_opcion(self):
+        for _ in range(5):
+            self._cotizacion(self.empresa, self.admin, self.acme, self.usd, 2, "1.00", self.base)
+        valores = [o["value"] for o in self._get().json()["cliente"]]
+        self.assertEqual(valores.count(self.acme.pk), 1)
+
+    def test_solo_sin_cliente(self):
+        solo = Usuario.objects.create(username="solo@811.test", email="solo@811.test", empresa=self.empresa)
+        self._cotizacion(self.empresa, solo, None, self.mxn, 1, "1.00", self.base)
+        self._cotizacion(self.empresa, solo, None, self.mxn, 1, "1.00", self.base)
+        self.assertEqual(self._get(user=solo).json(), {"cliente": [{"value": "sin_cliente", "label": "Sin cliente"}]})
+
+    def test_una_consulta_aunque_crezcan_cotizaciones_y_clientes(self):
+        self._get()
+        with self.assertNumQueries(1):
+            self._get()
+        for i in range(10):
+            otro = Cliente.objects.create(empresa=self.empresa, nombre=f"Más {i}")
+            for _ in range(3):
+                self._cotizacion(self.empresa, self.admin, otro, self.mxn, 1, "1.00", self.base)
+        with self.assertNumQueries(1):
+            self.assertEqual(len(self._get().json()["cliente"]), 13)

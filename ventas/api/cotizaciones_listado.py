@@ -17,9 +17,8 @@ serializan filas.
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from django.contrib.postgres.aggregates import ArrayAgg
-from django.db.models import Case, Count, DecimalField, F, Q, Sum, Value, When, Window
-from django.db.models.functions import Coalesce, Collate, JSONObject, NullIf, Round, RowNumber, Trim
+from django.db.models import Case, CharField, Count, DecimalField, F, IntegerField, Q, Sum, Value, When, Window
+from django.db.models.functions import Coalesce, Collate, NullIf, Round, RowNumber, Trim
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter
@@ -28,6 +27,7 @@ from rest_framework.exceptions import ValidationError
 from nucleo.kpis import entero_param, rango_fechas
 from nucleo.listados import OrdenamientoEstableFilter, estatus_param
 from nucleo.opciones_filtros import clave_orden
+from terceros.models import Cliente
 from ventas.models import Cotizacion
 
 # Acciones que pasan por los filtros del listado en ``CotizacionViewSet._apply_filters``.
@@ -304,22 +304,27 @@ def opciones(qs):
     """Opciones del filtro de cliente sobre el conjunto visible completo (no reaccionan
     a filtros, como ``pedidos_listado.opciones``), en UNA consulta. La etiqueta es la
     razón social o, si está vacía, el nombre; "Sin cliente" va al final y sólo si
-    alguna cotización visible no tiene cliente."""
-    datos = qs.order_by().aggregate(
-        clientes=ArrayAgg(
-            JSONObject(
-                value=F("cliente_id"),
-                label=Coalesce(NullIf(Trim(F("cliente__razon_social")), Value("")), F("cliente__nombre")),
-            ),
-            distinct=True,
-            filter=Q(cliente__isnull=False),
-        ),
-        sin_cliente=Count("id", filter=Q(cliente__isnull=True)),
+    alguna cotización visible no tiene cliente.
+
+    Primero se deduplican los clientes (``Cliente`` por ``pk__in`` de los
+    ``cliente_id`` visibles) y sólo entonces se arma la etiqueta, una por cliente y
+    no una por cotización. "Sin cliente" va en la misma consulta (``UNION ALL`` con
+    una fila de marca, ``[:1]``: basta con que exista una)."""
+    visibles = qs.order_by()
+    clientes = (
+        Cliente.objects.filter(pk__in=visibles.filter(cliente__isnull=False).values("cliente_id"))
+        .order_by()
+        .values_list("pk", Coalesce(NullIf(Trim(F("razon_social")), Value("")), F("nombre")))
     )
-    clientes = sorted(
-        ({"value": c["value"], "label": (c["label"] or "").strip()} for c in datos["clientes"] or []),
+    marca_sin_cliente = (
+        visibles.filter(cliente__isnull=True)
+        .values_list(Value(None, output_field=IntegerField()), Value(ETIQUETA_SIN_CLIENTE, output_field=CharField()))[:1]
+    )
+    filas = list(clientes.union(marca_sin_cliente, all=True))
+    opciones_cliente = sorted(
+        ({"value": pk, "label": (label or "").strip()} for pk, label in filas if pk is not None),
         key=lambda o: (clave_orden(o["label"]), o["value"]),
     )
-    if datos["sin_cliente"]:
-        clientes.append({"value": SIN_CLIENTE, "label": ETIQUETA_SIN_CLIENTE})
-    return {"cliente": clientes}
+    if any(pk is None for pk, _ in filas):
+        opciones_cliente.append({"value": SIN_CLIENTE, "label": ETIQUETA_SIN_CLIENTE})
+    return {"cliente": opciones_cliente}
