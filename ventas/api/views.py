@@ -4281,9 +4281,18 @@ class PedidoViewSet(viewsets.ModelViewSet):
     def exportar(self, request):
         """Mismos filtros, ``search``, ``ordering`` y regla de importes que el
         listado (parte de ``get_queryset`` y ``filter_queryset``: un filtro nuevo del
-        listado aplica solo), sin paginar y con sólo las columnas de la exportación."""
+        listado aplica solo), sin paginar y con sólo las columnas de la exportación.
+        Más de ``TOPE_EXPORTACION`` filas → 400 pidiendo acotar los filtros (#971)."""
         qs = self.filter_queryset(self.get_queryset())
-        return Response(pedidos_listado.filas_exportacion(qs, puede_ver_contabilidad(request.user)))
+        try:
+            filas = pedidos_listado.filas_exportacion(qs, puede_ver_contabilidad(request.user))
+        except pedidos_listado.ExportacionExcedeTope:
+            tope = pedidos_listado.TOPE_EXPORTACION
+            return Response(
+                {"detail": f"La exportación excede {tope} pedidos. Acota los filtros (fechas, estatus, cliente).", "tope": tope},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(filas)
 
     @extend_schema(
         summary="KPIs de pedidos de Mesa de Control con los filtros del listado",

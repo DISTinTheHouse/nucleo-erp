@@ -14,6 +14,8 @@ from rest_framework.filters import OrderingFilter
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from simple_history.utils import bulk_create_with_history
 
 from auditoria.models import AuditoriaEvento
@@ -159,6 +161,29 @@ def _tipo_compra_param(request):
     if tipo_compra and tipo_compra not in OrdenCompra.TipoCompra.values:
         raise ValidationError({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
     return tipo_compra
+
+
+# Filtros de servidor de los listados de OC y recepciones (#973): los mismos que
+# leen ``_tipo_compra_param`` y ``filtrar_listado_compras``.
+PARAMETROS_LISTADO_COMPRAS = [
+    OpenApiParameter("tipo_compra", OpenApiTypes.STR, enum=["MP", "PT"], description="MP (serie OC) o PT (serie O)."),
+    OpenApiParameter("estatus", OpenApiTypes.STR, description="Uno o varios estatus separados por coma."),
+    OpenApiParameter("proveedor", OpenApiTypes.INT, description="Id del proveedor."),
+    OpenApiParameter("sucursal", OpenApiTypes.INT, description="Id de la sucursal."),
+    OpenApiParameter("fecha_desde", OpenApiTypes.DATE, description="Desde (YYYY-MM-DD), inclusivo."),
+    OpenApiParameter("fecha_hasta", OpenApiTypes.DATE, description="Hasta (YYYY-MM-DD), inclusivo."),
+]
+PARAMETROS_LISTADO_OC = PARAMETROS_LISTADO_COMPRAS + [
+    OpenApiParameter("moneda", OpenApiTypes.INT, description="Id de la moneda."),
+    OpenApiParameter("con_proveedor", OpenApiTypes.BOOL, description="true: solo OC con proveedor; false: sin proveedor."),
+]
+PARAMETROS_LISTADO_RECEPCIONES = PARAMETROS_LISTADO_COMPRAS + [
+    OpenApiParameter("almacen", OpenApiTypes.INT, description="Id del almacén destino."),
+    OpenApiParameter("orden_compra", OpenApiTypes.INT, description="Id de la OC de origen."),
+]
+PARAMETROS_KPIS_RECEPCIONES = [
+    p for p in PARAMETROS_LISTADO_COMPRAS if p.name in {"sucursal", "proveedor", "fecha_desde", "fecha_hasta"}
+]
 
 
 class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
@@ -325,6 +350,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             self._ver_montos = puede_ver_contabilidad(self.request.user)
         return self._ver_montos
 
+    @extend_schema(parameters=PARAMETROS_LISTADO_OC)
     def list(self, request, *args, **kwargs):
         response = super().list(request, *args, **kwargs)
         if self.ver_montos():
@@ -1211,6 +1237,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA,
     }
 
+    @extend_schema(summary="KPIs del dashboard de Compras", responses=OpenApiTypes.OBJECT)
     @action(detail=False, methods=["get"], url_path="kpis")
     def kpis(self, request):
         user = request.user
@@ -1450,6 +1477,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             ],
         }
 
+@extend_schema_view(list=extend_schema(parameters=PARAMETROS_LISTADO_RECEPCIONES))
 class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Recepcion.objects.all().select_related(
         "orden_compra",
@@ -2322,6 +2350,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     # ``compras.services.kpi_criterios``, compartidos con el KPI de proveedores.
     PARAMS_KPIS = {"sucursal", "proveedor", "fecha_desde", "fecha_hasta"}
 
+    @extend_schema(summary="KPIs de recepciones", parameters=PARAMETROS_KPIS_RECEPCIONES, responses=OpenApiTypes.OBJECT)
     @action(detail=False, methods=["get"], url_path="kpis")
     def kpis(self, request):
         user = request.user
