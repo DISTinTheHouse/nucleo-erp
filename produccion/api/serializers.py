@@ -383,6 +383,47 @@ class OrdenProduccionDetalleSerializer(serializers.ModelSerializer):
             'pedido_detalle': {'queryset': PedidoDetalle.objects.select_related('pedido')},
         }
 
+def estado_ruta_critica(ruta):
+    """Semáforo de solo lectura de la ruta crítica de una OP.
+
+    Cada etapa: ``pendiente`` | ``en_proceso`` | ``completo``. Sin captura
+    (``ruta`` ``None``) todo está pendiente.
+    - desarrollo: completo con ``fecha_liberacion_paquete_tecnico`` (el estatus
+      del paquete no tiene valor "liberado"); en proceso si ya tiene estatus.
+    - telas_avios: completo con ``kit_completo``; en proceso con existencia o
+      surtido de tela o avíos.
+    - trazo: completo con ``fecha_trazo``.
+    - corte: completo con ``fecha_real_corte`` y ``cantidad_real_corte``; en
+      proceso con solo una de las dos.
+    - produccion: completo con ``corte_recibido``; en proceso si ya se envió o
+      llegó la materia prima al centro de confección.
+    """
+    P, E, C = "pendiente", "en_proceso", "completo"
+    if ruta is None:
+        return dict.fromkeys(("desarrollo", "telas_avios", "trazo", "corte", "produccion"), P)
+
+    def etapa(completo, en_proceso=False):
+        return C if completo else (E if en_proceso else P)
+
+    return {
+        "desarrollo": etapa(ruta.fecha_liberacion_paquete_tecnico, ruta.estatus_paquete_tecnico),
+        "telas_avios": etapa(
+            ruta.kit_completo,
+            ruta.existencia_tela or ruta.existencia_avios
+            or ruta.fecha_real_surtido_telas or ruta.fecha_real_surtido_avios,
+        ),
+        "trazo": etapa(ruta.fecha_trazo),
+        "corte": etapa(
+            ruta.fecha_real_corte and ruta.cantidad_real_corte,
+            ruta.fecha_real_corte or ruta.cantidad_real_corte,
+        ),
+        "produccion": etapa(
+            ruta.corte_recibido,
+            ruta.fecha_embarque_materia_prima or ruta.fecha_llegada_centro_confeccion,
+        ),
+    }
+
+
 class OrdenProduccionListSerializer(serializers.ModelSerializer):
     """Serializer minimalista para el LISTADO de OP.
 
@@ -390,8 +431,14 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
     (el nested pesado) para evitar el N+1. Campos explícitos, no ``__all__``.
     """
     estatus_op_display = serializers.CharField(source="get_estatus_op_display", read_only=True)
-    # ``select_related("pedido")`` en el listado: mismo query, sin viaje extra.
+    # ``select_related("pedido", "centro_confeccion", "ruta_critica")`` y
+    # ``cantidad_total`` anotada en el listado: mismo query, sin viajes extra.
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True, allow_null=True, default=None)
+    centro_confeccion = serializers.SerializerMethodField()
+    fecha_pedido = serializers.SerializerMethodField()
+    fecha_vence = serializers.SerializerMethodField()
+    cantidad_total = serializers.FloatField(read_only=True, default=0.0)
+    ruta_critica = serializers.SerializerMethodField()
 
     class Meta:
         model = OrdenProduccion
@@ -399,7 +446,25 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
             "op_id", "folio_op", "estatus_op", "estatus_op_display",
             "prioridad", "fecha_inicio", "fecha_fin", "fecha_entrega_estimada", "activo",
             "pedido", "pedido_folio", "sucursal",
+            "centro_confeccion", "fecha_pedido", "fecha_vence", "cantidad_total", "ruta_critica",
         ]
+
+    def get_centro_confeccion(self, obj):
+        p = obj.centro_confeccion
+        return {"id": p.pk, "nombre": p.nombre} if p else None
+
+    def get_fecha_pedido(self, obj):
+        from django.utils import timezone
+        pedido = obj.pedido
+        return timezone.localdate(pedido.created_at) if pedido and pedido.created_at else None
+
+    def get_fecha_vence(self, obj):
+        # La misma ``fecha_compromiso`` del listado de pedidos especiales.
+        from ventas.services.clasificacion_service import rango_fecha_entrega
+        return rango_fecha_entrega(obj.pedido)[1] if obj.pedido else None
+
+    def get_ruta_critica(self, obj):
+        return estado_ruta_critica(getattr(obj, "ruta_critica", None))
 
 class OrdenProduccionSerializer(serializers.ModelSerializer):
     orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
@@ -454,6 +519,12 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
 
     def validate_ruta_produccion(self, ruta_produccion):
         return _fk_de_la_empresa_del_usuario(self, 'ruta_produccion', ruta_produccion)
+
+    def validate_centro_confeccion(self, proveedor):
+        proveedor = _fk_de_la_empresa_del_usuario(self, 'centro_confeccion', proveedor)
+        if proveedor is not None and not (proveedor.activo and proveedor.es_maquilero):
+            raise serializers.ValidationError('El proveedor no está activo como maquilero.')
+        return proveedor
 
     def validate(self, attrs):
         # ``empresa``/``sucursal`` son read-only (ver ``Meta``): nunca llegan

@@ -527,7 +527,19 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                 ),
             )
         if getattr(self, "action", None) == "list":
-            queryset = self._filtrar_listado(queryset.select_related("pedido"))
+            from django.db.models import DecimalField
+            cantidad_total = (
+                OrdenProduccionDetalle.objects.filter(op_id=OuterRef("pk"), activo=True)
+                .order_by().values("op_id").annotate(t=Sum("cantidad")).values("t")[:1]
+            )
+            queryset = self._filtrar_listado(
+                queryset.select_related("pedido", "centro_confeccion", "ruta_critica")
+                .annotate(cantidad_total=Coalesce(
+                    Subquery(cantidad_total, output_field=DecimalField(max_digits=14, decimal_places=2)),
+                    Value(Decimal("0")),
+                    output_field=DecimalField(max_digits=14, decimal_places=2),
+                ))
+            )
         return queryset
 
     def _filtrar_listado(self, queryset):
