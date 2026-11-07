@@ -1108,6 +1108,21 @@ class ProductoTerminadoEntradasViewSet(viewsets.ModelViewSet):
         self.get_object()
         return Response({'msg': 'ProductoTerminadoEntradasViewSet.anular'}, status=status.HTTP_200_OK)
 
+def _suma_avances(modelo, fk, campo, **filtro):
+    """``Σ campo`` de los avances activos de la orden (``OuterRef("pk")``) como
+    subconsulta: el listado la anota y no hace un viaje por orden."""
+    from django.db.models import FloatField
+    return Coalesce(
+        Subquery(
+            modelo.objects.filter(**{fk: OuterRef("pk")}, activo=True, **filtro)
+            .order_by().values(fk).annotate(t=Sum(campo)).values("t")[:1],
+            output_field=FloatField(),
+        ),
+        Value(0.0),
+        output_field=FloatField(),
+    )
+
+
 class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, mixins.DestroyModelMixin, GenericViewSet):
     queryset = OrdenesBordado.objects.filter()
     serializer_class = OrdenBordadoSerializer
@@ -1159,6 +1174,21 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
             # Listado más reciente primero; ``-id`` como desempate estable.
             .order_by("-fecha_inicio", "-id")
         )
+        if self.action == "list":
+            qs = qs.annotate(
+                av_cantidad=_suma_avances(BordadoAvances, "ob", "cantidad_bordada"),
+                av_puntadas_realizadas=_suma_avances(BordadoAvances, "ob", "puntadas_realizadas"),
+                av_puntadas_total=_suma_avances(BordadoAvances, "ob", "puntadas_total"),
+                # Promedio ponderado de puntadas por pieza, como el retrieve.
+                av_pp_num=_suma_avances(
+                    BordadoAvances, "ob", F("puntadas_por_pieza") * F("cantidad_bordada"),
+                    puntadas_por_pieza__gt=0, cantidad_bordada__gt=0,
+                ),
+                av_pp_den=_suma_avances(
+                    BordadoAvances, "ob", "cantidad_bordada",
+                    puntadas_por_pieza__gt=0, cantidad_bordada__gt=0,
+                ),
+            )
         return ordenes_bordado_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
@@ -1516,6 +1546,8 @@ class OrdenReflejanteViewSet(
             # Listado más reciente primero; ``-id`` como desempate estable.
             .order_by("-fecha_inicio", "-id")
         )
+        if self.action == "list":
+            qs = qs.annotate(av_cantidad=_suma_avances(ReflejanteAvances, "orden_r", "cantidad_aplicada"))
         return ordenes_reflejante_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
@@ -1878,6 +1910,8 @@ class OrdenesCorteMangaViewSet(
             # Listado más reciente primero; ``-id`` como desempate estable.
             .order_by("-fecha_inicio", "-id")
         )
+        if self.action == "list":
+            qs = qs.annotate(av_cantidad=_suma_avances(CorteMangaAvances, "ocm", "cantidad"))
         return ordenes_corte_manga_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
