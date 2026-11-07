@@ -7,6 +7,7 @@ from rest_framework.exceptions import ValidationError
 
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Producto
+from inventarios.services import costeo
 from inventarios.models import Existencia, MovimientoInventario, MovimientoInventarioDetalle, TipoMovimiento
 from produccion.models import ConsumoProduccion, ConsumoProduccionDetalle, OrdenProduccion
 from produccion.services.orden_produccion_service import OrdenProduccionService
@@ -142,7 +143,7 @@ class RecalculoConsumoTelaService:
                 empresa=op.empresa, sucursal=op.sucursal, pedido=op.pedido, tipo_movimiento=tipo,
                 usuario=user, op=op, observaciones=f"Recálculo de consumo por piezas reales OP {op.folio_op}",
             )
-            MovimientoInventarioDetalle.objects.bulk_create([
+            detalles = MovimientoInventarioDetalle.objects.bulk_create([
                 MovimientoInventarioDetalle(
                     movimiento_inventario=mov, producto_id=i["producto_id"],
                     producto_variante_id=i["producto_variante_id"],
@@ -152,6 +153,8 @@ class RecalculoConsumoTelaService:
                 )
                 for i in items
             ])
+            signo = -1 if tipo == TipoMovimiento.SALIDA else 1
+            costeo.costear(op.empresa_id, [(d, signo * d.cantidad, None) for d in detalles], costeo.Origen.CONSUMO_OP)
             movimientos.append(mov)
 
         cambios = [

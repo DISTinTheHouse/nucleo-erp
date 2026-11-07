@@ -1,5 +1,6 @@
 from django.db import transaction
 from inventarios.models import MovimientoInventario, MovimientoInventarioDetalle
+from inventarios.services import costeo
 
 class MovimientoInventarioService:
     @staticmethod
@@ -20,6 +21,8 @@ class MovimientoInventarioService:
         ]
 
         MovimientoInventarioDetalle.objects.bulk_create(bulk_rows)
+        # Mueve stock entre almacenes de la misma empresa: no cambia el promedio (#809).
+        costeo.costear(empresa.pk if hasattr(empresa, "pk") else empresa, [(d, 0, None) for d in bulk_rows], costeo.Origen.TRANSFERENCIA)
         return movimiento_inventario.id
     
     

@@ -1035,6 +1035,50 @@ Operaciones oficiales del módulo. Este es el flujo recomendado para modificar e
 
 ---
 
+### Costo de inventario (#809)
+
+Cada movimiento de inventario guarda en su renglón (`costo_unitario`, en MXN) el costo con el que se movió. El método es **costo promedio ponderado** por empresa y artículo (producto sin variante, variante o SKU de muestra).
+
+| Movimiento | Costo del renglón | ¿Cambia el promedio? |
+|---|---|---|
+| Recepción de OC | `importe ÷ cantidad` del renglón de la OC (con descuento), × `tipo_cambio` de la OC si no es MXN | Sí |
+| Entrada de producto terminado de una OP (recepción contra OP) | materiales consumidos por la OP ÷ piezas + `costo_maquila_unitario` | Sí |
+| Consumo de insumos de OP, salida por pedido, redescuento por factura, salida o ajuste a la baja | promedio vigente | No |
+| Reintegro, devolución, entrada manual o ajuste a la alza | promedio vigente | No |
+| Transferencia entre almacenes | promedio vigente | No |
+
+- **Fórmula:** `nuevo = (existencia_previa × promedio + cantidad × costo) / (existencia_previa + cantidad)`. La existencia previa es la de todos los almacenes de la empresa.
+- **Arranque:** el inventario que ya existía no tenía costo. La primera entrada valorada fija el promedio de ese artículo, y desde ahí se pondera con toda la existencia.
+- **Sin costo conocido** (OC en otra moneda sin `tipo_cambio`, OP sin materiales costeados ni maquila, precio 0): la entrada suma existencia sin mover el promedio.
+- **Historial:** cada cambio del promedio queda registrado con fecha, costo anterior, costo nuevo, cantidad y costo de la entrada, y el movimiento que lo causó.
+
+#### `GET /api/v1/inventarios/costos/`
+
+Costo promedio vigente por artículo, paginado con `limit`/`offset`. Filtros opcionales: `producto`, `producto_variante`, `variante_produccion`. Exige `R-CONTABILIDAD` (superusuario y admin de empresa pasan); sin él → `403`. Cada usuario ve solo su empresa.
+
+```json
+{"id": 1, "empresa": 1, "producto": 11860, "producto_variante": null, "variante_produccion": null,
+ "producto_nombre": "AMBASSADOR", "sku": null, "costo_promedio": "100.04979253", "actualizado_en": "2026-11-07T15:10:58-06:00"}
+```
+
+#### `GET /api/v1/inventarios/costos/{id}/historial/`
+
+Cambios del promedio, el más reciente primero (paginado). Mismo permiso. Otro artículo o empresa → `404`.
+
+```json
+{"id": 2, "fecha": "2026-11-07T15:10:58-06:00", "origen": "RECEPCION_OC",
+ "costo_anterior": "100.00000000", "costo_nuevo": "100.04979253", "diferencia": "0.04979253",
+ "existencia_previa": "6015.0000", "cantidad_entrada": "10.0000", "costo_entrada": "130.00000000",
+ "movimiento_detalle": 1139, "movimiento": 494}
+```
+
+`origen`: `RECEPCION_OC` o `PRODUCCION`, que son las entradas que mueven el promedio.
+
+#### Campos nuevos para capturar el costo
+
+- **OC — `tipo_cambio`** (pesos por unidad de la moneda): se manda en el encabezado de `POST/PUT .../ordenes/onboarding/` y se devuelve en la OC. Es **obligatorio si la moneda no es MXN**: si falta → `400 {"tipo_cambio": "La orden está en USD: captura el tipo de cambio (pesos por USD)."}`. En MXN se ignora y queda `null`. Las 3 OC en USD que ya existían piden el tipo de cambio la próxima vez que se editen.
+- **OP — `costo_maquila_unitario`** (MXN por pieza, `>= 0`, opcional): se captura en `PATCH /api/v1/produccion/orden-produccion/{id}/`. Es el costo de confección, externa con maquilero (`centro_confeccion`) o interna de LAZZAR. Debe estar capturado **antes de recibir** el producto terminado.
+
 ## 🏷️ 9. Catálogo de Productos
 
 Gestión de productos, variantes, y catálogos auxiliares (Tallas, Colores, Categorías).

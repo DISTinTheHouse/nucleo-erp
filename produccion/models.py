@@ -80,6 +80,9 @@ class OrdenProduccion(models.Model):
         'terceros.Proveedor', on_delete=models.PROTECT, null=True, blank=True,
         related_name='ordenes_produccion',
     )
+    # Costo de confección por pieza en MXN (maquila externa o interna de LAZZAR):
+    # se suma al costo de materiales del producto terminado que entra (#809).
+    costo_maquila_unitario = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
 
     folio_op = models.CharField(max_length=50, unique=True)
     estatus_op = models.IntegerField(default=EstatusOrdenProduccion.PENDIENTE.value, choices=EstatusOrdenProduccion.choices)

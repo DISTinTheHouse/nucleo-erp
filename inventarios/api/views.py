@@ -17,6 +17,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
+from inventarios.services import costeo
 from inventarios.models import (
     Almacen,
     TipoAlmacen,
@@ -1239,8 +1240,9 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             op_id=None,
         )
 
+        renglones = []
         for item in detalle_movimientos:
-            MovimientoInventarioDetalle.objects.create(
+            detalle = MovimientoInventarioDetalle.objects.create(
                 movimiento_inventario=movimiento,
                 producto_id=item["producto_id"],
                 producto_variante_id=item["producto_variante_id"],
@@ -1252,6 +1254,10 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 cantidad=item["cantidad"],
                 costo_unitario=Decimal("0"),
             )
+            # En un ajuste ``cantidad`` es la final: el delta viaja aparte.
+            renglones.append((detalle, item["delta"], None))
+        # Entradas, salidas y ajustes manuales al costo promedio vigente (#809).
+        costeo.costear(empresa.pk, renglones, costeo.Origen.OPERACION)
         return movimiento
 
     def _apply(self, request, tipo):
@@ -1383,6 +1389,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                         "lote_id": it["lote_id"],
                         "serie_id": it["serie_id"],
                         "cantidad": qty if tipo != "AJUSTE" else new_qty,
+                        "delta": new_qty - current,
                     }
                 )
                 results.append(

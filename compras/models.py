@@ -125,6 +125,9 @@ class OrdenCompra(StatusLifecycleModel):
     proveedor = models.ForeignKey(Proveedor, on_delete=models.SET_NULL, null=True, blank=True)
     solicitud_compra = models.ForeignKey(SolicitudCompra, on_delete=models.SET_NULL, null=True, blank=True)
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE)
+    # Pesos por unidad de ``moneda``; obligatorio si no es MXN. Convierte el
+    # precio de la OC al costo en pesos del inventario que se recibe (#809).
+    tipo_cambio = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
     usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     pedido = models.ForeignKey(Pedido, on_delete=models.SET_NULL, related_name='ordenes_compra', null=True, blank=True)
     # Una OC puede surtir varios pedidos. ``pedido`` (FK) se conserva por

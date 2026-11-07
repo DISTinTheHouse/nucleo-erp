@@ -6,6 +6,7 @@ from rest_framework.exceptions import ValidationError
 
 from auditoria.models import AuditoriaEvento
 from catalogo.models import ProductoVariante
+from inventarios.services import costeo
 from inventarios.models import Existencia, MovimientoInventario, MovimientoInventarioDetalle, TipoMovimiento
 from produccion.models import (
     ConsumoProduccion,
@@ -212,7 +213,7 @@ class OrdenProduccionService:
             op=op,
         )
 
-        MovimientoInventarioDetalle.objects.bulk_create(
+        detalles = MovimientoInventarioDetalle.objects.bulk_create(
             [
                 MovimientoInventarioDetalle(
                     movimiento_inventario=movimiento,
@@ -229,6 +230,8 @@ class OrdenProduccionService:
                 for item in consumos
             ]
         )
+        # Los insumos salen al costo promedio vigente (#809).
+        costeo.costear(op.empresa_id, [(d, -d.cantidad, None) for d in detalles], costeo.Origen.CONSUMO_OP)
         return movimiento
 
     @staticmethod

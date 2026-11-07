@@ -578,6 +578,7 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         model = OrdenProduccion
         fields = '__all__'
         read_only_fields = ['folio_op', 'activo', 'usuario_asignado', 'empresa', 'sucursal', 'estatus_op']
+        extra_kwargs = {"costo_maquila_unitario": {"min_value": 0}}  # MXN por pieza (#809)
 
 
 class OrdenProduccionRutaCriticaSerializer(serializers.ModelSerializer):

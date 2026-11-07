@@ -10,6 +10,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from auditoria.models import AuditoriaEvento
 from finanzas.exceptions import ErrorDeNegocio
+from inventarios.services import costeo
 from inventarios.models import (
     Existencia,
     MovimientoInventario,
@@ -98,7 +99,7 @@ class FacturaInventarioService:
                 usuario=usuario,
                 observaciones=f"{observaciones} {referencia}"[:150],
             )
-            MovimientoInventarioDetalle.objects.bulk_create(
+            detalles = MovimientoInventarioDetalle.objects.bulk_create(
                 MovimientoInventarioDetalle(
                     movimiento_inventario=movimiento,
                     producto_id=e["producto_id"],
@@ -110,6 +111,9 @@ class FacturaInventarioService:
                 )
                 for e in items
             )
+            # Reintegro o redescuento al costo promedio vigente (#809).
+            signo = 1 if entrada else -1
+            costeo.costear(pedido.empresa_id, [(d, signo * d.cantidad, None) for d in detalles], costeo.Origen.FACTURA)
         AuditoriaEvento.objects.create(
             empresa=pedido.empresa,
             usuario=usuario if getattr(usuario, "pk", None) else None,

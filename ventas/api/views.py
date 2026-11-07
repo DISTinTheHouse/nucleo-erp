@@ -27,6 +27,7 @@ from rest_framework.settings import api_settings
 from django.conf import settings
 
 from auditoria.models import AuditoriaEvento
+from inventarios.services import costeo
 from inventarios.models import (
     Existencia,
     MovimientoInventario,
@@ -1184,7 +1185,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             op_id=None,
         )
 
-        MovimientoInventarioDetalle.objects.bulk_create(
+        detalles = MovimientoInventarioDetalle.objects.bulk_create(
             [
                 MovimientoInventarioDetalle(
                     movimiento_inventario=movimiento,
@@ -1204,6 +1205,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 for item in items
             ]
         )
+        # Salida o reintegro del pedido al costo promedio vigente (#809).
+        signo = 1 if tipo_movimiento == TipoMovimiento.ENTRADA else -1
+        costeo.costear(pedido.empresa_id, [(d, signo * d.cantidad, None) for d in detalles], costeo.Origen.PEDIDO)
         return movimiento
 
     def _registrar_auditoria_inventario_pedido(
