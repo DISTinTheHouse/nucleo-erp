@@ -278,13 +278,26 @@ COLUMNAS_EXPORTACION = (
 )
 
 
+# Filas máximas de ``exportar/`` (#971): por encima, 400 pidiendo acotar los filtros
+# en vez de un archivo recortado sin aviso. Holgado frente al volumen actual (~170).
+TOPE_EXPORTACION = 5000
+
+
+class ExportacionExcedeTope(Exception):
+    pass
+
+
 def filas_exportacion(qs, ver_importes):
-    """Todas las filas filtradas y ordenadas, sin paginar, en UNA consulta
-    (``.values()``, sin instanciar pedidos ni serializer)."""
+    """Las filas filtradas y ordenadas, sin paginar, en UNA consulta (``.values()``,
+    sin instanciar pedidos ni serializer). Pide ``TOPE_EXPORTACION + 1`` filas: si
+    llegan más del tope lanza ``ExportacionExcedeTope``, sin un ``count`` aparte."""
     columnas = [c for c in COLUMNAS_EXPORTACION if ver_importes or c not in CAMPOS_IMPORTE]
     etiquetas = dict(Pedido.CHOICES_ESTATUS)
     filas = []
-    for fila in qs.values(*columnas, moneda_codigo=F("moneda__codigo_iso")):
+    valores = qs.values(*columnas, moneda_codigo=F("moneda__codigo_iso"))[: TOPE_EXPORTACION + 1]
+    for fila in valores:
+        if len(filas) == TOPE_EXPORTACION:
+            raise ExportacionExcedeTope()
         fila["estatus_display"] = etiquetas.get(fila["estatus"], str(fila["estatus"]))
         filas.append(fila)
     return filas

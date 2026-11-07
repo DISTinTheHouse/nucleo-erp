@@ -1328,6 +1328,7 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
   - OC y recepciones: `?estatus=` (uno o varios separados por coma: `3` o `3,4`, EC-782; un valor no entero → `400 {"estatus": "Debe ser un entero válido."}`, uno inexistente → `400 {"estatus": "Estatus inexistente."}`), `?proveedor=`, `?sucursal=` (ids), `?fecha_desde=`/`?fecha_hasta=` (`YYYY-MM-DD`, sobre `fecha_oc` o el día de `fecha_recepcion`), `?tipo_compra=MP|PT` (en recepciones, el de la OC de origen). Solo recepciones: `?almacen=` y `?orden_compra=` (ids; uno de otra empresa no trae filas). Inválidos → `400` (#889).
   - Solo OC: `?con_proveedor=true|false` (EC-782): con o sin `proveedor` (el FK es `SET_NULL`). El selector de OC de facturas de proveedor usa `?con_proveedor=true&estatus=1,2,3,4,5&search=...&limit=...` en vez de bajar la lista completa. El listado ya solo trae OC activas (`activo=true`).
   - Proveedores: `?activo=true|false` (default `true`; `false` lista las bajas). Una baja se abre en solo lectura: `GET {id}/`, `historial-ordenes-compra/` y `kpis-detalle/` responden `200`; `PUT`/`PATCH`/`DELETE` sobre ella → `400 {"detail": "El proveedor está dado de baja."}` (#888).
+  - **OpenAPI (#973):** Swagger/ReDoc ya publican estos filtros: `ordenes/` (`tipo_compra`, `estatus`, `proveedor`, `sucursal`, `fecha_desde`, `fecha_hasta`, `moneda`, `con_proveedor`) y `recepciones/` (los mismos sin `moneda`/`con_proveedor`, más `almacen` y `orden_compra`). `ordenes/kpis/` y `recepciones/kpis/` se declaran como objeto libre (antes `ordenes/kpis/` decía `OrdenCompra`).
 - **Mismo modo servidor en ventas y clientes (EC-757)**: `GET /api/v1/terceros/clientes/`, `ventas/cotizaciones/` (y `ventas/mesa-control/`), `ventas/pedidos/` y `ventas/oportunidades/`.
   - `?limit=&offset=` igual que arriba (tope 500; en oportunidades antes no había tope). Sin `?limit=` sigue la lista completa.
   - `?ordering=` con lista blanca y `id` de desempate; sin él, el orden por defecto: clientes por `nombre` (antes indefinido), cotizaciones y pedidos más reciente primero. Los importes (`gran_total`, `subtotal`…) **no** se aceptan (#537): se ignoran y queda el orden por defecto. Excepción: pedidos los acepta para quien ve importes (EC-782).
@@ -1690,7 +1691,11 @@ Además de la lista blanca de EC-757 (`id`, `folio`, `estatus`, `clasificacion`,
 
 #### Exportar — `GET /api/v1/ventas/pedidos/exportar/`
 
-El conjunto filtrado **completo, sin paginar** (para el CSV/PDF de Compras › Pedidos): mismos filtros, `search`, `ordering`, alcance y regla de importes que el listado; `limit`/`offset` no aplican. Una consulta. Arreglo de:
+El conjunto filtrado **sin paginar** (para el CSV/PDF de Compras › Pedidos): mismos filtros, `search`, `ordering`, alcance y regla de importes que el listado; `limit`/`offset` no aplican. Una consulta.
+
+**Tope (#971):** máximo **5000** pedidos. Si el filtro trae más, responde `400 {"detail": "La exportación excede 5000 pedidos. Acota los filtros (fechas, estatus, cliente).", "tope": 5000}` y no se exporta nada (nunca un archivo recortado). El front debe mostrar `detail`.
+
+Respuesta `200`, arreglo de:
 
 ```json
 [{ "id": 88, "folio": "P-00088-2026", "estatus": 3, "estatus_display": "AUTORIZADA", "oc": "OC-1",
