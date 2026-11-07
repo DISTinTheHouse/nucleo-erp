@@ -162,6 +162,7 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'moneda',
             'moneda_codigo',
             'moneda_simbolo',
+            'tipo_cambio',
             'usuario',
             'usuario_nombre',
             'pedido',
@@ -355,6 +356,10 @@ class OrdenCompraOnboardingHeaderSerializer(serializers.Serializer):
     almacen = serializers.IntegerField(required=False, allow_null=True)
     proveedor = serializers.IntegerField(required=False, allow_null=True)
     moneda = serializers.IntegerField(required=False, allow_null=True)
+    # Pesos por unidad de ``moneda``: obligatorio si no es MXN (#809).
+    tipo_cambio = serializers.DecimalField(
+        max_digits=12, decimal_places=6, required=False, allow_null=True, min_value=Decimal("0.000001"),
+    )
     # ``fecha_oc`` (fecha de generación) ya NO se acepta aquí: la fija el
     # servidor al crear la OC (ver EC-395) y no es editable. Se deja de
     # declarar a propósito para que un valor enviado por el cliente se

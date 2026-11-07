@@ -14,6 +14,7 @@ from rest_framework.filters import OrderingFilter
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
+from inventarios.services import costeo
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from simple_history.utils import bulk_create_with_history
@@ -552,6 +553,19 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         if almacen.sucursal_id and str(almacen.sucursal_id) != str(sucursal_id):
             raise ValidationError({"almacen": "El almacén no pertenece a la sucursal de la orden."})
 
+    @staticmethod
+    def _aplicar_tipo_cambio(oc, header):
+        """``tipo_cambio`` del encabezado (#809): en MXN no aplica y queda ``null``;
+        en otra moneda es obligatorio (400 si falta), porque convierte el precio de la
+        OC al costo en pesos del inventario que se recibe."""
+        if "tipo_cambio" in header:
+            oc.tipo_cambio = header.get("tipo_cambio")
+        codigo = Moneda.objects.filter(pk=oc.moneda_id).values_list("codigo_iso", flat=True).first() if oc.moneda_id else None
+        if (codigo or "MXN").upper() == "MXN":
+            oc.tipo_cambio = None
+        elif not oc.tipo_cambio:
+            raise ValidationError({"tipo_cambio": f"La orden está en {codigo}: captura el tipo de cambio (pesos por {codigo})."})
+
     def _validar_encabezado_empresa(self, empresa, sucursal_id=None, proveedor_id=None, moneda_id=None):
         # Aislamiento multi-tenant, para TODOS (superusuario incluido): lo que
         # escribe la OC debe ser de la empresa de la orden. Solo se validan los
@@ -979,6 +993,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.referencia = header.get("referencia") or None
             if "observaciones" in header:
                 oc.observaciones = header.get("observaciones") or None
+            self._aplicar_tipo_cambio(oc, header)
             if "tipo_compra" in header:
                 # Con folio asignado el tipo no puede cambiar, igual que en el PUT (#504).
                 if oc.folio and header["tipo_compra"] != oc.tipo_compra:
@@ -1160,6 +1175,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 oc.referencia = header.get("referencia") or None
             if "observaciones" in header:
                 oc.observaciones = header.get("observaciones") or None
+            self._aplicar_tipo_cambio(oc, header)
             if "tipo_compra" in header:
                 oc.tipo_compra = header["tipo_compra"]
             if pedidos_ids is not None:
@@ -2663,8 +2679,10 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             transferencia_id=None,
             op_id=recepcion.op_id,
         )
+        costos = self._costos_de_entrada(recepcion, movimientos)
+        renglones = []
         for item in movimientos:
-            MovimientoInventarioDetalle.objects.create(
+            detalle = MovimientoInventarioDetalle.objects.create(
                 movimiento_inventario=movimiento,
                 producto_id=item["producto_id"],
                 producto_variante_id=item["producto_variante_id"],
@@ -2675,7 +2693,37 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
                 cantidad=Decimal(str(item["delta"] or 0)),
                 costo_unitario=Decimal("0"),
             )
+            renglones.append((detalle, detalle.cantidad, costos.get(item["recepcion_detalle_id"])))
+        # Entrada valorada: recalcula el costo promedio y deja historial (#809).
+        origen = costeo.Origen.PRODUCCION if recepcion.op_id else costeo.Origen.RECEPCION_OC
+        costeo.costear(recepcion.empresa_id, renglones, origen)
         return movimiento
+
+    def _costos_de_entrada(self, recepcion, movimientos):
+        """Costo unitario en MXN por renglón de recepción (#809): contra OC, el
+        importe del renglón de la OC entre su cantidad, por el tipo de cambio si no
+        es MXN (sin tipo de cambio entra sin valor); contra OP, materiales + maquila."""
+        if recepcion.op_id:
+            from produccion.services.costo_produccion import costo_unitario_produccion
+
+            costo = costo_unitario_produccion(recepcion.op)
+            return {m["recepcion_detalle_id"]: costo for m in movimientos}
+        ids = {m["orden_compra_detalle_id"] for m in movimientos if m.get("orden_compra_detalle_id")}
+        lineas = {
+            d.pk: d
+            for d in OrdenCompraDetalle.objects.filter(pk__in=ids).select_related("orden_compra__moneda")
+        }
+        costos = {}
+        for m in movimientos:
+            linea = lineas.get(m.get("orden_compra_detalle_id"))
+            if linea is None:
+                continue
+            unitario = (linea.importe / linea.cantidad) if linea.cantidad else linea.precio
+            oc = linea.orden_compra
+            if (oc.moneda.codigo_iso or "").upper() != "MXN":
+                unitario = unitario * oc.tipo_cambio if oc.tipo_cambio else None
+            costos[m["recepcion_detalle_id"]] = unitario
+        return costos
 
     def _derivar_estado(self, resultados):
         aprobados = {"liberado", "concesion_cc", "concesion lazzar"}

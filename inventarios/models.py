@@ -258,3 +258,73 @@ class inventario_reservas(models.Model):
     def __str__(self):
         return str(self.id)
    
+
+
+class CostoInventario(models.Model):
+    """Costo promedio ponderado vigente de un artículo en una empresa (#809).
+
+    Un renglón por artículo: producto sin variante, variante de catálogo o SKU de
+    muestra (``variante_produccion``). Lo mueve sólo ``inventarios.services.costeo``.
+    """
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="costos_inventario")
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name="costos_inventario", null=True, blank=True)
+    producto_variante = models.ForeignKey(
+        ProductoVariante, on_delete=models.PROTECT, related_name="costos_inventario", null=True, blank=True
+    )
+    variante_produccion = models.ForeignKey(
+        "catalogo.VarianteProductoProduccion", on_delete=models.PROTECT, related_name="costos_inventario", null=True, blank=True
+    )
+    costo_promedio = models.DecimalField(max_digits=18, decimal_places=8, default=0)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "costos_inventario"
+        verbose_name = "Costo de inventario"
+        verbose_name_plural = "Costos de inventario"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["empresa", "variante_produccion"],
+                condition=models.Q(variante_produccion__isnull=False),
+                name="uq_costo_inv_variante_produccion",
+            ),
+            models.UniqueConstraint(
+                fields=["empresa", "producto_variante"],
+                condition=models.Q(producto_variante__isnull=False, variante_produccion__isnull=True),
+                name="uq_costo_inv_producto_variante",
+            ),
+            models.UniqueConstraint(
+                fields=["empresa", "producto"],
+                condition=models.Q(producto_variante__isnull=True, variante_produccion__isnull=True),
+                name="uq_costo_inv_producto",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.pk}: {self.costo_promedio}"
+
+
+class HistorialCostoInventario(models.Model):
+    """Cada cambio del costo promedio: cuándo, de cuánto a cuánto y qué entrada lo movió (#809)."""
+
+    costo_inventario = models.ForeignKey(CostoInventario, on_delete=models.CASCADE, related_name="historial")
+    fecha = models.DateTimeField(auto_now_add=True)
+    origen = models.CharField(max_length=30)
+    costo_anterior = models.DecimalField(max_digits=18, decimal_places=8)
+    costo_nuevo = models.DecimalField(max_digits=18, decimal_places=8)
+    existencia_previa = models.DecimalField(max_digits=18, decimal_places=4)
+    cantidad_entrada = models.DecimalField(max_digits=18, decimal_places=4)
+    costo_entrada = models.DecimalField(max_digits=18, decimal_places=8)
+    movimiento_detalle = models.ForeignKey(
+        MovimientoInventarioDetalle, on_delete=models.SET_NULL, related_name="historial_costos", null=True, blank=True
+    )
+
+    class Meta:
+        db_table = "historial_costos_inventario"
+        verbose_name = "Historial de costo de inventario"
+        verbose_name_plural = "Historial de costos de inventario"
+        ordering = ["-fecha", "-id"]
+        indexes = [models.Index(fields=["costo_inventario", "-fecha"], name="ix_hist_costo_inv_fecha")]
+
+    def __str__(self):
+        return f"{self.costo_anterior} -> {self.costo_nuevo}"
