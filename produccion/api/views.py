@@ -21,7 +21,7 @@ from seguridad.role_identity import (
 )
 
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
-from produccion.services.common import config_como_dict, pendientes_por_linea
+from produccion.services.common import EPS_CANTIDAD, config_como_dict, pendientes_por_linea
 from produccion.scope import (
     ordenes_bordado_base,
     ordenes_bordado_visibles,
@@ -34,6 +34,7 @@ from produccion.scope import (
 )
 
 from produccion.models import (
+    CorteMangaAvances,
     ListaMaterialBom,
     BomDetalle,
     OrdenProduccion,
@@ -56,6 +57,8 @@ from produccion.models import (
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 
 from produccion.api.serializers import (
+    CorteMangaAvancesSerializer,
+    leer_mapa_pdt,
     AltaCatalogoInputSerializer,
     ListaMaterialBomSerializer,
     BomDetalleSerializer,
@@ -1201,16 +1204,9 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
         # Sin filtro por ``lleva_bordado``/``cantidad``: la query por fila
         # tampoco lo tenía, y un renglón cuyo pedido cambió después seguiría
         # resolviendo su config.
-        pdt_config_map = {}
-        for pd_id, talla_id, cfg in (
-            PedidoDetalleTalla.objects
-            .filter(pedido_detalle__pedido_id=orden.pedido_id)
-            .order_by("id")
-            .values_list("pedido_detalle_id", "talla_id", "bordado_config")
-        ):
-            # ``setdefault``: si hubiera dos filas para el mismo par se conserva
-            # la primera, como hacía ``.first()``.
-            pdt_config_map.setdefault((pd_id, talla_id), cfg)
+        # La misma query trae el ``sku`` de la variante de cada talla
+        # (``detalles[].sku``), sin viaje extra a la BD.
+        pdt_config_map, sku_por_linea = leer_mapa_pdt(orden.pedido_id, "bordado_config")
 
         avances = list(
             BordadoAvances.objects
@@ -1251,6 +1247,7 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                 "reparto_aproximado": aproximado,
                 "avances": avances,
                 "pdt_bordado_config_map": pdt_config_map,
+                "sku_por_linea": sku_por_linea,
             },
         )
         return Response(serializer.data)
@@ -1556,16 +1553,9 @@ class OrdenReflejanteViewSet(
         # ``OrdenBordadoViewSet.retrieve``. Sin filtro por
         # ``lleva_reflejante``/``cantidad``: la query por fila tampoco lo tenía,
         # y un renglón cuyo pedido cambió después seguiría resolviendo su config.
-        pdt_config_map = {}
-        for pd_id, talla_id, cfg in (
-            PedidoDetalleTalla.objects
-            .filter(pedido_detalle__pedido_id=orden.pedido_id)
-            .order_by("id")
-            .values_list("pedido_detalle_id", "talla_id", "reflejante_config")
-        ):
-            # ``setdefault``: si hubiera dos filas para el mismo par se conserva
-            # la primera, como hacía ``.first()``.
-            pdt_config_map.setdefault((pd_id, talla_id), cfg)
+        # La misma query trae el ``sku`` de cada talla (``detalles[].sku``).
+        pdt_config_map, sku_por_linea = leer_mapa_pdt(orden.pedido_id, "reflejante_config")
+        avances = _avances_de_piezas(ReflejanteAvances, "orden_r", orden, "cantidad_aplicada")
 
         # Numerador y denominador de la cobertura, ya en memoria: los renglones
         # de la OR vienen del prefetch de ``detalles`` (``.all()`` lee su caché)
@@ -1591,6 +1581,8 @@ class OrdenReflejanteViewSet(
                 "hermanas": hermanas,
                 "reparto_aproximado": aproximado,
                 "pdt_reflejante_config_map": pdt_config_map,
+                "sku_por_linea": sku_por_linea,
+                "avances": avances,
             },
         )
         return Response(serializer.data)
@@ -1700,13 +1692,108 @@ class OrdenReflejanteViewSet(
             status=status.HTTP_201_CREATED,
         )
 
-class ReflejanteAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
+def _avances_de_piezas(modelo, fk, orden, campo_cantidad):
+    """Avances activos de la orden, del más reciente al más antiguo, en UNA
+    query (con el usuario). ``cantidad`` queda normalizada en cada objeto
+    (reflejante la guarda como ``cantidad_aplicada``)."""
+    avances = list(
+        modelo.objects.filter(**{fk: orden}, activo=True)
+        .select_related("usuario")
+        .order_by("-fecha", "-id")
+    )
+    for a in avances:
+        a.cantidad = getattr(a, campo_cantidad)
+    return avances
+
+
+class _AvancePiezasViewSetMixin:
+    """Alta/baja de avances de piezas (reflejante, corte de manga).
+
+    - Mismo gate de escritura que PATCH/DELETE de la orden (``_require_produccion``).
+    - La orden se bloquea (``select_for_update``) y debe seguir abierta.
+    - Σ avances activos + nuevo ≤ piezas programadas (Σ renglones de la orden).
+    - El usuario sale de la sesión.
+    """
+
+    http_method_names = ["get", "post", "delete"]
+    orden_model = None
+    orden_padre_field = None
+    campo_cantidad = None
+    estatus_field = None
+    estatus_cerrados = ()
+
+    def _orden_bloqueada(self, orden_id):
+        return self.orden_model.objects.select_for_update().get(pk=orden_id)
+
+    def _exigir_abierta(self, orden):
+        if not orden.activo or getattr(orden, self.estatus_field) in self.estatus_cerrados:
+            raise ValidationError({self.orden_padre_field: "La orden está cerrada; no admite avances."})
+
+    def perform_create(self, serializer):
+        _require_produccion(self.request.user)
+        v = serializer.validated_data
+        with transaction.atomic():
+            orden = self._orden_bloqueada(v[self.orden_padre_field].pk)
+            self._exigir_abierta(orden)
+            programada = float(
+                orden.detalles.aggregate(t=Sum("cantidad"))["t"] or 0
+            )
+            realizada = float(
+                self.queryset.model.objects
+                .filter(**{self.orden_padre_field: orden}, activo=True)
+                .aggregate(t=Sum(self.campo_cantidad))["t"] or 0
+            )
+            nueva = float(v[self.campo_cantidad])
+            if realizada + nueva > programada + EPS_CANTIDAD:
+                disponible = max(programada - realizada, 0)
+                raise ValidationError({
+                    "cantidad": (
+                        f"El avance excede las piezas programadas: {realizada:g} de "
+                        f"{programada:g} ya registradas; quedan {disponible:g}."
+                    )
+                })
+            serializer.save(usuario=self.request.user)
+
+    def perform_destroy(self, instance):
+        _require_produccion(self.request.user)
+        with transaction.atomic():
+            orden = self._orden_bloqueada(getattr(instance, f"{self.orden_padre_field}_id"))
+            self._exigir_abierta(orden)
+            instance.soft_delete()
+
+
+class ReflejanteAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = ReflejanteAvances.objects.filter(activo=True)
     serializer_class = ReflejanteAvancesSerializer
     orden_padre_field = "orden_r"
+    filterset_fields = ["orden_r"]
+    orden_model = OrdenesReflejante
+    campo_cantidad = "cantidad_aplicada"
+    estatus_field = "estatus_reflejante"
+    estatus_cerrados = (
+        OrdenesReflejante.EstatusReflejante.COMPLETADO,
+        OrdenesReflejante.EstatusReflejante.CANCELADO,
+    )
 
-    def perform_destroy(self, instance):
-        instance.soft_delete()
+    def get_queryset(self):
+        return super().get_queryset().select_related("usuario").order_by("-fecha", "-id")
+
+
+class CorteMangaAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
+    queryset = CorteMangaAvances.objects.filter(activo=True)
+    serializer_class = CorteMangaAvancesSerializer
+    orden_padre_field = "ocm"
+    filterset_fields = ["ocm"]
+    orden_model = OrdenesCorteManga
+    campo_cantidad = "cantidad"
+    estatus_field = "estatus_corte"
+    estatus_cerrados = (
+        OrdenesCorteManga.EstatusCorte.COMPLETADO,
+        OrdenesCorteManga.EstatusCorte.CANCELADO,
+    )
+
+    def get_queryset(self):
+        return super().get_queryset().select_related("usuario").order_by("-fecha", "-id")
 
 class ReflejanteIncidenciasViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = ReflejanteIncidencias.objects.filter(activo=True)
@@ -1789,23 +1876,33 @@ class OrdenesCorteMangaViewSet(
         ``lleva_corte_manga``/``cantidad``, igual que hacía la query por fila.
         """
         orden = self.get_object()
+        por_linea, por_detalle, hermanas, aproximado = (
+            OrdenCorteMangaService.partialidad_de_orden(orden)
+        )
+        # La misma query trae el ``sku`` de cada talla (``detalles[].sku``).
+        pdt_config_map, sku_por_linea = leer_mapa_pdt(orden.pedido_id, "corte_manga_config")
+        avances = _avances_de_piezas(CorteMangaAvances, "ocm", orden, "cantidad")
 
-        pdt_config_map = {}
-        for pd_id, talla_id, cfg in (
-            PedidoDetalleTalla.objects
-            .filter(pedido_detalle__pedido_id=orden.pedido_id)
-            .order_by("id")
-            .values_list("pedido_detalle_id", "talla_id", "corte_manga_config")
-        ):
-            # ``setdefault``: si hubiera dos filas para el mismo par se conserva
-            # la primera, como hacía ``.first()``.
-            pdt_config_map.setdefault((pd_id, talla_id), cfg)
+        # Cobertura con los totales ya en memoria, como en reflejante.
+        cubierto = sum(float(d.cantidad or 0) for d in orden.detalles.all())
+        contratado = sum(v[0] for v in por_detalle.values())
 
         serializer = self.get_serializer(
             orden,
             context={
                 **self.get_serializer_context(),
                 "pdt_corte_manga_config_map": pdt_config_map,
+                "sku_por_linea": sku_por_linea,
+                "cobertura": OrdenCorteMangaService.cobertura_por_orden(
+                    [orden],
+                    cubierto_override={orden.pk: cubierto},
+                    contratado_override={orden.pedido_id: contratado},
+                ),
+                "partialidad_por_linea": por_linea,
+                "partialidad_por_detalle": por_detalle,
+                "hermanas": hermanas,
+                "reparto_aproximado": aproximado,
+                "avances": avances,
             },
         )
         return Response(serializer.data)
