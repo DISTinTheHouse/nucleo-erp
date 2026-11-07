@@ -1748,6 +1748,24 @@ class ReporteExistenciasPeriodoTests(ReportesPeriodoBase):
         self.assertIsNotNone(data["next"])
         self.assertEqual(data["resumen"]["existencia_final"], "36.0000")  # 11 + 7 por empresa
 
+    def test_costo_unitario_del_ultimo_movimiento_costeado_hasta_fecha_final(self):
+        # Entrada por ajuste (sin ubicación: el almacén sale del ajuste) más
+        # reciente que la de 5 → gana 4. Una de 9 después del periodo no cuenta,
+        # y un renglón sin costo tampoco.
+        self._entrada_por_ajuste(self.a)
+        tardio = self._entrada_por_ajuste(self.a)
+        tardio.detalles.update(costo_unitario="9")
+        MovimientoInventario.objects.filter(pk=tardio.pk).update(fecha_movimiento=_fecha_reporte(2026, 7, 15))
+        sin_costo = self._entrada_por_ajuste(self.a)
+        sin_costo.detalles.update(costo_unitario="0")
+        MovimientoInventario.objects.filter(pk=sin_costo.pk).update(fecha_movimiento=_fecha_reporte(2026, 6, 1))
+
+        data = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL).json()
+        self.assertEqual(
+            [(f["costo_unitario_final"], f["costo_existencia_final"]) for f in data["results"]],
+            [("4.00", "44.00")],
+        )
+
     def test_filtros_almacen_id_conserva_el_valor_historico(self):
         # Antes del EC-814 ``filtros.almacen_id`` traía el almacén de la última
         # fila cuando no se filtraba por almacén; el refactor lo conserva.
@@ -1769,6 +1787,25 @@ class ReporteMovimientosPeriodoTests(ReportesPeriodoBase):
         self.assertEqual({f["almacen_codigo"] for f in data["results"]}, {"acme-rp-PT"})
         self.assertEqual(data["resumen"], {"total_movimientos": 3, "total_registros": 3, "total_cantidad": "14.0000"})
         self.assertEqual(data["results"][0]["usuario_nombre"], "Ana acme-rp")
+
+    def test_entrada_sin_n_mas_1_por_almacen_del_documento(self):
+        def consultas():
+            client = APIClient()
+            client.force_authenticate(user=self.a["usuario"])
+            with CaptureQueriesContext(connection) as ctx:
+                resp = client.get(REPORTE_MOVIMIENTOS_PERIODO_URL, {**PERIODO_REPORTE, "tipo_movimiento": "ENTRADA"})
+            self.assertEqual(resp.status_code, 200)
+            return resp.json()["count"], len(ctx.captured_queries)
+
+        self._entrada_por_recepcion(self.a, "REC-RP-N0")
+        self._entrada_por_ajuste(self.a)
+        filas_antes, antes = consultas()
+        for i in range(1, 5):
+            self._entrada_por_recepcion(self.a, f"REC-RP-N{i}")
+            self._entrada_por_ajuste(self.a)
+        filas_despues, despues = consultas()
+        self.assertEqual((filas_antes, filas_despues), (3, 11))
+        self.assertEqual(despues, antes)
 
     def test_usuario_de_otra_empresa_no_ve_los_movimientos(self):
         self._entrada_por_ajuste(self.a)

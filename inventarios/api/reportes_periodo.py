@@ -141,20 +141,26 @@ def _iter_auditoria_items(eventos, allowed_almacen_ids, producto_id=None, produc
             }
 
 
-def _movement_almacen_ids(detalle):
-    movimiento = detalle.movimiento_inventario
-    origen_id = (
-        getattr(detalle.ubicacion_origen, "almacen_id", None)
-        or getattr(getattr(movimiento, "transferencia", None), "almacen_origen_id", None)
-        or getattr(getattr(movimiento, "ajuste_inventario", None), "almacen_id", None)
-    )
-    destino_id = (
-        getattr(detalle.ubicacion_destino, "almacen_id", None)
-        or getattr(getattr(movimiento, "recepcion", None), "almacen_id", None)
-        or getattr(getattr(movimiento, "transferencia", None), "almacen_destino_id", None)
-        or getattr(getattr(movimiento, "ajuste_inventario", None), "almacen_id", None)
-    )
-    return origen_id, destino_id
+# Almacén de origen/destino de un renglón de movimiento para el costo: el de su
+# ubicación y, si no tiene, el del documento. Se toma el primero no nulo.
+_CAMPOS_ALMACEN_ORIGEN = (
+    "ubicacion_origen__almacen_id",
+    "movimiento_inventario__transferencia__almacen_origen_id",
+    "movimiento_inventario__ajuste_inventario__almacen_id",
+)
+_CAMPOS_ALMACEN_DESTINO = (
+    "ubicacion_destino__almacen_id",
+    "movimiento_inventario__recepcion__almacen_id",
+    "movimiento_inventario__transferencia__almacen_destino_id",
+    "movimiento_inventario__ajuste_inventario__almacen_id",
+)
+
+
+def _primero(valores):
+    for valor in valores:
+        if valor:
+            return valor
+    return None
 
 
 def _totales_existencias(totals):
@@ -316,15 +322,7 @@ def reporte_existencias(user, query_params):
     cost_map = {}
     if keys:
         movement_cost_qs = (
-            MovimientoInventarioDetalle.objects.select_related(
-                "movimiento_inventario",
-                "movimiento_inventario__recepcion",
-                "movimiento_inventario__ajuste_inventario",
-                "movimiento_inventario__transferencia",
-                "ubicacion_origen",
-                "ubicacion_destino",
-            )
-            .filter(
+            MovimientoInventarioDetalle.objects.filter(
                 movimiento_inventario__fecha_movimiento__lte=final_dt,
                 costo_unitario__gt=0,
             )
@@ -343,14 +341,24 @@ def reporte_existencias(user, query_params):
         if producto_id:
             movement_cost_qs = movement_cost_qs.filter(producto_id=producto_id)
 
-        for detalle in movement_cost_qs:
-            producto_key_id = detalle.producto_id
-            variante_key_id = detalle.producto_variante_id
-            origen_id, destino_id = _movement_almacen_ids(detalle)
+        # Del más reciente al más antiguo: el primer costo de cada llave gana.
+        # Solo bajan escalares (sin instanciar modelos) y por bloques, porque
+        # una llave sin movimiento costeado obliga a recorrer todo el historial.
+        filas_costo = movement_cost_qs.values_list(
+            "producto_id",
+            "producto_variante_id",
+            "costo_unitario",
+            *_CAMPOS_ALMACEN_ORIGEN,
+            *_CAMPOS_ALMACEN_DESTINO,
+        )
+        n_origen = len(_CAMPOS_ALMACEN_ORIGEN)
+        for producto_key_id, variante_key_id, costo, *almacenes_fila in filas_costo.iterator(chunk_size=2000):
+            origen_id = _primero(almacenes_fila[:n_origen])
+            destino_id = _primero(almacenes_fila[n_origen:])
             for costo_almacen_id in {origen_id, destino_id}:
                 key = (costo_almacen_id, producto_key_id, variante_key_id)
                 if costo_almacen_id and key in keys and key not in cost_map:
-                    cost_map[key] = to_decimal(detalle.costo_unitario)
+                    cost_map[key] = to_decimal(costo)
             if len(cost_map) >= len(keys):
                 break
 
@@ -466,8 +474,11 @@ def reporte_movimientos(user, query_params):
             "movimiento_inventario",
             "movimiento_inventario__usuario",
             "movimiento_inventario__pedido",
-            "movimiento_inventario__recepcion",
-            "movimiento_inventario__ajuste_inventario",
+            # El almacén del documento se lee cuando el renglón no trae
+            # ubicación (ENTRADA/SALIDA/AJUSTE): sin el join era una consulta
+            # por renglón.
+            "movimiento_inventario__recepcion__almacen",
+            "movimiento_inventario__ajuste_inventario__almacen",
             "movimiento_inventario__op",
             "movimiento_inventario__transferencia",
             "producto",
