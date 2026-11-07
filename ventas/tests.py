@@ -9755,3 +9755,36 @@ class CotizacionFiltrosBordesTests(_CotizacionesModoServidorBase, TestCase):
         self.assertEqual(self._ids({"q": "١٢"}), [])
         pk = self.c["ana_acme_mxn_1"].pk
         self.assertEqual(self._ids({"q": str(pk)}), [pk])
+
+
+class CotizacionEstatusFueraDeCatalogoTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811 (revisión): ``estatus`` no tiene CheckConstraint; una fila con un valor
+    fuera del catálogo no tumba ``kpis/`` ni ``tablero/``."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.rara = cls._cotizacion(cls.empresa, cls.ana, cls.acme, cls.usd, 1, "5.00", cls.base)
+        Cotizacion.objects.filter(pk=cls.rara.pk).update(estatus=6)
+
+    def test_kpis_cuenta_la_fila_en_total_y_moneda_pero_no_en_un_estatus(self):
+        resp = self._get(f"{COTIZACIONES_URL}kpis/")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["total"], len(self._ids()))  # = ``count`` del listado
+        self.assertEqual(data["total"], 7)
+        self.assertEqual([e["estatus"] for e in data["por_estatus"]], [1, 2, 3, 4, 5])
+        self.assertEqual(sum(e["total"] for e in data["por_estatus"]), 6)
+        self.assertEqual(sum(m["total"] for m in data["por_moneda"]), 7)
+        usd = next(m for m in data["por_moneda"] if m["moneda"] == "USD")
+        self.assertEqual((usd["total"], usd["gran_total"]), (2, "55.00"))
+
+    def test_tablero_la_omite(self):
+        resp = self._get(f"{COTIZACIONES_URL}tablero/")
+        self.assertEqual(resp.status_code, 200)
+        columnas = resp.json()["columnas"]
+        self.assertEqual([c["estatus"] for c in columnas], [1, 2, 3, 4, 5])
+        self.assertNotIn(self.rara.pk, {f["id"] for c in columnas for f in c["results"]})
+        self.assertEqual(sum(c["total"] for c in columnas), 6)
+        # El listado la sigue trayendo, como antes.
+        self.assertIn(self.rara.pk, self._ids())

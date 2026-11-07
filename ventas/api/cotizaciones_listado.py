@@ -136,7 +136,9 @@ def _importe(valor):
 def kpis(qs):
     """Conteos por estatus y ``gran_total`` por moneda del conjunto filtrado, en UNA
     consulta agrupada por ``(estatus, moneda)``. ``por_estatus`` trae siempre los 5
-    estatus del catálogo (en cero si no hay); la moneda nula es un grupo más
+    estatus del catálogo (en cero si no hay); una fila con estatus fuera del catálogo
+    no tiene bloque pero cuenta en ``total`` y ``por_moneda`` (``total`` = ``count``
+    del listado con los mismos filtros); la moneda nula es un grupo más
     (``moneda_id``/``moneda`` en ``null``) y va al final. ``order_by()`` antes de
     agrupar: el orden por defecto del listado entraría al ``GROUP BY``."""
     filas = list(
@@ -152,7 +154,12 @@ def kpis(qs):
         acumulado = por_moneda.setdefault(f["moneda_id"], {**moneda, "total": 0, "gran_total": Decimal("0")})
         acumulado["total"] += f["total"]
         acumulado["gran_total"] += f["gran_total"] or Decimal("0")
-        bloque = por_estatus[f["estatus"]]
+        bloque = por_estatus.get(f["estatus"])
+        if bloque is None:
+            # Estatus fuera del catálogo (la columna no tiene CheckConstraint): no
+            # tiene bloque, pero sí cuenta en ``total`` y ``por_moneda``, igual que en
+            # el ``count`` del listado con los mismos filtros.
+            continue
         bloque["total"] += f["total"]
         bloque["por_moneda"].append({**moneda, "total": f["total"], "gran_total": _importe(f["gran_total"])})
     etiquetas = dict(Cotizacion.CHOICES_ESTATUS)
@@ -188,9 +195,10 @@ def ventana_tablero(qs, por_columna):
     Postgres las calcula para todas las filas antes de recortar por ``fila``: ~950 ms
     con 50 000 cotizaciones contra ~75 ms así (EC-811). ``total_del_estatus`` es el
     ``count`` que daría el listado con ``?estatus=N`` y los mismos filtros. Un
-    estatus sin filas no aparece."""
+    estatus sin filas no aparece, ni uno fuera del catálogo (no tiene columna)."""
     return list(
-        qs.annotate(
+        qs.filter(estatus__in=ESTATUS_VALIDOS)
+        .annotate(
             fila_tablero=Window(RowNumber(), partition_by=[F("estatus")], order_by=ORDEN_POR_DEFECTO),
             total_estatus=Window(Count("id"), partition_by=[F("estatus")]),
         )
@@ -205,6 +213,8 @@ def columnas_tablero(ventana, filas_serializadas):
     ventana. ``filas_serializadas``: ``{id: fila}``."""
     totales, results = {}, {e: [] for e in ESTATUS_VALIDOS}
     for pk, estatus, total in ventana:
+        if estatus not in results:
+            continue  # fuera del catálogo: sin columna (``ventana_tablero`` ya los excluye)
         totales[estatus] = total
         if pk in filas_serializadas:
             results[estatus].append(filas_serializadas[pk])
