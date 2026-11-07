@@ -2646,6 +2646,22 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             )
         return Response({"cotizacion": CotizacionSerializer(cotizacion).data})
 
+    # --- Modo servidor del listado (EC-811) -----------------------------------
+    # Las tres acciones parten de ``self.get_queryset()``: el alcance es el del
+    # listado (y el de la subclase, si la hubiera), nunca una copia de él.
+
+    @extend_schema(
+        summary="Opciones del filtro de cliente del listado de cotizaciones",
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="opciones")
+    def opciones(self, request):
+        """Clientes presentes en las cotizaciones que el usuario ve, más "Sin
+        cliente" si alguna no tiene, en una consulta. No reaccionan a los filtros
+        (como ``pedidos/opciones/``)."""
+        validar_parametros(request, set())
+        return Response(cotizaciones_listado.opciones(self.get_queryset()))
+
 
 class CotizacionDetalleViewSet(viewsets.ModelViewSet):
     queryset = CotizacionDetalle.objects.all()

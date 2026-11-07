@@ -16,12 +16,15 @@ serializan filas.
 
 from datetime import datetime, time, timedelta
 
-from django.db.models import Q
+from django.contrib.postgres.aggregates import ArrayAgg
+from django.db.models import Count, F, Q, Value
+from django.db.models.functions import Coalesce, JSONObject, NullIf, Trim
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param, rango_fechas
 from nucleo.listados import estatus_param
+from nucleo.opciones_filtros import clave_orden
 from ventas.models import Cotizacion
 
 # Acciones que pasan por los filtros del listado en ``CotizacionViewSet._apply_filters``.
@@ -31,6 +34,7 @@ ACCIONES_FILTRADAS = ("list",)
 
 ESTATUS_VALIDOS = frozenset(e for e, _ in Cotizacion.CHOICES_ESTATUS)
 SIN_CLIENTE = "sin_cliente"
+ETIQUETA_SIN_CLIENTE = "Sin cliente"
 
 
 def cliente_param(request):
@@ -97,3 +101,31 @@ def filtrar(request, qs):
             q_filter = q_filter | Q(id=int(q))
         qs = qs.filter(q_filter)
     return qs
+
+
+# --- Opciones de filtros -----------------------------------------------------------
+
+
+def opciones(qs):
+    """Opciones del filtro de cliente sobre el conjunto visible completo (no reaccionan
+    a filtros, como ``pedidos_listado.opciones``), en UNA consulta. La etiqueta es la
+    razón social o, si está vacía, el nombre; "Sin cliente" va al final y sólo si
+    alguna cotización visible no tiene cliente."""
+    datos = qs.order_by().aggregate(
+        clientes=ArrayAgg(
+            JSONObject(
+                value=F("cliente_id"),
+                label=Coalesce(NullIf(Trim(F("cliente__razon_social")), Value("")), F("cliente__nombre")),
+            ),
+            distinct=True,
+            filter=Q(cliente__isnull=False),
+        ),
+        sin_cliente=Count("id", filter=Q(cliente__isnull=True)),
+    )
+    clientes = sorted(
+        ({"value": c["value"], "label": (c["label"] or "").strip()} for c in datos["clientes"] or []),
+        key=lambda o: (clave_orden(o["label"]), o["value"]),
+    )
+    if datos["sin_cliente"]:
+        clientes.append({"value": SIN_CLIENTE, "label": ETIQUETA_SIN_CLIENTE})
+    return {"cliente": clientes}

@@ -9316,3 +9316,60 @@ class CotizacionListadoFiltrosTests(_CotizacionesModoServidorBase, TestCase):
         self.assertEqual(self._ids({"cliente": self.acme.pk}, url=MESA_CONTROL_URL), [])
         self.assertEqual(self._ids({"estatus": "1"}, url=MESA_CONTROL_URL), [])
         self.assertEqual(self._get(MESA_CONTROL_URL, {"estatus": "9"}).status_code, 400)
+
+
+class CotizacionOpcionesTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811: ``GET /cotizaciones/opciones/``: clientes del alcance y "Sin cliente"."""
+
+    URL = f"{COTIZACIONES_URL}opciones/"
+
+    def _opciones(self, user=None, params=None):
+        resp = self._get(params=params, user=user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def test_admin_ve_los_clientes_de_su_empresa_y_sin_cliente(self):
+        self.assertEqual(self._opciones(), {"cliente": [
+            {"value": self.acme.pk, "label": "ACME SA"},
+            # Razón social en blanco: cae al nombre.
+            {"value": self.zeta.pk, "label": "Zeta comercial"},
+            {"value": "sin_cliente", "label": "Sin cliente"},
+        ]})
+
+    def test_sin_cliente_solo_si_existe_en_el_alcance(self):
+        # Beto no tiene cotizaciones sin cliente: no aparece la opción.
+        self.assertEqual(
+            [o["value"] for o in self._opciones(self.beto)["cliente"]], [self.acme.pk, self.zeta.pk],
+        )
+        self.assertEqual(
+            [o["value"] for o in self._opciones(self.ana)["cliente"]], [self.acme.pk, self.zeta.pk, "sin_cliente"],
+        )
+
+    def test_alcance_por_empresa_y_sin_empresa(self):
+        self.assertEqual(self._opciones(self.admin_b), {"cliente": [{"value": self.secreto.pk, "label": "Secreto SA"}]})
+        self.assertNotIn("Secreto", str(self._opciones()))
+        self.assertEqual(self._opciones(self.sin_empresa), {"cliente": []})
+
+    def test_vendedor_solo_ve_clientes_de_sus_cotizaciones(self):
+        solo_admin = Cliente.objects.create(empresa=self.empresa, nombre="Solo admin")
+        self._cotizacion(self.empresa, self.admin, solo_admin, self.mxn, 1, "1.00", self.base)
+        self.assertNotIn(solo_admin.pk, [o["value"] for o in self._opciones(self.ana)["cliente"]])
+        self.assertIn(solo_admin.pk, [o["value"] for o in self._opciones()["cliente"]])
+
+    def test_no_reacciona_a_filtros_y_rechaza_parametros(self):
+        for params in ({"estatus": "1"}, {"cliente": self.acme.pk}, {"q": "acme"}, {"otro": "1"}):
+            with self.subTest(params=params):
+                self.assertEqual(self._get(params=params).status_code, 400)
+        # ``?format=json`` es de DRF, no un filtro.
+        self.assertEqual(self._opciones(params={"format": "json"}), self._opciones())
+
+    def test_una_consulta_que_no_crece_con_las_filas(self):
+        self._opciones()
+        with CaptureQueriesContext(connection) as ctx:
+            self._opciones()
+        self.assertEqual(len(ctx), 1)
+        for i in range(5):
+            otro = Cliente.objects.create(empresa=self.empresa, nombre=f"Otro {i}")
+            self._cotizacion(self.empresa, self.admin, otro, self.mxn, 1, "1.00", self.base)
+        with self.assertNumQueries(1):
+            self.assertEqual(len(self._opciones()["cliente"]), 8)
