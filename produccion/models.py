@@ -74,6 +74,12 @@ class OrdenProduccion(models.Model):
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, null=True, blank=True)
     ruta_produccion = models.ForeignKey(RutaProduccion, on_delete=models.SET_NULL, null=True, blank=True)
+    # Maquilero que confecciona la OP (``terceros.Proveedor`` con
+    # ``es_maquilero``); ``null`` = confección interna.
+    centro_confeccion = models.ForeignKey(
+        'terceros.Proveedor', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='ordenes_produccion',
+    )
 
     folio_op = models.CharField(max_length=50, unique=True)
     estatus_op = models.IntegerField(default=EstatusOrdenProduccion.PENDIENTE.value, choices=EstatusOrdenProduccion.choices)

@@ -114,6 +114,9 @@ class Proveedor(StatusLifecycleModel):
     rfc = models.CharField(max_length=20)
     email = models.EmailField(max_length=120)
     tipo = models.CharField(max_length=50, choices=TipoProveedor.choices, default=TipoProveedor.GENERAL)
+    # Maquilero (centro de confección externo): puede ser ``centro_confeccion``
+    # de una OP. El listado filtra con ``?es_maquilero=true``.
+    es_maquilero = models.BooleanField(default=False, db_index=True)
     #condiciones
     lista_precios = models.PositiveSmallIntegerField(default=1)
     descuento_monto = models.DecimalField(max_digits=12,decimal_places=2, default=0)

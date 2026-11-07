@@ -525,7 +525,10 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         qs = qs.filter(empresa=empresa)
         if self.action == "list":
             # ``?activo=false`` lista las bajas (#863).
-            return qs.filter(activo=booleano_param(self.request, "activo", True))
+            qs = qs.filter(activo=booleano_param(self.request, "activo", True))
+            if "es_maquilero" in self.request.query_params:
+                qs = qs.filter(es_maquilero=booleano_param(self.request, "es_maquilero", True))
+            return qs
         if self.action in self.ACCIONES_CON_BAJAS:
             return qs
         return qs.filter(activo=True)
