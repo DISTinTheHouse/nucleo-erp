@@ -17,8 +17,9 @@ from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 from unittest import mock
 
-from django.db import DatabaseError
+from django.db import DatabaseError, connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 
@@ -1580,3 +1581,210 @@ class ExistenciasPorAlmacenTests(TestCase):
         for stock in range(20):
             Existencia.objects.create(almacen=self.alm, ubicacion=self.u1, producto=tela, stock=stock, cantidad="1")
         medir()
+
+
+# --- Reportes por periodo: existencias y movimientos (EC-814) -----------------
+
+REPORTE_EXISTENCIAS_PERIODO_URL = f"{EXISTENCIAS_URL}reporte-existencias-periodo/"
+REPORTE_MOVIMIENTOS_PERIODO_URL = f"{MOVIMIENTOS_URL}reporte-movimientos-periodo/"
+PERIODO_REPORTE = {"fecha_inicio": "2026-01-01", "fecha_final": "2026-06-30"}
+
+
+def _fecha_reporte(anio, mes, dia):
+    return datetime(anio, mes, dia, 18, 0, tzinfo=dt_timezone.utc)
+
+
+class ReportesPeriodoBase(TestCase):
+    """Dos empresas, cada una con un almacén en su sucursal matriz (donde vive el
+    usuario regular) y otro en una sucursal norte a la que el usuario NO tiene
+    acceso. Una existencia de 10 en matriz y de 7 en norte; la auditoría suma +3
+    dentro del periodo y -1 después; una entrada costeada a 5 dentro del periodo.
+    """
+
+    @classmethod
+    def _tenant(cls, codigo):
+        empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+        matriz = Sucursal.objects.create(empresa=empresa, codigo=f"{codigo[:2].upper()}M", nombre=f"Matriz {codigo}")
+        norte = Sucursal.objects.create(empresa=empresa, codigo=f"{codigo[:2].upper()}N", nombre=f"Norte {codigo}")
+        almacen = Almacen.objects.create(
+            empresa=empresa, sucursal=matriz, codigo=f"{codigo}-PT", nombre=f"PRODUCTO TERMINADO {codigo}",
+        )
+        almacen_norte = Almacen.objects.create(
+            empresa=empresa, sucursal=norte, codigo=f"{codigo}-NT", nombre=f"NORTE {codigo}",
+        )
+        ubicacion = Ubicacion.objects.create(almacen=almacen, pasillo="1", rack="A", nivel="1", posicion="1")
+        usuario = Usuario.objects.create(
+            username=f"u@{codigo}.test", email=f"u@{codigo}.test", empresa=empresa,
+            first_name="Ana", last_name=codigo,
+        )
+        usuario.sucursales.add(matriz)
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Playera {codigo}")
+        variante = ProductoVariante.objects.create(
+            producto=producto, empresa=empresa, color=cls.color, talla=cls.talla,
+            sku=f"{codigo}-AZ-M", precio_base="1",
+        )
+        Existencia.objects.create(
+            almacen=almacen, ubicacion=ubicacion, producto=producto, producto_variante=variante, cantidad="10",
+        )
+        Existencia.objects.create(almacen=almacen_norte, producto=producto, producto_variante=variante, cantidad="7")
+
+        mov = MovimientoInventario.objects.create(
+            empresa=empresa, sucursal=matriz, tipo_movimiento="ENTRADA", usuario=usuario,
+        )
+        MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=mov, producto=producto, producto_variante=variante,
+            ubicacion_destino=ubicacion, cantidad="10", costo_unitario="5",
+        )
+        MovimientoInventario.objects.filter(pk=mov.pk).update(fecha_movimiento=_fecha_reporte(2026, 2, 1))
+
+        for fecha, delta in ((_fecha_reporte(2026, 3, 1), "3"), (_fecha_reporte(2026, 8, 1), "-1")):
+            evento = AuditoriaEvento.objects.create(
+                empresa=empresa, usuario=usuario, modulo="inventarios", accion="ENTRADA",
+                tabla="existencias", id_registro=str(almacen.pk),
+                despues_json={"almacen_id": almacen.pk, "items": [
+                    {"producto_id": producto.pk, "producto_variante_id": variante.pk, "delta": delta},
+                ]},
+            )
+            AuditoriaEvento.objects.filter(pk=evento.pk).update(created_at=fecha)
+
+        return {
+            "empresa": empresa, "matriz": matriz, "norte": norte, "almacen": almacen,
+            "almacen_norte": almacen_norte, "ubicacion": ubicacion, "usuario": usuario,
+            "producto": producto, "variante": variante,
+        }
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.color = Color.objects.create(nombre="Azul RP", codigo="AZR", codigo_hex="#0000ff")
+        cls.talla = Talla.objects.create(nombre="M-RP")
+        cls.a = cls._tenant("acme-rp")
+        cls.b = cls._tenant("globex-rp")
+        cls.superuser = Usuario.objects.create(username="root-rp", email="root@rp.test", is_superuser=True)
+
+    def _get(self, user, url, params=None):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(url, {**PERIODO_REPORTE, **(params or {})})
+
+    def _movimiento(self, tenant, tipo="ENTRADA", fecha=None, **kwargs):
+        """Movimiento de una línea sin ubicación (el almacén sale del documento)."""
+        mov = MovimientoInventario.objects.create(
+            empresa=tenant["empresa"], sucursal=tenant["matriz"], tipo_movimiento=tipo,
+            usuario=tenant["usuario"], **kwargs,
+        )
+        MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=mov, producto=tenant["producto"], producto_variante=tenant["variante"],
+            cantidad="2", costo_unitario="4",
+        )
+        MovimientoInventario.objects.filter(pk=mov.pk).update(fecha_movimiento=fecha or _fecha_reporte(2026, 4, 1))
+        return mov
+
+    def _entrada_por_recepcion(self, tenant, folio):
+        recepcion = Recepcion.objects.create(
+            empresa=tenant["empresa"], sucursal=tenant["matriz"], almacen=tenant["almacen"],
+            usuario=tenant["usuario"], folio=folio, fecha_recepcion=_fecha_reporte(2026, 4, 1),
+        )
+        return self._movimiento(tenant, recepcion=recepcion)
+
+    def _entrada_por_ajuste(self, tenant):
+        ajuste = AjusteInventario.objects.create(
+            empresa=tenant["empresa"], sucursal=tenant["matriz"], almacen=tenant["almacen"],
+            usuario=tenant["usuario"], motivo="Conteo",
+        )
+        return self._movimiento(tenant, ajuste_inventario=ajuste)
+
+
+class ReporteExistenciasPeriodoTests(ReportesPeriodoBase):
+    """``GET existencias/reporte-existencias-periodo/`` (cálculo en ``reportes_periodo``)."""
+
+    def _filas(self, data):
+        return [
+            (
+                f["almacen_codigo"], f["sku"], f["color"], f["talla"], f["existencia_inicial"], f["entradas"],
+                f["salidas"], f["existencia_final"], f["costo_unitario_final"], f["costo_existencia_final"],
+            )
+            for f in data["results"]
+        ]
+
+    def test_usuario_ve_solo_los_almacenes_de_sus_sucursales(self):
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(
+            self._filas(data),
+            [("acme-rp-PT", "acme-rp-AZ-M", "Azul RP", "M-RP", "8.0000", "3.0000", "0.0000", "11.0000", "5.00", "55.00")],
+        )
+        self.assertEqual(data["resumen"], {
+            "existencia_inicial": "8.0000", "entradas": "3.0000", "salidas": "0.0000",
+            "existencia_final": "11.0000", "costo_total_existencia_final": "55.00",
+        })
+        self.assertEqual([r["almacen_codigo"] for r in data["resumen_por_almacen"]], ["acme-rp-PT"])
+        self.assertEqual((data["fecha_inicio"], data["fecha_final"]), ("2026-01-01", "2026-06-30"))
+
+    def test_superusuario_ve_todos_los_almacenes(self):
+        data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL).json()
+        self.assertEqual(data["count"], 4)
+        norte = [f for f in self._filas(data) if f[0] == "acme-rp-NT"]
+        self.assertEqual(norte, [("acme-rp-NT", "acme-rp-AZ-M", "Azul RP", "M-RP", "7.0000", "0.0000", "0.0000", "7.0000", "0.00", "0.00")])
+
+    def test_almacen_o_empresa_ajenos_no_abren_el_alcance(self):
+        for params in ({"almacen_id": self.b["almacen"].pk}, {"empresa": self.b["empresa"].pk}, {"almacen": self.a["almacen_norte"].pk}):
+            data = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, params).json()
+            self.assertEqual((data["count"], data["results"]), (0, []), params)
+            self.assertEqual(data["resumen"]["existencia_final"], "0.0000")
+
+    def test_fechas_requeridas_y_en_orden(self):
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, {"fecha_inicio": ""})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("fecha_inicio", resp.json())
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, {"fecha_final": "2025-12-31"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("fecha_final", resp.json())
+
+    def test_paginacion_recorta_el_reporte_completo(self):
+        data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL, {"page_size": 1, "page": 2}).json()
+        self.assertEqual((data["count"], len(data["results"])), (4, 1))
+        self.assertIsNotNone(data["next"])
+        self.assertEqual(data["resumen"]["existencia_final"], "36.0000")  # 11 + 7 por empresa
+
+    def test_filtros_almacen_id_conserva_el_valor_historico(self):
+        # Antes del EC-814 ``filtros.almacen_id`` traía el almacén de la última
+        # fila cuando no se filtraba por almacén; el refactor lo conserva.
+        data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL, {"page_size": 100}).json()
+        self.assertEqual(data["filtros"], {"almacen_id": data["results"][-1]["almacen_id"]})
+        data = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, {"almacen_id": self.a["almacen"].pk}).json()
+        self.assertEqual(data["filtros"], {"almacen_id": self.a["almacen"].pk})
+
+
+class ReporteMovimientosPeriodoTests(ReportesPeriodoBase):
+    """``GET movimientos/reporte-movimientos-periodo/``."""
+
+    def test_entrada_toma_el_almacen_del_documento_cuando_no_hay_ubicacion(self):
+        self._entrada_por_recepcion(self.a, "REC-RP-1")
+        self._entrada_por_ajuste(self.a)
+        data = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": "entrada"}).json()
+        self.assertEqual(data["tipo_movimiento"], "ENTRADA")
+        self.assertEqual(data["count"], 3)
+        self.assertEqual({f["almacen_codigo"] for f in data["results"]}, {"acme-rp-PT"})
+        self.assertEqual(data["resumen"], {"total_movimientos": 3, "total_registros": 3, "total_cantidad": "14.0000"})
+        self.assertEqual(data["results"][0]["usuario_nombre"], "Ana acme-rp")
+
+    def test_usuario_de_otra_empresa_no_ve_los_movimientos(self):
+        self._entrada_por_ajuste(self.a)
+        data = self._get(self.b["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": "ENTRADA"}).json()
+        self.assertEqual({f["almacen_codigo"] for f in data["results"]}, {"globex-rp-PT"})
+        data = self._get(
+            self.b["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL,
+            {"tipo_movimiento": "ENTRADA", "almacen": self.a["almacen"].pk},
+        ).json()
+        self.assertEqual((data["count"], data["results"]), (0, []))
+        self.assertEqual(data["filtros"], {"almacen_id": self.a["almacen"].pk})
+
+    def test_tipo_y_fechas_requeridos(self):
+        resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("tipo_movimiento", resp.json())
+        resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": "SALIDA", "fecha_inicio": ""})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("fecha_inicio", resp.json())
