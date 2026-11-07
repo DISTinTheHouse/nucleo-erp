@@ -1440,6 +1440,42 @@ class _OrdenPadreTenantScopedMixin:
         )
 
 
+def _estatus_por_avance(orden, avance_model, fk, campo, estatus_field, parcial, completo, intocables):
+    """Ajusta el estatus de la orden (ya bloqueada) a sus avances activos.
+
+    - realizado ≥ programado (> 0) → ``completo`` (sella ``fecha_fin`` si falta);
+    - 0 < realizado < programado → ``parcial`` (si venía de ``completo``, limpia
+      ``fecha_fin``, igual que reabrir desde el PATCH de la orden, #777);
+    - sin avances: si estaba ``completo`` regresa a ``parcial``; si no, no se toca.
+    Orden inactiva o en ``intocables`` (Detenida/Cancelada): no se toca.
+    2 consultas (dos ``aggregate``) + el ``UPDATE`` cuando cambia.
+    """
+    actual = getattr(orden, estatus_field)
+    if not orden.activo or actual in intocables:
+        return
+    programada = float(orden.detalles.aggregate(t=Sum("cantidad"))["t"] or 0)
+    realizada = float(
+        avance_model.objects.filter(**{fk: orden}, activo=True).aggregate(t=Sum(campo))["t"] or 0
+    )
+    if programada > 0 and realizada >= programada - EPS_CANTIDAD:
+        nuevo = completo
+    elif realizada > 0 or actual == completo:
+        nuevo = parcial
+    else:
+        return
+    if nuevo == actual:
+        return
+    campos = [estatus_field]
+    setattr(orden, estatus_field, nuevo)
+    if nuevo == completo and not orden.fecha_fin:
+        orden.fecha_fin = timezone.now()
+        campos.append("fecha_fin")
+    elif actual == completo and orden.fecha_fin:
+        orden.fecha_fin = None
+        campos.append("fecha_fin")
+    orden.save(update_fields=campos)
+
+
 class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = BordadoAvances.objects.filter(activo=True)
     serializer_class = BordadoAvancesSerializer
@@ -1451,16 +1487,35 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
         # puntadas_total = puntadas_por_pieza × cantidad_bordada
         return int(round(float(por_pieza or 0) * float(cantidad or 0)))
 
-    def perform_create(self, serializer):
-        v = serializer.validated_data
-        serializer.save(
-            usuario=self.request.user,
-            puntadas_total=self._puntadas_total(
-                v.get("puntadas_por_pieza"), v.get("cantidad_bordada")
-            ),
+    def _ajustar_estatus(self, ob_id):
+        E = OrdenesBordado.EstatusBordado
+        orden = OrdenesBordado.objects.select_for_update().get(pk=ob_id)
+        _estatus_por_avance(
+            orden, BordadoAvances, "ob", "cantidad_bordada", "estatus_bordado",
+            E.BORDANDO, E.FINALIZADO, (E.DETENIDO, E.CANCELADO_LEGACY),
         )
 
+    def perform_create(self, serializer):
+        v = serializer.validated_data
+        with transaction.atomic():
+            # Bloquea la orden antes de sumar: dos capturas simultáneas no
+            # calculan el estatus sobre la misma foto.
+            OrdenesBordado.objects.select_for_update().filter(pk=v["ob"].pk).first()
+            avance = serializer.save(
+                usuario=self.request.user,
+                puntadas_total=self._puntadas_total(
+                    v.get("puntadas_por_pieza"), v.get("cantidad_bordada")
+                ),
+            )
+            self._ajustar_estatus(avance.ob_id)
+
     def perform_update(self, serializer):
+        with transaction.atomic():
+            OrdenesBordado.objects.select_for_update().filter(pk=serializer.instance.ob_id).first()
+            self._perform_update(serializer)
+            self._ajustar_estatus(serializer.instance.ob_id)
+
+    def _perform_update(self, serializer):
         inst, v = serializer.instance, serializer.validated_data
         # Un PATCH que no toca piezas ni puntadas no recalcula, y un avance
         # legacy (puntadas_por_pieza=0, total capturado a mano) conserva su total.
@@ -1476,7 +1531,10 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
         )
 
     def perform_destroy(self, instance):
-        instance.soft_delete()
+        with transaction.atomic():
+            OrdenesBordado.objects.select_for_update().filter(pk=instance.ob_id).first()
+            instance.soft_delete()
+            self._ajustar_estatus(instance.ob_id)
 
 class BordadoIncidenciasViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = BordadoIncidencias.objects.filter(activo=True)
@@ -1783,7 +1841,19 @@ class _AvancePiezasViewSetMixin:
     orden_padre_field = None
     campo_cantidad = None
     estatus_field = None
+    # Sin avances nuevos ni bajas. Completado ya no cierra: el estatus lo mueven
+    # los propios avances y una baja debe poder regresarla a parcial.
     estatus_cerrados = ()
+    # (parcial, completo, intocables) para ``_estatus_por_avance``.
+    estatus_parcial = None
+    estatus_completo = None
+    estatus_intocables = ()
+
+    def _ajustar_estatus(self, orden):
+        _estatus_por_avance(
+            orden, self.queryset.model, self.orden_padre_field, self.campo_cantidad,
+            self.estatus_field, self.estatus_parcial, self.estatus_completo, self.estatus_intocables,
+        )
 
     def _orden_bloqueada(self, orden_id):
         return self.orden_model.objects.select_for_update().get(pk=orden_id)
@@ -1816,6 +1886,7 @@ class _AvancePiezasViewSetMixin:
                     )
                 })
             serializer.save(usuario=self.request.user)
+            self._ajustar_estatus(orden)
 
     def perform_destroy(self, instance):
         _require_produccion(self.request.user)
@@ -1823,6 +1894,7 @@ class _AvancePiezasViewSetMixin:
             orden = self._orden_bloqueada(getattr(instance, f"{self.orden_padre_field}_id"))
             self._exigir_abierta(orden)
             instance.soft_delete()
+            self._ajustar_estatus(orden)
 
 
 class ReflejanteAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
@@ -1833,8 +1905,11 @@ class ReflejanteAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScope
     orden_model = OrdenesReflejante
     campo_cantidad = "cantidad_aplicada"
     estatus_field = "estatus_reflejante"
-    estatus_cerrados = (
-        OrdenesReflejante.EstatusReflejante.COMPLETADO,
+    estatus_cerrados = (OrdenesReflejante.EstatusReflejante.CANCELADO,)
+    estatus_parcial = OrdenesReflejante.EstatusReflejante.APLICANDO
+    estatus_completo = OrdenesReflejante.EstatusReflejante.COMPLETADO
+    estatus_intocables = (
+        OrdenesReflejante.EstatusReflejante.DETENIDO,
         OrdenesReflejante.EstatusReflejante.CANCELADO,
     )
 
@@ -1850,8 +1925,11 @@ class CorteMangaAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScope
     orden_model = OrdenesCorteManga
     campo_cantidad = "cantidad"
     estatus_field = "estatus_corte"
-    estatus_cerrados = (
-        OrdenesCorteManga.EstatusCorte.COMPLETADO,
+    estatus_cerrados = (OrdenesCorteManga.EstatusCorte.CANCELADO,)
+    estatus_parcial = OrdenesCorteManga.EstatusCorte.CORTANDO
+    estatus_completo = OrdenesCorteManga.EstatusCorte.COMPLETADO
+    estatus_intocables = (
+        OrdenesCorteManga.EstatusCorte.DETENIDO,
         OrdenesCorteManga.EstatusCorte.CANCELADO,
     )
 
