@@ -151,6 +151,16 @@ def _copiar(origen, destino, campos):
         setattr(destino, campo, getattr(origen, campo))
 
 
+def _estatus_en_facturama(facturama_id):
+    """``Status`` de ``GET /cfdi/{id}?type=issued`` (``active`` | ``canceled``; también para el
+    REP, CFDI tipo P), en minúsculas. ``None`` si Facturama falla o no contesta un objeto."""
+    try:
+        respuesta = FacturamaService().get_cfdi(facturama_id)
+    except FacturamaAPIException:
+        return None
+    return str(respuesta.get("Status") or "").lower() if isinstance(respuesta, dict) else None
+
+
 def _limite_en_curso():
     """Una llamada a Facturama iniciada antes de esto ya terminó: su timeout más margen (#901)."""
     return timezone.now() - timedelta(seconds=int(settings.FACTURAMA_TIMEOUT) + 30)
@@ -193,7 +203,8 @@ def _cancelar_ante_sat(cfg, pk, motivo_sat, nota=""):
     Respuesta del SAT (``canceled``, ``pending``/``requested`` u otro estatus): definitiva, se
     libera la reserva. Rechazo 4xx de Facturama: este intento no ocurrió, así que vuelven el
     motivo y la reserva de antes; una reserva fresca se libera, una heredada de un intento sin
-    respuesta se queda y sigue fijando el motivo. Timeout, red, 408 o 5xx: no se sabe si el SAT
+    respuesta se queda y sigue fijando el motivo, salvo que ``GET /cfdi/{id}`` diga
+    ``canceled``: entonces se guarda como cualquier ``canceled`` (``active`` nunca libera). Timeout, red, 408 o 5xx: no se sabe si el SAT
     la registró, así que la reserva se queda y fija el motivo del reintento (#563, #623).
 
     Toda escritura posterior a Facturama revisa, con la fila bloqueada, que la reserva siga
@@ -228,18 +239,23 @@ def _cancelar_ante_sat(cfg, pk, motivo_sat, nota=""):
                 f"Facturama no respondió ({_mensaje(exc)}); no se sabe si se canceló. "
                 f"Vuelve a intentar en un minuto con el mismo motivo ({motivo})."
             )})
-        # UPDATE sin fila de historial (no hay cambio neto), solo sobre la reserva propia.
-        with transaction.atomic():
-            fila = cfg.modelo.objects.select_for_update(of=("self",)).get(pk=pk)
-            if getattr(fila, f_desde) == reservado:
-                if cfg.ya_cancelado(fila, facturama_id):
-                    previo = {f_desde: None}
-                else:
-                    previo = {f_motivo: motivo_anterior, f_desde: desde_anterior}
-                cfg.modelo.objects.filter(pk=pk).update(**previo, updated_at=timezone.now())
-                fila = cfg.modelo.objects.get(pk=pk)
-        _copiar(fila, obj, (f_motivo, f_desde))
-        return obj, ErrorDeNegocio({cfg.clave: f"Facturama no canceló el {cfg.nombre}: {_mensaje(exc)}"})
+        # Reserva heredada de un intento sin respuesta: ese intento pudo cancelar y el 4xx ser
+        # "ya cancelado". Solo ``canceled`` en la consulta resuelve; ``active`` no libera nada,
+        # porque una cancelación pendiente de aceptar también se lee ``active``.
+        if desde_anterior is None or _estatus_en_facturama(facturama_id) != "canceled":
+            # UPDATE sin fila de historial (no hay cambio neto), solo sobre la reserva propia.
+            with transaction.atomic():
+                fila = cfg.modelo.objects.select_for_update(of=("self",)).get(pk=pk)
+                if getattr(fila, f_desde) == reservado:
+                    if cfg.ya_cancelado(fila, facturama_id):
+                        previo = {f_desde: None}
+                    else:
+                        previo = {f_motivo: motivo_anterior, f_desde: desde_anterior}
+                    cfg.modelo.objects.filter(pk=pk).update(**previo, updated_at=timezone.now())
+                    fila = cfg.modelo.objects.get(pk=pk)
+            _copiar(fila, obj, (f_motivo, f_desde))
+            return obj, ErrorDeNegocio({cfg.clave: f"Facturama no canceló el {cfg.nombre}: {_mensaje(exc)}"})
+        respuesta = {"Status": "canceled"}  # se guarda igual que un ``canceled`` del DELETE
     estatus = str((respuesta or {}).get("Status") or "").lower()
     error = None
     campos = list(cfg.campos)
