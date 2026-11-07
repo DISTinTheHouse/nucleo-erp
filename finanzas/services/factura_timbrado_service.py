@@ -161,8 +161,10 @@ class _CancelacionSat:
     """Lo que cambia entre cancelar el CFDI de una factura y el de un REP (``_cancelar_ante_sat``).
 
     ``preparar(obj)`` valida con la fila bloqueada y regresa el id de Facturama, o ``None`` si
-    no hay nada que cancelar. ``al_cancelar(obj)`` aplica un ``canceled`` del SAT. ``campos``:
-    lo que guarda el resultado. ``campo_nota``: dónde va la nota interna (``None``: no admite).
+    no hay nada que cancelar. ``al_cancelar(obj)`` aplica un ``canceled`` del SAT.
+    ``ya_cancelado(obj, facturama_id)``: otra petición ya guardó la cancelación de ese CFDI.
+    ``campos``: lo que guarda el resultado. ``campo_nota``: dónde va la nota interna
+    (``None``: no admite).
     """
     modelo: type
     prefijo: str
@@ -172,6 +174,7 @@ class _CancelacionSat:
     campos: tuple
     preparar: Callable
     al_cancelar: Callable
+    ya_cancelado: Callable
     campo_nota: str | None = None
 
     def campo(self, sufijo):
@@ -192,7 +195,14 @@ def _cancelar_ante_sat(cfg, pk, motivo_sat, nota=""):
     motivo y la reserva de antes; una reserva fresca se libera, una heredada de un intento sin
     respuesta se queda y sigue fijando el motivo. Timeout, red, 408 o 5xx: no se sabe si el SAT
     la registró, así que la reserva se queda y fija el motivo del reintento (#563, #623).
-    Regresa ``(obj, error)``.
+
+    Toda escritura posterior a Facturama revisa, con la fila bloqueada, que la reserva siga
+    siendo la de esta petición (``<prefijo>_en_curso_desde`` igual al que guardó). Si otra
+    petición reservó después (respuesta más lenta que la ventana), esta no toca reserva ni
+    motivo: solo guarda lo que su respuesta confirma y no se puede perder (``canceled``: el CFDI
+    ya no está vigente; ``pending``: el SAT tiene una solicitud) y descarta lo demás, que la
+    petición vigente resolverá. Un 4xx sobre un CFDI que otra petición ya registró cancelado
+    libera la reserva en vez de restaurar una heredada. Regresa ``(obj, error)``.
     """
     f_solicitada, f_motivo, f_desde = cfg.campo("solicitada"), cfg.campo("motivo"), cfg.campo("en_curso_desde")
     with transaction.atomic():
@@ -205,7 +215,8 @@ def _cancelar_ante_sat(cfg, pk, motivo_sat, nota=""):
             raise ErrorDeNegocio({cfg.clave: MSG_CANCELACION_EN_CURSO.format(cfg.nombre)})
         fijado = getattr(obj, f_solicitada) or desde_anterior is not None
         motivo = _motivo_sat(motivo_sat, motivo_anterior, fijado)
-        reserva = {f_motivo: motivo, f_desde: timezone.now(), "updated_at": timezone.now()}
+        reservado = timezone.now()  # identifica la reserva de esta petición
+        reserva = {f_motivo: motivo, f_desde: reservado, "updated_at": timezone.now()}
         cfg.modelo.objects.filter(pk=pk).update(**reserva)
         for campo, valor in reserva.items():
             setattr(obj, campo, valor)
@@ -217,32 +228,46 @@ def _cancelar_ante_sat(cfg, pk, motivo_sat, nota=""):
                 f"Facturama no respondió ({_mensaje(exc)}); no se sabe si se canceló. "
                 f"Vuelve a intentar en un minuto con el mismo motivo ({motivo})."
             )})
-        # Un solo UPDATE (bloquea la fila): sin cambio neto, no deja fila de historial.
-        previo = {f_motivo: motivo_anterior, f_desde: desde_anterior}
-        cfg.modelo.objects.filter(pk=pk).update(**previo, updated_at=timezone.now())
-        for campo, valor in previo.items():
-            setattr(obj, campo, valor)
+        # UPDATE sin fila de historial (no hay cambio neto), solo sobre la reserva propia.
+        with transaction.atomic():
+            fila = cfg.modelo.objects.select_for_update(of=("self",)).get(pk=pk)
+            if getattr(fila, f_desde) == reservado:
+                if cfg.ya_cancelado(fila, facturama_id):
+                    previo = {f_desde: None}
+                else:
+                    previo = {f_motivo: motivo_anterior, f_desde: desde_anterior}
+                cfg.modelo.objects.filter(pk=pk).update(**previo, updated_at=timezone.now())
+                fila = cfg.modelo.objects.get(pk=pk)
+        _copiar(fila, obj, (f_motivo, f_desde))
         return obj, ErrorDeNegocio({cfg.clave: f"Facturama no canceló el {cfg.nombre}: {_mensaje(exc)}"})
     estatus = str((respuesta or {}).get("Status") or "").lower()
     error = None
     campos = list(cfg.campos)
     with transaction.atomic():
         bloqueado = cfg.modelo.objects.select_for_update(of=("self",)).get(pk=pk)
-        setattr(bloqueado, f_desde, None)
+        propia = getattr(bloqueado, f_desde) == reservado
+        if propia:
+            setattr(bloqueado, f_desde, None)
+        guardar = propia
         if estatus == "canceled":
             cfg.al_cancelar(bloqueado)
             setattr(bloqueado, f_solicitada, False)
+            guardar = True
             if nota and cfg.campo_nota:  # misma transacción que ``canceled`` (EC-806)
                 setattr(bloqueado, cfg.campo_nota, agregar_observacion(getattr(bloqueado, cfg.campo_nota), nota))
                 campos.append(cfg.campo_nota)
         elif estatus in CANCELACION_PENDIENTE:  # #565, #630
             setattr(bloqueado, f_solicitada, True)
+            guardar = True
             error = ErrorDeNegocio({"cancelacion_pendiente": MSG_CANCELACION_PENDIENTE})
         else:
-            # Rechazo del receptor (``active``): ya no hay solicitud en curso (#633).
-            setattr(bloqueado, f_solicitada, False)
+            # Rechazo del receptor (``active``): ya no hay solicitud en curso (#633). Si la
+            # reserva ya es de otra petición, su respuesta decide.
+            if propia:
+                setattr(bloqueado, f_solicitada, False)
             error = ErrorDeNegocio({cfg.clave: f"El SAT no canceló el {cfg.nombre} (estatus: {estatus or 'vacío'})."})
-        bloqueado.save(update_fields=[*campos, "updated_at"])
+        if guardar:
+            bloqueado.save(update_fields=[*campos, "updated_at"])
     _copiar(bloqueado, obj, campos)
     return obj, error
 
@@ -296,12 +321,15 @@ def _al_cancelar_rep(c):
 CANCELACION_CFDI = _CancelacionSat(
     modelo=Factura, prefijo="cfdi_cancelacion", nombre="CFDI", clave="cfdi", clave_incierto="cfdi",
     campos=CAMPOS_CFDI_CANCELACION, preparar=_preparar_cancelacion_cfdi, al_cancelar=_al_cancelar_cfdi,
+    ya_cancelado=lambda f, facturama_id: f.cfdi_cancelado,
     campo_nota="observaciones",
 )
 CANCELACION_REP = _CancelacionSat(
     modelo=Cobro, prefijo="rep_cancelacion", nombre="REP", clave="rep", clave_incierto="rep_incierto",
     campos=(*CAMPOS_REP, *CAMPOS_REP_CANCELACION), preparar=_preparar_cancelacion_rep,
     al_cancelar=_al_cancelar_rep,
+    # Al cancelarse el REP se limpia ``rep_facturama_id``: ya no es el que se mandó a cancelar.
+    ya_cancelado=lambda c, facturama_id: c.rep_facturama_id != facturama_id,
 )
 # Facturama documenta ``pending``; ``requested`` es el valor que el ERP ya manejaba (#630).
 CANCELACION_PENDIENTE = ("pending", "requested")

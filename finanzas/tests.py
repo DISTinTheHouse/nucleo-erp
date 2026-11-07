@@ -7116,6 +7116,37 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         cobro.refresh_from_db()
         self.assertEqual(cobro.rep_cancelacion_motivo, "03")
 
+    def test_cancelar_rep_respuesta_tardia_cancelada_no_pisa_la_reserva(self):  # EC-806
+        nueva = timezone.now() + timedelta(seconds=5)
+        estado = {}
+
+        def cancelar(facturama_id, motivo):
+            Cobro.objects.filter(rep_facturama_id=facturama_id).update(
+                rep_cancelacion_en_curso_desde=nueva, rep_cancelacion_motivo="02"
+            )
+            return {"Status": "canceled"}
+
+        resp, cobro, _ = self._cancelar_rep(None, cancelar, motivo_sat="03")
+        estado["uuid"] = f"REP-UUID-{cobro.pk}"
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual((cobro.rep_uuid, cobro.rep_cancelado_uuid), (None, estado["uuid"]))
+        self.assertEqual((cobro.rep_cancelacion_en_curso_desde, cobro.rep_cancelacion_motivo), (nueva, "02"))
+
+    def test_cancelar_rep_rechazo_sobre_un_rep_ya_registrado_cancelado_libera_la_reserva(self):  # EC-806
+        def cancelar(facturama_id, motivo):
+            # Otra petición guardó la cancelación del REP (limpia ``rep_facturama_id``) mientras esta esperaba.
+            Cobro.objects.filter(rep_facturama_id=facturama_id).update(rep_uuid=None, rep_facturama_id=None)
+            raise FacturamaAPIException("error", status_code=400, details={"Message": "Ya cancelado"})
+
+        vencida = timezone.now() - timedelta(minutes=5)
+        resp, cobro, _ = self._cancelar_rep(
+            None, cancelar, motivo_sat=None, rep_cancelacion_en_curso_desde=vencida, rep_cancelacion_motivo="03"
+        )
+
+        self.assertIn("rep", resp.data)
+        self.assertIsNone(cobro.rep_cancelacion_en_curso_desde)
+
     def test_cancelar_rep_rechazo_tras_un_intento_sin_respuesta_conserva_el_motivo(self):  # EC-806
         resp, cobro, _ = self._cancelar_rep(None, FacturamaAPIException("caído", status_code=503), motivo_sat="03")
         self._vencer_reserva_rep(cobro)
@@ -9206,6 +9237,79 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.assertEqual((factura.cfdi_cancelado, factura.observaciones), (False, "Previa"))
         self.facturama.cancel_cfdi.assert_not_called()
 
+    def _respuesta_tardia(self, factura, resultado, **campos):
+        """Mientras esta petición espera a Facturama, otra reserva después (respuesta más lenta
+        que la ventana): se simula reescribiendo la reserva antes de contestar ``resultado``."""
+        nueva = timezone.now() + timedelta(seconds=5)
+
+        def cancelar(*args):
+            Factura.objects.filter(pk=factura.pk).update(
+                cfdi_cancelacion_en_curso_desde=nueva, cfdi_cancelacion_motivo="02", **campos
+            )
+            if isinstance(resultado, Exception):
+                raise resultado
+            return resultado
+
+        self.facturama.cancel_cfdi.side_effect = cancelar
+        return nueva
+
+    def test_respuesta_tardia_cancelada_no_pisa_la_reserva_y_no_se_pierde(self):  # EC-806
+        factura = self._timbrada()
+        nueva = self._respuesta_tardia(factura, {"Status": "canceled"})
+
+        self.assertEqual(self._cancelar(factura, motivo_sat="03").status_code, 200)
+
+        factura.refresh_from_db()
+        self.assertTrue(factura.cfdi_cancelado)
+        self.assertEqual((factura.cfdi_cancelacion_en_curso_desde, factura.cfdi_cancelacion_motivo), (nueva, "02"))
+
+    def test_respuesta_tardia_pendiente_marca_la_solicitud_sin_pisar_la_reserva(self):  # EC-806
+        factura = self._timbrada()
+        nueva = self._respuesta_tardia(factura, {"Status": "pending"})
+
+        self.assertIn("cancelacion_pendiente", self._cancelar(factura, motivo_sat="03").data)
+
+        factura.refresh_from_db()
+        self.assertTrue(factura.cfdi_cancelacion_solicitada)
+        self.assertEqual((factura.cfdi_cancelacion_en_curso_desde, factura.cfdi_cancelacion_motivo), (nueva, "02"))
+
+    def test_respuesta_tardia_rechazada_no_toca_nada(self):  # EC-806
+        error = FacturamaAPIException("error", status_code=400, details={"Message": "No"})
+        factura = self._timbrada()
+        for resultado in ({"Status": "active"}, error):
+            with self.subTest(resultado=resultado):
+                Factura.objects.filter(pk=factura.pk).update(
+                    cfdi_cancelacion_en_curso_desde=None, cfdi_cancelacion_motivo=None, cfdi_cancelacion_solicitada=False
+                )
+                nueva = self._respuesta_tardia(factura, resultado, cfdi_cancelacion_solicitada=True)
+
+                self.assertEqual(self._cancelar(factura, motivo_sat="03").status_code, 400)
+
+                factura.refresh_from_db()
+                self.assertEqual(
+                    (factura.cfdi_cancelacion_en_curso_desde, factura.cfdi_cancelacion_motivo,
+                     factura.cfdi_cancelacion_solicitada, factura.cfdi_cancelado),
+                    (nueva, "02", True, False),
+                )
+
+    def test_rechazo_sobre_un_cfdi_ya_registrado_cancelado_libera_la_reserva(self):  # EC-806
+        factura = self._timbrada()
+        vencida = timezone.now() - timedelta(minutes=5)
+        Factura.objects.filter(pk=factura.pk).update(
+            cfdi_cancelacion_en_curso_desde=vencida, cfdi_cancelacion_motivo="03"
+        )
+
+        def cancelar(*args):
+            # Otra petición guarda la cancelación mientras esta espera; Facturama dice "ya cancelado".
+            Factura.objects.filter(pk=factura.pk).update(cfdi_cancelado=True)
+            raise FacturamaAPIException("error", status_code=400, details={"Message": "Ya cancelado"})
+
+        self.facturama.cancel_cfdi.side_effect = cancelar
+        self._cancelar(factura, motivo_sat=None)
+
+        factura.refresh_from_db()
+        self.assertEqual((factura.cfdi_cancelado, factura.cfdi_cancelacion_en_curso_desde), (True, None))
+
     def test_rechazo_tras_un_intento_sin_respuesta_conserva_el_motivo(self):  # EC-806
         factura = self._timbrada()
         self.facturama.cancel_cfdi.side_effect = FacturamaAPIException("caído", status_code=503)
@@ -9258,11 +9362,16 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         factura = self._borrador()
         resp = self._client(self.a["usuario"]).patch(
             f"{FACTURAS_URL}{factura.pk}/",
-            {"cfdi_cancelacion_motivo": "03", "cfdi_cancelacion_en_curso_desde": timezone.now().isoformat()},
+            {
+                "observaciones": "Nota de control",
+                "cfdi_cancelacion_motivo": "03",
+                "cfdi_cancelacion_en_curso_desde": timezone.now().isoformat(),
+            },
             format="json",
         )
-        self.assertIn(resp.status_code, (200, 400), resp.data)
+        self.assertEqual(resp.status_code, 200, resp.data)
         factura.refresh_from_db()
+        self.assertEqual(factura.observaciones, "Nota de control")  # la escritura sí se aplicó
         self.assertEqual((factura.cfdi_cancelacion_motivo, factura.cfdi_cancelacion_en_curso_desde), (None, None))
 
     def test_solicitada_sin_motivo_guardado_es_02(self):  # EC-806: marcada por el código previo
