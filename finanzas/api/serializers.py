@@ -392,6 +392,8 @@ class FacturaSerializer(serializers.ModelSerializer):
             'cfdi_pendiente',
             'cfdi_cancelado',
             'cfdi_cancelacion_solicitada',
+            'cfdi_cancelacion_motivo',
+            'cfdi_cancelacion_en_curso_desde',
         ]
         fields = '__all__'
         extra_kwargs = {'tipo_cambio': {'min_value': Decimal('0.000001')}}
@@ -466,6 +468,7 @@ class FacturaListSerializer(serializers.ModelSerializer):
             'moneda_nombre',
             'cfdi_uuid',
             'cfdi_cancelacion_solicitada',
+            'cfdi_cancelacion_motivo',
             'cfdi_cancelado',
             'cfdi_pendiente',
         ]
@@ -1134,7 +1137,7 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
         model = Cobro
         fields = "__all__"
         # ``activo`` solo lo apaga el DELETE, que revierte saldos (#572).
-        read_only_fields = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado", "rep_pendiente", "rep_cancelacion_solicitada", "rep_cancelado_uuid", "rep_fecha_cancelacion", "activo", "moneda", "folio")
+        read_only_fields = ("rep_uuid", "rep_facturama_id", "rep_fecha_timbrado", "rep_pendiente", "rep_cancelacion_solicitada", "rep_cancelacion_motivo", "rep_cancelacion_en_curso_desde", "rep_cancelado_uuid", "rep_fecha_cancelacion", "activo", "moneda", "folio")
 
     def get_fields(self):
         # #570: una CxC de otra empresa responde igual que una inexistente.

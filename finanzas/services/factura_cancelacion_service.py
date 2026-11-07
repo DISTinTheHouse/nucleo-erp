@@ -6,12 +6,17 @@ from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import CuentaPorCobrar, Factura, NotaCredito
 from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.services.factura_poliza_service import FacturaPolizaService
-from finanzas.services.factura_timbrado_service import PENDIENTE_CFDI, FacturaTimbradoService
+from finanzas.services.factura_timbrado_service import (
+    PENDIENTE_CFDI,
+    FacturaTimbradoService,
+    agregar_observacion,
+    normalizar_motivo_sat,
+)
 
 
 class FacturaCancelacionService:
     @staticmethod
-    def cancelar(factura, usuario=None, motivo=""):
+    def cancelar(factura, usuario=None, motivo="", motivo_sat=None):
         """Regresa la contrapóliza, o ``None`` si no hubo (Borrador, ya cancelada o sin póliza).
 
         Los cobros aplicados no se tocan: su póliza sigue y en Clientes queda el
@@ -22,20 +27,28 @@ class FacturaCancelacionService:
         Timbrada: primero el SAT, y ``cfdi_cancelado`` se guarda en su propia
         transacción. Si la parte del ERP falla, reintentar no vuelve a llamar al
         SAT y el ERP no pierde que el CFDI ya está cancelado (#554).
+
+        ``motivo_sat`` (02/03) es obligatorio solo si hay que cancelar el CFDI ante el
+        SAT; ``motivo`` es la nota interna que va a ``observaciones`` (EC-806).
         """
+        motivo_sat = normalizar_motivo_sat(motivo_sat)
         actual = Factura.objects.get(pk=factura.pk)
         if not actual.activo:  # #857, como emitir/ y timbrar/
             raise ErrorDeNegocio({"estatus": "La factura está eliminada y no se puede cancelar."})
         if actual.estatus == Factura.FacturaStatus.CANCELADA:
             # #567: cancelada en el ERP antes de cancelar su CFDI; se cancela ahora.
             if actual.cfdi_uuid and not actual.cfdi_cancelado:
-                FacturaTimbradoService.cancelar_cfdi(factura)
+                # La nota interna ya no se descarta (EC-806): va en la misma transacción que
+                # ``cfdi_cancelado``, igual que al cancelar en el ERP.
+                FacturaTimbradoService.cancelar_cfdi(
+                    factura, motivo_sat, nota=f"CFDI cancelado ante el SAT: {motivo}" if motivo else ""
+                )
             return None
         FacturaCancelacionService._exigir_sin_notas_emitidas(actual)
         if actual.cfdi_pendiente:  # #562, #904
             raise ErrorDeNegocio({"cfdi": PENDIENTE_CFDI})
         if actual.cfdi_uuid and not actual.cfdi_cancelado:
-            FacturaTimbradoService.cancelar_cfdi(factura)
+            FacturaTimbradoService.cancelar_cfdi(factura, motivo_sat)
         return FacturaCancelacionService._cancelar_en_erp(factura, usuario, motivo)
 
     @staticmethod
@@ -60,8 +73,7 @@ class FacturaCancelacionService:
 
         era_emitida = bloqueada.estatus == Factura.FacturaStatus.EMITIDA
         bloqueada.estatus = Factura.FacturaStatus.CANCELADA
-        if motivo:
-            bloqueada.observaciones = f"{bloqueada.observaciones or ''}\nCancelada: {motivo}".strip()
+        bloqueada.observaciones = agregar_observacion(bloqueada.observaciones, f"Cancelada: {motivo}" if motivo else "")
         bloqueada.save(update_fields=["estatus", "observaciones", "updated_at"])
         factura.estatus, factura.observaciones = bloqueada.estatus, bloqueada.observaciones
 
