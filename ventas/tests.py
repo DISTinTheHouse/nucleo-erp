@@ -9864,3 +9864,53 @@ class CotizacionImporteSinIvaSqlTests(TestCase):
         for cot in Cotizacion.objects.filter(empresa__codigo="ec811-iva", iva__in=(0, 8, 16, 80)).annotate(sql=IMPORTE_SIN_IVA):
             with self.subTest(gran_total=cot.gran_total, iva=cot.iva):
                 self.assertEqual(cot.sql, importes_iva(cot)[0])
+
+
+class CotizacionParametrosFiltroTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811 (revisión): ``PARAMETROS_FILTRO`` es la única lista de los filtros. Todo
+    lo que lee ``filtrar`` debe estar en ella y lo deben aceptar ``kpis/`` y
+    ``tablero/`` (si no, el listado filtra y ellas responden 400)."""
+
+    def _leidos_por_filtrar(self):
+        from django.http import QueryDict
+        from rest_framework.request import Request
+        from rest_framework.test import APIRequestFactory
+        from ventas.api import cotizaciones_listado
+
+        leidos = set()
+
+        class Espia(QueryDict):
+            def get(self, key, default=None):
+                leidos.add(key)
+                return super().get(key, default)
+
+        request = Request(APIRequestFactory().get("/x/"))
+        request._request.GET = Espia(mutable=True)
+        cotizaciones_listado.filtrar(request, Cotizacion.objects.none())
+        return leidos
+
+    def test_filtrar_solo_lee_parametros_de_la_lista(self):
+        from ventas.api import cotizaciones_listado
+
+        leidos = self._leidos_por_filtrar()
+        self.assertTrue(leidos)
+        self.assertEqual(leidos, set(cotizaciones_listado.PARAMETROS_FILTRO))
+
+    def test_kpis_y_tablero_aceptan_cada_filtro_que_lee_filtrar(self):
+        valores = {
+            "q": "acme", "estatus": "1,3", "cliente": str(self.acme.pk), "vendedor": str(self.ana.pk),
+            "fecha_desde": "2026-03-01", "fecha_hasta": "2026-03-31",
+        }
+        leidos = self._leidos_por_filtrar()
+        self.assertLessEqual(leidos, set(valores), "falta un valor de ejemplo para un filtro nuevo")
+        for url in (f"{COTIZACIONES_URL}kpis/", f"{COTIZACIONES_URL}tablero/"):
+            for nombre in sorted(leidos):
+                with self.subTest(url=url, parametro=nombre):
+                    resp = self._get(url, {nombre: valores[nombre]})
+                    self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_schema_documenta_los_mismos(self):
+        from ventas.api import cotizaciones_listado
+        from ventas.api.views import PARAMETROS_FILTRO_COTIZACIONES
+
+        self.assertEqual({p.name for p in PARAMETROS_FILTRO_COTIZACIONES}, set(cotizaciones_listado.PARAMETROS_FILTRO))

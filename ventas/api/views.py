@@ -437,19 +437,9 @@ FILTER_BACKENDS_SIN_ORDERING = tuple(
 # que el usuario no ve (#537, #947, EC-784) es de pedidos: ``OrdenamientoPedidosFilter``.
 FILTER_BACKENDS_LISTADO = (*FILTER_BACKENDS_SIN_ORDERING, cotizaciones_listado.OrdenamientoCotizacionesFilter)
 
-# Filtros del listado de cotizaciones (``cotizaciones_listado.filtrar``, EC-811).
-PARAMETROS_FILTRO_COTIZACIONES = [
-    OpenApiParameter("q", OpenApiTypes.STR, description=(
-        "Contiene, en OC y nombre, razón social o RFC del cliente; si es numérico, también el id exacto."
-    )),
-    OpenApiParameter("estatus", OpenApiTypes.STR, description="Uno o varios estatus (1-5) separados por coma."),
-    OpenApiParameter("cliente", OpenApiTypes.STR, description=(
-        "Id del cliente, o `sin_cliente` para las cotizaciones sin cliente."
-    )),
-    OpenApiParameter("vendedor", OpenApiTypes.INT, description="Id del vendedor."),
-    OpenApiParameter("fecha_desde", OpenApiTypes.DATE, description="Día local de creación, desde (YYYY-MM-DD), inclusivo."),
-    OpenApiParameter("fecha_hasta", OpenApiTypes.DATE, description="Día local de creación, hasta (YYYY-MM-DD), inclusivo."),
-]
+# Filtros del listado de cotizaciones (``cotizaciones_listado.filtrar``, EC-811): la
+# lista vive allá, junto a quien los lee.
+PARAMETROS_FILTRO_COTIZACIONES = list(cotizaciones_listado.PARAMETROS_FILTRO_OPENAPI)
 
 
 class CotizacionViewSet(viewsets.ModelViewSet):

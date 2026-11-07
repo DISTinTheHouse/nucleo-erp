@@ -21,6 +21,8 @@ from django.contrib.postgres.aggregates import ArrayAgg
 from django.db.models import Case, Count, DecimalField, F, Q, Sum, Value, When, Window
 from django.db.models.functions import Coalesce, Collate, JSONObject, NullIf, Round, RowNumber, Trim
 from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter
 from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param, rango_fechas
@@ -49,8 +51,23 @@ ESTATUS_VALIDOS = frozenset(e for e, _ in Cotizacion.CHOICES_ESTATUS)
 SIN_CLIENTE = "sin_cliente"
 ETIQUETA_SIN_CLIENTE = "Sin cliente"
 CENTAVOS = Decimal("0.01")
-# Parámetros de ``filtrar`` (los que aceptan ``kpis/`` y ``tablero/``).
-PARAMETROS_FILTRO = frozenset({"q", "estatus", "cliente", "vendedor", "fecha_desde", "fecha_hasta"})
+# Parámetros que lee ``filtrar``: ÚNICA lista. De ella salen el schema del listado,
+# ``kpis/`` y ``tablero/`` (``PARAMETROS_FILTRO_OPENAPI``) y lo que esas dos acciones
+# aceptan (``PARAMETROS_FILTRO``). Un filtro nuevo en ``filtrar`` va aquí; si no,
+# ``CotizacionParametrosFiltroTests`` falla.
+PARAMETROS_FILTRO_OPENAPI = (
+    OpenApiParameter("q", OpenApiTypes.STR, description=(
+        "Contiene, en OC y nombre, razón social o RFC del cliente; si son dígitos, también el id exacto."
+    )),
+    OpenApiParameter("estatus", OpenApiTypes.STR, description="Uno o varios estatus (1-5) separados por coma."),
+    OpenApiParameter("cliente", OpenApiTypes.STR, description=(
+        f"Id del cliente, o `{SIN_CLIENTE}` para las cotizaciones sin cliente."
+    )),
+    OpenApiParameter("vendedor", OpenApiTypes.INT, description="Id del vendedor."),
+    OpenApiParameter("fecha_desde", OpenApiTypes.DATE, description="Día local de creación, desde (YYYY-MM-DD), inclusivo."),
+    OpenApiParameter("fecha_hasta", OpenApiTypes.DATE, description="Día local de creación, hasta (YYYY-MM-DD), inclusivo."),
+)
+PARAMETROS_FILTRO = frozenset(p.name for p in PARAMETROS_FILTRO_OPENAPI)
 
 
 def cliente_param(request):
