@@ -585,3 +585,23 @@ class OrdenCorteMangaDetalle(models.Model):
 
     def __str__(self):
         return str(self.id)
+
+
+class CorteMangaAvances(StatusLifecycleModel):
+    """Avance de piezas de una orden de corte de manga. Mismo patrón que
+    ``ReflejanteAvances``: sólo piezas, sin renglón ni talla."""
+
+    ocm = models.ForeignKey(OrdenesCorteManga, on_delete=models.CASCADE)
+    fecha = models.DateTimeField(auto_now_add=True)
+    cantidad = models.FloatField()
+    usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
+    comentario = models.TextField(blank=True, null=True)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'corte_manga_avances'
+        verbose_name = 'Corte Manga Avance'
+        verbose_name_plural = 'Corte Manga Avances'
+
+    def __str__(self):
+        return str(self.id)

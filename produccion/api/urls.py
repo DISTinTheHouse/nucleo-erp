@@ -12,6 +12,7 @@ from produccion.api.views import (
     OrdenReflejanteViewSet,
     ReflejanteAvancesViewSet,
     ReflejanteIncidenciasViewSet,
+    CorteMangaAvancesViewSet,
     OrdenesCorteMangaViewSet,
     PedidoEspecialViewSet,
 )
@@ -29,6 +30,7 @@ router.register(r'orden-reflejante', OrdenReflejanteViewSet)
 router.register(r'reflejante-avances', ReflejanteAvancesViewSet)
 router.register(r'reflejante-incidencias', ReflejanteIncidenciasViewSet)
 router.register(r'orden-corte-manga', OrdenesCorteMangaViewSet)
+router.register(r'corte-manga-avances', CorteMangaAvancesViewSet)
 router.register(r'pedidos-especiales', PedidoEspecialViewSet, basename='pedido-especial')
 
 urlpatterns = [

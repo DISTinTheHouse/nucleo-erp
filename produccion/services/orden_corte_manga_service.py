@@ -1,4 +1,7 @@
+import math
+
 from django.db import transaction
+from django.db.models import Sum
 from catalogo.compatibilidad import Proceso, exigir_compatibilidad
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesCorteManga, OrdenCorteMangaDetalle
@@ -8,11 +11,12 @@ from produccion.services.common import (
     crear_orden_con_guardia_duplicado,
     exigir_producto_en_tallas,
     payload_duplicada,
+    pendientes_por_linea,
     revisar_empresa,
     tallas_orden_trabajo_qs,
 )
 from produccion.utils.folios import generate_ocm_folio
-from ventas.models import Pedido
+from ventas.models import Pedido, PedidoDetalleTalla
 
 
 class OrdenCorteMangaDuplicada409(APIException):
@@ -109,6 +113,116 @@ class OrdenCorteMangaService:
     def cantidades_asignadas_por_pedidos(pedido_ids):
         """``common.cantidades_asignadas`` para OCMs; ver allí el contrato."""
         return cantidades_asignadas(OrdenCorteMangaDetalle, "ocm", pedido_ids, "estatus_corte")
+
+    @staticmethod
+    def contratado_por_pedido(pedido_ids):
+        """Piezas contratadas de corte de manga por pedido, en UNA query.
+
+        Mismo contrato que ``OrdenReflejanteService.contratado_por_pedido``
+        (``lleva_corte_manga=True, cantidad > 0``).
+        """
+        filas = (
+            PedidoDetalleTalla.objects
+            .filter(
+                pedido_detalle__pedido_id__in=list(pedido_ids),
+                lleva_corte_manga=True,
+                cantidad__gt=0,
+            )
+            .values("pedido_detalle__pedido_id")
+            .annotate(total=Sum("cantidad"))
+        )
+        return {
+            f["pedido_detalle__pedido_id"]: float(f["total"] or 0) for f in filas
+        }
+
+    @staticmethod
+    def cobertura_por_orden(ordenes, cubierto_override=None, contratado_override=None):
+        """Cobertura de cada OCM sobre lo contratado por su pedido.
+
+        Copia de ``OrdenReflejanteService.cobertura_por_orden`` (mismo piso,
+        mismo tope ``cubierto <= contratado`` y mismos ``*_override``).
+        """
+        ordenes = list(ordenes)
+        if not ordenes:
+            return {}
+        if cubierto_override is not None:
+            cubierto_por_ocm = cubierto_override
+        else:
+            cubierto_por_ocm = {
+                f["ocm_id"]: float(f["total"] or 0)
+                for f in (
+                    OrdenCorteMangaDetalle.objects
+                    .filter(ocm_id__in=[o.pk for o in ordenes])
+                    .values("ocm_id")
+                    .annotate(total=Sum("cantidad"))
+                )
+            }
+        if contratado_override is not None:
+            contratado = contratado_override
+        else:
+            contratado = OrdenCorteMangaService.contratado_por_pedido(
+                {o.pedido_id for o in ordenes}
+            )
+
+        resultado = {}
+        for orden in ordenes:
+            contratado_int = math.floor(contratado.get(orden.pedido_id, 0.0) + EPS_CANTIDAD)
+            cubierto_int = min(
+                math.floor(cubierto_por_ocm.get(orden.pk, 0.0) + EPS_CANTIDAD),
+                contratado_int,
+            )
+            resultado[orden.pk] = {
+                "cubierto": cubierto_int,
+                "contratado": contratado_int,
+                "completa": contratado_int > 0 and cubierto_int >= contratado_int,
+            }
+        return resultado
+
+    @staticmethod
+    def partialidad_de_orden(orden):
+        """Contexto de parcialidad para el DETALLE de una OCM.
+
+        Devuelve ``(por_linea, por_detalle, hermanas, reparto_aproximado)``;
+        mismo contrato que ``OrdenReflejanteService.partialidad_de_orden``.
+        3 queries constantes.
+        """
+        tallas = list(
+            OrdenCorteMangaService._tallas_corte_manga_qs(orden.pedido_id)
+            .order_by("id")
+            .values("pedido_detalle_id", "talla_id", "cantidad")
+        )
+        por_linea_asignado, sin_talla = (
+            OrdenCorteMangaService.cantidades_asignadas_por_pedidos([orden.pedido_id])
+        )
+        calculado = pendientes_por_linea(
+            [(t["pedido_detalle_id"], t["talla_id"], float(t["cantidad"] or 0))
+             for t in tallas],
+            por_linea_asignado,
+            sin_talla,
+        )
+        por_linea = {}
+        por_detalle = {}
+        for t, (asignada, pendiente) in zip(tallas, calculado):
+            contratado = float(t["cantidad"] or 0)
+            por_linea[(t["pedido_detalle_id"], t["talla_id"])] = (
+                contratado, asignada, pendiente
+            )
+            acumulado = por_detalle.get(t["pedido_detalle_id"], (0.0, 0.0, 0.0))
+            por_detalle[t["pedido_detalle_id"]] = (
+                acumulado[0] + contratado,
+                acumulado[1] + asignada,
+                acumulado[2] + pendiente,
+            )
+
+        hermanas = list(
+            OrdenesCorteManga.objects
+            .filter(pedido_id=orden.pedido_id, activo=True)
+            .exclude(pk=orden.pk)
+            .order_by("id")
+            .values("id", "folio_ocm", "fecha_inicio")
+        )
+        reparto_aproximado = any(v > EPS_CANTIDAD for v in sin_talla.values())
+        return por_linea, por_detalle, hermanas, reparto_aproximado
 
     @staticmethod
     def _cantidades_asignadas_por_linea(pedido):

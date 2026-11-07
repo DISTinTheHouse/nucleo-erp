@@ -24,13 +24,107 @@ from produccion.models import (
     ReflejanteAvances,
     ReflejanteIncidencias,
     OrdenesCorteManga,
-    OrdenCorteMangaDetalle
+    OrdenCorteMangaDetalle,
+    CorteMangaAvances,
 )
 
 from catalogo.api.serializers import ProductoVarianteSerializer
 from catalogo.models import Color, ProductoVariante, VarianteProductoProduccion
 from inventarios.models import Ubicacion
 from produccion.services.common import config_como_dict, revisar_empresa
+
+
+class _SkuPorTallaMixin:
+    """``sku`` de la variante (producto+color+talla) del renglón, o ``null``.
+
+    El ``retrieve`` de la orden deja ``sku_por_linea`` en el contexto
+    (``{(pedido_detalle_id, talla_id): sku}``), armado en la MISMA query que ya
+    lee ``PedidoDetalleTalla`` para el config: cero queries extra. Para una
+    muestra sin variante de catálogo se publica su ``sku_muestra``.
+    """
+
+    def get_sku(self, obj):
+        mapa = self.context.get("sku_por_linea") or {}
+        return mapa.get((obj.pedido_detalle_id, obj.talla_id)) or None
+
+
+def leer_mapa_pdt(pedido_id, config_field):
+    """``(config_map, sku_map)`` de todas las tallas del pedido en UNA query.
+
+    ``config_map`` es el mismo mapa que ya armaba cada ``retrieve``
+    (``pdt_*_config_map``); ``sku_map`` sale de la misma fila (JOIN a la
+    variante).
+    """
+    config_map, sku_map = {}, {}
+    for pd_id, talla_id, cfg, sku_var, sku_muestra in (
+        PedidoDetalleTalla.objects
+        .filter(pedido_detalle__pedido_id=pedido_id)
+        .order_by("id")
+        .values_list("pedido_detalle_id", "talla_id", config_field, "variante__sku", "sku_muestra")
+    ):
+        # ``setdefault``: si hubiera dos filas para el mismo par se conserva la
+        # primera, como hacía ``.first()``.
+        config_map.setdefault((pd_id, talla_id), cfg)
+        sku_map.setdefault((pd_id, talla_id), sku_var or sku_muestra or None)
+    return config_map, sku_map
+
+
+class AvancePiezasReadSerializer(serializers.Serializer):
+    """Avance de piezas (reflejante / corte de manga) en el retrieve de la orden."""
+
+    id = serializers.IntegerField(read_only=True)
+    fecha = serializers.DateTimeField(read_only=True)
+    cantidad = serializers.FloatField(read_only=True)
+    comentario = serializers.CharField(read_only=True, allow_null=True)
+    usuario = serializers.IntegerField(source="usuario_id", read_only=True)
+    usuario_nombre = serializers.SerializerMethodField()
+
+    def get_usuario_nombre(self, obj):
+        usuario = getattr(obj, "usuario", None)
+        if not usuario:
+            return None
+        return usuario.get_full_name().strip() or getattr(usuario, "email", None)
+
+
+def resumen_avance_piezas(detalles, avances):
+    """``{cantidad_programada, cantidad_realizada_total, porcentaje_avance}``.
+
+    Mismo cálculo de piezas que ``OrdenBordadoRetrieveSerializer.get_resumen_avance``
+    (sin puntadas), sobre lo ya en memoria: renglones prefetcheados y avances
+    del contexto.
+    """
+    programada = sum((float(d.cantidad or 0) for d in detalles), 0.0)
+    realizada = sum((float(a.cantidad or 0) for a in avances), 0.0)
+    pct = round(realizada / programada * 100.0, 2) if programada > 0 else 0.0
+    return {
+        "cantidad_programada": programada,
+        "cantidad_realizada_total": realizada,
+        "porcentaje_avance": pct,
+    }
+
+
+class _AvancePiezasWriteSerializer(serializers.ModelSerializer):
+    """Alta de avance de piezas: ``{<orden>, cantidad, comentario?}``.
+
+    El usuario sale de la sesión (``perform_create``). La orden debe estar en
+    el alcance del solicitante (``_OrdenPadreWriteOnceMixin``); orden abierta y
+    tope de piezas se validan en la vista, con la orden bloqueada.
+    """
+
+    usuario_nombre = serializers.SerializerMethodField()
+
+    def get_usuario_nombre(self, obj):
+        usuario = getattr(obj, "usuario", None)
+        if not usuario:
+            return None
+        return usuario.get_full_name().strip() or getattr(usuario, "email", None)
+
+    def validate_cantidad(self, value):
+        if value is None or value <= 0:
+            raise serializers.ValidationError("La cantidad debe ser mayor a 0.")
+        if value != int(value):
+            raise serializers.ValidationError("La cantidad debe ser un número entero de piezas.")
+        return value
 
 
 def _pedido_en_alcance(serializer, pedido, etiqueta_orden, destino):
@@ -852,7 +946,7 @@ class OrdenBordadoListSerializer(OrdenBordadoSerializer):
         return self._cobertura(obj).get("completa", False)
 
 
-class OrdenBordadoDetalleRetrieveSerializer(OrdenBordadoDetalleSerializer):
+class OrdenBordadoDetalleRetrieveSerializer(_SkuPorTallaMixin, OrdenBordadoDetalleSerializer):
     """Renglón del DETALLE, con el contexto de parcialidad de su línea."""
 
     # Mismos nombres que ya usa el GET de onboarding para estos tres conceptos
@@ -867,6 +961,7 @@ class OrdenBordadoDetalleRetrieveSerializer(OrdenBordadoDetalleSerializer):
     cantidad_pedido = serializers.SerializerMethodField()
     cantidad_asignada = serializers.SerializerMethodField()
     cantidad_pendiente = serializers.SerializerMethodField()
+    sku = serializers.SerializerMethodField()
 
     def _linea(self, obj):
         """``(pedido, asignada, pendiente)`` de este renglón.
@@ -1834,7 +1929,7 @@ class OrdenReflejanteListSerializer(OrdenReflejanteSerializer):
         return self._cobertura(obj).get("completa", False)
 
 
-class OrdenReflejanteDetalleRetrieveSerializer(OrdenReflejanteDetalleSerializer):
+class OrdenReflejanteDetalleRetrieveSerializer(_SkuPorTallaMixin, OrdenReflejanteDetalleSerializer):
     """Renglón del DETALLE, con el contexto de parcialidad de su línea."""
 
     # Mismos nombres que ya usa el GET de onboarding para estos tres conceptos
@@ -1849,6 +1944,7 @@ class OrdenReflejanteDetalleRetrieveSerializer(OrdenReflejanteDetalleSerializer)
     cantidad_pedido = serializers.SerializerMethodField()
     cantidad_asignada = serializers.SerializerMethodField()
     cantidad_pendiente = serializers.SerializerMethodField()
+    sku = serializers.SerializerMethodField()
 
     def _linea(self, obj):
         """``(pedido, asignada, pendiente)`` de este renglón.
@@ -1940,6 +2036,14 @@ class OrdenReflejanteRetrieveSerializer(OrdenReflejanteListSerializer):
     otras_ordenes_del_pedido = serializers.SerializerMethodField()
     reparto_por_talla_aproximado = serializers.SerializerMethodField()
     pedido_vinculado = serializers.SerializerMethodField()
+    avances = serializers.SerializerMethodField()
+    resumen_avance = serializers.SerializerMethodField()
+
+    def get_avances(self, obj):
+        return AvancePiezasReadSerializer(self.context.get("avances") or [], many=True).data
+
+    def get_resumen_avance(self, obj):
+        return resumen_avance_piezas(obj.detalles.all(), self.context.get("avances") or [])
 
     def get_pedido_vinculado(self, obj):
         from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
@@ -1970,14 +2074,28 @@ class OrdenReflejanteRetrieveSerializer(OrdenReflejanteListSerializer):
         return bool(self.context.get("reparto_aproximado", False))
 
 
-class ReflejanteAvancesSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
+class ReflejanteAvancesSerializer(_OrdenPadreWriteOnceMixin, _AvancePiezasWriteSerializer):
+    """Body ``{orden_r, cantidad, comentario?}``. ``cantidad`` es la columna
+    ``cantidad_aplicada``; el usuario sale de la sesión."""
+
     orden_padre_field = 'orden_r'
+    cantidad = serializers.FloatField(source='cantidad_aplicada')
 
     class Meta:
         model = ReflejanteAvances
-        fields = '__all__'
-        # ``usuario`` client-supplied a propósito (ver BordadoAvancesSerializer).
-        read_only_fields = ['activo']
+        fields = ['id', 'orden_r', 'fecha', 'cantidad', 'comentario', 'usuario', 'usuario_nombre']
+        read_only_fields = ['id', 'fecha', 'usuario']
+
+
+class CorteMangaAvancesSerializer(_OrdenPadreWriteOnceMixin, _AvancePiezasWriteSerializer):
+    """Body ``{ocm, cantidad, comentario?}``; el usuario sale de la sesión."""
+
+    orden_padre_field = 'ocm'
+
+    class Meta:
+        model = CorteMangaAvances
+        fields = ['id', 'ocm', 'fecha', 'cantidad', 'comentario', 'usuario', 'usuario_nombre']
+        read_only_fields = ['id', 'fecha', 'usuario']
 
 class ReflejanteIncidenciasSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelSerializer):
     orden_padre_field = 'orden_r'
@@ -2241,6 +2359,47 @@ class OrdenesCorteMangaListSerializer(OrdenesCorteMangaSerializer):
     detalles = OrdenCorteMangaDetalleListSerializer(many=True, read_only=True)
 
 
+class OrdenCorteMangaDetalleRetrieveSerializer(_SkuPorTallaMixin, OrdenCorteMangaDetalleSerializer):
+    """Renglón del DETALLE de corte de manga con la parcialidad de su línea y su
+    ``sku``. Mismo contrato que ``OrdenReflejanteDetalleRetrieveSerializer``."""
+
+    cantidad_pedido = serializers.SerializerMethodField()
+    cantidad_asignada = serializers.SerializerMethodField()
+    cantidad_pendiente = serializers.SerializerMethodField()
+    sku = serializers.SerializerMethodField()
+
+    def _linea(self, obj):
+        if "partialidad_por_linea" not in self.context:
+            raise KeyError(
+                f"{type(self).__name__} requiere 'partialidad_por_linea' en el "
+                "contexto; lo inyecta OrdenesCorteMangaViewSet.retrieve."
+            )
+        linea = (self.context["partialidad_por_linea"] or {}).get((obj.pedido_detalle_id, obj.talla_id))
+        if linea is not None:
+            return linea
+        return (self.context.get("partialidad_por_detalle") or {}).get(obj.pedido_detalle_id)
+
+    def get_cantidad_pedido(self, obj):
+        linea = self._linea(obj)
+        return linea[0] if linea else None
+
+    def get_cantidad_asignada(self, obj):
+        linea = self._linea(obj)
+        return linea[1] if linea else None
+
+    def get_cantidad_pendiente(self, obj):
+        linea = self._linea(obj)
+        return linea[2] if linea else None
+
+
+class OrdenCorteMangaHermanaSerializer(serializers.Serializer):
+    """Referencia mínima a otra OCM activa del mismo pedido."""
+
+    id = serializers.IntegerField(read_only=True)
+    folio_ocm = serializers.CharField(read_only=True)
+    fecha_inicio = serializers.DateTimeField(read_only=True)
+
+
 class OrdenesCorteMangaRetrieveSerializer(OrdenesCorteMangaSerializer):
     """Orden de corte de manga para el detalle.
 
@@ -2251,11 +2410,57 @@ class OrdenesCorteMangaRetrieveSerializer(OrdenesCorteMangaSerializer):
     ``OrdenReflejanteRetrieveSerializer``/``OrdenBordadoRetrieveSerializer``.
     """
 
+    detalles = OrdenCorteMangaDetalleRetrieveSerializer(many=True, read_only=True)
     pedido_vinculado = serializers.SerializerMethodField()
+    cantidad_cubierta = serializers.SerializerMethodField()
+    cantidad_contratada = serializers.SerializerMethodField()
+    cobertura_completa = serializers.SerializerMethodField()
+    otras_ordenes_del_pedido = serializers.SerializerMethodField()
+    reparto_por_talla_aproximado = serializers.SerializerMethodField()
+    avances = serializers.SerializerMethodField()
+    resumen_avance = serializers.SerializerMethodField()
 
     def get_pedido_vinculado(self, obj):
         from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
         return armar_pedido_vinculado(obj)
+
+    def _cobertura(self, obj):
+        if "cobertura" not in self.context:
+            raise KeyError(
+                f"{type(self).__name__} requiere 'cobertura' en el contexto; "
+                "lo inyecta OrdenesCorteMangaViewSet.retrieve."
+            )
+        return (self.context["cobertura"] or {}).get(obj.pk) or {}
+
+    def get_cantidad_cubierta(self, obj):
+        """Piezas que programa ESTA orden."""
+        return self._cobertura(obj).get("cubierto", 0)
+
+    def get_cantidad_contratada(self, obj):
+        """Piezas de corte de manga que contrató el pedido (todas sus líneas)."""
+        return self._cobertura(obj).get("contratado", 0)
+
+    def get_cobertura_completa(self, obj):
+        """¿Esta orden sola cubre el 100% de lo contratado por el pedido?"""
+        return self._cobertura(obj).get("completa", False)
+
+    def get_otras_ordenes_del_pedido(self, obj):
+        """Las demás OCMs activas del mismo pedido, sin incluir ésta."""
+        if "hermanas" not in self.context:
+            raise KeyError(
+                f"{type(self).__name__} requiere 'hermanas' en el contexto; "
+                "lo inyecta OrdenesCorteMangaViewSet.retrieve."
+            )
+        return OrdenCorteMangaHermanaSerializer(self.context["hermanas"] or [], many=True).data
+
+    def get_reparto_por_talla_aproximado(self, obj):
+        return bool(self.context.get("reparto_aproximado", False))
+
+    def get_avances(self, obj):
+        return AvancePiezasReadSerializer(self.context.get("avances") or [], many=True).data
+
+    def get_resumen_avance(self, obj):
+        return resumen_avance_piezas(obj.detalles.all(), self.context.get("avances") or [])
 
 
 # --- Pedidos con produccion especial (muestras) para el modulo de produccion ---

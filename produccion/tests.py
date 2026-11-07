@@ -7456,3 +7456,34 @@ class EditarOrdenServicioTests(TestCase):
         self.assertEqual(client.delete(self.url).status_code, 400)
         self.orden.refresh_from_db()
         self.assertTrue(self.orden.activo)
+
+
+class AvancesPiezasYSkuContratoTests(TestCase):
+    """Documentación del contrato (no se ejecuta en CI; ver CLAUDE.md).
+
+    - ``detalles[].sku`` en el retrieve de OB/OR/OCM: SKU de la variante
+      producto+color+talla (``PedidoDetalleTalla.variante.sku``, o
+      ``sku_muestra``), ``null`` si no hay. Sale de la misma query del config.
+    - ``POST /reflejante-avances/`` ``{orden_r, cantidad, comentario?}`` y
+      ``POST /corte-manga-avances/`` ``{ocm, cantidad, comentario?}``: usuario
+      de la sesión; cantidad entera > 0; Σ avances ≤ Σ renglones de la orden
+      (400 ``cantidad``); orden COMPLETADO/CANCELADO/inactiva → 400; gate
+      ``_require_produccion``. ``DELETE /{id}/`` es borrado lógico con las
+      mismas reglas. Sin PUT/PATCH.
+    - Retrieve de OR/OCM: ``avances`` (``-fecha``) y ``resumen_avance``
+      ``{cantidad_programada, cantidad_realizada_total, porcentaje_avance}``.
+    - Retrieve de OCM: ``cantidad_pedido``/``cantidad_asignada``/
+      ``cantidad_pendiente`` por renglón; ``cantidad_cubierta``/
+      ``cantidad_contratada``/``cobertura_completa``/``otras_ordenes_del_pedido``.
+    - Medido en producción (33 renglones): OB 7→7 queries, OR 6→7, OCM 3→7;
+      constantes respecto al número de renglones.
+    """
+
+    def test_contrato_documentado(self):
+        from produccion.api.serializers import resumen_avance_piezas
+        det = [SimpleNamespace(cantidad=10), SimpleNamespace(cantidad=30)]
+        av = [SimpleNamespace(cantidad=4), SimpleNamespace(cantidad=6)]
+        self.assertEqual(
+            resumen_avance_piezas(det, av),
+            {"cantidad_programada": 40.0, "cantidad_realizada_total": 10.0, "porcentaje_avance": 25.0},
+        )
