@@ -7055,6 +7055,76 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         cancel.assert_called_once_with("REP-ID", "03")
         self.assertEqual(cobro.rep_cancelacion_motivo, "03")
 
+    def _vencer_reserva_rep(self, cobro):
+        Cobro.objects.filter(pk=cobro.pk).update(
+            rep_cancelacion_en_curso_desde=timezone.now() - timedelta(minutes=5)
+        )
+
+    def test_cancelar_rep_incierto_deja_la_reserva_y_fija_el_motivo(self):  # EC-806
+        resp, cobro, _ = self._cancelar_rep(None, FacturamaAPIException("caído", status_code=503), motivo_sat="03")
+        self.assertIn("rep_incierto", resp.data)
+        self.assertIsNotNone(cobro.rep_cancelacion_en_curso_desde)
+        self.assertEqual(cobro.rep_cancelacion_motivo, "03")
+
+        # Dentro de la ventana, otra petición espera aunque traiga el mismo motivo.
+        resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, motivo_sat="03", cobro=cobro)
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("en curso", str(resp.data["rep"]))
+        cancel.assert_not_called()
+
+        self._vencer_reserva_rep(cobro)
+        resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, motivo_sat="02", cobro=cobro)
+        self.assertIn("motivo 03", str(resp.data["motivo_sat"]))
+        cancel.assert_not_called()
+
+        resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, motivo_sat=None, cobro=cobro)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cancel.assert_called_once_with("REP-ID", "03")
+        self.assertIsNone(cobro.rep_cancelacion_en_curso_desde)
+
+    def test_cancelar_rep_rechazo_de_facturama_libera_la_reserva_y_el_motivo(self):  # EC-806
+        error = FacturamaAPIException("error", status_code=400, details={"Message": "No"})
+        resp, cobro, _ = self._cancelar_rep(None, error, motivo_sat="03")
+        self.assertIn("rep", resp.data)
+        self.assertEqual((cobro.rep_cancelacion_en_curso_desde, cobro.rep_cancelacion_motivo), (None, None))
+
+        resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, motivo_sat="02", cobro=cobro)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cancel.assert_called_once_with("REP-ID", "02")
+
+    def test_cancelar_rep_rechaza_una_segunda_peticion_mientras_otra_esta_en_vuelo(self):  # EC-806
+        cobro = Cobro.objects.get(pk=self._cobrar(self._cxc(), "60.00").data["id"])
+        Cobro.objects.filter(pk=cobro.pk).update(rep_uuid=f"REP-UUID-{cobro.pk}", rep_facturama_id="REP-ID")
+        cliente = self._client(self.a["usuario"])
+        url = f"{COBROS_URL}{cobro.pk}/cancelar-rep/"
+        segunda = {}
+
+        def cancelar(*args):
+            segunda["resp"] = cliente.post(url, {"motivo_sat": "02"}, format="json")
+            return {"Status": "canceled"}
+
+        with self.settings(FACTURAMA_EMPRESA_CODIGO=self.a["empresa"].codigo), patch(
+            "finanzas.services.factura_timbrado_service.FacturamaService"
+        ) as servicio:
+            servicio.return_value.cancel_cfdi.side_effect = cancelar
+            resp = cliente.post(url, {"motivo_sat": "03"}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(segunda["resp"].status_code, 400, segunda["resp"].data)
+        self.assertIn("en curso", str(segunda["resp"].data["rep"]))
+        servicio.return_value.cancel_cfdi.assert_called_once_with("REP-ID", "03")
+        cobro.refresh_from_db()
+        self.assertEqual(cobro.rep_cancelacion_motivo, "03")
+
+    def test_cancelar_rep_solicitada_sin_motivo_guardado_es_02(self):  # EC-806
+        resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, motivo_sat="03", rep_cancelacion_solicitada=True)
+        self.assertIn("motivo 02", str(resp.data["motivo_sat"]))
+        cancel.assert_not_called()
+
+        resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, motivo_sat=None, cobro=cobro)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        cancel.assert_called_once_with("REP-ID", "02")
+
     def test_cancelar_rep_sin_uuid_pero_con_id_de_facturama_se_destraba(self):
         resp, cobro, cancel = self._cancelar_rep({"Status": "canceled"}, rep_uuid=None, rep_pendiente=True)
 
@@ -9022,6 +9092,81 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         factura.refresh_from_db()
         self.assertEqual((factura.cfdi_cancelado, factura.cfdi_cancelacion_motivo, factura.observaciones), (True, "03", nota))
 
+    def test_incierto_deja_la_reserva_y_fija_el_motivo(self):  # EC-806
+        factura = self._timbrada()
+        self.facturama.cancel_cfdi.side_effect = FacturamaAPIException("caído", status_code=503)
+        resp = self._cancelar(factura, motivo_sat="03")
+        self.assertIn("no se sabe", str(resp.data["cfdi"]))
+        factura.refresh_from_db()
+        self.assertIsNotNone(factura.cfdi_cancelacion_en_curso_desde)
+        self.assertEqual(factura.cfdi_cancelacion_motivo, "03")
+
+        self.facturama.cancel_cfdi.side_effect = None
+        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
+        resp = self._cancelar(factura, motivo_sat="03")
+        self.assertIn("en curso", str(resp.data["cfdi"]))
+        self.assertEqual(self.facturama.cancel_cfdi.call_count, 1)
+
+        Factura.objects.filter(pk=factura.pk).update(cfdi_cancelacion_en_curso_desde=timezone.now() - timedelta(minutes=5))
+        self.assertIn("motivo 03", str(self._cancelar(factura, motivo_sat="02").data["motivo_sat"]))
+        self.assertEqual(self._cancelar(factura, motivo_sat=None).status_code, 200)
+        self.assertEqual(self.facturama.cancel_cfdi.call_args.args, ("J6MjEYRjnLnV6aMCK8dV-w2", "03"))
+        factura.refresh_from_db()
+        self.assertEqual((factura.cfdi_cancelado, factura.cfdi_cancelacion_en_curso_desde), (True, None))
+
+    def test_rechazo_de_facturama_libera_la_reserva_y_el_motivo(self):  # EC-806
+        factura = self._timbrada()
+        self.facturama.cancel_cfdi.side_effect = FacturamaAPIException("error", status_code=400, details={"Message": "No"})
+        resp = self._cancelar(factura, motivo_sat="03")
+        self.assertIn("Facturama no canceló", str(resp.data["cfdi"]))
+        factura.refresh_from_db()
+        self.assertEqual((factura.cfdi_cancelacion_en_curso_desde, factura.cfdi_cancelacion_motivo), (None, None))
+
+        self.facturama.cancel_cfdi.side_effect = None
+        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
+        self.assertEqual(self._cancelar(factura, motivo_sat="02").status_code, 200)
+        self.assertEqual(self.facturama.cancel_cfdi.call_args.args, ("J6MjEYRjnLnV6aMCK8dV-w2", "02"))
+
+    def test_rechazo_con_solicitud_previa_conserva_el_motivo(self):  # EC-806
+        factura = self._timbrada()
+        self.facturama.cancel_cfdi.return_value = {"Status": "pending"}
+        self._cancelar(factura, motivo_sat="03")
+        self.facturama.cancel_cfdi.side_effect = FacturamaAPIException("error", status_code=400, details={"Message": "No"})
+        self._cancelar(factura, motivo_sat=None)
+        factura.refresh_from_db()
+        self.assertEqual(
+            (factura.cfdi_cancelacion_solicitada, factura.cfdi_cancelacion_motivo, factura.cfdi_cancelacion_en_curso_desde),
+            (True, "03", None),
+        )
+
+    def test_rechaza_una_segunda_peticion_mientras_otra_esta_en_vuelo(self):  # EC-806
+        factura = self._timbrada()
+        segunda = {}
+
+        def cancelar(*args):
+            segunda["resp"] = self._cancelar(factura, motivo_sat="02")
+            return {"Status": "canceled"}
+
+        self.facturama.cancel_cfdi.side_effect = cancelar
+
+        self.assertEqual(self._cancelar(factura, motivo_sat="03").status_code, 200)
+
+        self.assertEqual(segunda["resp"].status_code, 400, segunda["resp"].data)
+        self.assertIn("en curso", str(segunda["resp"].data["cfdi"]))
+        self.facturama.cancel_cfdi.assert_called_once_with("J6MjEYRjnLnV6aMCK8dV-w2", "03")
+        factura.refresh_from_db()
+        self.assertEqual((factura.cfdi_cancelado, factura.cfdi_cancelacion_motivo), (True, "03"))
+
+    def test_solicitada_sin_motivo_guardado_es_02(self):  # EC-806: marcada por el código previo
+        factura = self._timbrada()
+        Factura.objects.filter(pk=factura.pk).update(cfdi_cancelacion_solicitada=True)
+        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
+
+        self.assertIn("motivo 02", str(self._cancelar(factura, motivo_sat="03").data["motivo_sat"]))
+        self.assertEqual(self._cancelar(factura, motivo_sat=None).status_code, 200)
+
+        self.facturama.cancel_cfdi.assert_called_once_with("J6MjEYRjnLnV6aMCK8dV-w2", "02")
+
     def test_facturama_se_llama_fuera_de_toda_transaccion(self):  # EC-806, como el REP (#627)
         factura = self._timbrada()
         profundidad = {}
@@ -9131,6 +9276,19 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("no está timbrada", str(resp.data["cfdi"]))
         self.facturama.create_cfdi_emision.assert_not_called()
+
+
+class AgregarObservacionTests(SimpleTestCase):
+    """``agregar_observacion``: la misma nota para cancelar en el ERP y cancelar solo el CFDI (EC-806)."""
+
+    def test_agrega_en_una_linea_nueva_y_sin_nota_no_cambia(self):
+        from finanzas.services.factura_cancelacion_service import agregar_observacion
+
+        self.assertEqual(agregar_observacion("Previa", "Cancelada: x"), "Previa\nCancelada: x")
+        self.assertEqual(agregar_observacion(None, "Cancelada: x"), "Cancelada: x")
+        self.assertEqual(agregar_observacion("", "Cancelada: x"), "Cancelada: x")
+        self.assertEqual(agregar_observacion("Previa", ""), "Previa")
+        self.assertIsNone(agregar_observacion(None, ""))
 
 
 class CancelCfdiFacturamaTests(SimpleTestCase):

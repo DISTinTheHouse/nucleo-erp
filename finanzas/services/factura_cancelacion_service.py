@@ -13,6 +13,11 @@ from finanzas.services.factura_timbrado_service import (
 )
 
 
+def agregar_observacion(observaciones, nota):
+    """``observaciones`` con ``nota`` en una línea nueva; sin nota, igual."""
+    return f"{observaciones or ''}\n{nota}".strip() if nota else observaciones
+
+
 class FacturaCancelacionService:
     @staticmethod
     def cancelar(factura, usuario=None, motivo="", motivo_sat=None):
@@ -39,7 +44,8 @@ class FacturaCancelacionService:
             if actual.cfdi_uuid and not actual.cfdi_cancelado:
                 FacturaTimbradoService.cancelar_cfdi(factura, motivo_sat)
                 # La nota interna ya no se descarta (EC-806), igual que al cancelar en el ERP.
-                FacturaCancelacionService._anotar(factura, f"CFDI cancelado ante el SAT: {motivo}" if motivo else "")
+                if motivo:
+                    FacturaCancelacionService._anotar(factura, f"CFDI cancelado ante el SAT: {motivo}")
             return None
         FacturaCancelacionService._exigir_sin_notas_emitidas(actual)
         if actual.cfdi_pendiente:  # #562, #904
@@ -51,11 +57,9 @@ class FacturaCancelacionService:
     @staticmethod
     @transaction.atomic
     def _anotar(factura, nota):
-        """Agrega ``nota`` a ``observaciones`` con la fila bloqueada; vacía no hace nada."""
-        if not nota:
-            return
+        """Agrega ``nota`` a ``observaciones`` con la fila bloqueada (``agregar_observacion``)."""
         bloqueada = Factura.objects.select_for_update().get(pk=factura.pk)
-        bloqueada.observaciones = f"{bloqueada.observaciones or ''}\n{nota}".strip()
+        bloqueada.observaciones = agregar_observacion(bloqueada.observaciones, nota)
         bloqueada.save(update_fields=["observaciones", "updated_at"])
         factura.observaciones = bloqueada.observaciones
 
@@ -81,8 +85,7 @@ class FacturaCancelacionService:
 
         era_emitida = bloqueada.estatus == Factura.FacturaStatus.EMITIDA
         bloqueada.estatus = Factura.FacturaStatus.CANCELADA
-        if motivo:
-            bloqueada.observaciones = f"{bloqueada.observaciones or ''}\nCancelada: {motivo}".strip()
+        bloqueada.observaciones = agregar_observacion(bloqueada.observaciones, f"Cancelada: {motivo}" if motivo else "")
         bloqueada.save(update_fields=["estatus", "observaciones", "updated_at"])
         factura.estatus, factura.observaciones = bloqueada.estatus, bloqueada.observaciones
 

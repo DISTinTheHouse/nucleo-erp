@@ -310,6 +310,10 @@ class Factura(StatusLifecycleModel):
     cfdi_cancelacion_motivo = models.CharField(
         max_length=2, choices=MotivoCancelacionSat.choices, null=True, blank=True
     )
+    # Reserva de la cancelación ante el SAT (EC-806), como ``cfdi_pendiente_desde`` del timbrado:
+    # se fija antes de llamar a Facturama y se limpia con una respuesta definitiva. Sin respuesta
+    # se queda: el motivo sigue fijo y otro intento espera la ventana de ``conciliar-cfdi/``.
+    cfdi_cancelacion_en_curso_desde = models.DateTimeField(null=True, blank=True)
     # Pesos por unidad de ``moneda`` (EC-581). Obligatorio para emitir o timbrar si no es MXN.
     tipo_cambio = models.DecimalField(max_digits=18, decimal_places=6, null=True, blank=True)
 
@@ -624,6 +628,8 @@ class Cobro(models.Model):
     rep_cancelacion_motivo = models.CharField(
         max_length=2, choices=MotivoCancelacionSat.choices, null=True, blank=True
     )
+    # Reserva de la cancelación del REP ante el SAT (EC-806); ver ``Factura``.
+    rep_cancelacion_en_curso_desde = models.DateTimeField(null=True, blank=True)
     rep_cancelado_uuid = models.CharField(max_length=36, null=True, blank=True)
     rep_fecha_cancelacion = models.DateTimeField(null=True, blank=True)
     rep_pendiente = models.BooleanField(default=False)

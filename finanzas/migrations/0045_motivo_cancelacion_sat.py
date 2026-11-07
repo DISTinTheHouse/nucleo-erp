@@ -39,5 +39,20 @@ class Migration(migrations.Migration):
             name='cfdi_cancelacion_motivo',
             field=models.CharField(blank=True, choices=[('02', 'Comprobante emitido con errores sin relación'), ('03', 'No se llevó a cabo la operación')], max_length=2, null=True),
         ),
+        migrations.AddField(
+            model_name='cobro',
+            name='rep_cancelacion_en_curso_desde',
+            field=models.DateTimeField(blank=True, null=True),
+        ),
+        migrations.AddField(
+            model_name='factura',
+            name='cfdi_cancelacion_en_curso_desde',
+            field=models.DateTimeField(blank=True, null=True),
+        ),
+        migrations.AddField(
+            model_name='historicalfactura',
+            name='cfdi_cancelacion_en_curso_desde',
+            field=models.DateTimeField(blank=True, null=True),
+        ),
         migrations.RunPython(motivo_02_a_cancelaciones_previas, migrations.RunPython.noop),
     ]
