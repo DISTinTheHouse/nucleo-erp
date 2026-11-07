@@ -347,11 +347,16 @@ class Factura(StatusLifecycleModel):
 
     @property
     def cancelada_o_en_cancelacion(self):
-        """Cancelada o con la cancelación ante el SAT en curso: no admite nota ni REP (#614, #733)."""
+        """Cancelada o con la cancelación ante el SAT en curso: no admite nota ni REP (#614, #733).
+
+        En curso incluye la reserva de ``cancelar/`` (EC-806): la llamada a Facturama en vuelo o
+        un intento sin respuesta, tras el cual el CFDI pudo quedar cancelado.
+        """
         return (
             self.estatus == Factura.FacturaStatus.CANCELADA
             or self.cfdi_cancelado
             or self.cfdi_cancelacion_solicitada
+            or self.cfdi_cancelacion_en_curso_desde is not None
         )
 
 class FacturaDetalle(models.Model):

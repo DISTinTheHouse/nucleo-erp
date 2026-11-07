@@ -9,13 +9,9 @@ from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_timbrado_service import (
     PENDIENTE_CFDI,
     FacturaTimbradoService,
+    agregar_observacion,
     normalizar_motivo_sat,
 )
-
-
-def agregar_observacion(observaciones, nota):
-    """``observaciones`` con ``nota`` en una línea nueva; sin nota, igual."""
-    return f"{observaciones or ''}\n{nota}".strip() if nota else observaciones
 
 
 class FacturaCancelacionService:
@@ -42,10 +38,11 @@ class FacturaCancelacionService:
         if actual.estatus == Factura.FacturaStatus.CANCELADA:
             # #567: cancelada en el ERP antes de cancelar su CFDI; se cancela ahora.
             if actual.cfdi_uuid and not actual.cfdi_cancelado:
-                FacturaTimbradoService.cancelar_cfdi(factura, motivo_sat)
-                # La nota interna ya no se descarta (EC-806), igual que al cancelar en el ERP.
-                if motivo:
-                    FacturaCancelacionService._anotar(factura, f"CFDI cancelado ante el SAT: {motivo}")
+                # La nota interna ya no se descarta (EC-806): va en la misma transacción que
+                # ``cfdi_cancelado``, igual que al cancelar en el ERP.
+                FacturaTimbradoService.cancelar_cfdi(
+                    factura, motivo_sat, nota=f"CFDI cancelado ante el SAT: {motivo}" if motivo else ""
+                )
             return None
         FacturaCancelacionService._exigir_sin_notas_emitidas(actual)
         if actual.cfdi_pendiente:  # #562, #904
@@ -53,15 +50,6 @@ class FacturaCancelacionService:
         if actual.cfdi_uuid and not actual.cfdi_cancelado:
             FacturaTimbradoService.cancelar_cfdi(factura, motivo_sat)
         return FacturaCancelacionService._cancelar_en_erp(factura, usuario, motivo)
-
-    @staticmethod
-    @transaction.atomic
-    def _anotar(factura, nota):
-        """Agrega ``nota`` a ``observaciones`` con la fila bloqueada (``agregar_observacion``)."""
-        bloqueada = Factura.objects.select_for_update().get(pk=factura.pk)
-        bloqueada.observaciones = agregar_observacion(bloqueada.observaciones, nota)
-        bloqueada.save(update_fields=["observaciones", "updated_at"])
-        factura.observaciones = bloqueada.observaciones
 
     @staticmethod
     def _exigir_sin_notas_emitidas(factura):
