@@ -14,7 +14,7 @@ Mismo patrón que ``pedidos_listado`` (EC-782): los filtros se aplican en todas 
 serializan filas.
 """
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 from django.contrib.postgres.aggregates import ArrayAgg
@@ -100,6 +100,10 @@ def filtrar(request, qs):
         qs = qs.filter(vendedor_id=vendedor)
 
     fecha_desde, fecha_hasta = rango_fechas(request)
+    if fecha_hasta and fecha_hasta >= date.max:
+        # El límite superior es la medianoche del día siguiente: no existe para
+        # ``date.max`` (``9999-12-31`` + 1 día desborda).
+        raise ValidationError({"fecha_hasta": "Fecha fuera de rango; usa una anterior a 9999-12-31."})
     if fecha_desde:
         qs = qs.filter(created_at__gte=inicio_del_dia(fecha_desde))
     if fecha_hasta:
@@ -113,7 +117,9 @@ def filtrar(request, qs):
             | Q(cliente__nombre__icontains=q)
             | Q(cliente__rfc__icontains=q)
         )
-        if q.isdigit():
+        # Sólo dígitos ASCII: ``str.isdigit`` también acepta "²" o "①", que ``int()``
+        # rechaza (500).
+        if q.isascii() and q.isdigit():
             q_filter = q_filter | Q(id=int(q))
         qs = qs.filter(q_filter)
     return qs

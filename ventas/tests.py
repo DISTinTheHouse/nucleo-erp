@@ -9725,3 +9725,33 @@ class CotizacionOrdenImporteTests(_CotizacionesModoServidorBase, TestCase):
         resp = self._get(MESA_CONTROL_URL, params)
         self.assertEqual(resp.status_code, 200, resp.content)
         return resp.json()
+
+
+class CotizacionFiltrosBordesTests(_CotizacionesModoServidorBase, TestCase):
+    """EC-811 (revisión): entradas límite de los filtros no dan 500 en el listado,
+    ``kpis/`` ni ``tablero/``."""
+
+    URLS = (COTIZACIONES_URL, f"{COTIZACIONES_URL}kpis/", f"{COTIZACIONES_URL}tablero/")
+
+    def test_fecha_hasta_en_el_maximo_es_400(self):
+        for url in self.URLS:
+            with self.subTest(url=url):
+                resp = self._get(url, {"fecha_hasta": "9999-12-31"})
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("fecha_hasta", resp.json())
+
+    def test_fechas_extremas_validas(self):
+        for url in self.URLS:
+            for params in ({"fecha_hasta": "9999-12-30"}, {"fecha_desde": "9999-12-31"}, {"fecha_desde": "0001-01-01"}):
+                with self.subTest(url=url, params=params):
+                    self.assertEqual(self._get(url, params).status_code, 200)
+
+    def test_q_con_digitos_unicode_no_se_toma_como_id(self):
+        for url in self.URLS:
+            for q in ("²", "①", "١٢"):
+                with self.subTest(url=url, q=q):
+                    self.assertEqual(self._get(url, {"q": q}).status_code, 200)
+        # "١٢" (12 en arábigo-índico) no busca por id: solo texto, sin coincidencias.
+        self.assertEqual(self._ids({"q": "١٢"}), [])
+        pk = self.c["ana_acme_mxn_1"].pk
+        self.assertEqual(self._ids({"q": str(pk)}), [pk])
