@@ -9397,10 +9397,25 @@ class CotizacionKpisTests(_CotizacionesModoServidorBase, TestCase):
         return data
 
     def _moneda(self, moneda, total, gran_total):
-        return {
-            "moneda_id": moneda.pk if moneda else None, "moneda": moneda.codigo_iso if moneda else None,
-            "total": total, "gran_total": gran_total,
-        }
+        return {"moneda": moneda.codigo_iso if moneda else None, "total": total, "gran_total": gran_total}
+
+    def test_agrupa_por_codigo_aunque_cada_empresa_tenga_su_moneda(self):
+        """``Moneda`` es por empresa: dos "MXN" con distinto id son un solo grupo."""
+        mxn_b = Moneda.objects.create(codigo_iso="MXN", nombre="Peso B", empresa=self.empresa_b)
+        self._cotizacion(self.empresa_b, self.admin_b, self.secreto, mxn_b, 3, "1.00", self.base)
+        superusuario = Usuario.objects.create(
+            username="su@811.test", email="su@811.test", is_superuser=True, empresa=self.empresa,
+        )
+        data = self._kpis(user=superusuario)
+        self.assertEqual(data["por_moneda"], [
+            self._moneda(self.mxn, 6, "1160.00"),
+            self._moneda(self.usd, 1, "50.00"),
+            self._moneda(None, 1, "7.00"),
+        ])
+        autorizadas = data["por_estatus"][2]
+        self.assertEqual(autorizadas["por_moneda"], [self._moneda(self.mxn, 4, "1040.00"), self._moneda(None, 1, "7.00")])
+        for bloque in [*data["por_moneda"], *(m for e in data["por_estatus"] for m in e["por_moneda"])]:
+            self.assertNotIn("moneda_id", bloque)
 
     def test_admin_por_estatus_y_por_moneda_con_moneda_nula(self):
         data = self._kpis()

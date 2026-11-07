@@ -135,23 +135,25 @@ def _importe(valor):
 
 def kpis(qs):
     """Conteos por estatus y ``gran_total`` por moneda del conjunto filtrado, en UNA
-    consulta agrupada por ``(estatus, moneda)``. ``por_estatus`` trae siempre los 5
+    consulta agrupada por ``(estatus, código de moneda)``. ``por_estatus`` trae siempre los 5
     estatus del catálogo (en cero si no hay); una fila con estatus fuera del catálogo
     no tiene bloque pero cuenta en ``total`` y ``por_moneda`` (``total`` = ``count``
     del listado con los mismos filtros); la moneda nula es un grupo más
-    (``moneda_id``/``moneda`` en ``null``) y va al final. ``order_by()`` antes de
-    agrupar: el orden por defecto del listado entraría al ``GROUP BY``."""
+    (``moneda`` en ``null``) y va al final. Por código y no por ``moneda_id``: cada
+    empresa tiene su propia ``Moneda``, y un superusuario recibía "MXN" repetido.
+    ``order_by()`` antes de agrupar: el orden por defecto del listado entraría al
+    ``GROUP BY``."""
     filas = list(
         qs.order_by()
-        .values("estatus", "moneda_id", "moneda__codigo_iso")
+        .values("estatus", "moneda__codigo_iso")
         .annotate(total=Count("id"), gran_total=Sum("gran_total"))
-        .order_by("moneda__codigo_iso", "moneda_id", "estatus")
+        .order_by("moneda__codigo_iso", "estatus")
     )
     por_moneda = {}
     por_estatus = {e: {"total": 0, "por_moneda": []} for e in ESTATUS_VALIDOS}
     for f in filas:
-        moneda = {"moneda_id": f["moneda_id"], "moneda": f["moneda__codigo_iso"]}
-        acumulado = por_moneda.setdefault(f["moneda_id"], {**moneda, "total": 0, "gran_total": Decimal("0")})
+        moneda = {"moneda": f["moneda__codigo_iso"]}
+        acumulado = por_moneda.setdefault(f["moneda__codigo_iso"], {**moneda, "total": 0, "gran_total": Decimal("0")})
         acumulado["total"] += f["total"]
         acumulado["gran_total"] += f["gran_total"] or Decimal("0")
         bloque = por_estatus.get(f["estatus"])
