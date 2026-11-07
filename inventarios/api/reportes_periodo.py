@@ -187,7 +187,8 @@ def reporte_existencias(user, query_params):
     """Reporte de existencias del periodo, completo y sin paginar.
 
     Regresa ``fecha_inicio``/``fecha_final`` (``date``), los filtros
-    ``almacen_id``/``producto_id``/``producto_variante_id``, ``almacenes``
+    ``almacen_id``/``empresa_id``/``sucursal_id``/``producto_id``/
+    ``producto_variante_id``, ``almacenes``
     (``{id_almacen: {codigo, nombre, ...}}`` de los almacenes en alcance),
     ``sin_almacenes`` (ningún almacén en alcance), ``results``, ``resumen`` y
     ``resumen_por_almacen`` con el mismo formato que la respuesta JSON.
@@ -214,6 +215,8 @@ def reporte_existencias(user, query_params):
         "fecha_inicio": fecha_inicio,
         "fecha_final": fecha_final,
         "almacen_id": almacen_id,
+        "empresa_id": to_int(qp.get("empresa") or qp.get("empresa_id")),
+        "sucursal_id": to_int(qp.get("sucursal") or qp.get("sucursal_id")),
         "producto_id": producto_id,
         "producto_variante_id": producto_variante_id,
         "almacenes": almacen_map,
