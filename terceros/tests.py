@@ -999,7 +999,7 @@ class ClienteKpisTests(TestCase):
             "total": 2,  # B y el del último minuto; A cae en octubre
             "mes": "2026-11",
             "desde": "2026-11-01",
-            "hasta": "2026-12-01",
+            "hasta": "2026-11-30",  # inclusivo, como ``fecha_hasta``
         })
 
     def test_clientes_nuevos_excluye_bajas_y_altas_sin_fecha(self):

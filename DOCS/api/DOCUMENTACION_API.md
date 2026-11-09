@@ -1305,7 +1305,7 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
   "clientes_nuevos": {
     "disponible": true,
     "criterio": "Clientes activos dados de alta en el mes en curso (hora del centro de México).",
-    "total": 2, "mes": "2026-11", "desde": "2026-11-01", "hasta": "2026-12-01"
+    "total": 2, "mes": "2026-11", "desde": "2026-11-01", "hasta": "2026-11-30"
   },
   "reclamos_devoluciones": {
     "disponible": false,
@@ -1336,7 +1336,7 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
 - **Montos por moneda** (#370): nunca se suman monedas distintas; cada bloque trae su `moneda`.
 - `ventas_por_cliente`: `Factura` con `activo=true` y estatus **`Emitida`** (los borradores y cancelados no cuentan). `top_clientes` = los 5 de mayor facturación de esa moneda, con `pct_acumulado` listo para un Pareto.
 - `clientes_activos`: "activo" = al menos un `Pedido` **Por autorizar, Autorizada o En proceso** creado en los últimos 90 días (fijo). Borrador y Cancelado no cuentan. `drill_down` trae hasta 20 activos y 20 inactivos (por nombre) con la misma definición que los conteos; `*_truncado` indica que hay más.
-- `clientes_nuevos` (EC-817): clientes **activos** del mismo alcance que `clientes_activos` con `created_at` dentro del mes calendario en curso, en hora del centro de México (`desde` incluido, `hasta` excluido). Los clientes anteriores al historial no tienen `created_at` y no cuentan en ningún mes. Sin empresa llega `"disponible": false` como los demás bloques.
+- `clientes_nuevos` (EC-817): clientes **activos** del mismo alcance que `clientes_activos` con `created_at` dentro del mes calendario en curso, en hora del centro de México. `desde` y `hasta` son el primer y el último día del mes, ambos incluidos (como `fecha_desde`/`fecha_hasta` en el resto del API). Los clientes anteriores al historial no tienen `created_at` y no cuentan en ningún mes. Sin empresa llega `"disponible": false` como los demás bloques.
 - `cartera_antiguedad`: `CuentaPorCobrar` `Pendiente`/`Parcial` con `fecha_vencimiento` ya pasada, de facturas activas y no canceladas. Las CxC vivas **sin `fecha_vencimiento`** van aparte en `sin_vencimiento` (no cuentan como vencidas). `drill_down`: hasta 20, la más antigua primero.
 
 ### Proveedores: escritura (`/api/v1/terceros/proveedores/`)

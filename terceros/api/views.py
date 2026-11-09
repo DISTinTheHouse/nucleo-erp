@@ -411,11 +411,13 @@ class ClienteViewSet(viewsets.ModelViewSet):
         # límites en UTC, un alta del día 1 antes de las 06:00Z caería en el mes
         # anterior. Los clientes sin ``created_at`` (anteriores al historial) no
         # cuentan en ningún mes.
+        # ``hasta`` se devuelve inclusivo (último día del mes), como ``fecha_hasta``
+        # en el resto del API; la consulta usa ``< 1° del mes siguiente``.
         desde = timezone.localdate().replace(day=1)
-        hasta = (desde + timedelta(days=32)).replace(day=1)
+        siguiente = (desde + timedelta(days=32)).replace(day=1)
         total = clientes_qs.filter(
             created_at__gte=timezone.make_aware(datetime.combine(desde, time.min)),
-            created_at__lt=timezone.make_aware(datetime.combine(hasta, time.min)),
+            created_at__lt=timezone.make_aware(datetime.combine(siguiente, time.min)),
         ).count()
         return {
             "disponible": True,
@@ -423,7 +425,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
             "total": total,
             "mes": desde.strftime("%Y-%m"),
             "desde": desde,
-            "hasta": hasta,
+            "hasta": siguiente - timedelta(days=1),
         }
 
     def _kpi_cartera_antiguedad(self, clientes_qs):
