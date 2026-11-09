@@ -246,7 +246,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
         user = request.user
         validar_parametros(request, set())  # sin filtros: un parámetro → 400
         empresa = getattr(user, "empresa", None)
-        if empresa is None and not getattr(user, "is_superuser", False):
+        if empresa is None:
             return Response(self._kpis_vacio())
 
         # Mismo alcance que el listado (``clientes_visibles``): un vendedor
@@ -284,8 +284,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
         cliente_id = entero_param(request, "cliente")
         if cliente_id is not None:
             clientes = clientes_base()
-            if not getattr(request.user, "is_superuser", False):
-                clientes = clientes.filter(empresa=empresa) if empresa else clientes.none()
+            clientes = clientes.filter(empresa=empresa) if empresa else clientes.none()
             empresa = get_object_or_404(clientes.select_related("empresa"), pk=cliente_id).empresa
         # Primero la validación del campo (longitud máxima), como en el guardado.
         try:
@@ -793,11 +792,10 @@ class DireccionClienteViewSet(viewsets.ModelViewSet):
         # ``?cliente=`` del listado (EC-775). Se valida antes del alcance para que
         # un valor no entero sea 400 para todos, también sin empresa.
         cliente_id = entero_param(self.request, "cliente") if self.action == "list" else None
-        if not getattr(user, "is_superuser", False):
-            empresa = getattr(user, "empresa", None)
-            if not empresa:
-                return qs.none()
-            qs = qs.filter(empresa=empresa, cliente__empresa=empresa)
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        qs = qs.filter(empresa=empresa, cliente__empresa=empresa)
         # El filtro va después del alcance: un cliente de otra empresa no trae
         # filas, igual que un id inexistente.
         if cliente_id is not None:

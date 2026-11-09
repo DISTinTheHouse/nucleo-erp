@@ -1902,7 +1902,8 @@ class Defecto7ErroresDeNegocioYTransacciones(FinanzasBase):
         self.assertEqual(poliza.empresa_id, self.a["empresa"].pk)
         self.assertFalse(Poliza.objects.filter(empresa=self.b["empresa"]).exists())
 
-    def test_superusuario_si_manda_empresa_explicita(self):
+    def test_superusuario_no_crea_en_otra_empresa(self):
+        # EC-798: el superusuario opera sólo en su empresa activa.
         cargo, _, centro_costo = self._crear_cuentas_contables(self.b["empresa"])
         client = self._client(self.superusuario)
 
@@ -1917,9 +1918,8 @@ class Defecto7ErroresDeNegocioYTransacciones(FinanzasBase):
             format="json",
         )
 
-        self.assertEqual(resp.status_code, 201, resp.data)
-        poliza = Poliza.objects.get(pk=resp.data["id"])
-        self.assertEqual(poliza.empresa_id, self.b["empresa"].pk)
+        self.assertIn(resp.status_code, (400, 403), resp.data)
+        self.assertFalse(Poliza.objects.filter(empresa=self.b["empresa"]).exists())
 
     def test_patch_no_reasigna_la_empresa(self):
         _, _, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
@@ -3091,14 +3091,14 @@ class FacturaProveedorMontosDerivadosTests(FinanzasBase):
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(resp.data["empresa"], self.a["empresa"].pk)
 
-    def test_superusuario_sin_empresa_propia_ni_en_el_cuerpo_recibe_400(self):
+    def test_superusuario_sin_empresa_propia_es_rechazado(self):
+        # EC-798: sin empresa activa, el superusuario no opera (403 como cualquiera).
         root = Usuario.objects.create_superuser(
             username="root-fp2@test.mx", email="root-fp2@test.mx", password="x",
         )
         resp = self._client(root).post(FACTURAS_PROVEEDOR_URL, self._payload(), format="json")
 
-        self.assertEqual(resp.status_code, 400, resp.data)
-        self.assertIn("empresa", resp.data)
+        self.assertEqual(resp.status_code, 403, resp.data)
 
     def test_rechaza_crear_sin_lineas_y_no_deja_encabezado(self):
         antes = FacturaProveedor.objects.count()
@@ -4983,6 +4983,7 @@ class CuentaContableCodigoUnicoTests(FinanzasBase):
     def test_superusuario_con_empresa_explicita_choca_en_esa_empresa(self):
         superusuario = Usuario.objects.create_superuser(
             username="root-ec139@test.mx", email="root-ec139@test.mx", password="x",
+            empresa=self.b["empresa"],  # EC-798: choca en su empresa activa
         )
         self._cuenta(self.b["empresa"], "1101")
 
@@ -5214,6 +5215,7 @@ class CentroCostoCodigoUnicoTests(FinanzasBase):
     def test_superusuario_con_empresa_explicita_choca_en_esa_empresa(self):
         superusuario = Usuario.objects.create_superuser(
             username="root-ec140@test.mx", email="root-ec140@test.mx", password="x",
+            empresa=self.b["empresa"],  # EC-798: choca en su empresa activa
         )
         self._centro(self.b["empresa"], "CC-01")
 
@@ -8668,16 +8670,19 @@ class F9ReportesContablesTests(MotorPolizasBase):
         self.assertEqual(self._get("balanza", fecha_inicio="ayer", fecha_fin="2026-03-31").status_code, 400)
         self.assertEqual(self._get("balanza", fecha_inicio="2026-04-01", fecha_fin="2026-03-31").status_code, 400)
 
-    def test_cada_empresa_ve_solo_lo_suyo_y_el_superusuario_pide_empresa(self):
+    def test_cada_empresa_ve_solo_lo_suyo_y_el_superusuario_la_suya(self):
         self._factura_en(date(2026, 3, 5), "F-1")
 
         ajena = self._get("libro-diario", user=self.b["usuario"], **self.PERIODO)
         root = Usuario.objects.create(username="root-f9", email="root@f9.test", is_superuser=True)
-        sin_empresa = self._get("libro-diario", user=root, **self.PERIODO)
-        con_empresa = self._get("libro-diario", user=root, empresa=self.empresa.pk, **self.PERIODO)
+        sin_empresa = self._get("libro-diario", user=root, empresa=self.empresa.pk, **self.PERIODO)
+        root.empresa = self.empresa
+        root.save()
+        con_empresa = self._get("libro-diario", user=root, **self.PERIODO)
 
         self.assertEqual(ajena.data["renglones"], [])
-        self.assertEqual(sin_empresa.status_code, 400)
+        # EC-798: ``?empresa=`` no le abre otra empresa al superusuario.
+        self.assertNotEqual(sin_empresa.status_code, 200)
         self.assertEqual(len(con_empresa.data["renglones"]), 3)
 
     def test_rastro_de_un_documento_trae_su_poliza_y_la_contrapoliza(self):
@@ -8785,9 +8790,11 @@ class CuentaBancariaSinCredencialesTests(FinanzasBase):
             self.assertEqual(set(datos), self.CONTRATO)
         self.assertEqual(detalle.data["saldo_actual"], "100.00")
 
-    def test_el_superusuario_crea_en_otra_empresa_sin_escribir_campos_de_solo_lectura(self):
-        # Sin empresa propia: es la rama del mixin en la que ``empresa`` es escribible.
-        root = Usuario.objects.create(username="root-ec710", email="root@ec710.test", is_superuser=True)
+    def test_el_superusuario_crea_en_su_empresa_sin_escribir_campos_de_solo_lectura(self):
+        # EC-798: ``empresa`` ya no es escribible ni para el superusuario; usa la activa.
+        root = Usuario.objects.create(
+            username="root-ec710", email="root@ec710.test", is_superuser=True, empresa=self.b["empresa"],
+        )
         banco = Banco.objects.create(empresa=self.b["empresa"], nombre="Banco B")
         payload = {
             "empresa": self.b["empresa"].pk, "banco": banco.pk, "moneda": self.moneda.pk,
@@ -10203,11 +10210,10 @@ class CobrosResumenTests(LecturaJerarquicaBase):
         admin.save()
         self.assertEqual(self._resumen(admin).json()["por_moneda"][0]["monto_total"], "130.01")
 
-    def test_superusuario_elige_empresa_o_usa_la_suya(self):
+    def test_superusuario_usa_su_empresa_activa(self):
+        # EC-798: sin empresa no ve nada y ``?empresa_id=`` no le abre otra.
         root = Usuario.objects.create(username="ec746-root@x.test", email="ec746-root@x.test", is_superuser=True)
-        self.assertEqual(self._resumen(root).status_code, 400)
-        data = self._resumen(root, f"?empresa_id={self.b['empresa'].pk}").json()
-        self.assertEqual([m["moneda_codigo"] for m in data["por_moneda"]], ["EUR", "MXN"])
+        self.assertNotEqual(self._resumen(root, f"?empresa_id={self.b['empresa'].pk}").status_code, 200)
         root.empresa = self.a["empresa"]
         root.save()
         self.assertEqual(self._resumen(root).json()["por_moneda"][0]["monto_total"], "50.01")

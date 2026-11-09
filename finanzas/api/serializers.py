@@ -102,7 +102,7 @@ class EmpresaResueltaEnServidorMixin:
         if self.instance is not None:
             return False
         user = getattr(self.context.get("request"), "user", None)
-        return bool(getattr(user, "is_superuser", False))
+        return False  # empresa activa siempre, superusuario incluido (EC-798)
 
     def get_extra_kwargs(self):
         extra_kwargs = super().get_extra_kwargs()
@@ -1272,7 +1272,7 @@ class ConciliacionBancariaSerializer(serializers.ModelSerializer):
             return attrs
         user = getattr(self.context.get("request"), "user", None)
         empresa_id = getattr(getattr(user, "empresa", None), "pk", None)
-        if not getattr(user, "is_superuser", False) and empresa_id and cta.empresa_id != empresa_id:
+        if cta.empresa_id != empresa_id:
             raise _no_existe("cuenta_bancaria", cta)
         return attrs
 

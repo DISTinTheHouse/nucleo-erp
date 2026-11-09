@@ -174,13 +174,11 @@ class ProveedorSerializer(serializers.ModelSerializer):
 
 class DireccionClienteSerializer(serializers.ModelSerializer):
     def validate_cliente(self, cliente):
-        # Solo un cliente de la empresa del usuario (el superusuario, de cualquiera),
+        # Solo un cliente de la empresa del usuario (superusuario incluido, EC-798),
         # activo o dado de baja. Uno de otra empresa responde igual que un pk
         # inexistente, sin delatar que existe.
         user = getattr(self.context.get("request"), "user", None)
-        if not getattr(user, "is_superuser", False) and (
-            cliente.empresa_id is None or cliente.empresa_id != getattr(user, "empresa_id", None)
-        ):
+        if cliente.empresa_id is None or cliente.empresa_id != getattr(user, "empresa_id", None):
             raise serializers.ValidationError(
                 self.fields["cliente"].error_messages["does_not_exist"].format(pk_value=cliente.pk),
                 code="does_not_exist",
