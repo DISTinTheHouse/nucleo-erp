@@ -164,6 +164,11 @@ class PreOrdenProduccion(models.Model):
     usuario_confirma = models.ForeignKey(
         'usuarios.Usuario', on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
     )
+    # Seguimiento (los calcula ``pre_orden_service``; el front solo los muestra).
+    estatus_desde = models.DateTimeField(null=True, blank=True)
+    materiales_faltantes = models.PositiveIntegerField(default=0)
+    regreso_fecha = models.DateTimeField(null=True, blank=True)
+    regreso_motivo = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -184,6 +189,35 @@ class PreOrdenProduccion(models.Model):
 
     def __str__(self):
         return f"Pre-orden {self.pk} (pedido {self.pedido_id})"
+
+
+class PreOrdenEvento(models.Model):
+    """Línea de tiempo de la pre-orden (``pre-ordenes/{id}/historial``)."""
+
+    class Evento(models.TextChoices):
+        CREADA = "creada", "Creada"
+        BOM_EDITADO = "bom_editado", "BOM editado"
+        EXISTENCIAS_CONFIRMADAS = "existencias_confirmadas", "Existencias confirmadas"
+        NECESIDAD_ENVIADA = "necesidad_enviada", "Necesidad enviada a compras"
+        OC_CREADA = "oc_creada", "OC creada"
+        OC_AUTORIZADA = "oc_autorizada", "OC autorizada"
+        MATERIAL_RECIBIDO = "material_recibido", "Material recibido"
+        REGRESO_CONSUMO = "regreso_consumo", "Regreso por consumo"
+        LISTA = "lista", "Lista para producir"
+        OP_CREADA = "op_creada", "OP creada"
+        CANCELADA = "cancelada", "Cancelada"
+
+    pre_orden = models.ForeignKey(PreOrdenProduccion, on_delete=models.CASCADE, related_name="eventos")
+    fecha = models.DateTimeField(auto_now_add=True)
+    evento = models.CharField(max_length=30, choices=Evento.choices)
+    usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    descripcion = models.CharField(max_length=500, blank=True, default="")
+
+    class Meta:
+        db_table = "pre_ordenes_produccion_eventos"
+        verbose_name = "Pre-orden Produccion Evento"
+        verbose_name_plural = "Pre-ordenes Produccion Eventos"
+        indexes = [models.Index(fields=["pre_orden", "fecha"], name="ix_pre_orden_evento_fecha")]
 
 
 class PreOrdenProduccionDetalle(models.Model):
