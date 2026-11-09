@@ -965,6 +965,113 @@ class ClienteKpisTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("fecha_desde", str(resp.data["parametros"]))
 
+    # --- EC-817: clientes nuevos del mes --------------------------------------
+
+    # 15 de noviembre de 2026, 06:00 en el centro de México (UTC-6 todo el año).
+    AHORA = datetime(2026, 11, 15, 12, 0, tzinfo=dt_timezone.utc)
+
+    def _alta(self, cliente, *args):
+        """Fija ``created_at`` en UTC (``auto_now_add`` no deja ponerlo al crear)."""
+        Cliente.objects.filter(pk=cliente.pk).update(created_at=datetime(*args, tzinfo=dt_timezone.utc))
+
+    def _nuevos(self, user, query=""):
+        with patch("django.utils.timezone.now", return_value=self.AHORA):
+            resp = self._get(user, query)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.json()["clientes_nuevos"]
+
+    def setUp(self):
+        # A: 05:59Z del 1 = 23:59 del 31 de octubre local; B: 06:00Z = 00:00 del 1 de noviembre.
+        self._alta(self.cliente_a, 2026, 11, 1, 5, 59)
+        self._alta(self.cliente_b, 2026, 11, 1, 6, 0)
+
+    def test_clientes_nuevos_usa_el_mes_en_hora_local(self):
+        ultimo_minuto = Cliente.objects.create(empresa=self.empresa, nombre="Fin de mes")
+        self._alta(ultimo_minuto, 2026, 12, 1, 5, 59)  # 23:59 del 30 de noviembre local
+        siguiente_mes = Cliente.objects.create(empresa=self.empresa, nombre="Diciembre")
+        self._alta(siguiente_mes, 2026, 12, 1, 6, 0)
+
+        nuevos = self._nuevos(self.admin_empresa)
+
+        self.assertEqual(nuevos, {
+            "disponible": True,
+            "criterio": "Clientes activos dados de alta en el mes en curso (hora del centro de México).",
+            "total": 2,  # B y el del último minuto; A cae en octubre
+            "mes": "2026-11",
+            "desde": "2026-11-01",
+            "hasta": "2026-12-01",
+        })
+
+    def test_clientes_nuevos_excluye_bajas_y_altas_sin_fecha(self):
+        baja = Cliente.objects.create(empresa=self.empresa, nombre="Baja")
+        self._alta(baja, 2026, 11, 10, 12, 0)
+        baja.soft_delete()
+        sin_fecha = Cliente.objects.create(empresa=self.empresa, nombre="Sin fecha")
+        Cliente.objects.filter(pk=sin_fecha.pk).update(created_at=None)
+
+        self.assertEqual(self._nuevos(self.admin_empresa)["total"], 1)
+
+    def test_clientes_nuevos_de_otra_empresa_no_cuentan(self):
+        otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        ajeno = Cliente.objects.create(empresa=otra, nombre="Ajeno")
+        self._alta(ajeno, 2026, 11, 10, 12, 0)
+        admin_otra = Usuario.objects.create(
+            username="admin_g", email="admin@globex.test", empresa=otra, is_admin_empresa=True,
+        )
+        admin_otra.empresas.add(self.empresa)  # el M2M no amplía el alcance (EC-816)
+
+        self.assertEqual(self._nuevos(self.admin_empresa)["total"], 1)
+        self.assertEqual(self._nuevos(admin_otra)["total"], 1)  # solo el suyo
+
+    def test_clientes_nuevos_respeta_el_alcance_del_vendedor(self):
+        self.assertEqual(self._nuevos(self.vendedor_a)["total"], 0)  # A es de octubre
+        self.assertEqual(self._nuevos(self.vendedor_b)["total"], 1)
+
+    def test_clientes_nuevos_superusuario_acotado_a_su_empresa(self):
+        otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        self._alta(Cliente.objects.create(empresa=otra, nombre="Ajeno"), 2026, 11, 10, 12, 0)
+        root = Usuario.objects.create(
+            username="root", email="root@acme.test", is_superuser=True, is_staff=True, empresa=self.empresa,
+        )
+        root_sin_empresa = Usuario.objects.create(
+            username="root2", email="root2@acme.test", is_superuser=True, is_staff=True,
+        )
+
+        self.assertEqual(self._nuevos(root)["total"], 1)
+        self.assertEqual(
+            self._nuevos(root_sin_empresa), {"disponible": False, "motivo": "Usuario sin empresa asignada."},
+        )
+
+    def test_clientes_nuevos_sin_empresa_no_disponible(self):
+        self.assertEqual(
+            self._nuevos(self.sin_empresa), {"disponible": False, "motivo": "Usuario sin empresa asignada."},
+        )
+
+    def test_clientes_nuevos_no_acepta_parametros(self):
+        resp = self._get(self.admin_empresa, "?mes=2026-10")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("mes", str(resp.data["parametros"]))
+
+    def test_clientes_nuevos_agrega_una_sola_consulta(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from terceros.api.views import ClienteViewSet
+
+        def _consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(self._get(self.vendedor_a).status_code, 200)
+            return len(ctx)
+
+        self._get(self.vendedor_a)  # calienta lo que se cachea por proceso
+        con_bloque = _consultas()
+        with patch.object(ClienteViewSet, "_kpi_clientes_nuevos", return_value={}):
+            sin_bloque = _consultas()
+
+        self.assertEqual(con_bloque - sin_bloque, 1)
+
+
 class ClienteCreatedAtBackfillTests(TestCase):
     """Migración 0024 (EC-817): ``created_at`` sale del registro ``+`` del historial."""
 

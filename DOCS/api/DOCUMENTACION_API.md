@@ -1277,7 +1277,7 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
 - **Facturación y cartera (EC-789)**: `ventas_por_cliente` y `cartera_antiguedad` cubren todos los clientes visibles solo si `puede_ver_cartera_de_todos` es `true` (superusuario, admin, Contabilidad); para los demás (Mesa de Control incluida), solo sus clientes asignados.
 - Facturas, pedidos y CxC cuentan solo si son de la **misma empresa que su cliente**; un documento de otra empresa que apunte al cliente no entra.
 - Alcance = mismo que el listado de clientes (`clientes_visibles`): un vendedor normal solo ve KPIs de **sus propios clientes** (M2M `vendedores`); Mesa de Control/`is_admin_empresa`/superuser ven toda la empresa.
-- Solo **3 de 4 KPIs son reales**. `reclamos_devoluciones` viene `"disponible": false` — `Devolucion`/`Entrega` no registran cantidad de piezas, solo los FKs.
+- Solo **4 de 5 KPIs son reales**. `reclamos_devoluciones` viene `"disponible": false` — `Devolucion`/`Entrega` no registran cantidad de piezas, solo los FKs.
 
 ```json
 {
@@ -1301,6 +1301,11 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
       "inactivos": [{ "cliente_id": 9, "cliente_nombre": "Otro Cliente" }],
       "activos_truncado": true, "inactivos_truncado": false
     }
+  },
+  "clientes_nuevos": {
+    "disponible": true,
+    "criterio": "Clientes activos dados de alta en el mes en curso (hora del centro de México).",
+    "total": 2, "mes": "2026-11", "desde": "2026-11-01", "hasta": "2026-12-01"
   },
   "reclamos_devoluciones": {
     "disponible": false,
@@ -1331,6 +1336,7 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
 - **Montos por moneda** (#370): nunca se suman monedas distintas; cada bloque trae su `moneda`.
 - `ventas_por_cliente`: `Factura` con `activo=true` y estatus **`Emitida`** (los borradores y cancelados no cuentan). `top_clientes` = los 5 de mayor facturación de esa moneda, con `pct_acumulado` listo para un Pareto.
 - `clientes_activos`: "activo" = al menos un `Pedido` **Por autorizar, Autorizada o En proceso** creado en los últimos 90 días (fijo). Borrador y Cancelado no cuentan. `drill_down` trae hasta 20 activos y 20 inactivos (por nombre) con la misma definición que los conteos; `*_truncado` indica que hay más.
+- `clientes_nuevos` (EC-817): clientes **activos** del mismo alcance que `clientes_activos` con `created_at` dentro del mes calendario en curso, en hora del centro de México (`desde` incluido, `hasta` excluido). Los clientes anteriores al historial no tienen `created_at` y no cuentan en ningún mes. Sin empresa llega `"disponible": false` como los demás bloques.
 - `cartera_antiguedad`: `CuentaPorCobrar` `Pendiente`/`Parcial` con `fecha_vencimiento` ya pasada, de facturas activas y no canceladas. Las CxC vivas **sin `fecha_vencimiento`** van aparte en `sin_vencimiento` (no cuentan como vencidas). `drill_down`: hasta 20, la más antigua primero.
 
 ### Proveedores: escritura (`/api/v1/terceros/proveedores/`)
