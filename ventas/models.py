@@ -9,10 +9,14 @@ from terceros.models import Cliente, DireccionCliente
 from catalogo.models import Producto, Talla, Color, ProductoVariante, CategoriaProducto
 from simple_history.models import HistoricalRecords
 
+TIPO_PEDIDO_VENTA = 1
+TIPO_PEDIDO_MUESTRA = 2
+TIPO_PEDIDO_ERROR = 3
+
 TIPO_PEDIDO_CHOICES = (
-    (1, "PEDIDO DE VENTA"),
-    (2, "MUESTRA"),
-    (3, "PEDIDO DE ERROR"),
+    (TIPO_PEDIDO_VENTA, "PEDIDO DE VENTA"),
+    (TIPO_PEDIDO_MUESTRA, "MUESTRA"),
+    (TIPO_PEDIDO_ERROR, "PEDIDO DE ERROR"),
 )
 
 class Prospecto(models.Model):
@@ -370,14 +374,16 @@ class Pedido(StatusLifecycleModel):
         F = 'F', 'F - 8 a 10 semanas'
         X = 'X', 'X - Solo para facturar'
 
+    ESTATUS_BORRADOR = 1
+    ESTATUS_POR_AUTORIZAR = 2
+    ESTATUS_CANCELADO = 5
     CHOICES_ESTATUS = (
-        (1, "BORRADOR"),
-        (2, "POR AUTORIZAR"),
+        (ESTATUS_BORRADOR, "BORRADOR"),
+        (ESTATUS_POR_AUTORIZAR, "POR AUTORIZAR"),
         (3, "AUTORIZADA"),
         (4, "EN PROCESO"),
-        (5, "CANCELADO"),
+        (ESTATUS_CANCELADO, "CANCELADO"),
     )
-    ESTATUS_CANCELADO = 5
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="pedidos")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="pedidos")
