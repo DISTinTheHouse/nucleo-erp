@@ -67,6 +67,23 @@ def direccion_sucursal(sucursal):
     return ", ".join(p.strip() for p in partes if p and p.strip()) or None
 
 
+def con_pre_ordenes(qs):
+    """Anota ``pre_ordenes_ids`` para ``OrdenCompraSerializer.get_pre_ordenes``.
+
+    Sin la anotación, el serializer consulta las necesidades de cada OC (N+1, #1025).
+    Una sola definición para el listado, el historial por proveedor y las respuestas
+    de escritura.
+    """
+    from django.contrib.postgres.expressions import ArraySubquery
+    from django.db.models import OuterRef
+    from compras.models import NecesidadCompra
+
+    return qs.annotate(pre_ordenes_ids=ArraySubquery(
+        NecesidadCompra.objects.filter(orden_compra_id=OuterRef("pk")).order_by()
+        .values("pre_orden_id").distinct()
+    ))
+
+
 class OrdenCompraSerializer(serializers.ModelSerializer):
     def get_pre_ordenes(self, obj):
         ids = getattr(obj, "pre_ordenes_ids", None)

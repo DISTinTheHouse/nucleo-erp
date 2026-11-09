@@ -42,8 +42,9 @@ def ve_cartera_de_todos(user):
 
     if ve_clientes_sin_asignacion(user) or "R-CONTABILIDAD" in permisos_efectivos(user):
         return True
-    empresa = getattr(user, "empresa", None)
-    return bool(empresa) and CLAVE_DEPARTAMENTO_CONTABILIDAD in claves_departamento_usuario(user, empresa=empresa)
+    # ``empresa_id`` y no ``empresa``: no hace falta cargar la empresa (#1025).
+    empresa_id = getattr(user, "empresa_id", None)
+    return bool(empresa_id) and CLAVE_DEPARTAMENTO_CONTABILIDAD in claves_departamento_usuario(user, empresa=empresa_id)
 
 
 def clientes_con_cartera_visible(qs, user, ve_todos=None):

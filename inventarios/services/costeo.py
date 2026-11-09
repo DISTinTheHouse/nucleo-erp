@@ -114,10 +114,17 @@ def costear(empresa_id, renglones, origen):
         return
     claves = {_clave_de(d) for d, _, _ in renglones}
     costos = _costos(empresa_id, claves)
-    for k in claves - costos.keys():
-        tipo, pk = k
-        campo = {"vp": "variante_produccion_id", "pv": "producto_variante_id", "p": "producto_id"}[tipo]
-        costos[k], _ = CostoInventario.objects.get_or_create(empresa_id=empresa_id, **{campo: pk})
+    faltan = claves - costos.keys()
+    if faltan:
+        # Alta en bloque (#1025): antes, un ``get_or_create`` por artículo sin costo.
+        # ``ignore_conflicts`` cubre la carrera con otra transacción; luego se releen
+        # bloqueadas, como las que ya existían.
+        campos = {"vp": "variante_produccion_id", "pv": "producto_variante_id", "p": "producto_id"}
+        CostoInventario.objects.bulk_create(
+            [CostoInventario(empresa_id=empresa_id, **{campos[tipo]: pk}) for tipo, pk in faltan],
+            ignore_conflicts=True,
+        )
+        costos.update(_costos(empresa_id, faltan))
     # Existencia previa al movimiento = la de ahora menos lo que este movimiento sumó.
     existencia = _existencias(empresa_id, claves)
     for d, delta, _ in renglones:
