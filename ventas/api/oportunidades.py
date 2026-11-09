@@ -25,6 +25,8 @@ from seguridad.role_identity import (
 from usuarios.models import Usuario
 from ventas.models import Cotizacion, Oportunidad, OportunidadSeguimiento, Pedido
 from ventas.scope import cotizaciones_visibles, oportunidades_base, oportunidades_visibles
+from nucleo.permisos import CODIGOS_OPORTUNIDADES, LecturaPorCodigo
+from rest_framework.permissions import IsAuthenticated
 
 ESTATUS_BORRADOR = 1
 ESTATUS_AUTORIZADA = 3
@@ -203,6 +205,13 @@ class OportunidadSerializer(ClienteVisibleMixin, serializers.ModelSerializer):
 
 
 class OportunidadViewSet(viewsets.ModelViewSet):
+    # #1020: lecturas con código R-CRM / R-CRM-OPORTUNIDADES.
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = {
+        "list": CODIGOS_OPORTUNIDADES,
+        "retrieve": CODIGOS_OPORTUNIDADES,
+        "embudo": CODIGOS_OPORTUNIDADES,
+    }
     queryset = oportunidades_base()
     serializer_class = OportunidadSerializer
     http_method_names = ["get", "post", "patch", "delete"]

@@ -49,6 +49,7 @@ Dos detalles de fidelidad que es fácil perder de vista:
   de los dos, igual que en ``tiene_permiso()``, que consulta cada uno por separado.
 """
 
+from rest_framework.permissions import BasePermission
 from seguridad.models import Rol, UsuarioPermiso
 
 
@@ -129,3 +130,58 @@ def permisos_efectivos(user) -> PermisosEfectivos:
     )
 
     return PermisosEfectivos(todo=False, claves=frozenset(concedidos - denegados))
+
+
+# ---------------------------------------------------------------------------
+# Lecturas protegidas por código (#1020)
+# ---------------------------------------------------------------------------
+
+_ATRIBUTO_PETICION = "_permisos_efectivos_peticion"
+
+
+def permisos_de_la_peticion(request):
+    """``permisos_efectivos(request.user)`` una sola vez por petición."""
+    permisos = getattr(request, _ATRIBUTO_PETICION, None)
+    if permisos is None:
+        permisos = permisos_efectivos(request.user)
+        setattr(request, _ATRIBUTO_PETICION, permisos)
+    return permisos
+
+
+class LecturaPorCodigo(BasePermission):
+    """Exige uno de los códigos ``R-*`` que el ViewSet declara por acción.
+
+    El ViewSet declara ``codigos_lectura = {"list": (...), "retrieve": (...), ...}``.
+    Una acción que no aparece ahí no se toca (escrituras y acciones con su propia
+    regla siguen como estaban). Superusuario y admin de empresa pasan siempre
+    (``permisos_efectivos``). Mismos códigos que la ruta del frontend: el backend
+    deja de depender de ella como único control (#1020).
+    """
+
+    message = "No tienes permiso para consultar esta información."
+
+    def has_permission(self, request, view):
+        codigos = getattr(view, "codigos_lectura", {}).get(getattr(view, "action", None))
+        if not codigos:
+            return True
+        permisos = permisos_de_la_peticion(request)
+        return any(c in permisos for c in codigos)
+
+
+# Códigos de lectura de CRM (#1020). Mismos que ``routePermissions.ts`` del frontend y
+# que el buscador global (``nucleo.api.search``).
+CODIGOS_PEDIDO_NEUTRO = (
+    # ``/orders/[id]``: desde ahí se abren la cotización y el cliente del pedido.
+    "R-CRM-PEDIDOS", "R-WMS-PEDIDOS", "R-COMPRAS-PEDIDOS", "R-MESACONTROL-PEDIDOS",
+    "R-PRODUCCION-OB", "R-PRODUCCION-OR", "R-PRODUCCION-CM", "R-PRODUCCION-OP",
+    "R-COMPRAS-OC", "R-WMS-PICKING", "R-WMS-PACKING", "R-WMS-ENVIO",
+)
+CODIGOS_COTIZACIONES = ("R-CRM", "R-CRM-COTIZACIONES", "R-MESACONTROL", "R-MESACONTROL-COTI")
+CODIGOS_OPORTUNIDADES = ("R-CRM", "R-CRM-OPORTUNIDADES")
+CODIGOS_CLIENTES = (
+    # CRM (clientes, y el selector de las cotizaciones/oportunidades), Mesa de Control
+    # y Contabilidad (clientes contables y la cartera, que usa el listado de clientes).
+    "R-CRM", "R-CRM-CLIENTES", "R-CRM-COTIZACIONES",
+    "R-MESACONTROL", "R-MESACONTROL-CLIENTES",
+    "R-CONTABILIDAD", "R-CONTABILIDAD-CLIENTES", "R-CONTABILIDAD-CXC",
+)

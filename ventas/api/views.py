@@ -119,6 +119,8 @@ from ventas.services.pedido_field_filter_service import (
     puede_ver_contabilidad,
     quitar_campos_contabilidad_pedido,
 )
+from nucleo.permisos import CODIGOS_COTIZACIONES, CODIGOS_PEDIDO_NEUTRO, LecturaPorCodigo
+from rest_framework.permissions import IsAuthenticated
 from nucleo.importes import quitar_montos
 from wms.models import Estado as EstadoWms, Picking, PickingDetalle
 
@@ -444,6 +446,13 @@ PARAMETROS_FILTRO_COTIZACIONES = list(cotizaciones_listado.PARAMETROS_FILTRO_OPE
 
 
 class CotizacionViewSet(viewsets.ModelViewSet):
+    # #1020: lecturas con código R-*; el detalle también desde ``/orders/[id]``.
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = {
+        "list": CODIGOS_COTIZACIONES,
+        "kpis": CODIGOS_COTIZACIONES,
+        "retrieve": CODIGOS_COTIZACIONES + CODIGOS_PEDIDO_NEUTRO,
+    }
     queryset = cotizaciones_base()
     serializer_class = CotizacionSerializer
     http_method_names = ["get", "post", "patch"]
