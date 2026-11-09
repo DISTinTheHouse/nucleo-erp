@@ -1,5 +1,6 @@
 from nucleo.scope import empresa_ids_lectura
 from nucleo.middleware import ip_auditoria
+from nucleo.permisos import permisos_efectivos
 from collections import defaultdict
 from decimal import Decimal
 
@@ -68,6 +69,27 @@ class IsAuthenticatedAndScoped(permissions.BasePermission):
             return True
         # Para write/delete, mismo criterio: admin_empresa o superuser
         return request.user.is_superuser or getattr(request.user, 'is_admin_empresa', False)
+
+
+PERMISO_REPORTES = "R-CORE-REPORTES"
+
+
+class PermisoReportesInventario(permissions.BasePermission):
+    """Reportes por periodo de existencias y movimientos (JSON y ``exportar/``,
+    EC-822): exige ``R-CORE-REPORTES``, el mismo código con el que el front abre
+    ``/system/reports``. Superusuario y admin de empresa pasan siempre
+    (``permisos_efectivos``); ``R-CORE`` solo no basta."""
+
+    message = "No tienes permiso para ver los reportes de inventario."
+
+    def has_permission(self, request, view):
+        return PERMISO_REPORTES in permisos_efectivos(request.user)
+
+
+# El ``permission_classes`` de una acción reemplaza el del ViewSet: se repite
+# ``IsAuthenticatedAndScoped`` para que sin sesión siga siendo 401, no 403.
+PERMISOS_REPORTES = [IsAuthenticatedAndScoped, PermisoReportesInventario]
+
 
 class AlmacenViewSet(viewsets.ModelViewSet):
     queryset = Almacen.objects.all().select_related('empresa', 'sucursal')
@@ -149,6 +171,7 @@ RESPUESTAS_EXPORTACION = {
     (200, exportacion_mod.CONTENT_TYPES["pdf"]): OpenApiTypes.BINARY,
     (200, exportacion_mod.CONTENT_TYPES["xlsx"]): OpenApiTypes.BINARY,
     400: OpenApiResponse(description="Validación (formato, fechas, tipo_movimiento)."),
+    403: OpenApiResponse(description="Sin R-CORE-REPORTES."),
 }
 
 
@@ -388,10 +411,13 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
     def _quantize_qty(self, value):
         return reportes_mod.quantize_qty(value)
 
-    def _build_report_almacenes_queryset(self):
-        return reportes_mod.almacenes_del_reporte(self.request.user, self.request.query_params)
+    def _build_report_almacenes_queryset(self, almacen_id):
+        return reportes_mod.almacenes_del_reporte(self.request.user, self.request.query_params, almacen_id)
 
-    @action(detail=False, methods=["get"], url_path="reporte-existencias-periodo")
+    @action(
+        detail=False, methods=["get"], url_path="reporte-existencias-periodo",
+        permission_classes=PERMISOS_REPORTES,
+    )
     def reporte_existencias_periodo(self, request):
         # Cálculo completo (alcance + filtros + totales) en ``reportes_periodo``;
         # aquí solo se pagina y se arma el sobre JSON.
@@ -401,10 +427,8 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
                 {
                     "fecha_inicio": str(reporte["fecha_inicio"]),
                     "fecha_final": str(reporte["fecha_final"]),
-                    "filtros": {
-                        "producto_id": reporte["producto_id"],
-                        "producto_variante_id": reporte["producto_variante_id"],
-                    },
+                    # Misma forma que con resultados (EC-822).
+                    "filtros": {"almacen_id": reporte["almacen_id"]},
                     "resumen": reporte["resumen"],
                     "resumen_por_almacen": [],
                     "count": 0,
@@ -449,14 +473,14 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
     )
     @action(
         detail=False, methods=["get"], url_path="reporte-existencias-periodo/exportar",
-        renderer_classes=RENDERERS_EXPORTACION,
+        renderer_classes=RENDERERS_EXPORTACION, permission_classes=PERMISOS_REPORTES,
     )
     def reporte_existencias_periodo_exportar(self, request):
         formato = exportacion_mod.formato_requerido(request.query_params)
         # Fechas primero: sin ellas, el mismo 400 que el JSON.
         reportes_mod.parse_fechas(request.query_params)
-        reportes_mod.almacen_requerido(request.query_params)
-        reporte = reportes_mod.reporte_existencias(request.user, request.query_params)
+        almacen_id = reportes_mod.almacen_requerido(request.query_params)
+        reporte = reportes_mod.reporte_existencias(request.user, request.query_params, almacen_id)
         return respuesta_archivo(exportacion_mod.exportar_existencias(reporte, formato))
 
     @action(detail=False, methods=["get"], url_path="reporte-existencias-produccion-compras")
@@ -530,8 +554,12 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
         qp = request.query_params
         producto_id = self._report_to_int(qp.get("producto") or qp.get("producto_id"))
         sku_q = (qp.get("sku") or qp.get("q") or "").strip()
+        # Mismo lector estricto que los reportes por periodo (EC-822): ``almacen=abc``
+        # ya no se ignora (antes salían todos los almacenes PT). ``sucursal``,
+        # ``producto`` y ``empresa`` siguen como estaban.
+        almacen_id = reportes_mod.almacen_del_query(qp)
 
-        almacenes_pt = self._build_report_almacenes_queryset().filter(
+        almacenes_pt = self._build_report_almacenes_queryset(almacen_id).filter(
             tipo_almacen=TipoAlmacen.PRODUCTO_TERMINADO
         )
         almacenes_info = list(almacenes_pt.values("id_almacen", "empresa_id", "sucursal_id"))
@@ -542,7 +570,7 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
         # Con ``?sucursal``/``?almacen`` el reporte es de esa sucursal también en OP y OC.
         acotar_sucursal = bool(
             self._report_to_int(qp.get("sucursal") or qp.get("sucursal_id"))
-            or self._report_to_int(qp.get("almacen") or qp.get("almacen_id"))
+            or almacen_id
         )
         sucursal_ids = {a["sucursal_id"] for a in almacenes_info}
 
@@ -1260,7 +1288,10 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
     def _movement_report_parse_dates(self, request):
         return reportes_mod.parse_fechas(request.query_params)
 
-    @action(detail=False, methods=["get"], url_path="reporte-movimientos-periodo")
+    @action(
+        detail=False, methods=["get"], url_path="reporte-movimientos-periodo",
+        permission_classes=PERMISOS_REPORTES,
+    )
     def reporte_movimientos_periodo(self, request):
         # Cálculo completo en ``reportes_periodo``; aquí solo se pagina.
         reporte = reportes_mod.reporte_movimientos(request.user, request.query_params)
@@ -1310,7 +1341,7 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
     )
     @action(
         detail=False, methods=["get"], url_path="reporte-movimientos-periodo/exportar",
-        renderer_classes=RENDERERS_EXPORTACION,
+        renderer_classes=RENDERERS_EXPORTACION, permission_classes=PERMISOS_REPORTES,
     )
     def reporte_movimientos_periodo_exportar(self, request):
         formato = exportacion_mod.formato_requerido(request.query_params)
@@ -1320,16 +1351,10 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
     def _auxiliar_id(self, qp, *nombres):
         # A diferencia de ``_report_to_int``, un id no numérico es 400: ignorarlo
         # regresaba el kardex de todos los almacenes (#805).
+        # 0 o negativo también es 400: tratarlo como ausente quitaba el filtro (#815).
         for nombre in nombres:
-            raw = (qp.get(nombre) or "").strip()
-            if raw:
-                try:
-                    valor = int(raw)
-                except ValueError:
-                    valor = 0
-                # 0 o negativo también es 400: tratarlo como ausente quitaba el filtro (#815).
-                if valor <= 0:
-                    raise ValidationError({nombre: "Debe ser un id numérico mayor a 0."})
+            valor = reportes_mod.id_positivo(qp.get(nombre), nombre)
+            if valor is not None:
                 return valor
         return None
 

@@ -52,17 +52,25 @@ def quantize_money(value):
     return to_decimal(value).quantize(Decimal("0.01"))
 
 
+def _fecha(query_params, nombre):
+    """Fecha obligatoria ``YYYY-MM-DD``; 400 con la clave ``nombre``."""
+    try:
+        fecha = parse_date((query_params.get(nombre) or "").strip())
+    except ValueError:
+        # ``parse_date`` lanza ``ValueError`` con una fecha bien formada que no
+        # existe (2026-02-30): era un 500 (EC-822). El formato sí es el pedido,
+        # así que el mensaje no es el de "requerida".
+        raise ValidationError({nombre: f"{nombre} no es una fecha válida: ese día no existe."})
+    if not fecha:
+        raise ValidationError({nombre: f"{nombre} es requerida con formato YYYY-MM-DD."})
+    return fecha
+
+
 def parse_fechas(query_params):
     """``fecha_inicio``/``fecha_final`` obligatorias (YYYY-MM-DD), en hora local."""
-    fecha_inicio_raw = (query_params.get("fecha_inicio") or "").strip()
-    fecha_final_raw = (query_params.get("fecha_final") or "").strip()
-    fecha_inicio = parse_date(fecha_inicio_raw)
-    fecha_final = parse_date(fecha_final_raw)
+    fecha_inicio = _fecha(query_params, "fecha_inicio")
+    fecha_final = _fecha(query_params, "fecha_final")
 
-    if not fecha_inicio:
-        raise ValidationError({"fecha_inicio": "fecha_inicio es requerida con formato YYYY-MM-DD."})
-    if not fecha_final:
-        raise ValidationError({"fecha_final": "fecha_final es requerida con formato YYYY-MM-DD."})
     if fecha_final < fecha_inicio:
         raise ValidationError({"fecha_final": "fecha_final no puede ser menor a fecha_inicio."})
 
@@ -72,10 +80,38 @@ def parse_fechas(query_params):
     return fecha_inicio, fecha_final, inicio_dt, final_dt
 
 
+def id_positivo(valor, clave):
+    """Id de un query param: vacío → ``None``; no numérico, 0 o negativo → 400
+    con ``clave``. Ignorarlo quitaba el filtro en silencio (#805, #815, EC-822)."""
+    raw = (valor or "").strip()
+    if not raw:
+        return None
+    try:
+        numero = int(raw)
+    except ValueError:
+        numero = 0
+    if numero <= 0:
+        raise ValidationError({clave: "Debe ser un id numérico mayor a 0."})
+    return numero
+
+
+def almacen_del_query(query_params):
+    """``almacen``/``almacen_id`` de los reportes por periodo (EC-822): el primer
+    alias NO vacío, estricto, y el 400 siempre con la clave ``almacen``. Antes,
+    ``almacen=abc&almacen_id=5`` tomaba ``abc`` y se quedaba sin filtro."""
+    raw = next((v for v in (query_params.get("almacen"), query_params.get("almacen_id")) if (v or "").strip()), None)
+    # Solo dígitos ASCII: ``int()`` acepta ``1_0`` (10), ``+5`` y dígitos no
+    # ASCII (``٣``), que filtraban otro almacén en vez de dar 400.
+    limpio = (raw or "").strip()
+    if limpio and not (limpio.isascii() and limpio.isdigit()):
+        raise ValidationError({"almacen": "Debe ser un id numérico mayor a 0."})
+    return id_positivo(raw, "almacen")
+
+
 def almacen_requerido(query_params):
     """``almacen``/``almacen_id`` obligatorio (exportación de existencias)."""
-    almacen_id = to_int(query_params.get("almacen") or query_params.get("almacen_id"))
-    if not almacen_id:
+    almacen_id = almacen_del_query(query_params)
+    if almacen_id is None:
         raise ValidationError({"almacen": "almacen es requerido para exportar el reporte de existencias."})
     return almacen_id
 
@@ -101,14 +137,15 @@ def _almacenes_en_alcance(user, qs):
     return qs if user.is_superuser else almacenes_en_alcance(user, qs)
 
 
-def almacenes_del_reporte(user, query_params):
-    """Almacenes del reporte de existencias: alcance del usuario acotado por
-    ``empresa``, ``sucursal`` y ``almacen`` (y sus alias ``*_id``)."""
+def almacenes_del_reporte(user, query_params, almacen_id):
+    """Almacenes del reporte de existencias (y de
+    ``reporte-existencias-produccion-compras``): alcance del usuario acotado por
+    ``empresa``, ``sucursal`` (y sus alias ``*_id``) y por ``almacen_id``, que el
+    llamador ya leyó con ``almacen_del_query`` (una vez por petición)."""
     qs = _almacenes_en_alcance(user, Almacen.objects.select_related("empresa", "sucursal").all())
 
     empresa_id = to_int(query_params.get("empresa") or query_params.get("empresa_id"))
     sucursal_id = to_int(query_params.get("sucursal") or query_params.get("sucursal_id"))
-    almacen_id = to_int(query_params.get("almacen") or query_params.get("almacen_id"))
 
     if empresa_id:
         qs = qs.filter(empresa_id=empresa_id)
@@ -121,8 +158,9 @@ def almacenes_del_reporte(user, query_params):
 
 def almacen_ids_movimientos(user, query_params):
     """Ids de almacén del reporte de movimientos (solo acota ``almacen``) y el
-    ``almacen`` pedido."""
-    almacen_id = to_int(query_params.get("almacen") or query_params.get("almacen_id"))
+    ``almacen`` pedido (estricto, ``almacen_del_query``). El auxiliar también
+    lo usa, pero valida ``almacen`` antes con la misma regla."""
+    almacen_id = almacen_del_query(query_params)
     qs = _almacenes_en_alcance(user, Almacen.objects.all())
     if almacen_id:
         qs = qs.filter(pk=almacen_id)
@@ -202,7 +240,10 @@ def _totales_en_cero():
     }
 
 
-def reporte_existencias(user, query_params):
+_SIN_LEER = object()
+
+
+def reporte_existencias(user, query_params, almacen_id=_SIN_LEER):
     """Reporte de existencias del periodo, completo y sin paginar.
 
     Regresa ``fecha_inicio``/``fecha_final`` (``date``), los filtros
@@ -214,12 +255,15 @@ def reporte_existencias(user, query_params):
     """
     fecha_inicio, fecha_final, inicio_dt, final_dt = parse_fechas(query_params)
     qp = query_params
-    almacen_id = to_int(qp.get("almacen") or qp.get("almacen_id"))
+    # La exportación ya lo leyó con ``almacen_requerido``; el JSON lo lee aquí,
+    # después de las fechas (mismo orden de los 400).
+    if almacen_id is _SIN_LEER:
+        almacen_id = almacen_del_query(qp)
     producto_id = to_int(qp.get("producto") or qp.get("producto_id"))
     producto_variante_id = to_int(qp.get("producto_variante") or qp.get("producto_variante_id"))
 
     almacenes = list(
-        almacenes_del_reporte(user, qp).values(
+        almacenes_del_reporte(user, qp, almacen_id).values(
             "id_almacen",
             "codigo",
             "nombre",
