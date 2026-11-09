@@ -1,5 +1,6 @@
 from nucleo.scope import empresa_ids_lectura
 from nucleo.middleware import ip_auditoria
+from nucleo.permisos import permisos_efectivos
 from collections import defaultdict
 from decimal import Decimal
 
@@ -68,6 +69,27 @@ class IsAuthenticatedAndScoped(permissions.BasePermission):
             return True
         # Para write/delete, mismo criterio: admin_empresa o superuser
         return request.user.is_superuser or getattr(request.user, 'is_admin_empresa', False)
+
+
+PERMISO_REPORTES = "R-CORE-REPORTES"
+
+
+class PermisoReportesInventario(permissions.BasePermission):
+    """Reportes por periodo de existencias y movimientos (JSON y ``exportar/``,
+    EC-822): exige ``R-CORE-REPORTES``, el mismo código con el que el front abre
+    ``/system/reports``. Superusuario y admin de empresa pasan siempre
+    (``permisos_efectivos``); ``R-CORE`` solo no basta."""
+
+    message = "No tienes permiso para ver los reportes de inventario."
+
+    def has_permission(self, request, view):
+        return PERMISO_REPORTES in permisos_efectivos(request.user)
+
+
+# El ``permission_classes`` de una acción reemplaza el del ViewSet: se repite
+# ``IsAuthenticatedAndScoped`` para que sin sesión siga siendo 401, no 403.
+PERMISOS_REPORTES = [IsAuthenticatedAndScoped, PermisoReportesInventario]
+
 
 class AlmacenViewSet(viewsets.ModelViewSet):
     queryset = Almacen.objects.all().select_related('empresa', 'sucursal')
@@ -149,6 +171,7 @@ RESPUESTAS_EXPORTACION = {
     (200, exportacion_mod.CONTENT_TYPES["pdf"]): OpenApiTypes.BINARY,
     (200, exportacion_mod.CONTENT_TYPES["xlsx"]): OpenApiTypes.BINARY,
     400: OpenApiResponse(description="Validación (formato, fechas, tipo_movimiento)."),
+    403: OpenApiResponse(description="Sin R-CORE-REPORTES."),
 }
 
 
@@ -391,7 +414,10 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
     def _build_report_almacenes_queryset(self):
         return reportes_mod.almacenes_del_reporte(self.request.user, self.request.query_params)
 
-    @action(detail=False, methods=["get"], url_path="reporte-existencias-periodo")
+    @action(
+        detail=False, methods=["get"], url_path="reporte-existencias-periodo",
+        permission_classes=PERMISOS_REPORTES,
+    )
     def reporte_existencias_periodo(self, request):
         # Cálculo completo (alcance + filtros + totales) en ``reportes_periodo``;
         # aquí solo se pagina y se arma el sobre JSON.
@@ -449,7 +475,7 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
     )
     @action(
         detail=False, methods=["get"], url_path="reporte-existencias-periodo/exportar",
-        renderer_classes=RENDERERS_EXPORTACION,
+        renderer_classes=RENDERERS_EXPORTACION, permission_classes=PERMISOS_REPORTES,
     )
     def reporte_existencias_periodo_exportar(self, request):
         formato = exportacion_mod.formato_requerido(request.query_params)
@@ -1260,7 +1286,10 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
     def _movement_report_parse_dates(self, request):
         return reportes_mod.parse_fechas(request.query_params)
 
-    @action(detail=False, methods=["get"], url_path="reporte-movimientos-periodo")
+    @action(
+        detail=False, methods=["get"], url_path="reporte-movimientos-periodo",
+        permission_classes=PERMISOS_REPORTES,
+    )
     def reporte_movimientos_periodo(self, request):
         # Cálculo completo en ``reportes_periodo``; aquí solo se pagina.
         reporte = reportes_mod.reporte_movimientos(request.user, request.query_params)
@@ -1310,7 +1339,7 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
     )
     @action(
         detail=False, methods=["get"], url_path="reporte-movimientos-periodo/exportar",
-        renderer_classes=RENDERERS_EXPORTACION,
+        renderer_classes=RENDERERS_EXPORTACION, permission_classes=PERMISOS_REPORTES,
     )
     def reporte_movimientos_periodo_exportar(self, request):
         formato = exportacion_mod.formato_requerido(request.query_params)
