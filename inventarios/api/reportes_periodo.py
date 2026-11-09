@@ -53,13 +53,17 @@ def quantize_money(value):
 
 
 def _fecha(query_params, nombre):
-    # ``parse_date`` regresa ``None`` si el formato no es YYYY-MM-DD, pero lanza
-    # ``ValueError`` con una fecha bien formada que no existe (2026-02-30): eso
-    # era un 500 (EC-822). Las dos cosas quedan como fecha inválida.
+    """Fecha obligatoria ``YYYY-MM-DD``; 400 con la clave ``nombre``."""
     try:
-        return parse_date((query_params.get(nombre) or "").strip())
+        fecha = parse_date((query_params.get(nombre) or "").strip())
     except ValueError:
-        return None
+        # ``parse_date`` lanza ``ValueError`` con una fecha bien formada que no
+        # existe (2026-02-30): era un 500 (EC-822). El formato sí es el pedido,
+        # así que el mensaje no es el de "requerida".
+        raise ValidationError({nombre: f"{nombre} no es una fecha válida: ese día no existe."})
+    if not fecha:
+        raise ValidationError({nombre: f"{nombre} es requerida con formato YYYY-MM-DD."})
+    return fecha
 
 
 def parse_fechas(query_params):
@@ -67,10 +71,6 @@ def parse_fechas(query_params):
     fecha_inicio = _fecha(query_params, "fecha_inicio")
     fecha_final = _fecha(query_params, "fecha_final")
 
-    if not fecha_inicio:
-        raise ValidationError({"fecha_inicio": "fecha_inicio es requerida con formato YYYY-MM-DD."})
-    if not fecha_final:
-        raise ValidationError({"fecha_final": "fecha_final es requerida con formato YYYY-MM-DD."})
     if fecha_final < fecha_inicio:
         raise ValidationError({"fecha_final": "fecha_final no puede ser menor a fecha_inicio."})
 
