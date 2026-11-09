@@ -13,6 +13,7 @@ from rest_framework import status, viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.response import Response
 
 from inventarios.services import costeo
@@ -172,6 +173,46 @@ RESPUESTAS_EXPORTACION = {
 }
 
 
+class _RendererArchivo(BaseRenderer):
+    """Solo para que la negociación de contenido acepte ``Accept`` con el tipo
+    del archivo: la acción responde con un ``HttpResponse`` ya armado, que DRF
+    no vuelve a renderizar. Los errores se van a JSON en ``finalize_response``
+    de ``ExportacionArchivoMixin``."""
+
+    charset = None
+    render_style = "binary"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
+class RendererPdf(_RendererArchivo):
+    media_type = exportacion_mod.CONTENT_TYPES["pdf"]
+    format = "pdf"
+
+
+class RendererXlsx(_RendererArchivo):
+    media_type = exportacion_mod.CONTENT_TYPES["xlsx"]
+    format = "xlsx"
+
+
+# JSON primero: con ``*/*`` o sin ``Accept`` gana JSON (los 400 salen igual).
+RENDERERS_EXPORTACION = [JSONRenderer, RendererPdf, RendererXlsx]
+
+
+class ExportacionArchivoMixin:
+    """Un 400/403/404 de una acción de exportación sale en JSON aunque el
+    cliente haya pedido ``Accept: application/pdf`` (o el tipo del XLSX)."""
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        if isinstance(response, Response) and isinstance(
+            getattr(request, "accepted_renderer", None), _RendererArchivo
+        ):
+            request.accepted_renderer = JSONRenderer()
+            request.accepted_media_type = JSONRenderer.media_type
+        return super().finalize_response(request, response, *args, **kwargs)
+
+
 def respuesta_archivo(exportacion):
     """Descarga (``attachment``) con el nombre del reporte y su rango de fechas,
     como el ``pdf-fusionado/`` de facturas de proveedor."""
@@ -187,7 +228,7 @@ class ReporteExistenciasPeriodoPagination(PageNumberPagination):
     page_size_query_param = "page_size"
 
 
-class ExistenciaViewSet(viewsets.ModelViewSet):
+class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
     queryset = Existencia.objects.all().select_related(
         "producto",
         "producto__tipo",
@@ -430,7 +471,10 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         ],
         responses=RESPUESTAS_EXPORTACION,
     )
-    @action(detail=False, methods=["get"], url_path="reporte-existencias-periodo/exportar")
+    @action(
+        detail=False, methods=["get"], url_path="reporte-existencias-periodo/exportar",
+        renderer_classes=RENDERERS_EXPORTACION,
+    )
     def reporte_existencias_periodo_exportar(self, request):
         formato = exportacion_mod.formato_requerido(request.query_params)
         # Fechas primero: sin ellas, el mismo 400 que el JSON.
@@ -1219,7 +1263,7 @@ class ReporteMovimientosPeriodoPagination(PageNumberPagination):
     page_size_query_param = "page_size"
 
 
-class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
+class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModelViewSet):
     serializer_class = AuditoriaMovimientoSerializer
     permission_classes = [IsAuthenticatedAndScoped]
 
@@ -1284,7 +1328,10 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
         ],
         responses=RESPUESTAS_EXPORTACION,
     )
-    @action(detail=False, methods=["get"], url_path="reporte-movimientos-periodo/exportar")
+    @action(
+        detail=False, methods=["get"], url_path="reporte-movimientos-periodo/exportar",
+        renderer_classes=RENDERERS_EXPORTACION,
+    )
     def reporte_movimientos_periodo_exportar(self, request):
         formato = exportacion_mod.formato_requerido(request.query_params)
         reporte = reportes_mod.reporte_movimientos(request.user, request.query_params)

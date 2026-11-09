@@ -2010,3 +2010,27 @@ class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
             self.assertEqual((fila[0].value, fila[0].data_type), (sku, "s"))
             self.assertEqual((fila[1].value, fila[1].data_type), ('=HYPERLINK("http://x","Ver")', "s"))
             self.assertEqual(fila[5].data_type, "n")  # las cantidades siguen siendo números
+
+    def test_accept_del_archivo_o_comodin_descarga_y_los_errores_salen_en_json(self):
+        cliente = APIClient()
+        cliente.force_authenticate(user=self.a["usuario"])
+        base = {**PERIODO_REPORTE, "almacen": self.a["almacen"].pk}
+        casos = (
+            ("pdf", "application/pdf", "application/pdf"),
+            ("xlsx", CONTENT_TYPE_XLSX, CONTENT_TYPE_XLSX),
+            ("pdf", "*/*", "application/pdf"),
+            ("xlsx", "application/json, text/plain, */*", CONTENT_TYPE_XLSX),
+        )
+        for formato, accept, esperado in casos:
+            for url, extra in (
+                (REPORTE_EXISTENCIAS_EXPORTAR_URL, {}),
+                (REPORTE_MOVIMIENTOS_EXPORTAR_URL, {"tipo_movimiento": "ENTRADA"}),
+            ):
+                resp = cliente.get(url, {**base, **extra, "formato": formato}, HTTP_ACCEPT=accept)
+                self.assertEqual((resp.status_code, resp["Content-Type"]), (200, esperado), (url, accept))
+        # Un 400 pedido como PDF/XLSX sale en JSON.
+        for accept in ("application/pdf", CONTENT_TYPE_XLSX):
+            resp = cliente.get(REPORTE_EXISTENCIAS_EXPORTAR_URL, PERIODO_REPORTE, HTTP_ACCEPT=accept)
+            self.assertEqual(resp.status_code, 400)
+            self.assertEqual(resp["Content-Type"], "application/json")
+            self.assertEqual(list(resp.json()), ["almacen"])
