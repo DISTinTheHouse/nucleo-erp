@@ -1557,19 +1557,19 @@ class DireccionClienteTests(TestCase):
         self.assertEqual(set(self._listado(self.admin)), propias)
         self.assertEqual(set(self._listado(self.admin, cliente="")), propias)
 
-    def test_superusuario_filtra_por_cliente_de_cualquier_empresa(self):
-        self.assertEqual(self._listado(self.superusuario, cliente=self.ajeno.pk), [self.direccion_ajena.pk])
-        self.assertEqual(self._listado(self.superusuario, cliente=self.cliente.pk), [self.direccion.pk])
-        todas = set(self._listado(self.superusuario))
-        self.assertTrue({self.direccion.pk, self.direccion_ajena.pk} <= todas)
+    def test_superusuario_sin_empresa_no_ve_direcciones(self):
+        # EC-798: sin empresa activa no ve nada, superusuario incluido.
+        self.assertEqual(self._listado(self.superusuario), [])
 
-    def test_superusuario_con_empresa_sigue_viendo_todas_las_empresas(self):
-        # Su ``empresa`` no lo acota (a diferencia de produccion, #361).
+    def test_superusuario_con_empresa_solo_ve_su_empresa(self):
+        # EC-798: como produccion (#361) y ventas, sólo la empresa activa.
         superusuario = Usuario.objects.create(
             username="su-a@x.test", email="su-a@x.test", empresa=self.empresa, is_superuser=True
         )
-        self.assertTrue({self.direccion.pk, self.direccion_ajena.pk} <= set(self._listado(superusuario)))
-        self.assertEqual(self._listado(superusuario, cliente=self.ajeno.pk), [self.direccion_ajena.pk])
+        todas = set(self._listado(superusuario))
+        self.assertIn(self.direccion.pk, todas)
+        self.assertNotIn(self.direccion_ajena.pk, todas)
+        self.assertEqual(self._listado(superusuario, cliente=self.ajeno.pk), [])
 
     def test_filtro_no_aplica_al_detalle(self):
         # Como en recepciones (#889), el filtro es del listado.

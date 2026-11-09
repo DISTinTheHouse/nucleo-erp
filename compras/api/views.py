@@ -2612,8 +2612,6 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
                 queryset=CalidadInspeccionDetalle.objects.select_related("recepcion_detalle__producto"),
             )
         )
-        if getattr(user, "is_superuser", False):
-            return qs.order_by("-fecha", "-id")
         empresa = getattr(user, "empresa", None)
         if empresa:
             return qs.filter(recepcion__empresa=empresa).order_by("-fecha", "-id")
@@ -3143,8 +3141,6 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             .select_related("orden_compra", "op", "almacen", "proveedor", "sucursal")
             .prefetch_related(prefetch_lecturas_rfid())
         )
-        if getattr(user, "is_superuser", False):
-            return qs.order_by("-created_at", "-id")
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()

@@ -130,17 +130,14 @@ def _bool_param(v, campo="valor"):
 
 
 def _puede_ver_todo(user):
-    """Quién ve fuera de su empresa: SÓLO el superusuario.
+    """Nadie ve fuera de su empresa activa, superusuario incluido (mismo criterio que
+    ventas tras EC-798 y produccion #361): un ERP opera una empresa a la vez y el M2M
+    ``empresas`` sólo dice a cuáles puede cambiarse el usuario.
 
-    ``is_admin_empresa`` NO entra aquí. En el patrón canónico del proyecto ese
-    flag relaja un sub-alcance MÁS ESTRECHO dentro de la empresa —el vendedor en
-    ``ventas.scope.alcance_cotizaciones()``, la sucursal en
-    ``wms``/``produccion.get_queryset()``— y nunca quita el filtro por empresa.
-    Incluirlo en este predicado abría los 17 endpoints de finanzas a los
-    registros de las demás empresas del tenant compartido, en contra de lo que
-    ya documentaban ``_aplicar_scope_empresa`` y ``_resolve_empresa`` aquí abajo.
+    Se conserva como predicado único para que todas las ramas de alcance de este
+    módulo sigan pasando por un solo lugar; siempre es ``False``.
     """
-    return bool(getattr(user, "is_superuser", False))
+    return False
 
 
 def _user_empresa_or_none(user):

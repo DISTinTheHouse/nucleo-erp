@@ -75,20 +75,18 @@ def clientes_visibles_entre(user, ids):
 def clientes_visibles(qs, user):
     """Alcance de ``terceros.Cliente``: empresa + ``vendedores`` si no es admin/mesa de control/contabilidad.
 
-    El superusuario ve todo; dentro de la empresa, ``is_admin_empresa``, Mesa de
+    Sólo la empresa activa, superusuario incluido (EC-798); dentro de la empresa, superusuario, ``is_admin_empresa``, Mesa de
     Control y Contabilidad ven TODOS los clientes de la empresa (Mesa de Control atiende pedidos
     de cualquier vendedor, no solo los suyos — mismo criterio de rol que
     ``ventas.api.views.PedidoViewSet._require_mesa_control``); el resto sólo ve
     los clientes que tiene asignados por el M2M ``vendedores``; sin empresa no se
     ve nada.
     """
-    if getattr(user, "is_superuser", False):
-        return qs
     empresa = getattr(user, "empresa", None)
     if not empresa:
         return qs.none()
     qs = qs.filter(empresa=empresa)
-    if getattr(user, "is_admin_empresa", False):
+    if ve_clientes_sin_asignacion(user):
         return qs
     if claves_departamento_usuario(user, empresa=empresa) & DEPARTAMENTOS_TODOS_LOS_CLIENTES:
         return qs
