@@ -58,7 +58,8 @@ class Cliente(StatusLifecycleModel):
         verbose_name_plural = "Clientes"
         indexes = [
             # ``clientes/kpis/`` cuenta las altas del mes dentro de una empresa.
-            models.Index(fields=["empresa", "created_at"], name="clientes_empresa_created_idx"),
+            # (``empresa_id`` ya tiene el índice de su FK.)
+            models.Index(fields=["created_at"], name="clientes_created_at_idx"),
             # Trigram GIN para el buscador global (``/api/v1/search/``): acelera
             # el ``icontains`` sobre los tres campos de texto del cliente. Estos
             # mismos índices sirven a la búsqueda de Cotización, que no tiene

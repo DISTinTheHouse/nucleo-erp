@@ -39,6 +39,6 @@ class Migration(migrations.Migration):
         ),
         migrations.AddIndex(
             model_name='cliente',
-            index=models.Index(fields=['empresa', 'created_at'], name='clientes_empresa_created_idx'),
+            index=models.Index(fields=['created_at'], name='clientes_created_at_idx'),
         ),
     ]
