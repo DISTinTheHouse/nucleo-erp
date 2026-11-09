@@ -44,6 +44,10 @@ class Cliente(StatusLifecycleModel):
 
     dias_credito = models.PositiveIntegerField(default=0, validators=[MaxValueValidator(365)])
     limite_credito = models.DecimalField(max_digits=14, decimal_places=2, default=0, validators=[MinValueValidator(0)])
+    # Alta del cliente (EC-817). NULL-able: los clientes de antes de este campo
+    # la toman de su registro ``+`` del historial (migración 0024); los que son
+    # anteriores al historial (django-simple-history) no tienen y quedan NULL.
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
     history = HistoricalRecords()
 
     class Meta:
@@ -51,6 +55,8 @@ class Cliente(StatusLifecycleModel):
         verbose_name = "Cliente"
         verbose_name_plural = "Clientes"
         indexes = [
+            # ``clientes/kpis/`` cuenta las altas del mes dentro de una empresa.
+            models.Index(fields=["empresa", "created_at"], name="clientes_empresa_created_idx"),
             # Trigram GIN para el buscador global (``/api/v1/search/``): acelera
             # el ``icontains`` sobre los tres campos de texto del cliente. Estos
             # mismos índices sirven a la búsqueda de Cotización, que no tiene

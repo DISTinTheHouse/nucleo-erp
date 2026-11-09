@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 
 from unittest.mock import patch
@@ -964,6 +964,54 @@ class ClienteKpisTests(TestCase):
 
         self.assertEqual(resp.status_code, 400)
         self.assertIn("fecha_desde", str(resp.data["parametros"]))
+
+class ClienteCreatedAtBackfillTests(TestCase):
+    """Migración 0024 (EC-817): ``created_at`` sale del registro ``+`` del historial."""
+
+    def _rellenar(self):
+        from importlib import import_module
+
+        from django.apps import apps
+
+        migracion = import_module("terceros.migrations.0024_cliente_created_at_backfill")
+        migracion.rellenar_created_at(apps, None)
+
+    def test_toma_la_fecha_del_alta_en_el_historial_y_sin_ella_queda_null(self):
+        empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        con_alta = Cliente.objects.create(empresa=empresa, nombre="Con alta")
+        sin_alta = Cliente.objects.create(empresa=empresa, nombre="Sin alta")
+        ya_tiene = Cliente.objects.create(empresa=empresa, nombre="Ya tiene")
+        fecha_alta = datetime(2026, 9, 3, 17, 30, tzinfo=dt_timezone.utc)
+        fecha_propia = datetime(2026, 10, 1, 12, 0, tzinfo=dt_timezone.utc)
+        Cliente.history.filter(id=con_alta.pk, history_type="+").update(history_date=fecha_alta)
+        con_alta.nombre = "Con alta editado"
+        con_alta.save()  # un ``~`` posterior no cambia la fecha de alta
+        Cliente.history.filter(id=sin_alta.pk).delete()
+        Cliente.objects.filter(pk__in=[con_alta.pk, sin_alta.pk]).update(created_at=None)
+        Cliente.objects.filter(pk=ya_tiene.pk).update(created_at=fecha_propia)
+
+        self._rellenar()
+
+        fechas = dict(Cliente.objects.values_list("pk", "created_at"))
+        self.assertEqual(fechas[con_alta.pk], fecha_alta)
+        self.assertIsNone(fechas[sin_alta.pk])
+        self.assertEqual(fechas[ya_tiene.pk], fecha_propia)
+
+    def test_agregar_la_columna_no_rellena_los_clientes_existentes(self):
+        """Con ``auto_now_add`` el ``AddField`` les pondría a todos la hora de la
+        migración (y el backfill, que solo toca los NULL, ya no los corregiría)."""
+        from importlib import import_module
+
+        from django.db.backends.base.schema import BaseDatabaseSchemaEditor
+        from django.db.migrations.operations import AddField
+
+        migracion = import_module("terceros.migrations.0023_cliente_created_at").Migration
+        altas = [op for op in migracion.operations if isinstance(op, AddField) and op.name == "created_at"]
+
+        self.assertEqual(len(altas), 2)  # cliente y su historial
+        for op in altas:
+            self.assertIsNone(BaseDatabaseSchemaEditor._effective_default(op.field), op.model_name)
+
 
 class ClienteCarteraTests(TestCase):
     """``resumen_comercial.cartera``: saldo por cobrar por moneda y antigüedad (30/60/90/120)."""
