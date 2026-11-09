@@ -1118,6 +1118,31 @@ class ClienteCreatedAtBackfillTests(TestCase):
         self.assertEqual(len(altas), 2)  # cliente y su historial
         for op in altas:
             self.assertIsNone(BaseDatabaseSchemaEditor._effective_default(op.field), op.model_name)
+            self.assertFalse(op.field.has_db_default(), op.model_name)  # el default va después del backfill
+
+    def test_insert_que_omite_la_columna_recibe_la_hora_del_alta(self):
+        """El código anterior a ``created_at`` (entre ``migrate`` y el deploy) inserta
+        sin la columna: el ``db_default`` le pone la hora en vez de dejarlo NULL."""
+        from django.db import connection
+
+        empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        base = Cliente.objects.create(empresa=empresa, nombre="Base")
+        columnas = [
+            f.column for f in Cliente._meta.concrete_fields if f.column not in ("id", "created_at")
+        ]
+        lista = ", ".join(connection.ops.quote_name(c) for c in columnas)
+        tabla = connection.ops.quote_name(Cliente._meta.db_table)
+        antes = timezone.now()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"INSERT INTO {tabla} ({lista}) SELECT {lista} FROM {tabla} WHERE id = %s RETURNING id",
+                [base.pk],
+            )
+            nuevo_id = cursor.fetchone()[0]
+
+        created_at = Cliente.objects.values_list("created_at", flat=True).get(pk=nuevo_id)
+        self.assertIsNotNone(created_at)
+        self.assertGreaterEqual(created_at, antes - timedelta(seconds=5))
 
 
 class ClienteCarteraTests(TestCase):

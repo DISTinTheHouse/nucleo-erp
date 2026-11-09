@@ -1,7 +1,7 @@
 from django.contrib.postgres.indexes import OpClass
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
-from django.db.models.functions import Upper
+from django.db.models.functions import Now, Upper
 from nucleo.indices import GinIndexSoloPostgres
 from django.conf import settings
 from nucleo.models import StatusLifecycleModel
@@ -47,7 +47,9 @@ class Cliente(StatusLifecycleModel):
     # Alta del cliente (EC-817). NULL-able: los clientes de antes de este campo
     # la toman de su registro ``+`` del historial (migración 0024); los que son
     # anteriores al historial (django-simple-history) no tienen y quedan NULL.
-    created_at = models.DateTimeField(auto_now_add=True, null=True)
+    # ``db_default``: un INSERT que omite la columna (el código anterior a este
+    # campo, entre la migración y el deploy) también recibe la hora del alta.
+    created_at = models.DateTimeField(auto_now_add=True, null=True, db_default=Now())
     history = HistoricalRecords()
 
     class Meta:
