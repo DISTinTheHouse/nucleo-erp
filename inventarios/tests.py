@@ -17,8 +17,9 @@ from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 from unittest import mock
 
-from django.db import DatabaseError
-from django.test import TestCase
+from django.db import DatabaseError, connection
+from django.test import SimpleTestCase, TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 
@@ -1580,3 +1581,525 @@ class ExistenciasPorAlmacenTests(TestCase):
         for stock in range(20):
             Existencia.objects.create(almacen=self.alm, ubicacion=self.u1, producto=tela, stock=stock, cantidad="1")
         medir()
+
+
+# --- Reportes por periodo: existencias y movimientos (EC-814) -----------------
+
+REPORTE_EXISTENCIAS_PERIODO_URL = f"{EXISTENCIAS_URL}reporte-existencias-periodo/"
+REPORTE_MOVIMIENTOS_PERIODO_URL = f"{MOVIMIENTOS_URL}reporte-movimientos-periodo/"
+PERIODO_REPORTE = {"fecha_inicio": "2026-01-01", "fecha_final": "2026-06-30"}
+
+
+def _fecha_reporte(anio, mes, dia):
+    return datetime(anio, mes, dia, 18, 0, tzinfo=dt_timezone.utc)
+
+
+class ReportesPeriodoBase(TestCase):
+    """Dos empresas, cada una con un almacén en su sucursal matriz (donde vive el
+    usuario regular) y otro en una sucursal norte a la que el usuario NO tiene
+    acceso. Una existencia de 10 en matriz y de 7 en norte; la auditoría suma +3
+    dentro del periodo y -1 después; una entrada costeada a 5 dentro del periodo.
+    """
+
+    @classmethod
+    def _tenant(cls, codigo):
+        empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+        matriz = Sucursal.objects.create(empresa=empresa, codigo=f"{codigo[:2].upper()}M", nombre=f"Matriz {codigo}")
+        norte = Sucursal.objects.create(empresa=empresa, codigo=f"{codigo[:2].upper()}N", nombre=f"Norte {codigo}")
+        almacen = Almacen.objects.create(
+            empresa=empresa, sucursal=matriz, codigo=f"{codigo}-PT", nombre=f"PRODUCTO TERMINADO {codigo}",
+        )
+        almacen_norte = Almacen.objects.create(
+            empresa=empresa, sucursal=norte, codigo=f"{codigo}-NT", nombre=f"NORTE {codigo}",
+        )
+        ubicacion = Ubicacion.objects.create(almacen=almacen, pasillo="1", rack="A", nivel="1", posicion="1")
+        usuario = Usuario.objects.create(
+            username=f"u@{codigo}.test", email=f"u@{codigo}.test", empresa=empresa,
+            first_name="Ana", last_name=codigo,
+        )
+        usuario.sucursales.add(matriz)
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Playera {codigo}")
+        variante = ProductoVariante.objects.create(
+            producto=producto, empresa=empresa, color=cls.color, talla=cls.talla,
+            sku=f"{codigo}-AZ-M", precio_base="1",
+        )
+        Existencia.objects.create(
+            almacen=almacen, ubicacion=ubicacion, producto=producto, producto_variante=variante, cantidad="10",
+        )
+        Existencia.objects.create(almacen=almacen_norte, producto=producto, producto_variante=variante, cantidad="7")
+
+        mov = MovimientoInventario.objects.create(
+            empresa=empresa, sucursal=matriz, tipo_movimiento="ENTRADA", usuario=usuario,
+        )
+        MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=mov, producto=producto, producto_variante=variante,
+            ubicacion_destino=ubicacion, cantidad="10", costo_unitario="5",
+        )
+        MovimientoInventario.objects.filter(pk=mov.pk).update(fecha_movimiento=_fecha_reporte(2026, 2, 1))
+
+        for fecha, delta in ((_fecha_reporte(2026, 3, 1), "3"), (_fecha_reporte(2026, 8, 1), "-1")):
+            evento = AuditoriaEvento.objects.create(
+                empresa=empresa, usuario=usuario, modulo="inventarios", accion="ENTRADA",
+                tabla="existencias", id_registro=str(almacen.pk),
+                despues_json={"almacen_id": almacen.pk, "items": [
+                    {"producto_id": producto.pk, "producto_variante_id": variante.pk, "delta": delta},
+                ]},
+            )
+            AuditoriaEvento.objects.filter(pk=evento.pk).update(created_at=fecha)
+
+        return {
+            "empresa": empresa, "matriz": matriz, "norte": norte, "almacen": almacen,
+            "almacen_norte": almacen_norte, "ubicacion": ubicacion, "usuario": usuario,
+            "producto": producto, "variante": variante,
+        }
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.color = Color.objects.create(nombre="Azul RP", codigo="AZR", codigo_hex="#0000ff")
+        cls.talla = Talla.objects.create(nombre="M-RP")
+        cls.a = cls._tenant("acme-rp")
+        cls.b = cls._tenant("globex-rp")
+        cls.superuser = Usuario.objects.create(username="root-rp", email="root@rp.test", is_superuser=True)
+
+    def _get(self, user, url, params=None):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(url, {**PERIODO_REPORTE, **(params or {})})
+
+    def _movimiento(self, tenant, tipo="ENTRADA", fecha=None, **kwargs):
+        """Movimiento de una línea sin ubicación (el almacén sale del documento)."""
+        mov = MovimientoInventario.objects.create(
+            empresa=tenant["empresa"], sucursal=tenant["matriz"], tipo_movimiento=tipo,
+            usuario=tenant["usuario"], **kwargs,
+        )
+        MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=mov, producto=tenant["producto"], producto_variante=tenant["variante"],
+            cantidad="2", costo_unitario="4",
+        )
+        MovimientoInventario.objects.filter(pk=mov.pk).update(fecha_movimiento=fecha or _fecha_reporte(2026, 4, 1))
+        return mov
+
+    def _entrada_por_recepcion(self, tenant, folio):
+        recepcion = Recepcion.objects.create(
+            empresa=tenant["empresa"], sucursal=tenant["matriz"], almacen=tenant["almacen"],
+            usuario=tenant["usuario"], folio=folio, fecha_recepcion=_fecha_reporte(2026, 4, 1),
+        )
+        return self._movimiento(tenant, recepcion=recepcion)
+
+    def _entrada_por_ajuste(self, tenant):
+        ajuste = AjusteInventario.objects.create(
+            empresa=tenant["empresa"], sucursal=tenant["matriz"], almacen=tenant["almacen"],
+            usuario=tenant["usuario"], motivo="Conteo",
+        )
+        return self._movimiento(tenant, ajuste_inventario=ajuste)
+
+
+class ReporteExistenciasPeriodoTests(ReportesPeriodoBase):
+    """``GET existencias/reporte-existencias-periodo/`` (cálculo en ``reportes_periodo``)."""
+
+    def _filas(self, data):
+        return [
+            (
+                f["almacen_codigo"], f["sku"], f["color"], f["talla"], f["existencia_inicial"], f["entradas"],
+                f["salidas"], f["existencia_final"], f["costo_unitario_final"], f["costo_existencia_final"],
+            )
+            for f in data["results"]
+        ]
+
+    def test_usuario_ve_solo_los_almacenes_de_sus_sucursales(self):
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(
+            self._filas(data),
+            [("acme-rp-PT", "acme-rp-AZ-M", "Azul RP", "M-RP", "8.0000", "3.0000", "0.0000", "11.0000", "5.00", "55.00")],
+        )
+        self.assertEqual(data["resumen"], {
+            "existencia_inicial": "8.0000", "entradas": "3.0000", "salidas": "0.0000",
+            "existencia_final": "11.0000", "costo_total_existencia_final": "55.00",
+        })
+        self.assertEqual([r["almacen_codigo"] for r in data["resumen_por_almacen"]], ["acme-rp-PT"])
+        self.assertEqual((data["fecha_inicio"], data["fecha_final"]), ("2026-01-01", "2026-06-30"))
+
+    def test_superusuario_ve_todos_los_almacenes(self):
+        data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL).json()
+        self.assertEqual(data["count"], 4)
+        norte = [f for f in self._filas(data) if f[0] == "acme-rp-NT"]
+        self.assertEqual(norte, [("acme-rp-NT", "acme-rp-AZ-M", "Azul RP", "M-RP", "7.0000", "0.0000", "0.0000", "7.0000", "0.00", "0.00")])
+
+    def test_almacen_o_empresa_ajenos_no_abren_el_alcance(self):
+        for params in ({"almacen_id": self.b["almacen"].pk}, {"empresa": self.b["empresa"].pk}, {"almacen": self.a["almacen_norte"].pk}):
+            data = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, params).json()
+            self.assertEqual((data["count"], data["results"]), (0, []), params)
+            self.assertEqual(data["resumen"]["existencia_final"], "0.0000")
+
+    def test_fechas_requeridas_y_en_orden(self):
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, {"fecha_inicio": ""})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("fecha_inicio", resp.json())
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, {"fecha_final": "2025-12-31"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("fecha_final", resp.json())
+
+    def test_paginacion_recorta_el_reporte_completo(self):
+        data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL, {"page_size": 1, "page": 2}).json()
+        self.assertEqual((data["count"], len(data["results"])), (4, 1))
+        self.assertIsNotNone(data["next"])
+        self.assertEqual(data["resumen"]["existencia_final"], "36.0000")  # 11 + 7 por empresa
+
+    def test_costo_unitario_del_ultimo_movimiento_costeado_hasta_fecha_final(self):
+        # Entrada por ajuste (sin ubicación: el almacén sale del ajuste) más
+        # reciente que la de 5 → gana 4. Una de 9 después del periodo no cuenta,
+        # y un renglón sin costo tampoco.
+        self._entrada_por_ajuste(self.a)
+        tardio = self._entrada_por_ajuste(self.a)
+        tardio.detalles.update(costo_unitario="9")
+        MovimientoInventario.objects.filter(pk=tardio.pk).update(fecha_movimiento=_fecha_reporte(2026, 7, 15))
+        sin_costo = self._entrada_por_ajuste(self.a)
+        sin_costo.detalles.update(costo_unitario="0")
+        MovimientoInventario.objects.filter(pk=sin_costo.pk).update(fecha_movimiento=_fecha_reporte(2026, 6, 1))
+
+        data = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL).json()
+        self.assertEqual(
+            [(f["costo_unitario_final"], f["costo_existencia_final"]) for f in data["results"]],
+            [("4.00", "44.00")],
+        )
+
+    def test_filtros_almacen_id_es_el_filtro_pedido(self):
+        # Antes del EC-814 traía el almacén de la última fila cuando no se
+        # filtraba por almacén; ahora ``null``.
+        data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL, {"page_size": 100}).json()
+        self.assertEqual(data["count"], 4)
+        self.assertEqual(data["filtros"], {"almacen_id": None})
+        data = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, {"almacen_id": self.a["almacen"].pk}).json()
+        self.assertEqual(data["filtros"], {"almacen_id": self.a["almacen"].pk})
+
+
+class ReporteMovimientosPeriodoTests(ReportesPeriodoBase):
+    """``GET movimientos/reporte-movimientos-periodo/``."""
+
+    def test_entrada_toma_el_almacen_del_documento_cuando_no_hay_ubicacion(self):
+        self._entrada_por_recepcion(self.a, "REC-RP-1")
+        self._entrada_por_ajuste(self.a)
+        data = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": "entrada"}).json()
+        self.assertEqual(data["tipo_movimiento"], "ENTRADA")
+        self.assertEqual(data["count"], 3)
+        self.assertEqual({f["almacen_codigo"] for f in data["results"]}, {"acme-rp-PT"})
+        self.assertEqual(data["resumen"], {"total_movimientos": 3, "total_registros": 3, "total_cantidad": "14.0000"})
+        self.assertEqual(data["results"][0]["usuario_nombre"], "Ana acme-rp")
+
+    def test_entrada_sin_n_mas_1_por_almacen_del_documento(self):
+        def consultas():
+            client = APIClient()
+            client.force_authenticate(user=self.a["usuario"])
+            with CaptureQueriesContext(connection) as ctx:
+                resp = client.get(REPORTE_MOVIMIENTOS_PERIODO_URL, {**PERIODO_REPORTE, "tipo_movimiento": "ENTRADA"})
+            self.assertEqual(resp.status_code, 200)
+            return resp.json()["count"], len(ctx.captured_queries)
+
+        self._entrada_por_recepcion(self.a, "REC-RP-N0")
+        self._entrada_por_ajuste(self.a)
+        filas_antes, antes = consultas()
+        for i in range(1, 5):
+            self._entrada_por_recepcion(self.a, f"REC-RP-N{i}")
+            self._entrada_por_ajuste(self.a)
+        filas_despues, despues = consultas()
+        self.assertEqual((filas_antes, filas_despues), (3, 11))
+        self.assertEqual(despues, antes)
+
+    def test_usuario_de_otra_empresa_no_ve_los_movimientos(self):
+        self._entrada_por_ajuste(self.a)
+        data = self._get(self.b["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": "ENTRADA"}).json()
+        self.assertEqual({f["almacen_codigo"] for f in data["results"]}, {"globex-rp-PT"})
+        data = self._get(
+            self.b["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL,
+            {"tipo_movimiento": "ENTRADA", "almacen": self.a["almacen"].pk},
+        ).json()
+        self.assertEqual((data["count"], data["results"]), (0, []))
+        self.assertEqual(data["filtros"], {"almacen_id": self.a["almacen"].pk})
+
+    def test_tipo_y_fechas_requeridos(self):
+        resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("tipo_movimiento", resp.json())
+        resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": "SALIDA", "fecha_inicio": ""})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("fecha_inicio", resp.json())
+
+
+REPORTE_EXISTENCIAS_EXPORTAR_URL = f"{REPORTE_EXISTENCIAS_PERIODO_URL}exportar/"
+REPORTE_MOVIMIENTOS_EXPORTAR_URL = f"{REPORTE_MOVIMIENTOS_PERIODO_URL}exportar/"
+CONTENT_TYPE_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
+    """``.../exportar/?formato=pdf|xlsx`` de ambos reportes (EC-814): mismo
+    cálculo, alcance y validación que el JSON."""
+
+    def _texto_pdf(self, contenido):
+        import io
+        from pypdf import PdfReader
+        return "\n".join(pagina.extract_text() for pagina in PdfReader(io.BytesIO(contenido)).pages)
+
+    def _hoja(self, contenido):
+        import io
+        from openpyxl import load_workbook
+        return load_workbook(io.BytesIO(contenido), read_only=True).active
+
+    def _tabla_xlsx(self, contenido, primer_encabezado):
+        filas = [list(f) for f in self._hoja(contenido).iter_rows(values_only=True)]
+        inicio = next(i for i, f in enumerate(filas) if f and f[0] == primer_encabezado)
+        return filas[inicio], [f for f in filas[inicio + 1:] if any(v is not None for v in f)]
+
+    def test_existencias_pdf(self):
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"almacen": self.a["almacen"].pk})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], "application/pdf")
+        self.assertEqual(
+            resp["Content-Disposition"],
+            'attachment; filename="reporte-existencias-acme-rp-pt-2026-01-01-a-2026-06-30.pdf"',
+        )
+        self.assertTrue(resp.content.startswith(b"%PDF"))
+        texto = self._texto_pdf(resp.content)
+        for esperado in (
+            "Reporte de Inventario", "PRODUCTO TERMINADO acme-rp (acme-rp-PT)", "1/1/2026 — 30/6/2026",
+            "RESUMEN DEL PERIODO", "Exist. Final", "acme-rp-AZ-M", "55.00", "Página 1 de 1",
+        ):
+            self.assertIn(esperado, texto)
+
+    def test_existencias_xlsx_con_numeros_reales(self):
+        resp = self._get(
+            self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx", "almacen_id": self.a["almacen"].pk},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"], CONTENT_TYPE_XLSX)
+        self.assertIn("reporte-existencias-acme-rp-pt-2026-01-01-a-2026-06-30.xlsx", resp["Content-Disposition"])
+        encabezado, filas = self._tabla_xlsx(resp.content, "SKU")
+        self.assertEqual(encabezado[:6], ["SKU", "Producto", "Color", "Talla", "Almacén", "Exist. Inicial"])
+        self.assertEqual(len(filas), 1)
+        self.assertEqual(filas[0][0], "acme-rp-AZ-M")
+        self.assertEqual(filas[0][5:], [8, 3, 0, 11, 5, 55])
+        self.assertIsInstance(filas[0][8], (int, float))
+
+    def test_movimientos_pdf_y_xlsx(self):
+        self._entrada_por_ajuste(self.a)
+        params = {"tipo_movimiento": "ENTRADA", "almacen": self.a["almacen"].pk}
+        resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_EXPORTAR_URL, params)
+        self.assertEqual((resp.status_code, resp["Content-Type"]), (200, "application/pdf"))
+        self.assertIn(
+            'filename="reporte-movimientos-entrada-acme-rp-pt-2026-01-01-a-2026-06-30.pdf"', resp["Content-Disposition"],
+        )
+        texto = self._texto_pdf(resp.content)
+        for esperado in ("Reporte de Movimientos de Inventario", "Entrada · PRODUCTO TERMINADO acme-rp", "Ana acme-rp", "01 feb 2026"):
+            self.assertIn(esperado, texto)
+
+        resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_EXPORTAR_URL, {**params, "formato": "XLSX"})
+        self.assertEqual((resp.status_code, resp["Content-Type"]), (200, CONTENT_TYPE_XLSX))
+        encabezado, filas = self._tabla_xlsx(resp.content, "Fecha")
+        self.assertEqual(encabezado, ["Fecha", "Tipo", "Producto", "Almacén", "Ubicación", "Cantidad", "Costo Total", "Usuario"])
+        self.assertEqual(len(filas), 2)
+        self.assertEqual([f[5] for f in filas], [2, 10])
+        # Hora de México, sin zona (Excel no la guarda): 18:00 UTC = 12:00.
+        self.assertEqual(filas[-1][0], datetime(2026, 2, 1, 12, 0))
+
+    def test_validacion_igual_que_el_json(self):
+        casos = (
+            (REPORTE_EXISTENCIAS_EXPORTAR_URL, REPORTE_EXISTENCIAS_PERIODO_URL, {"fecha_inicio": ""}),
+            (REPORTE_EXISTENCIAS_EXPORTAR_URL, REPORTE_EXISTENCIAS_PERIODO_URL, {"fecha_final": "2025-01-01"}),
+            (REPORTE_MOVIMIENTOS_EXPORTAR_URL, REPORTE_MOVIMIENTOS_PERIODO_URL, {}),
+            (REPORTE_MOVIMIENTOS_EXPORTAR_URL, REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": "SALIDA", "fecha_final": ""}),
+        )
+        for exportar, json_url, params in casos:
+            for formato in ("pdf", "xlsx"):
+                resp = self._get(self.a["usuario"], exportar, {**params, "formato": formato})
+                esperado = self._get(self.a["usuario"], json_url, params)
+                self.assertEqual(resp.status_code, 400, (exportar, params))
+                self.assertEqual(resp.json(), esperado.json(), (exportar, params))
+
+    def test_existencias_sin_almacen_es_400(self):
+        # Solo la exportación: el JSON sigue aceptando todos los almacenes.
+        for params in ({}, {"almacen": ""}, {"almacen_id": "abc"}, {"formato": "xlsx"}):
+            resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, params)
+            self.assertEqual(resp.status_code, 400, params)
+            self.assertEqual(list(resp.json()), ["almacen"], params)
+        self.assertEqual(self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL).status_code, 200)
+        # Las fechas se validan antes que el almacén, igual que en el JSON.
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"fecha_inicio": ""})
+        self.assertEqual(list(resp.json()), ["fecha_inicio"])
+
+    def test_formato_invalido_es_400(self):
+        resp = self._get(
+            self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "csv", "almacen": self.a["almacen"].pk},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("formato", resp.json())
+
+    def test_aislamiento_por_empresa_y_sucursal(self):
+        self._entrada_por_ajuste(self.a)
+        # Empresa ajena: el almacén de A no abre el alcance de B.
+        resp = self._get(self.b["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx", "almacen": self.a["almacen"].pk})
+        _, filas = self._tabla_xlsx(resp.content, "SKU")
+        self.assertEqual(filas, [])
+        texto = self._texto_pdf(self._get(self.b["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"almacen": self.a["almacen"].pk}).content)
+        self.assertIn("Sin existencias en el periodo.", texto)
+        self.assertNotIn("acme-rp", texto.replace(f"Almacén #{self.a['almacen'].pk}", ""))
+        # Misma empresa, sucursal sin acceso: el almacén norte no sale.
+        resp = self._get(
+            self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx", "almacen": self.a["almacen_norte"].pk},
+        )
+        _, filas = self._tabla_xlsx(resp.content, "SKU")
+        self.assertEqual(filas, [])
+        # Movimientos de otra empresa.
+        resp = self._get(
+            self.b["usuario"], REPORTE_MOVIMIENTOS_EXPORTAR_URL,
+            {"formato": "xlsx", "tipo_movimiento": "ENTRADA", "almacen": self.a["almacen"].pk},
+        )
+        _, filas = self._tabla_xlsx(resp.content, "Fecha")
+        self.assertEqual(filas, [])
+        texto = self._texto_pdf(self._get(
+            self.b["usuario"], REPORTE_MOVIMIENTOS_EXPORTAR_URL, {"tipo_movimiento": "ENTRADA"},
+        ).content)
+        self.assertNotIn("acme-rp", texto)
+        self.assertIn("globex-rp", texto)
+
+    def test_muchas_filas_se_paginan_con_encabezado(self):
+        variantes = [
+            ProductoVariante(
+                producto=self.a["producto"], empresa=self.a["empresa"], color=self.color, talla=self.talla,
+                sku=f"acme-rp-X{i:03d}", precio_base="1",
+            )
+            for i in range(120)
+        ]
+        ProductoVariante.objects.bulk_create(variantes)
+        Existencia.objects.bulk_create([
+            Existencia(almacen=self.a["almacen"], producto=self.a["producto"], producto_variante=v, cantidad="1")
+            for v in variantes
+        ])
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"almacen": self.a["almacen"].pk})
+        from pypdf import PdfReader
+        import io
+        paginas = PdfReader(io.BytesIO(resp.content)).pages
+        self.assertGreater(len(paginas), 2)
+        for pagina in paginas:
+            texto = pagina.extract_text()
+            self.assertIn("Exist. Final", texto)
+            self.assertIn(f"de {len(paginas)}", texto)
+        self.assertIn("acme-rp-X119", self._texto_pdf(resp.content))
+
+    def test_xlsx_guarda_como_texto_lo_que_parece_formula(self):
+        from openpyxl import load_workbook
+        import io
+        prefijos = ["=1+1", "+52 81", "-5", "@SUMA(A1)", "＠x", "#N/A"]
+        producto = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=self.a["empresa"], nombre='=HYPERLINK("http://x","Ver")',
+        )
+        for i, sku in enumerate(prefijos):
+            variante = ProductoVariante.objects.create(
+                producto=producto, empresa=self.a["empresa"], color=self.color, talla=self.talla,
+                sku=sku, precio_base="1",
+            )
+            Existencia.objects.create(almacen=self.a["almacen"], producto=producto, producto_variante=variante, cantidad=str(i))
+        resp = self._get(
+            self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx", "almacen": self.a["almacen"].pk},
+        )
+        hoja = load_workbook(io.BytesIO(resp.content)).active
+        celdas = {fila[0].value: fila for fila in hoja.iter_rows() if fila[0].value in prefijos}
+        self.assertEqual(set(celdas), set(prefijos))
+        for sku, fila in celdas.items():
+            self.assertEqual((fila[0].value, fila[0].data_type), (sku, "s"))
+            self.assertEqual((fila[1].value, fila[1].data_type), ('=HYPERLINK("http://x","Ver")', "s"))
+            self.assertEqual(fila[5].data_type, "n")  # las cantidades siguen siendo números
+
+    def test_accept_del_archivo_o_comodin_descarga_y_los_errores_salen_en_json(self):
+        cliente = APIClient()
+        cliente.force_authenticate(user=self.a["usuario"])
+        base = {**PERIODO_REPORTE, "almacen": self.a["almacen"].pk}
+        casos = (
+            ("pdf", "application/pdf", "application/pdf"),
+            ("xlsx", CONTENT_TYPE_XLSX, CONTENT_TYPE_XLSX),
+            ("pdf", "*/*", "application/pdf"),
+            ("xlsx", "application/json, text/plain, */*", CONTENT_TYPE_XLSX),
+        )
+        for formato, accept, esperado in casos:
+            for url, extra in (
+                (REPORTE_EXISTENCIAS_EXPORTAR_URL, {}),
+                (REPORTE_MOVIMIENTOS_EXPORTAR_URL, {"tipo_movimiento": "ENTRADA"}),
+            ):
+                resp = cliente.get(url, {**base, **extra, "formato": formato}, HTTP_ACCEPT=accept)
+                self.assertEqual((resp.status_code, resp["Content-Type"]), (200, esperado), (url, accept))
+        # Un 400 pedido como PDF/XLSX sale en JSON.
+        for accept in ("application/pdf", CONTENT_TYPE_XLSX):
+            resp = cliente.get(REPORTE_EXISTENCIAS_EXPORTAR_URL, PERIODO_REPORTE, HTTP_ACCEPT=accept)
+            self.assertEqual(resp.status_code, 400)
+            self.assertEqual(resp["Content-Type"], "application/json")
+            self.assertEqual(list(resp.json()), ["almacen"])
+
+    def test_encabezado_no_muestra_nombres_de_otra_empresa(self):
+        base = {"almacen": self.a["almacen"].pk}
+        ajenos = {
+            "empresa": self.b["empresa"].pk, "sucursal": self.b["matriz"].pk,
+            "producto": self.b["producto"].pk, "producto_variante": self.b["variante"].pk,
+        }
+        # Cada filtro ajeno por separado (con alcance propio, el nombre se buscaría
+        # en BD) y todos juntos (alcance vacío).
+        for params in [{clave: valor} for clave, valor in ajenos.items()] + [ajenos]:
+            resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {**base, **params})
+            self.assertEqual(resp.status_code, 200, params)
+            texto = self._texto_pdf(resp.content)
+            for nombre in ("globex-rp SA", "Norte globex-rp", "Matriz globex-rp", "Playera globex-rp", "globex-rp-AZ-M"):
+                self.assertNotIn(nombre, texto, params)
+            for clave, etiqueta in (
+                ("empresa", "Empresa"), ("sucursal", "Sucursal"),
+                ("producto", "Producto"), ("producto_variante", "Variante"),
+            ):
+                if clave in params:
+                    self.assertIn(f"{etiqueta} #{params[clave]}", texto, params)
+            resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {**base, **params, "formato": "xlsx"})
+            valores = {v for fila in self._hoja(resp.content).iter_rows(values_only=True) for v in fila if v}
+            self.assertFalse({"globex-rp SA", "Matriz globex-rp", "Playera globex-rp", "globex-rp-AZ-M"} & valores, params)
+        # Control: los propios sí se resuelven por nombre.
+        texto = self._texto_pdf(self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {
+            **base, "empresa": self.a["empresa"].pk, "sucursal": self.a["matriz"].pk,
+            "producto": self.a["producto"].pk, "producto_variante": self.a["variante"].pk,
+        }).content)
+        for nombre in ("acme-rp SA", "Matriz acme-rp", "Playera acme-rp", "acme-rp-AZ-M"):
+            self.assertIn(nombre, texto)
+
+
+class PartirTextoPdfTests(SimpleTestCase):
+    """``_partir`` (EC-814): mismas líneas que el corte carácter por carácter
+    anterior, sin su costo cuadrático."""
+
+    @staticmethod
+    def _partir_anterior(texto, fuente, ancho, tamano=8):
+        from reportlab.lib.utils import simpleSplit
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        lineas = []
+        for linea in simpleSplit(texto, fuente, tamano, ancho) or [texto]:
+            while stringWidth(linea, fuente, tamano) > ancho and len(linea) > 1:
+                corte = len(linea) - 1
+                while corte > 1 and stringWidth(linea[:corte], fuente, tamano) > ancho:
+                    corte -= 1
+                lineas.append(linea[:corte])
+                linea = linea[corte:]
+            lineas.append(linea)
+        return lineas
+
+    def test_mismas_lineas_que_el_corte_anterior(self):
+        from inventarios.services.reportes_exportacion import _partir
+        casos = [
+            "QA-5000-100-['S', 'L', 'F']",
+            "SKU-" + "X1Y2Z3" * 60,
+            "BOTA BORCEGUI DIELECTRICA CON CASCO DE POLIAMIDA " + "W" * 120 + " FIN",
+            "Ñandú — ññññññññññññññññññññññññññññññññ",
+            "corto",
+            "",
+            "MMMM",
+        ]
+        for texto in casos:
+            for fuente in ("Helvetica", "Helvetica-Bold"):
+                for ancho in (3, 20, 58.5, 120):
+                    self.assertEqual(
+                        _partir(texto, fuente, ancho), self._partir_anterior(texto, fuente, ancho), (texto, fuente, ancho),
+                    )
