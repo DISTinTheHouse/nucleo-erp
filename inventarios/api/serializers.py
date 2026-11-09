@@ -31,7 +31,7 @@ class AlmacenSerializer(serializers.ModelSerializer):
             if not user.sucursales.filter(pk=sucursal.pk).exists():
                 raise serializers.ValidationError({'sucursal': 'No tiene acceso a esta sucursal'})
             # Usuario debe tener acceso a la empresa
-            if user.empresa_id and sucursal.empresa_id != user.empresa_id and not user.empresas.filter(pk=sucursal.empresa_id).exists():
+            if sucursal.empresa_id != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
                 raise serializers.ValidationError({'empresa': 'No tiene acceso a esta empresa'})
 
         return attrs
@@ -77,7 +77,7 @@ class UbicacionSerializer(serializers.ModelSerializer):
             if almacen.sucursal and not user.sucursales.filter(pk=almacen.sucursal_id).exists():
                 raise serializers.ValidationError({'almacen': 'No tiene acceso al almacén (sucursal no permitida)'})
             # Usuario debe tener acceso a la empresa del almacén
-            if user.empresa_id and almacen.empresa_id != user.empresa_id and not user.empresas.filter(pk=almacen.empresa_id).exists():
+            if almacen.empresa_id != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
                 raise serializers.ValidationError({'almacen': 'No tiene acceso al almacén (empresa no permitida)'})
 
         return attrs

@@ -111,6 +111,8 @@ def get_queryset(self):
 
 Expected behavior: list returns `200 []` when out of scope; detail returns `404` (not 403) for another company's existing record. **When adding any tenant-scoped endpoint, replicate this — a missing `get_queryset` override is a cross-tenant data leak.**
 
+**One company at a time (EC-816).** Data is always scoped to the *active* `user.empresa`; the `empresas` M2M only lists which companies the user may switch to (company selector / switch endpoint) and never widens reads or writes. Use `nucleo.scope.empresa_ids_lectura(user)` instead of re-deriving it.
+
 **Documented exception — `produccion` scopes superusers too.** Per decision #361, `orden-produccion` (list/detail and `kpis`), `lista-material`, `bom-detalle`, `consumo`, `producto-terminado-entradas` and `pedidos-especiales` always use `user.empresa`, superuser included: no `if user.is_superuser: return qs` branch, empty lists and `400` on writes without an empresa, and writable FKs validated against `user.empresa` (`_fk_de_la_empresa_del_usuario` in `produccion/api/serializers.py`). This is deliberate, not a deviation to fix. Bordado/reflejante/corte de manga keep the canonical global-superuser shape (`produccion/scope.py`).
 
 **`finanzas` scopes the commercial side by sucursal (#753).** Facturas, notas de crédito, CxC, cobros and CxC mora alerts also filter by `sucursales_permitidas()` for non-admins, via `finanzas/scope.py`. Pólizas, banks, CxP, conciliaciones and reports stay empresa-wide on purpose.

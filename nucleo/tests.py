@@ -1921,3 +1921,27 @@ class EstructuraImportesTests(SimpleTestCase):
         original = self._documento()
         sin_importes(original, self.ESTRUCTURA)
         self.assertEqual(original, self._documento())
+
+
+class AlcanceEmpresaActivaTests(SimpleTestCase):
+    """EC-816: se trabaja en una empresa a la vez. El M2M ``empresas`` solo dice a
+    qué empresas puede cambiarse el usuario; nunca amplía lo que lee o escribe."""
+
+    def test_solo_la_empresa_activa(self):
+        from types import SimpleNamespace
+
+        from nucleo.scope import empresa_ids_lectura, es_empresa_activa
+
+        user = SimpleNamespace(empresa_id=7)
+        self.assertEqual(empresa_ids_lectura(user), [7])
+        self.assertTrue(es_empresa_activa(user, 7))
+        self.assertFalse(es_empresa_activa(user, 8))
+
+    def test_sin_empresa_activa_falla_cerrado(self):
+        from types import SimpleNamespace
+
+        from nucleo.scope import empresa_ids_lectura, es_empresa_activa
+
+        user = SimpleNamespace(empresa_id=None)
+        self.assertEqual(empresa_ids_lectura(user), [])
+        self.assertFalse(es_empresa_activa(user, None))
