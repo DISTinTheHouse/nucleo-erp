@@ -1500,12 +1500,17 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # Transferencia sin ubicaciones (picking, almacenes sin ubicaciones): los
+        # almacenes salen de la transferencia (EC-820, como el auxiliar en #801).
+        transferencia = mov.transferencia
         detalle = []
         for d in mov.detalles.select_related(
             "producto", "producto_variante", "ubicacion_origen__almacen",
             "ubicacion_destino__almacen",
         ):
             origen, destino = d.ubicacion_origen, d.ubicacion_destino
+            almacen_origen_id = getattr(origen, "almacen_id", None) or getattr(transferencia, "almacen_origen_id", None)
+            almacen_destino_id = getattr(destino, "almacen_id", None) or getattr(transferencia, "almacen_destino_id", None)
             detalle.append(
                 {
                     "id": d.pk,
@@ -1517,10 +1522,10 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
                     ),
                     "ubicacion_origen_id": d.ubicacion_origen_id,
                     "ubicacion_origen_nombre": str(origen) if origen else None,
-                    "almacen_origen_id": getattr(origen, "almacen_id", None),
+                    "almacen_origen_id": almacen_origen_id,
                     "ubicacion_destino_id": d.ubicacion_destino_id,
                     "ubicacion_destino_nombre": str(destino) if destino else None,
-                    "almacen_destino_id": getattr(destino, "almacen_id", None),
+                    "almacen_destino_id": almacen_destino_id,
                     "cantidad": str(d.cantidad),
                     "costo_unitario": str(d.costo_unitario),
                 }
