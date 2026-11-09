@@ -85,13 +85,12 @@ def almacenes_en_alcance(user, qs=None):
 
     Única definición del alcance de almacenes: la usan existencias, las
     operaciones de inventario y los reportes por periodo. Empresas del usuario
-    (``empresa`` + M2M ``empresas``) Y sus sucursales. Sin empresas o sin
+    (solo la activa, EC-816) Y sus sucursales. Sin empresa activa o sin
     sucursales el alcance queda vacío. El superusuario se trata aparte.
     """
-    empresa_ids = []
-    if getattr(user, "empresa_id", None):
-        empresa_ids.append(user.empresa_id)
-    empresa_ids += list(user.empresas.values_list("pk", flat=True))
+    from nucleo.scope import empresa_ids_lectura
+
+    empresa_ids = empresa_ids_lectura(user)
     sucursal_ids = list(user.sucursales_permitidas())
     qs = Almacen.objects.all() if qs is None else qs
     return qs.filter(models.Q(empresa_id__in=empresa_ids) & models.Q(sucursal_id__in=sucursal_ids))

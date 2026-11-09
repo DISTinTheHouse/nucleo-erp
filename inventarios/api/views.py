@@ -1,3 +1,4 @@
+from nucleo.scope import empresa_ids_lectura
 from nucleo.middleware import ip_auditoria
 from collections import defaultdict
 from decimal import Decimal
@@ -81,10 +82,7 @@ class AlmacenViewSet(viewsets.ModelViewSet):
         if user.is_superuser:
             return qs
         # Filtrar por empresas y sucursales permitidas
-        empresa_ids = []
-        if user.empresa_id:
-            empresa_ids.append(user.empresa_id)
-        empresa_ids += list(user.empresas.values_list('pk', flat=True))
+        empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
         sucursal_ids = list(user.sucursales_permitidas())
         return qs.filter(
             models.Q(empresa_id__in=empresa_ids) &
@@ -99,7 +97,7 @@ class AlmacenViewSet(viewsets.ModelViewSet):
             if instance.sucursal_id and not user.sucursales.filter(pk=instance.sucursal_id).exists():
                 raise PermissionDenied("No tiene acceso a esta sucursal")
             if instance.empresa_id:
-                if user.empresa_id and instance.empresa_id != user.empresa_id and not user.empresas.filter(pk=instance.empresa_id).exists():
+                if instance.empresa_id != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
                     raise PermissionDenied("No tiene acceso a esta empresa")
 
 class UbicacionViewSet(viewsets.ModelViewSet):
@@ -114,10 +112,7 @@ class UbicacionViewSet(viewsets.ModelViewSet):
         qs = self.queryset.order_by(models.F('created_at').desc(nulls_last=True), '-id_ubicacion')
         if user.is_superuser:
             return qs
-        empresa_ids = []
-        if user.empresa_id:
-            empresa_ids.append(user.empresa_id)
-        empresa_ids += list(user.empresas.values_list('pk', flat=True))
+        empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
         sucursal_ids = list(user.sucursales_permitidas())
         return qs.filter(
             models.Q(almacen__empresa_id__in=empresa_ids) &
@@ -137,7 +132,7 @@ class UbicacionViewSet(viewsets.ModelViewSet):
                 raise PermissionDenied("No tiene acceso a esta sucursal")
             
             if empresa:
-                if user.empresa_id and empresa.pk != user.empresa_id and not user.empresas.filter(pk=empresa.pk).exists():
+                if empresa.pk != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
                     raise PermissionDenied("No tiene acceso a esta empresa")
         serializer.save()
 
@@ -1418,9 +1413,7 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
         hasta la empresa (los reportes sí acotan por sucursal, porque bajan al
         almacén).
         """
-        empresa_ids = []
-        if getattr(user, "empresa_id", None):
-            empresa_ids.append(user.empresa_id)
+        empresa_ids = empresa_ids_lectura(user)
         # A diferencia de sus ViewSets hermanos, esta clase no declara el
         # atributo ``queryset``, así que drf-spectacular resuelve el modelo
         # llamando a ``get_queryset()`` con un request mock cuyo usuario es
@@ -1673,10 +1666,7 @@ class MovimientoInventarioViewSet(viewsets.ModelViewSet):
         if user.is_superuser:
             return qs
         
-        empresa_ids = []
-        if user.empresa_id:
-            empresa_ids.append(user.empresa_id)
-        empresa_ids += list(user.empresas.values_list('pk', flat=True))
+        empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
         sucursal_ids = list(user.sucursales_permitidas())
         
         return qs.filter(
@@ -1694,7 +1684,7 @@ class MovimientoInventarioViewSet(viewsets.ModelViewSet):
                 raise PermissionDenied("No tiene acceso a esta sucursal")
             
             if empresa:
-                if user.empresa_id and empresa.pk != user.empresa_id and not user.empresas.filter(pk=empresa.pk).exists():
+                if empresa.pk != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
                     raise PermissionDenied("No tiene acceso a esta empresa")
         serializer.save()
 
@@ -1713,10 +1703,7 @@ class MovimientoInventarioDetalleViewSet(viewsets.ModelViewSet):
         if user.is_superuser:
             return qs
         
-        empresa_ids = []
-        if user.empresa_id:
-            empresa_ids.append(user.empresa_id)
-        empresa_ids += list(user.empresas.values_list('pk', flat=True))
+        empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
         sucursal_ids = list(user.sucursales_permitidas())
         
         return qs.filter(
@@ -1732,7 +1719,7 @@ class MovimientoInventarioDetalleViewSet(viewsets.ModelViewSet):
                 if movimiento.sucursal_id and not user.sucursales.filter(pk=movimiento.sucursal_id).exists():
                     raise PermissionDenied("No tiene acceso a la sucursal del movimiento de inventario")
                 if movimiento.empresa_id:
-                    if user.empresa_id and movimiento.empresa_id != user.empresa_id and not user.empresas.filter(pk=movimiento.empresa_id).exists():
+                    if movimiento.empresa_id != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
                         raise PermissionDenied("No tiene acceso a la empresa del movimiento de inventario")
         serializer.save()
 
@@ -1747,10 +1734,7 @@ class AjusteInventarioViewSet(viewsets.ModelViewSet):
         if user.is_superuser:
             return qs
         
-        empresa_ids = []
-        if user.empresa_id:
-            empresa_ids.append(user.empresa_id)
-        empresa_ids += list(user.empresas.values_list('pk', flat=True))
+        empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
         sucursal_ids = list(user.sucursales_permitidas())
         
         return qs.filter(
@@ -1768,7 +1752,7 @@ class AjusteInventarioViewSet(viewsets.ModelViewSet):
                 raise PermissionDenied("No tiene acceso a esta sucursal")
             
             if empresa:
-                if user.empresa_id and empresa.pk != user.empresa_id and not user.empresas.filter(pk=empresa.pk).exists():
+                if empresa.pk != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
                     raise PermissionDenied("No tiene acceso a esta empresa")
         serializer.save()
     

@@ -1,3 +1,4 @@
+from nucleo.scope import empresa_ids_lectura
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.http import HttpResponseBadRequest
@@ -47,11 +48,7 @@ def wms_demo(request):
         almacen_qs = Almacen.objects.select_related("empresa", "sucursal").all().order_by("empresa__codigo", "sucursal__codigo", "codigo")
         ubicacion_qs = Ubicacion.objects.select_related("almacen").all().order_by("almacen__codigo", "orden_recorrido", "id_ubicacion")
     else:
-        empresa_ids = []
-        if getattr(user, "empresa_id", None):
-            empresa_ids.append(user.empresa_id)
-        empresa_ids += list(user.empresas.values_list("pk", flat=True))
-        empresa_ids = list(set(empresa_ids))
+        empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
         sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
 
         empresa_qs = Empresa.objects.filter(pk__in=empresa_ids).order_by("codigo")
@@ -180,11 +177,7 @@ def wms_demo(request):
     )
 
     if not user.is_superuser:
-        empresa_ids = []
-        if getattr(user, "empresa_id", None):
-            empresa_ids.append(user.empresa_id)
-        empresa_ids += list(user.empresas.values_list("pk", flat=True))
-        empresa_ids = list(set(empresa_ids))
+        empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
         sucursal_ids = list(user.sucursales.values_list("pk", flat=True))
 
         existencias_qs = existencias_qs.filter(almacen__empresa_id__in=empresa_ids, almacen__sucursal_id__in=sucursal_ids)
