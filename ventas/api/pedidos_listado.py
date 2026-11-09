@@ -144,10 +144,12 @@ def _texto(request, nombre):
     return (request.query_params.get(nombre) or "").strip()
 
 
-def _entero(request, nombre, campo=None):
-    """Entero del query string (``entero_param``: vacío → ``None``, una fracción o
-    texto → 400); ``piezas`` es entero y truncar ``0.5`` a ``0`` cambiaba el rango."""
-    return entero_param(request, nombre)
+def _entero_piezas(request, nombre, campo=None):
+    """``piezas_min``/``piezas_max`` (``entero_param``: vacío → ``None``, una fracción o
+    texto → 400); ``piezas`` es entero y truncar ``0.5`` a ``0`` cambiaba el rango.
+    Único lector con signo (EC-829): un mínimo negativo es válido desde EC-782
+    (no excluye ningún pedido)."""
+    return entero_param(request, nombre, con_signo=True)
 
 
 def _importe(request, nombre, campo):
@@ -227,7 +229,7 @@ def filtrar(request, qs, ver_importes):
 
 def filtrar_piezas(request, qs):
     """Rangos de ``piezas`` y ``?muestras=``; requiere ``anotar_piezas``."""
-    qs = _rango(request, qs, "piezas", _entero)
+    qs = _rango(request, qs, "piezas", _entero_piezas)
     muestras = _texto(request, "muestras")
     if muestras == "con":
         qs = qs.filter(piezas_muestra__gt=0)
