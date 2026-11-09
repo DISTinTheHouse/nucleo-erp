@@ -1500,17 +1500,21 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # Transferencia sin ubicaciones (picking, almacenes sin ubicaciones): los
-        # almacenes salen de la transferencia (EC-820, como el auxiliar en #801).
-        transferencia = mov.transferencia
-        detalle = []
-        for d in mov.detalles.select_related(
+        # Sin ubicación, el almacén de cada lado sale con la misma precedencia
+        # que el reporte por periodo (``detalle.almacen``, recepción, ajuste,
+        # transferencia): la fila del reporte y su detalle dicen el mismo
+        # almacén (EC-820). Solo llena los null.
+        detalles_qs = mov.detalles.select_related(
             "producto", "producto_variante", "ubicacion_origen__almacen",
             "ubicacion_destino__almacen",
-        ):
+        )
+        if mov.tipo_movimiento in reportes_mod.RUTAS_ALMACEN_POR_LADO:
+            detalles_qs = reportes_mod.anotar_almacenes(detalles_qs, mov.tipo_movimiento, campos=())
+        detalle = []
+        for d in detalles_qs:
             origen, destino = d.ubicacion_origen, d.ubicacion_destino
-            almacen_origen_id = getattr(origen, "almacen_id", None) or getattr(transferencia, "almacen_origen_id", None)
-            almacen_destino_id = getattr(destino, "almacen_id", None) or getattr(transferencia, "almacen_destino_id", None)
+            almacen_origen_id = getattr(origen, "almacen_id", None) or getattr(d, "almacen_origen_res", None)
+            almacen_destino_id = getattr(destino, "almacen_id", None) or getattr(d, "almacen_destino_res", None)
             detalle.append(
                 {
                     "id": d.pk,
