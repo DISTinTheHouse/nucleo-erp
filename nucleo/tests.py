@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import AnonymousUser
 from django.db import connection
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import NoReverseMatch, reverse
 from rest_framework.test import APIClient
@@ -1942,3 +1942,46 @@ class AlcanceEmpresaActivaTests(SimpleTestCase):
         user = SimpleNamespace(empresa_id=None)
         self.assertEqual(empresa_ids_lectura(user), [])
         self.assertFalse(es_empresa_activa(user, None))
+
+
+
+@override_settings(
+    CORS_ALLOWED_ORIGINS=["https://front-permitido.example"],
+    CORS_ALLOWED_ORIGIN_REGEXES=[],
+)
+class CorsExposeHeadersTests(SimpleTestCase):
+    """EC-824: el front (otro origen) debe poder leer ``Content-Disposition`` en
+    las descargas reales. Sin sesión responden 4xx, pero las cabeceras CORS salen
+    igual: basta para probar que sus rutas caen en ``CORS_URLS_REGEX``."""
+
+    PERMITIDO = "https://front-permitido.example"
+
+    def _rutas_de_descarga(self):
+        return [
+            reverse("existencia-reporte-existencias-periodo-exportar"),
+            reverse("movimiento-reporte-movimientos-periodo-exportar"),
+            reverse("factura-proveedor-pdf-fusionado", kwargs={"pk": 1}),
+        ]
+
+    def _get(self, url, origen):
+        # Los 401 esperados se capturan aquí para no ensuciar la salida de la suite.
+        with self.assertLogs("django.request", level="WARNING"), self.assertLogs("api_logger", level="WARNING"):
+            return self.client.get(url, HTTP_ORIGIN=origen)
+
+    def test_origen_permitido_expone_content_disposition(self):
+        for url in self._rutas_de_descarga():
+            with self.subTest(url=url):
+                response = self._get(url, self.PERMITIDO)
+                self.assertEqual(response["Access-Control-Allow-Origin"], self.PERMITIDO)
+                expuestos = [
+                    h.strip().lower() for h in response["Access-Control-Expose-Headers"].split(",")
+                ]
+                self.assertIn("content-disposition", expuestos)
+
+    def test_origen_no_permitido_no_recibe_cabeceras_cors(self):
+        for url in self._rutas_de_descarga():
+            with self.subTest(url=url):
+                response = self._get(url, "https://ajeno.example")
+                self.assertFalse(
+                    [h for h in response.headers if h.lower().startswith("access-control-")]
+                )
