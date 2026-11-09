@@ -5,6 +5,7 @@
 - **Base URL Desarrollo**: `http://localhost:8003` (o tu IP local `192.168.0.X:8003`)
 - **Autenticación**: Header `Authorization: Bearer <tu_token>` (Excepto Login)
 - **Content-Type**: `application/json` (excepto para subida de archivos)
+- **Ids y enteros en el query string (EC-829)**: solo dígitos ASCII (`0-9`), hasta 19 y dentro de bigint, con los espacios ASCII de alrededor recortados. `1_0`, `+5`, `1.0`, dígitos no ASCII (`٣`, `５`) o espacios Unicode (` `) → `400 {"<param>": "Debe ser un entero válido."}`; donde el valor debe ser positivo (ids de almacén, ubicación, `limite` del auxiliar), `0` o negativo → `400 {"<param>": "Debe ser un entero mayor a 0."}`. Solo `piezas_min`/`piezas_max` de pedidos admiten `-`. Vacío = ausente. Aplica a los lectores comunes (`entero_param`); la paginación `limit`/`offset` conserva su propia regla.
 
 ## 🏢 Aislamiento por Empresa (Multi-tenant) — Notas Importantes
 
@@ -1741,7 +1742,7 @@ Se suman a los que ya había (`q`, `search`, `folio`, `cliente`, `vendedor`, `su
 | `confirmado` | `true` / `false` | `fecha_confirmacion` puesta / vacía (EC-748). **No** es el booleano contable `por_confirmar`. |
 | `mes` | `AAAA-MM` | mes de `created_at` en hora de México. |
 | `mes_confirmacion` | `AAAA-MM` o `sin_confirmar` | mes de `fecha_confirmacion` en hora de México, o los que no la tienen. |
-| `piezas_min` / `piezas_max` | entero (una fracción como `0.5` → `400`) | `piezas` (todas las tallas, muestras incluidas). |
+| `piezas_min` / `piezas_max` | entero, admite `-` (una fracción como `0.5`, `+5` o `1_0` → `400`) | `piezas` (todas las tallas, muestras incluidas). |
 | `subtotal_min` / `subtotal_max` | número | `subtotal`. Ignorado sin permiso de importes. |
 | `gran_total_min` / `gran_total_max` | número | `gran_total`. Ignorado sin permiso de importes. |
 | `muestras` | `con` / `solo` / `sin` | `con`: alguna pieza de muestra; `solo`: todas las piezas son de muestra; `sin`: ninguna (sobre `piezas_muestra` y `piezas`, igual que la etiqueta del front). `?con_muestras=true` sigue igual (alguna **línea** de muestra). |
