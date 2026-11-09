@@ -89,6 +89,13 @@ class Cliente(StatusLifecycleModel):
     def __str__(self):
         return str(self.id)
 
+    def save(self, *args, **kwargs):
+        # #1022: sin clave es NULL, nunca "" (el orden nulls-last los junta al final).
+        if self.clave is not None:
+            self.clave = self.clave.strip() or None
+        super().save(*args, **kwargs)
+
+
 class Proveedor(StatusLifecycleModel):
     class TipoProveedor(models.TextChoices):
         GENERAL = "General", "General"
