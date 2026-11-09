@@ -392,7 +392,37 @@ class ProductoTerminadoEntradas(models.Model):
     def __str__(self):
         return str(self.pt_entrada_id)
     
-class OrdenesBordado(StatusLifecycleModel):
+class _EstatusPrevioMixin:
+    """Guarda en ``estatus_previo`` el paso en que estaba la orden al pasar a
+    Detenido (6 en los tres enums); se limpia al salir de Detenido."""
+
+    ESTATUS_CAMPO = None
+    DETENIDO = 6
+
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        obj = super().from_db(db, field_names, values)
+        obj._estatus_cargado = getattr(obj, cls.ESTATUS_CAMPO, None) if cls.ESTATUS_CAMPO in field_names else None
+        return obj
+
+    def save(self, *args, **kwargs):
+        actual = getattr(self, self.ESTATUS_CAMPO)
+        antes = getattr(self, "_estatus_cargado", None)
+        campos = kwargs.get("update_fields")
+        if antes is not None and actual != antes:
+            if actual == self.DETENIDO:
+                self.estatus_previo = antes
+            elif antes == self.DETENIDO:
+                self.estatus_previo = None
+            if campos is not None:
+                kwargs["update_fields"] = list(set(campos) | {"estatus_previo"})
+        super().save(*args, **kwargs)
+        self._estatus_cargado = actual
+
+
+class OrdenesBordado(_EstatusPrevioMixin, StatusLifecycleModel):
+    ESTATUS_CAMPO = "estatus_bordado"
+
     class EstatusBordado(models.IntegerChoices):
         SIN_TRABAJAR = 1, "Sin trabajar"
         PROGRAMADO = 2, "Programado"
@@ -408,6 +438,8 @@ class OrdenesBordado(StatusLifecycleModel):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE)
     folio_bordado = models.CharField(max_length=50, unique=True)
     estatus_bordado = models.IntegerField(default=EstatusBordado.SIN_TRABAJAR.value, choices=EstatusBordado.choices)
+    # Paso en que se quedó al pasar a Detenido (``_EstatusPrevioMixin``).
+    estatus_previo = models.IntegerField(null=True, blank=True, choices=EstatusBordado.choices)
     prioridad = models.IntegerField(default=1)  
     fecha_inicio = models.DateTimeField(auto_now_add=True)
     fecha_fin = models.DateTimeField(null=True, blank=True)
@@ -547,7 +579,8 @@ class BordadoIncidencias(StatusLifecycleModel):
     def __str__(self):
         return str(self.id)
 
-class OrdenesReflejante(StatusLifecycleModel):
+class OrdenesReflejante(_EstatusPrevioMixin, StatusLifecycleModel):
+    ESTATUS_CAMPO = "estatus_reflejante"
     class EstatusReflejante(models.IntegerChoices):
         PENDIENTE = 1, "Pendiente"
         PREPARACION = 2, "Preparacion"
@@ -562,6 +595,7 @@ class OrdenesReflejante(StatusLifecycleModel):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE)
     folio_reflejante = models.CharField(max_length=50, unique=True)
     estatus_reflejante = models.IntegerField(default=EstatusReflejante.PENDIENTE, choices=EstatusReflejante.choices)
+    estatus_previo = models.IntegerField(null=True, blank=True, choices=EstatusReflejante.choices)
     prioridad = models.IntegerField(default=1)
     fecha_inicio = models.DateTimeField(auto_now_add=True)
     fecha_fin = models.DateTimeField(null=True, blank=True)
@@ -649,7 +683,8 @@ class ReflejanteIncidencias(StatusLifecycleModel):
     def __str__(self):
         return str(self.id)
 
-class OrdenesCorteManga(StatusLifecycleModel):
+class OrdenesCorteManga(_EstatusPrevioMixin, StatusLifecycleModel):
+    ESTATUS_CAMPO = "estatus_corte"
     class EstatusCorte(models.IntegerChoices):
         PENDIENTE = 1, "Pendiente"
         PREPARACION = 2, "Preparacion"
@@ -664,6 +699,7 @@ class OrdenesCorteManga(StatusLifecycleModel):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE)
     folio_ocm = models.CharField(max_length=50, unique=True)
     estatus_corte = models.IntegerField(default=EstatusCorte.PENDIENTE, choices=EstatusCorte.choices)
+    estatus_previo = models.IntegerField(null=True, blank=True, choices=EstatusCorte.choices)
     prioridad = models.IntegerField(default=1)
     fecha_inicio = models.DateTimeField(auto_now_add=True)
     fecha_fin = models.DateTimeField(null=True, blank=True)

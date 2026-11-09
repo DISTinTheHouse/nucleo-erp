@@ -2442,7 +2442,7 @@ def _ordenes_servicio_json(pedido_ref):
 
     def arr(model, folio, estatus, proveedor=False):
         campos = dict(
-            id="id", folio=folio, estatus=estatus,
+            id="id", folio=folio, estatus=estatus, estatus_previo="estatus_previo",
             asignado=Trim(Concat("usuario_asignado__first_name", Value(" "), "usuario_asignado__last_name")),
         )
         if proveedor:
