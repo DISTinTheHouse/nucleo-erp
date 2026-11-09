@@ -346,8 +346,8 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
     r'^https://.*\.vercel\.app$',
 ]
 CORS_URLS_REGEX = r'^/api/.*$'
-# Las descargas (exportar/, pdf-fusionado/) mandan el nombre del archivo en
-# Content-Disposition; sin exponerlo, el navegador se lo oculta al front (EC-824).
+# Las descargas de la API mandan el nombre del archivo en Content-Disposition;
+# sin exponerlo, el navegador se lo oculta al front, que vive en otro origen (EC-824).
 CORS_EXPOSE_HEADERS = ["Content-Disposition"]
 
 CSRF_TRUSTED_ORIGINS = [o.strip() for o in config('CSRF_TRUSTED_ORIGINS', default='https://*.onrender.com,https://*.vercel.app,https://localhost:3000,http://localhost:3000,https://localhost:3001,http://localhost:3001,https://localhost:3002,http://localhost:3002').split(',') if o.strip()]
