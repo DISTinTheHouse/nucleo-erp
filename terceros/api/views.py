@@ -59,13 +59,17 @@ class ClienteViewSetMesaControl(viewsets.ModelViewSet):
         # ``vendedores`` en una sola consulta, igual que ``ClienteViewSet``: sin
         # el prefetch era una consulta por cliente.
         # ``fecha_ultima_compra``: ``created_at`` del pedido más reciente del
-        # cliente (activo, no cancelado, de su empresa) como subquery en la misma
-        # consulta. Import local por el ciclo ``ventas`` -> ``terceros``.
+        # cliente que es venta real (``pedidos_venta_real``: sin MUESTRA, PEDIDO DE
+        # ERROR, BORRADOR, POR AUTORIZAR ni CANCELADO; EC-830), activo y de su
+        # empresa, como subquery en la misma consulta. Import local por el ciclo
+        # ``ventas`` -> ``terceros``.
         from ventas.models import Pedido
+        from ventas.scope import pedidos_venta_real
 
         ultimo_pedido = (
-            Pedido.objects.filter(cliente_id=OuterRef("pk"), empresa_id=OuterRef("empresa_id"), activo=True)
-            .exclude(estatus=Pedido.ESTATUS_CANCELADO)
+            pedidos_venta_real(
+                Pedido.objects.filter(cliente_id=OuterRef("pk"), empresa_id=OuterRef("empresa_id"), activo=True)
+            )
             .order_by("-created_at")
             .values("created_at")[:1]
         )

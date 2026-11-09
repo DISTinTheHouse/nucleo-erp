@@ -1211,7 +1211,7 @@ Una categoría sin ninguna talla configurada rechaza el alta de variante por com
 ### Clientes en Mesa de Control
 
 - **Endpoint**: `GET /api/v1/terceros/clientes-mesa-control/` (y `{id}/`). Mismos campos y alcance que `GET /clientes/`, más:
-  - `fecha_ultima_compra`: fecha ISO (`"2026-10-28"`, hora local) del pedido más reciente del cliente — activo, no cancelado, de la empresa del cliente — o `null` si nunca ha comprado. Columna "Última Compra". Se calcula en la misma consulta del listado.
+  - `fecha_ultima_compra`: fecha ISO (`"2026-10-28"`, hora local) de creación (`created_at`) del pedido más reciente del cliente que sea **venta real** — activo, de la empresa del cliente, y que no sea `tipo_pedido` MUESTRA ni PEDIDO DE ERROR ni esté en `estatus` BORRADOR, POR AUTORIZAR o CANCELADO (EC-830) — o `null` si no tiene ninguna venta real. Columna "Última Compra". Se calcula en la misma consulta del listado. La regla vive en `ventas.scope.pedidos_venta_real` y es la misma de la herramienta `get_last_cliente_compra` del asistente.
 
 ### Detalle de Cliente (con resumen comercial)
 
@@ -6929,6 +6929,7 @@ Notas:
 - `message` es obligatorio.
 - `conversation` es opcional; enviar historial breve mejora el contexto (máx. ~20 turnos recientes).
 - **Importes (EC-784)**: la herramienta `get_last_cliente_compra` sigue la misma regla que el listado y el detalle de pedidos (contabilidad de ventas **o** de compras). Su resultado trae `"puede_ver_importes": true|false`; sin permiso se omite `last_purchase.gran_total`, tanto en lo que recibe el modelo como en `tool_results`. La última compra se elige por fecha (`-created_at`), no por monto.
+- **Qué cuenta como compra (EC-830)**: solo ventas reales, la misma regla que `fecha_ultima_compra` de `clientes-mesa-control` (`ventas.scope.pedidos_venta_real`): pedidos activos que no sean MUESTRA ni PEDIDO DE ERROR ni estén en BORRADOR, POR AUTORIZAR o CANCELADO. Sin ninguna, `last_purchase` es `null`.
 
 ### Response
 

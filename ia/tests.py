@@ -70,3 +70,58 @@ class UltimaCompraImportesPorPerfilTests(ImportesPedidoFixture, TestCase):
                 for datos in (resultado, al_modelo):
                     self.assertEqual(datos["last_purchase"]["pedido_id"], self.pedidos[usuario.pk].pk)
                     self.assertNotEqual(datos["last_purchase"]["pedido_id"], ajeno.pk)
+
+
+class UltimaCompraVentaRealTests(ImportesPedidoFixture, TestCase):
+    """EC-830: ``get_last_cliente_compra`` usa la misma regla de compra que
+    ``fecha_ultima_compra`` (``ventas.scope.pedidos_venta_real``): un pedido MÁS
+    NUEVO que sea MUESTRA, PEDIDO DE ERROR, BORRADOR, POR AUTORIZAR o CANCELADO no
+    es la última compra. El alcance por empresa no cambia."""
+
+    _chat = UltimaCompraImportesPorPerfilTests._chat
+
+    def _nuevo(self, empresa, sucursal, cliente, folio, **campos):
+        from ventas.models import Pedido
+
+        pedido = self._pedido(empresa, sucursal, cliente, self.admin_empresa, folio, "1.00")
+        if campos:
+            Pedido.objects.filter(pk=pedido.pk).update(**campos)
+        return pedido
+
+    def _ultima(self, usuario=None):
+        resultado, al_modelo = self._chat(usuario or self.admin_empresa)
+        self.assertEqual(resultado["last_purchase"], al_modelo["last_purchase"])
+        return resultado["last_purchase"]
+
+    def test_excluidos_mas_recientes_no_son_la_ultima_compra(self):
+        from ventas.models import TIPO_PEDIDO_ERROR, TIPO_PEDIDO_MUESTRA, Pedido
+
+        real = self._nuevo(self.empresa, self.sucursal, self.cliente, "EC830-REAL")
+        casos = {
+            "MUESTRA": {"tipo_pedido": TIPO_PEDIDO_MUESTRA},
+            "PEDIDO DE ERROR": {"tipo_pedido": TIPO_PEDIDO_ERROR},
+            "BORRADOR": {"estatus": Pedido.ESTATUS_BORRADOR},
+            "POR AUTORIZAR": {"estatus": Pedido.ESTATUS_POR_AUTORIZAR},
+            "CANCELADO": {"estatus": Pedido.ESTATUS_CANCELADO},
+        }
+        for caso, campos in casos.items():
+            with self.subTest(caso=caso):
+                excluido = self._nuevo(self.empresa, self.sucursal, self.cliente, f"EC830-{caso}", **campos)
+                self.assertEqual(self._ultima()["pedido_id"], real.pk)
+                excluido.delete()
+
+    def test_en_proceso_si_cuenta(self):
+        en_proceso = self._nuevo(self.empresa, self.sucursal, self.cliente, "EC830-EP", estatus=4)
+        self.assertEqual(self._ultima()["pedido_id"], en_proceso.pk)
+
+    def test_venta_real_de_otra_empresa_no_cruza(self):
+        ajeno = self._nuevo(self.otra, self.sucursal_otra, self.cliente_otra, "EC830-AJENO")
+        compra = self._ultima()
+        self.assertNotEqual(compra["pedido_id"], ajeno.pk)
+        self.assertEqual(compra["cliente"]["id"], self.cliente.pk)
+
+    def test_solo_excluidos_es_null(self):
+        from ventas.models import Pedido
+
+        Pedido.objects.filter(empresa=self.empresa).update(estatus=Pedido.ESTATUS_BORRADOR)
+        self.assertIsNone(self._ultima())

@@ -519,7 +519,12 @@ class AIAssistantAPIView(APIView):
 
         user = request.user
         ver_importes = puede_ver_contabilidad(user)
-        pedidos_qs = Pedido.objects.filter(activo=True).exclude(estatus=5)
+        from ventas.scope import pedidos_venta_real
+
+        # Misma regla de "compra" que ``fecha_ultima_compra`` de Mesa de Control
+        # (EC-830): sólo ventas reales, sin muestras, errores, borradores, por
+        # autorizar ni cancelados.
+        pedidos_qs = pedidos_venta_real(Pedido.objects.filter(activo=True))
         if not getattr(user, "is_superuser", False):
             empresa = getattr(user, "empresa", None)
             if empresa:
