@@ -2042,3 +2042,147 @@ class ResumenComercialImportesPorPerfilTests(ImportesPedidoFixture, TestCase):
         for usuario, _ in self.perfiles[:-1]:
             with self.subTest(usuario=usuario.username):
                 self.assertEqual(self._resumen(usuario, self.cliente_otra).status_code, 404)
+
+
+class ClienteListadoOrderingTests(TestCase):
+    """``?ordering=`` del listado de clientes (EC-826): sólo campos de ``Cliente``
+    (los de proveedores que no existen aquí respondían 500), NULL al final en
+    ambas direcciones y ``nombre, id`` por defecto. Siempre dentro del alcance."""
+
+    URL = "/api/v1/terceros/clientes/"
+    CAMPOS = [
+        "id", "clave", "nombre", "razon_social", "rfc", "correo", "telefono", "ciudad", "estado",
+        "giro_empresarial", "dias_credito", "created_at",
+    ]
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        cls.admin = Usuario.objects.create(
+            username="admin@acme.test", email="admin@acme.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(username="v@acme.test", email="v@acme.test", empresa=cls.empresa)
+
+        base = timezone.now() - timedelta(days=30)
+        # (nombre, clave, días desde ``base`` o ``None`` = alta desconocida)
+        filas = [
+            ("Delta", "C-04", 4), ("alfa", None, 1), ("Charlie", "C-02", None), ("Bravo", "C-03", 3),
+            ("Echo", None, None), ("Bravo", "C-01", 2), ("Foxtrot", "C-05", None),
+        ]
+        cls.clientes = []
+        for nombre, clave, dias in filas:
+            cliente = Cliente.objects.create(empresa=cls.empresa, nombre=nombre, clave=clave)
+            Cliente.objects.filter(pk=cliente.pk).update(
+                created_at=None if dias is None else base + timedelta(days=dias)
+            )
+            cls.clientes.append(cliente)
+        cls.clientes[0].vendedores.add(cls.vendedor)
+        cls.clientes[2].vendedores.add(cls.vendedor)
+        # Otra empresa, con fechas más recientes y sin fecha: nunca deben aparecer.
+        for nombre, dias in (("Aaa ajeno", 29), ("Zzz ajeno", None)):
+            ajeno = Cliente.objects.create(empresa=cls.otra, nombre=nombre)
+            Cliente.objects.filter(pk=ajeno.pk).update(
+                created_at=None if dias is None else base + timedelta(days=dias)
+            )
+        cls.ids_empresa = {c.pk for c in cls.clientes}
+        cls.sin_fecha = {c.pk for c, (_, _, dias) in zip(cls.clientes, filas) if dias is None}
+
+    def _get(self, user=None, **params):
+        api = APIClient()
+        api.force_authenticate(user or self.admin)
+        return api.get(self.URL, params)
+
+    def _ids(self, user=None, **params):
+        resp = self._get(user, **params)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        datos = resp.data["results"] if "limit" in params else resp.data
+        return [fila["id"] for fila in datos]
+
+    def _orden_por_defecto(self):
+        return list(
+            Cliente.objects.filter(pk__in=self.ids_empresa).order_by("nombre", "id").values_list("pk", flat=True)
+        )
+
+    def test_cada_campo_ordenable_responde_200_en_ambas_direcciones(self):
+        for campo in self.CAMPOS:
+            for termino in (campo, f"-{campo}"):
+                with self.subTest(ordering=termino):
+                    ids = self._ids(ordering=termino)
+                    self.assertCountEqual(ids, self.ids_empresa)
+
+    def test_campos_retirados_ya_no_responden_500_y_quedan_en_el_orden_por_defecto(self):
+        for campo in ("fecha_alta", "fecha_ultima_compra", "updated_at"):
+            for termino in (campo, f"-{campo}"):
+                with self.subTest(ordering=termino):
+                    self.assertEqual(self._ids(ordering=termino), self._orden_por_defecto())
+
+    def test_sin_ordering_conserva_nombre_e_id(self):
+        self.assertEqual(self._ids(), self._orden_por_defecto())
+
+    def test_created_at_deja_los_null_al_final_en_ambas_direcciones(self):
+        con_fecha = Cliente.objects.filter(pk__in=self.ids_empresa, created_at__isnull=False)
+        sin_fecha = Cliente.objects.filter(pk__in=self.sin_fecha)
+        casos = {
+            "-created_at": [*con_fecha.order_by("-created_at").values_list("pk", flat=True),
+                            *sin_fecha.order_by("-id").values_list("pk", flat=True)],
+            "created_at": [*con_fecha.order_by("created_at").values_list("pk", flat=True),
+                           *sin_fecha.order_by("id").values_list("pk", flat=True)],
+        }
+        for termino, esperado in casos.items():
+            with self.subTest(ordering=termino):
+                self.assertEqual(self._ids(ordering=termino), esperado)
+
+    def test_nulls_last_solo_en_campos_null_ables(self):
+        """En columnas NOT NULL (``id``, ``nombre``) el término queda simple para que
+        un DESC pueda recorrer el índice al revés; ``created_at``/``clave`` llevan
+        ``NULLS LAST``."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        casos = {
+            "-created_at": '"clientes"."created_at" DESC NULLS LAST, "clientes"."id" DESC',
+            "-clave": '"clientes"."clave" DESC NULLS LAST, "clientes"."id" DESC',
+            "created_at": '"clientes"."created_at" ASC NULLS LAST, "clientes"."id" ASC',
+            "-id": '"clientes"."id" DESC',
+            "-nombre": '"clientes"."nombre" DESC, "clientes"."id" DESC',
+        }
+        for termino, esperado in casos.items():
+            with self.subTest(ordering=termino):
+                with CaptureQueriesContext(connection) as consultas:
+                    self._ids(ordering=termino, limit=50)
+                sql = next(q["sql"] for q in consultas.captured_queries
+                           if 'FROM "clientes"' in q["sql"] and "LIMIT" in q["sql"])
+                self.assertEqual(sql.split("ORDER BY ")[-1].split(" LIMIT")[0], esperado)
+
+    def test_clave_ordena_las_claves_y_deja_los_null_al_final_en_ambas_direcciones(self):
+        """Mismo orden que el ORM con el desempate en la dirección del campo; sin
+        claves NULL la segunda parte queda vacía y la prueba sigue valiendo."""
+        empresa = Cliente.objects.filter(pk__in=self.ids_empresa)
+        con_clave = empresa.filter(clave__isnull=False)
+        sin_clave = empresa.filter(clave__isnull=True)
+        casos = {
+            "clave": [*con_clave.order_by("clave", "id").values_list("pk", flat=True),
+                      *sin_clave.order_by("id").values_list("pk", flat=True)],
+            "-clave": [*con_clave.order_by("-clave", "-id").values_list("pk", flat=True),
+                       *sin_clave.order_by("-id").values_list("pk", flat=True)],
+        }
+        for termino, esperado in casos.items():
+            with self.subTest(ordering=termino):
+                self.assertEqual(self._ids(ordering=termino), esperado)
+
+    def test_paginas_concatenadas_de_menos_created_at_igualan_la_lista_completa(self):
+        completo = self._ids(ordering="-created_at")
+        paginas = []
+        for offset in range(0, len(completo), 2):
+            paginas += self._ids(ordering="-created_at", limit=2, offset=offset)
+        self.assertEqual(paginas, completo)
+        self.assertEqual(len(paginas), len(set(paginas)))
+
+    def test_el_ordering_no_amplia_el_alcance(self):
+        """Admin: toda su empresa y nada de la otra. Vendedor: sólo sus asignados."""
+        asignados = {self.clientes[0].pk, self.clientes[2].pk}
+        for termino in ("-created_at", "created_at", "-clave", "nombre"):
+            with self.subTest(ordering=termino):
+                self.assertCountEqual(self._ids(ordering=termino), self.ids_empresa)
+                self.assertCountEqual(self._ids(self.vendedor, ordering=termino), asignados)
