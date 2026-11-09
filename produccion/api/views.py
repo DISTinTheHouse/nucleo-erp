@@ -35,6 +35,8 @@ from produccion.scope import (
 )
 
 from produccion.models import (
+    PreOrdenProduccion,
+    PreOrdenProduccionDetalle,
     CorteMangaAvances,
     ListaMaterialBom,
     BomDetalle,
@@ -340,6 +342,20 @@ def _con_detalles_prefetcheados(orden, detalle_model):
     return orden
 
 
+def _sincronizar_pre_orden_por_bom(bom):
+    """BOM de una variante de producción de muestra → crea/actualiza la
+    pre-orden de producción de su pedido (``pre_orden_service``)."""
+    if bom is None or not getattr(bom, "variante_produccion_id", None):
+        return
+    pedido_id = (
+        VarianteProductoProduccion.objects.filter(pk=bom.variante_produccion_id)
+        .values_list("pedido_detalle__pedido_id", flat=True).first()
+    )
+    if pedido_id:
+        from produccion.services.pre_orden_service import sincronizar_pre_orden
+        sincronizar_pre_orden(pedido_id)
+
+
 class ListaMaterialBomViewSet(viewsets.ModelViewSet):
     serializer_class = ListaMaterialBomSerializer
 
@@ -374,7 +390,14 @@ class ListaMaterialBomViewSet(viewsets.ModelViewSet):
         empresa = getattr(self.request.user, 'empresa', None)
         if empresa is None:
             raise ValidationError({'empresa': 'El usuario no tiene una empresa asignada.'})
-        serializer.save(empresa=empresa)
+        _sincronizar_pre_orden_por_bom(serializer.save(empresa=empresa))
+
+    def perform_update(self, serializer):
+        _sincronizar_pre_orden_por_bom(serializer.save())
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        _sincronizar_pre_orden_por_bom(instance)
 
     @action(detail=False, methods=['get'], url_path='bulk')
     def bulk(self, request):
@@ -436,6 +459,17 @@ class BomDetalleViewSet(viewsets.ModelViewSet):
         queryset = BomDetalle.objects.filter(bom__empresa=empresa)
 
         return queryset
+
+    def perform_create(self, serializer):
+        _sincronizar_pre_orden_por_bom(serializer.save().bom)
+
+    def perform_update(self, serializer):
+        _sincronizar_pre_orden_por_bom(serializer.save().bom)
+
+    def perform_destroy(self, instance):
+        bom = instance.bom
+        instance.delete()
+        _sincronizar_pre_orden_por_bom(bom)
 
 # Criterios de "a tiempo / tardía / atrasada" de OP: una sola definición para
 # el KPI y para el filtro ``?kpi=`` del listado, así el listado reproduce
@@ -625,21 +659,27 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             raise error
         return sucursal
 
-    def _crear_op_desde_request(self, request):
+    def _crear_op_desde_request(self, request, data=None, sucursal=None, post_crear=None):
+        """Alta de OP. ``data``/``sucursal``/``post_crear(op)`` los usa
+        ``pre-ordenes/{id}/crear-op``: cuerpo armado en el servidor, sucursal de
+        la pre-orden y su cambio de estatus dentro de la misma transacción."""
         empresa = getattr(request.user, 'empresa', None)
         if empresa is None:
             return Response(
                 {'msg': 'El usuario no tiene una empresa asignada'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        sucursal = self._resolver_sucursal_op(request, empresa)
+        if sucursal is None:
+            sucursal = self._resolver_sucursal_op(request, empresa)
         if sucursal is None:
             return Response(
                 {'msg': 'El usuario no tiene una sucursal asignada'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        serializer = self.get_serializer(data=request.data)
+        serializer = OrdenProduccionSerializer(
+            data=request.data if data is None else data, context={'request': request},
+        )
         serializer.is_valid(raise_exception=True)
         # ``empresa``/``sucursal`` son read-only en el serializer (no se
         # confía en el body): se inyectan ya resueltas y validadas contra el
@@ -691,6 +731,8 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                 request.user,
                 request=request,
             )
+            if post_crear is not None:
+                post_crear(result["op"])
 
         op = result["op"]
         return Response(
@@ -2372,6 +2414,12 @@ def _resumen_pedido_especial():
         "lleva_reflejante_any": Exists(base().filter(lleva_reflejante=True)),
         "lleva_corte_manga_any": Exists(base().filter(lleva_corte_manga=True)),
         "ops_json": ArraySubquery(ops),
+        "pre_orden_json": Subquery(
+            PreOrdenProduccion.objects.filter(pedido_id=OuterRef("pk"))
+            .exclude(estatus=PreOrdenProduccion.Estatus.CANCELADA)
+            .order_by("-id")
+            .values(json=JSONObject(id="id", estatus="estatus"))[:1]
+        ),
     }
 
 
@@ -2822,6 +2870,9 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                     raise
                 raise ValidationError(YA_TIENE_SKU)
 
+        if creadas:
+            from produccion.services.pre_orden_service import sincronizar_pre_orden
+            sincronizar_pre_orden(pedido.pk)
         return Response(
             VarianteProduccionSerializer(creadas, many=True).data,
             status=status.HTTP_201_CREATED,
@@ -2882,3 +2933,122 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                 precio = precios.get(v.talla_id)
                 _alta_variante_catalogo(v, producto, precio if precio is not None else detalle.precio_unitario)
         return Response(VarianteProduccionSerializer(variantes, many=True).data, status=status.HTTP_201_CREATED)
+
+
+class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
+    """Pre-órdenes de producción de Fabricación especial (``pre_orden_service``).
+
+    Alcance: ``user.empresa`` (superusuario incluido, como el resto de OP/BOM).
+    Filtros del listado: ``?pedido=``, ``?estatus=``. El detalle recalcula el
+    estatus con la existencia de hoy (no se aparta material).
+    """
+
+    def get_serializer_class(self):
+        from produccion.api.serializers import PreOrdenProduccionDetailSerializer, PreOrdenProduccionListSerializer
+        return PreOrdenProduccionListSerializer if self.action == "list" else PreOrdenProduccionDetailSerializer
+
+    def get_queryset(self):
+        empresa = getattr(self.request.user, "empresa", None)
+        if empresa is None:
+            return PreOrdenProduccion.objects.none()
+        qs = PreOrdenProduccion.objects.filter(empresa=empresa).select_related("pedido", "op", "usuario_confirma")
+        if self.action == "list":
+            from django.db.models import DecimalField
+            piezas = (
+                PreOrdenProduccionDetalle.objects.filter(pre_orden_id=OuterRef("pk")).order_by()
+                .values("pre_orden_id").annotate(t=Sum("cantidad")).values("t")[:1]
+            )
+            tallas = (
+                PreOrdenProduccionDetalle.objects.filter(pre_orden_id=OuterRef("pk")).order_by()
+                .values("pre_orden_id").annotate(n=Count("pk")).values("n")[:1]
+            )
+            qs = qs.annotate(
+                piezas_total=Coalesce(Subquery(piezas, output_field=DecimalField(max_digits=14, decimal_places=2)), Value(Decimal("0"))),
+                tallas_total=Coalesce(Subquery(tallas, output_field=IntegerField()), Value(0)),
+            )
+            pedido = entero_param(self.request, "pedido")
+            if pedido is not None:
+                qs = qs.filter(pedido_id=pedido)
+            estatus_q = (self.request.query_params.get("estatus") or "").strip()
+            if estatus_q:
+                qs = qs.filter(estatus__in=[e for e in estatus_q.split(",") if e])
+        else:
+            qs = qs.prefetch_related(
+                Prefetch("detalles", queryset=PreOrdenProduccionDetalle.objects.select_related(
+                    "variante_produccion__talla", "variante_produccion__color").order_by("id")),
+                "ordenes_compra",
+            )
+        return qs.order_by("-id")
+
+    def _respuesta(self, pre, mats=None, status_code=status.HTTP_200_OK, extra=None):
+        from produccion.services.pre_orden_service import materiales
+        pre = self.get_queryset().get(pk=pre.pk)
+        mats = materiales(pre) if mats is None else mats
+        data = self.get_serializer_class()(pre, context={**self.get_serializer_context(), "materiales": mats}).data
+        return Response({**data, **(extra or {})}, status=status_code)
+
+    def retrieve(self, request, *args, **kwargs):
+        from produccion.services.pre_orden_service import materiales, recalcular
+        pre = self.get_object()
+        mats = materiales(pre)
+        recalcular(pre, mats)
+        return self._respuesta(pre, mats)
+
+    @action(detail=True, methods=["post"], url_path="confirmar-existencias")
+    def confirmar_existencias(self, request, pk=None):
+        """Almacén confirma existencias. Con faltantes crea una OC en Borrador
+        (sin proveedor) solo con ellos, ligada a la pre-orden y al pedido."""
+        from produccion.services.pre_orden_service import confirmar_existencias
+        pre = self.get_object()
+        pre, mats, oc = confirmar_existencias(pre.pk, request.user)
+        return self._respuesta(pre, mats, extra={"orden_compra_creada": oc.pk if oc else None})
+
+    @action(detail=True, methods=["post"], url_path="crear-op")
+    def crear_op(self, request, pk=None):
+        """Convierte la pre-orden en OP: body ``{centro_confeccion?, prioridad?}``.
+        Solo en "Lista para producir" (se revalida con la existencia de hoy)."""
+        from nucleo.models import UnidadMedida
+        from produccion.services.pre_orden_service import materiales, recalcular
+        pre = self.get_object()
+        with transaction.atomic():
+            pre = PreOrdenProduccion.objects.select_for_update().get(pk=pre.pk)
+            recalcular(pre, materiales(pre))
+            if pre.estatus != PreOrdenProduccion.Estatus.LISTA:
+                raise ValidationError({"estatus": f"Solo se convierte en OP una pre-orden Lista para producir (está {pre.get_estatus_display().lower()})."})
+            pieza = UnidadMedida.objects.filter(clave__iexact="pz").first()
+            if pieza is None:
+                raise ValidationError({"unidad": "No existe la unidad de medida 'pz'."})
+            data = {
+                "pedido": pre.pedido_id,
+                "centro_confeccion": request.data.get("centro_confeccion"),
+                "orden_produccion_detalle": [
+                    {"variante_produccion_id": d.variante_produccion_id, "pedido_detalle": d.pedido_detalle_id,
+                     "cantidad": str(d.cantidad), "unidad": pieza.pk}
+                    for d in pre.detalles.all()
+                ],
+            }
+            if request.data.get("prioridad") not in (None, ""):
+                data["prioridad"] = request.data.get("prioridad")
+
+            def convertir(op):
+                pre.estatus = PreOrdenProduccion.Estatus.CONVERTIDA
+                pre.op = op
+                pre.save(update_fields=["estatus", "op", "updated_at"])
+
+            vista = OrdenProduccionViewSet(request=request, format_kwarg=None, action="create")
+            respuesta = vista._crear_op_desde_request(request, data=data, sucursal=pre.sucursal, post_crear=convertir)
+        if respuesta.status_code != status.HTTP_201_CREATED:
+            return respuesta
+        return Response({**respuesta.data, "pre_orden": pre.pk, "estatus": pre.estatus}, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="cancelar")
+    def cancelar(self, request, pk=None):
+        from produccion.services.pre_orden_service import ABIERTAS
+        pre = self.get_object()
+        with transaction.atomic():
+            pre = PreOrdenProduccion.objects.select_for_update().get(pk=pre.pk)
+            if pre.estatus not in ABIERTAS:
+                raise ValidationError({"estatus": f"La pre-orden está {pre.get_estatus_display().lower()}."})
+            pre.estatus = PreOrdenProduccion.Estatus.CANCELADA
+            pre.save(update_fields=["estatus", "updated_at"])
+        return self._respuesta(pre)

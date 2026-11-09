@@ -7,6 +7,8 @@ from rest_framework import serializers
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
 
 from produccion.models import (
+    PreOrdenProduccion,
+    PreOrdenProduccionDetalle,
     ListaMaterialBom,
     BomDetalle,
     OrdenProduccion,
@@ -2680,8 +2682,18 @@ class PedidoEspecialListSerializer(serializers.ModelSerializer):
             # tallas con cantidad > 0 de las líneas de muestra.
             "tallas_total", "tallas_con_sku", "tallas_en_catalogo",
             "fecha_compromiso", "prendas_total", "piezas_total", "servicios",
-            "ordenes_produccion",
+            "ordenes_produccion", "pre_orden",
         ]
+
+    pre_orden = serializers.SerializerMethodField()
+
+    def get_pre_orden(self, obj):
+        """Pre-orden vigente (la más reciente no cancelada): ``{id, estatus,
+        estatus_display}`` o ``null``."""
+        p = getattr(obj, "pre_orden_json", None)
+        if not p:
+            return None
+        return {**p, "estatus_display": dict(PreOrdenProduccion.Estatus.choices).get(p["estatus"])}
 
     tallas_total = serializers.IntegerField(read_only=True)
     tallas_con_sku = serializers.IntegerField(read_only=True)
@@ -2899,3 +2911,62 @@ class OrdenesCorteMangaEditarSerializer(_EditarOrdenServicioSerializer):
         fields = ["id", "folio_ocm", "estatus_corte", "estatus_corte_display",
                   "prioridad", "fecha_fin", "observaciones"]
         read_only_fields = ["id", "folio_ocm"]
+
+
+class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
+    """Listado de pre-órdenes. ``piezas_total``/``tallas_total`` vienen anotados."""
+    estatus_display = serializers.CharField(source="get_estatus_display", read_only=True)
+    pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
+    cliente_nombre = serializers.CharField(source="pedido.cliente_nombre", read_only=True, allow_null=True)
+    op_folio = serializers.CharField(source="op.folio_op", read_only=True, allow_null=True, default=None)
+    piezas_total = serializers.FloatField(read_only=True, default=0.0)
+    tallas_total = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = PreOrdenProduccion
+        fields = [
+            "id", "pedido", "pedido_folio", "cliente_nombre", "sucursal", "estatus", "estatus_display",
+            "op", "op_folio", "piezas_total", "tallas_total", "fecha_confirmacion_existencias",
+            "created_at", "updated_at",
+        ]
+
+
+class PreOrdenProduccionDetalleSerializer(serializers.ModelSerializer):
+    sku = serializers.CharField(source="variante_produccion.sku", read_only=True)
+    nombre = serializers.CharField(source="variante_produccion.nombre", read_only=True)
+    talla_nombre = serializers.CharField(source="variante_produccion.talla.nombre", read_only=True, allow_null=True, default=None)
+    color_nombre = serializers.CharField(source="variante_produccion.color.nombre", read_only=True, allow_null=True, default=None)
+    cantidad = serializers.FloatField()
+
+    class Meta:
+        model = PreOrdenProduccionDetalle
+        fields = ["id", "variante_produccion", "sku", "nombre", "talla_nombre", "color_nombre", "pedido_detalle", "cantidad"]
+
+
+class PreOrdenProduccionDetailSerializer(PreOrdenProduccionListSerializer):
+    """Detalle: tallas, materiales (``context["materiales"]``) y OC ligadas."""
+    detalles = PreOrdenProduccionDetalleSerializer(many=True, read_only=True)
+    materiales = serializers.SerializerMethodField()
+    ordenes_compra = serializers.SerializerMethodField()
+    usuario_confirma_nombre = serializers.SerializerMethodField()
+
+    class Meta(PreOrdenProduccionListSerializer.Meta):
+        fields = PreOrdenProduccionListSerializer.Meta.fields + [
+            "usuario_confirma", "usuario_confirma_nombre", "detalles", "materiales", "ordenes_compra",
+        ]
+
+    def get_materiales(self, obj):
+        return [
+            {**m, "requerido": float(m["requerido"]), "existencia": float(m["existencia"]), "faltante": float(m["faltante"])}
+            for m in self.context.get("materiales") or []
+        ]
+
+    def get_ordenes_compra(self, obj):
+        return [
+            {"id": oc.pk, "folio": oc.folio, "estatus": oc.estatus, "estatus_label": oc.get_estatus_display()}
+            for oc in obj.ordenes_compra.all()
+        ]
+
+    def get_usuario_confirma_nombre(self, obj):
+        u = obj.usuario_confirma
+        return (u.get_full_name().strip() or u.email) if u else None

@@ -1777,6 +1777,11 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         else:
             oc.estatus = OrdenCompra.EstatusOrdenCompra.RECIBIDA
         oc.save(update_fields=["estatus", "updated_at"])
+        if oc.pre_orden_id:
+            # Recepción de los faltantes de una pre-orden de producción: al
+            # confirmar la transacción (ya con la existencia nueva) se recalcula.
+            from produccion.services.pre_orden_service import recalcular_por_oc
+            transaction.on_commit(lambda oc_id=oc.pk: recalcular_por_oc(oc_id))
 
     def _actualizar_estatus_op(self, op):
         # Solo reabre: un rechazo de Calidad puede volver a dejar pendiente una
