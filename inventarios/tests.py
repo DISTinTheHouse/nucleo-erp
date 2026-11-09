@@ -903,6 +903,24 @@ class ReporteExistenciasProduccionComprasTests(TestCase):
         ids = {r["producto_id"] for r in self._get(self.superuser)}
         self.assertEqual(ids, {self.a["producto"].pk, self.b["producto"].pk})
 
+    def test_almacen_invalido_es_400_con_la_clave_almacen(self):
+        # EC-822: antes ``almacen=abc`` se ignoraba y salían todos los almacenes PT.
+        valido = self.a["almacen_pt"].pk
+        for malo in (
+            {"almacen": "abc"}, {"almacen": "0"}, {"almacen": "-1"}, {"almacen_id": "abc"},
+            {"almacen": "abc", "almacen_id": valido},
+        ):
+            resp = self._client(self.a["regular"]).get(REPORTE_EXISTENCIAS_PRODUCCION_COMPRAS_URL, malo)
+            self.assertEqual(resp.status_code, 400, malo)
+            self.assertEqual(list(resp.json()), ["almacen"], malo)
+
+    def test_almacen_valido_sigue_filtrando(self):
+        for params in ({"almacen": self.a["almacen_pt"].pk}, {"almacen": "", "almacen_id": self.a["almacen_pt"].pk}):
+            self.assertEqual([r["producto_id"] for r in self._get(self.a["regular"], params)], [self.a["producto"].pk])
+        # Ajeno o inexistente: vacío, como antes.
+        for almacen in (self.b["almacen_pt"].pk, 999999):
+            self.assertEqual(self._get(self.a["regular"], {"almacen": almacen}), [])
+
 
 class DetallesMovimientoFormalTests(TestCase):
     """``movimientos/formal/{id}/detalles/``: el id que da el reporte por periodo."""
@@ -1221,6 +1239,19 @@ class AuxiliarMovimientosTests(TestCase):
         resp = self._get(producto_variante=0, q="camisa")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("producto_variante", resp.json())
+
+    def test_fecha_que_no_existe_es_400_no_500(self):
+        # EC-822: ``parse_fechas`` (compartida con los reportes por periodo)
+        # dejaba escapar el ``ValueError`` de ``parse_date``.
+        for fechas, clave in (
+            ({"fecha_inicio": "2026-02-30", "fecha_final": "2026-03-31"}, "fecha_inicio"),
+            ({"fecha_inicio": "2026-01-01", "fecha_final": "2026-04-31"}, "fecha_final"),
+        ):
+            resp = self._get(producto_variante=self.variante.pk, **fechas)
+            self.assertEqual(resp.status_code, 400, fechas)
+            self.assertEqual(
+                resp.json(), {clave: f"{clave} no es una fecha válida: ese día no existe."}, fechas,
+            )
 
     def test_renglon_sin_ubicacion_usa_el_almacen_del_detalle(self):
         # #803: movimiento por pedido sobre una existencia sin ubicación.
@@ -1755,6 +1786,21 @@ class ReportesPeriodoBase(TestCase):
         client.force_authenticate(user=user)
         return client.get(url, {**PERIODO_REPORTE, **(params or {})})
 
+    def _texto_pdf(self, contenido):
+        import io
+        from pypdf import PdfReader
+        return "\n".join(pagina.extract_text() for pagina in PdfReader(io.BytesIO(contenido)).pages)
+
+    def _hoja(self, contenido):
+        import io
+        from openpyxl import load_workbook
+        return load_workbook(io.BytesIO(contenido), read_only=True).active
+
+    def _tabla_xlsx(self, contenido, primer_encabezado):
+        filas = [list(f) for f in self._hoja(contenido).iter_rows(values_only=True)]
+        inicio = next(i for i, f in enumerate(filas) if f and f[0] == primer_encabezado)
+        return filas[inicio], [f for f in filas[inicio + 1:] if any(v is not None for v in f)]
+
     def _movimiento(self, tenant, tipo="ENTRADA", fecha=None, almacen=None, cantidad="2", **kwargs):
         """Movimiento de una línea sin ubicación (el almacén sale del documento
         o, con ``almacen``, de ``detalle.almacen``)."""
@@ -2100,21 +2146,6 @@ CONTENT_TYPE_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml
 class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
     """``.../exportar/?formato=pdf|xlsx`` de ambos reportes (EC-814): mismo
     cálculo, alcance y validación que el JSON."""
-
-    def _texto_pdf(self, contenido):
-        import io
-        from pypdf import PdfReader
-        return "\n".join(pagina.extract_text() for pagina in PdfReader(io.BytesIO(contenido)).pages)
-
-    def _hoja(self, contenido):
-        import io
-        from openpyxl import load_workbook
-        return load_workbook(io.BytesIO(contenido), read_only=True).active
-
-    def _tabla_xlsx(self, contenido, primer_encabezado):
-        filas = [list(f) for f in self._hoja(contenido).iter_rows(values_only=True)]
-        inicio = next(i for i, f in enumerate(filas) if f and f[0] == primer_encabezado)
-        return filas[inicio], [f for f in filas[inicio + 1:] if any(v is not None for v in f)]
 
     def test_existencias_pdf(self):
         resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"almacen": self.a["almacen"].pk})
@@ -2471,30 +2502,51 @@ class PermisoYValidacionReportesPeriodoTests(ReportesPeriodoBase):
         self.assertEqual((data["count"], data["filtros"]), (1, {"almacen_id": self.a["almacen"].pk}))
 
     def test_almacen_ajeno_o_inexistente_sigue_siendo_200_vacio(self):
+        # Movimientos de A en sus dos almacenes, para que un filtro que se
+        # saltara el alcance sí tuviera filas que mostrar.
+        self._entrada_por_ajuste(self.a)
+        self._movimiento(self.a, almacen=self.a["almacen_norte"])
+        self._movimiento(self.b, almacen=self.b["almacen"])
+        tipo = {"tipo_movimiento": "ENTRADA"}
         for almacen in (self.b["almacen"].pk, self.a["almacen_norte"].pk, 999999):
-            for nombre, url, params in self._acciones()[:2]:
-                resp = self._get(self.a["usuario"], url, {**params, "almacen": almacen})
-                self.assertEqual(resp.status_code, 200, (nombre, almacen))
+            for url, extra in ((REPORTE_EXISTENCIAS_PERIODO_URL, {}), (REPORTE_MOVIMIENTOS_PERIODO_URL, tipo)):
+                resp = self._get(self.a["usuario"], url, {**extra, "almacen": almacen})
+                self.assertEqual(resp.status_code, 200, (url, almacen))
                 data = resp.json()
-                self.assertEqual((data["count"], data["results"]), (0, []), (nombre, almacen))
-                self.assertEqual(data["filtros"], {"almacen_id": almacen}, (nombre, almacen))
-            for nombre, url, params in self._acciones()[2:]:
-                resp = self._get(self.a["usuario"], url, {**params, "almacen": almacen})
-                self.assertEqual(resp.status_code, 200, (nombre, almacen))
+                self.assertEqual((data["count"], data["results"]), (0, []), (url, almacen))
+                self.assertEqual(data["filtros"], {"almacen_id": almacen}, (url, almacen))
+            # El archivo también sale vacío, en los dos formatos.
+            for url, extra, encabezado, vacio in (
+                (REPORTE_EXISTENCIAS_EXPORTAR_URL, {}, "SKU", "Sin existencias en el periodo."),
+                (REPORTE_MOVIMIENTOS_EXPORTAR_URL, tipo, "Fecha", "Sin movimientos en el periodo."),
+            ):
+                params = {**extra, "almacen": almacen}
+                resp = self._get(self.a["usuario"], url, {**params, "formato": "xlsx"})
+                self.assertEqual(resp.status_code, 200, (url, almacen))
+                _, filas = self._tabla_xlsx(resp.content, encabezado)
+                self.assertEqual(filas, [], (url, almacen))
+                resp = self._get(self.a["usuario"], url, {**params, "formato": "pdf"})
+                self.assertEqual(resp.status_code, 200, (url, almacen))
+                texto = self._texto_pdf(resp.content)
+                self.assertIn(vacio, texto, (url, almacen))
+                self.assertNotIn("globex-rp", texto, (url, almacen))
+                self.assertNotIn("NORTE", texto, (url, almacen))
 
     # --- Fechas y filtros ------------------------------------------------------------
 
     def test_fecha_inexistente_es_400_no_500(self):
+        no_existe = "no es una fecha válida: ese día no existe."
         casos = (
-            ({"fecha_inicio": "2026-02-30"}, "fecha_inicio"),
-            ({"fecha_final": "2026-13-01"}, "fecha_final"),
-            ({"fecha_inicio": "abc"}, "fecha_inicio"),
+            ({"fecha_inicio": "2026-02-30"}, "fecha_inicio", f"fecha_inicio {no_existe}"),
+            ({"fecha_final": "2026-13-01"}, "fecha_final", f"fecha_final {no_existe}"),
+            # Formato equivocado: sigue el mensaje de siempre.
+            ({"fecha_inicio": "abc"}, "fecha_inicio", "fecha_inicio es requerida con formato YYYY-MM-DD."),
         )
         for nombre, url, params in self._validos(self.a):
-            for fechas, clave in casos:
+            for fechas, clave, mensaje in casos:
                 resp = self._get(self.a["usuario"], url, {**params, **fechas})
                 self.assertEqual(resp.status_code, 400, (nombre, fechas))
-                self.assertEqual(list(resp.json()), [clave], (nombre, fechas))
+                self.assertEqual(resp.json(), {clave: mensaje}, (nombre, fechas))
 
     def test_filtros_de_existencias_con_una_sola_forma(self):
         # Con permiso pero sin sucursales: ningún almacén en alcance y sin filtro.
