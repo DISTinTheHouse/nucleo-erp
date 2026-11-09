@@ -966,9 +966,62 @@ class DetallesMovimientoFormalTests(TestCase):
         self.assertEqual((renglon["almacen_origen_id"], renglon["almacen_destino_id"]), (origen.pk, destino.pk))
         self.assertEqual((renglon["ubicacion_origen_id"], renglon["ubicacion_destino_id"]), (None, None))
 
-    def test_movimiento_sin_transferencia_ni_ubicacion_sigue_en_null(self):
+    def test_movimiento_sin_ningun_almacen_sigue_en_null(self):
         renglon = self._get(self.mov.pk).json()["detalle"][0]
         self.assertEqual((renglon["almacen_origen_id"], renglon["almacen_destino_id"]), (None, None))
+
+    def _almacen(self, codigo):
+        return Almacen.objects.create(empresa=self.empresa, sucursal=self.sucursal, codigo=codigo, nombre=codigo)
+
+    def _mov(self, tipo, detalles=1, **kwargs):
+        mov = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, usuario=self.user, tipo_movimiento=tipo, **kwargs,
+        )
+        detalle = None
+        for _ in range(detalles):
+            detalle = MovimientoInventarioDetalle.objects.create(movimiento_inventario=mov, cantidad=Decimal("1"))
+        return mov, detalle
+
+    def _almacenes(self, mov):
+        return [(r["almacen_origen_id"], r["almacen_destino_id"]) for r in self._get(mov.pk).json()["detalle"]]
+
+    def test_mismo_almacen_que_el_reporte_sin_ubicacion(self):
+        # EC-820: misma precedencia que reporte-movimientos-periodo.
+        alm, otro = self._almacen("DA"), self._almacen("DB")
+        salida, d = self._mov("SALIDA")
+        MovimientoInventarioDetalle.objects.filter(pk=d.pk).update(almacen=alm)
+        self.assertEqual(self._almacenes(salida), [(alm.pk, None)])
+
+        recepcion = Recepcion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, almacen=otro, usuario=self.user,
+            folio="REC-DET", fecha_recepcion=timezone.now(),
+        )
+        entrada, _ = self._mov("ENTRADA", recepcion=recepcion)
+        self.assertEqual(self._almacenes(entrada), [(None, otro.pk)])
+
+        ajuste = AjusteInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, almacen=alm, usuario=self.user, motivo="Conteo",
+        )
+        mov_ajuste, _ = self._mov("AJUSTE", ajuste_inventario=ajuste)
+        self.assertEqual(self._almacenes(mov_ajuste), [(alm.pk, alm.pk)])
+
+    def test_la_ubicacion_no_se_sobrescribe(self):
+        alm, otro = self._almacen("DC"), self._almacen("DD")
+        ubicacion = Ubicacion.objects.create(almacen=alm, pasillo="1")
+        salida, d = self._mov("SALIDA")
+        MovimientoInventarioDetalle.objects.filter(pk=d.pk).update(almacen=otro, ubicacion_origen=ubicacion)
+        self.assertEqual(self._almacenes(salida), [(alm.pk, None)])
+
+    def test_consultas_constantes_por_renglon(self):
+        alm = self._almacen("DE")
+
+        def consultas(mov):
+            MovimientoInventarioDetalle.objects.filter(movimiento_inventario=mov).update(almacen=alm)
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(self._get(mov.pk).status_code, 200)
+            return len(ctx.captured_queries)
+
+        self.assertEqual(consultas(self._mov("SALIDA", detalles=1)[0]), consultas(self._mov("SALIDA", detalles=6)[0]))
 
 
 class AlmacenPermiteEntradaTests(TestCase):
@@ -1897,6 +1950,63 @@ class ReporteMovimientosPeriodoTests(ReportesPeriodoBase):
             filas, data = self._filas_mov(self.b["usuario"], "TRANSFERENCIA", **params)
             self.assertEqual((filas, data["resumen"]["total_registros"]), ([], 0), params)
         self.assertEqual(self._filas_mov(self.a["usuario"], "TRANSFERENCIA")[0], [("acme-rp-PT", "3.0000")])
+
+    def test_transferencia_con_ubicacion_gana_sobre_el_almacen_de_la_transferencia(self):
+        # La ubicación (PT) y el almacén de la transferencia (OTRO/AP) difieren:
+        # manda la ubicación, para filtrar y para mostrar. El lado sin
+        # ubicación toma el almacén de la transferencia.
+        a = self.a
+        apartados = Almacen.objects.create(empresa=a["empresa"], sucursal=a["matriz"], codigo="acme-rp-AP", nombre="AP")
+        otro = Almacen.objects.create(empresa=a["empresa"], sucursal=a["matriz"], codigo="acme-rp-OT", nombre="OT")
+        solo_origen = self._transferencia(a, otro, apartados, folio="TR-RP-UO", cantidad="3")
+        solo_origen.detalles.update(ubicacion_origen=a["ubicacion"])
+        casos = {
+            None: [("acme-rp-PT", "3.0000")],
+            a["almacen"].pk: [("acme-rp-PT", "3.0000")],
+            otro.pk: [],
+            apartados.pk: [("acme-rp-AP", "3.0000")],
+        }
+        for almacen, esperado in casos.items():
+            params = {"almacen": almacen} if almacen else {}
+            self.assertEqual(self._filas_mov(a["usuario"], "TRANSFERENCIA", **params)[0], esperado, almacen)
+
+        solo_origen.delete()
+        solo_destino = self._transferencia(a, otro, apartados, folio="TR-RP-UD", cantidad="4")
+        solo_destino.detalles.update(ubicacion_destino=a["ubicacion"])
+        casos = {
+            None: [("acme-rp-OT", "4.0000")],
+            otro.pk: [("acme-rp-OT", "4.0000")],
+            a["almacen"].pk: [("acme-rp-PT", "4.0000")],
+            apartados.pk: [],
+        }
+        for almacen, esperado in casos.items():
+            params = {"almacen": almacen} if almacen else {}
+            filas, data = self._filas_mov(a["usuario"], "TRANSFERENCIA", **params)
+            self.assertEqual(filas, esperado, almacen)
+        # Con la ubicación del lado mostrado, la fila la trae.
+        self.assertEqual(data["results"], [])
+        data = self._filas_mov(a["usuario"], "TRANSFERENCIA", almacen=a["almacen"].pk)[1]
+        self.assertEqual(data["results"][0]["ubicacion_id"], a["ubicacion"].pk)
+
+    def test_ajuste_con_su_almacen_filtrado_y_fuera_de_alcance(self):
+        def ajuste(almacen):
+            aj = AjusteInventario.objects.create(
+                empresa=self.a["empresa"], sucursal=self.a["matriz"], almacen=almacen,
+                usuario=self.a["usuario"], motivo="Conteo",
+            )
+            return self._movimiento(self.a, "AJUSTE", ajuste_inventario=aj, cantidad="5")
+
+        ajuste(self.a["almacen"])
+        ajuste(self.a["almacen_norte"])
+        filas, data = self._filas_mov(self.a["usuario"], "AJUSTE")
+        self.assertEqual(filas, [("acme-rp-PT", "5.0000")])
+        self.assertEqual(data["results"][0]["almacen_nombre"], "PRODUCTO TERMINADO acme-rp")
+        self.assertEqual(data["results"][0]["motivo_ajuste"], "Conteo")
+        self.assertEqual(self._filas_mov(self.a["usuario"], "AJUSTE", almacen=self.a["almacen"].pk)[0], [("acme-rp-PT", "5.0000")])
+        # Norte: fuera del alcance del usuario; el superusuario sí lo ve.
+        self.assertEqual(self._filas_mov(self.a["usuario"], "AJUSTE", almacen=self.a["almacen_norte"].pk)[0], [])
+        self.assertEqual(sorted(self._filas_mov(self.superuser, "AJUSTE")[0]), [("acme-rp-NT", "5.0000"), ("acme-rp-PT", "5.0000")])
+        self.assertEqual(self._filas_mov(self.b["usuario"], "AJUSTE", almacen=self.a["almacen"].pk)[0], [])
 
     def test_salida_y_entrada_por_detalle_almacen(self):
         # Movimientos por pedido sobre una existencia sin ubicación (#803).
