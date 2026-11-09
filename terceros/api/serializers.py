@@ -77,7 +77,9 @@ class ClienteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cliente
-        fields = "__all__"
+        # Todos los campos menos ``created_at`` (EC-817): por ahora solo lo usa
+        # ``clientes/kpis/``; exponerlo en listado/detalle es otro ticket.
+        exclude = ["created_at"]
         read_only_fields = ["activo", "empresa", "vendedores", "facturama_id"]
         extra_kwargs = {"telefono_2": {"validators": [validate_telefono]}}
 

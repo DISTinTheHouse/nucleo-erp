@@ -1,7 +1,7 @@
 from django.contrib.postgres.indexes import OpClass
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
-from django.db.models.functions import Upper
+from django.db.models.functions import Now, Upper
 from nucleo.indices import GinIndexSoloPostgres
 from django.conf import settings
 from nucleo.models import StatusLifecycleModel
@@ -44,6 +44,12 @@ class Cliente(StatusLifecycleModel):
 
     dias_credito = models.PositiveIntegerField(default=0, validators=[MaxValueValidator(365)])
     limite_credito = models.DecimalField(max_digits=14, decimal_places=2, default=0, validators=[MinValueValidator(0)])
+    # Alta del cliente (EC-817). NULL-able: los clientes de antes de este campo
+    # la toman de su registro ``+`` del historial (migración 0024); los que son
+    # anteriores al historial (django-simple-history) no tienen y quedan NULL.
+    # ``db_default``: un INSERT que omite la columna (el código anterior a este
+    # campo, entre la migración y el deploy) también recibe la hora del alta.
+    created_at = models.DateTimeField(auto_now_add=True, null=True, db_default=Now())
     history = HistoricalRecords()
 
     class Meta:
@@ -51,6 +57,9 @@ class Cliente(StatusLifecycleModel):
         verbose_name = "Cliente"
         verbose_name_plural = "Clientes"
         indexes = [
+            # ``clientes/kpis/`` cuenta las altas del mes dentro de una empresa.
+            # (``empresa_id`` ya tiene el índice de su FK.)
+            models.Index(fields=["created_at"], name="clientes_created_at_idx"),
             # Trigram GIN para el buscador global (``/api/v1/search/``): acelera
             # el ``icontains`` sobre los tres campos de texto del cliente. Estos
             # mismos índices sirven a la búsqueda de Cotización, que no tiene

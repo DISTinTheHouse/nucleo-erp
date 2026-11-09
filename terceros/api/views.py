@@ -1,5 +1,5 @@
 import math
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from rest_framework import viewsets
@@ -261,6 +261,8 @@ class ClienteViewSet(viewsets.ModelViewSet):
             "puede_ver_cartera_de_todos": ve_todos,
             "ventas_por_cliente": self._kpi_ventas_por_cliente(con_importes),
             "clientes_activos": self._kpi_clientes_activos(clientes_qs),
+            # Mismo alcance que ``clientes_activos`` (EC-817), no el de importes.
+            "clientes_nuevos": self._kpi_clientes_nuevos(clientes_qs),
             "reclamos_devoluciones": {
                 "disponible": False,
                 "motivo": "Devolucion/DevolucionDetalle no registran cantidad de piezas (solo los FKs); Entrega tampoco, así que no hay piezas devueltas ni piezas embarcadas que dividir.",
@@ -306,6 +308,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
             "generado_en": timezone.now(),
             "ventas_por_cliente": motivo,
             "clientes_activos": motivo,
+            "clientes_nuevos": motivo,
             "reclamos_devoluciones": motivo,
             "cartera_antiguedad": motivo,
         }
@@ -400,6 +403,29 @@ class ClienteViewSet(viewsets.ModelViewSet):
                 "activos_truncado": activos > len(drill_activos),
                 "inactivos_truncado": inactivos > len(drill_inactivos),
             },
+        }
+
+    def _kpi_clientes_nuevos(self, clientes_qs):
+        # Mes calendario en la hora local del proyecto (America/Mexico_City), como
+        # los demás "del mes" (``timezone.localdate().replace(day=1)``): con
+        # límites en UTC, un alta del día 1 antes de las 06:00Z caería en el mes
+        # anterior. Los clientes sin ``created_at`` (anteriores al historial) no
+        # cuentan en ningún mes.
+        # ``hasta`` se devuelve inclusivo (último día del mes), como ``fecha_hasta``
+        # en el resto del API; la consulta usa ``< 1° del mes siguiente``.
+        desde = timezone.localdate().replace(day=1)
+        siguiente = (desde + timedelta(days=32)).replace(day=1)
+        total = clientes_qs.filter(
+            created_at__gte=timezone.make_aware(datetime.combine(desde, time.min)),
+            created_at__lt=timezone.make_aware(datetime.combine(siguiente, time.min)),
+        ).count()
+        return {
+            "disponible": True,
+            "criterio": "Clientes activos dados de alta en el mes en curso (hora del centro de México).",
+            "total": total,
+            "mes": desde.strftime("%Y-%m"),
+            "desde": desde,
+            "hasta": siguiente - timedelta(days=1),
         }
 
     def _kpi_cartera_antiguedad(self, clientes_qs):

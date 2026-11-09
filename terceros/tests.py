@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 
 from unittest.mock import patch
@@ -964,6 +964,206 @@ class ClienteKpisTests(TestCase):
 
         self.assertEqual(resp.status_code, 400)
         self.assertIn("fecha_desde", str(resp.data["parametros"]))
+
+    # --- EC-817: clientes nuevos del mes --------------------------------------
+
+    # 15 de noviembre de 2026, 06:00 en el centro de México (UTC-6 todo el año).
+    AHORA = datetime(2026, 11, 15, 12, 0, tzinfo=dt_timezone.utc)
+
+    def _alta(self, cliente, *args):
+        """Fija ``created_at`` en UTC (``auto_now_add`` no deja ponerlo al crear)."""
+        Cliente.objects.filter(pk=cliente.pk).update(created_at=datetime(*args, tzinfo=dt_timezone.utc))
+
+    def _nuevos(self, user, query=""):
+        with patch("django.utils.timezone.now", return_value=self.AHORA):
+            resp = self._get(user, query)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.json()["clientes_nuevos"]
+
+    def setUp(self):
+        # A: 05:59Z del 1 = 23:59 del 31 de octubre local; B: 06:00Z = 00:00 del 1 de noviembre.
+        self._alta(self.cliente_a, 2026, 11, 1, 5, 59)
+        self._alta(self.cliente_b, 2026, 11, 1, 6, 0)
+
+    def test_clientes_nuevos_usa_el_mes_en_hora_local(self):
+        ultimo_minuto = Cliente.objects.create(empresa=self.empresa, nombre="Fin de mes")
+        self._alta(ultimo_minuto, 2026, 12, 1, 5, 59)  # 23:59 del 30 de noviembre local
+        siguiente_mes = Cliente.objects.create(empresa=self.empresa, nombre="Diciembre")
+        self._alta(siguiente_mes, 2026, 12, 1, 6, 0)
+
+        nuevos = self._nuevos(self.admin_empresa)
+
+        self.assertEqual(nuevos, {
+            "disponible": True,
+            "criterio": "Clientes activos dados de alta en el mes en curso (hora del centro de México).",
+            "total": 2,  # B y el del último minuto; A cae en octubre
+            "mes": "2026-11",
+            "desde": "2026-11-01",
+            "hasta": "2026-11-30",  # inclusivo, como ``fecha_hasta``
+        })
+
+    def test_clientes_nuevos_excluye_bajas_y_altas_sin_fecha(self):
+        baja = Cliente.objects.create(empresa=self.empresa, nombre="Baja")
+        self._alta(baja, 2026, 11, 10, 12, 0)
+        baja.soft_delete()
+        sin_fecha = Cliente.objects.create(empresa=self.empresa, nombre="Sin fecha")
+        Cliente.objects.filter(pk=sin_fecha.pk).update(created_at=None)
+
+        self.assertEqual(self._nuevos(self.admin_empresa)["total"], 1)
+
+    def test_clientes_nuevos_de_otra_empresa_no_cuentan(self):
+        otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        ajeno = Cliente.objects.create(empresa=otra, nombre="Ajeno")
+        self._alta(ajeno, 2026, 11, 10, 12, 0)
+        admin_otra = Usuario.objects.create(
+            username="admin_g", email="admin@globex.test", empresa=otra, is_admin_empresa=True,
+        )
+        admin_otra.empresas.add(self.empresa)  # el M2M no amplía el alcance (EC-816)
+
+        self.assertEqual(self._nuevos(self.admin_empresa)["total"], 1)
+        self.assertEqual(self._nuevos(admin_otra)["total"], 1)  # solo el suyo
+
+    def test_clientes_nuevos_respeta_el_alcance_del_vendedor(self):
+        self.assertEqual(self._nuevos(self.vendedor_a)["total"], 0)  # A es de octubre
+        self.assertEqual(self._nuevos(self.vendedor_b)["total"], 1)
+
+    def test_clientes_nuevos_superusuario_acotado_a_su_empresa(self):
+        otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        self._alta(Cliente.objects.create(empresa=otra, nombre="Ajeno"), 2026, 11, 10, 12, 0)
+        root = Usuario.objects.create(
+            username="root", email="root@acme.test", is_superuser=True, is_staff=True, empresa=self.empresa,
+        )
+        root_sin_empresa = Usuario.objects.create(
+            username="root2", email="root2@acme.test", is_superuser=True, is_staff=True,
+        )
+
+        self.assertEqual(self._nuevos(root)["total"], 1)
+        self.assertEqual(
+            self._nuevos(root_sin_empresa), {"disponible": False, "motivo": "Usuario sin empresa asignada."},
+        )
+
+    def test_clientes_nuevos_sin_empresa_no_disponible(self):
+        self.assertEqual(
+            self._nuevos(self.sin_empresa), {"disponible": False, "motivo": "Usuario sin empresa asignada."},
+        )
+
+    def test_clientes_nuevos_no_acepta_parametros(self):
+        resp = self._get(self.admin_empresa, "?mes=2026-10")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("mes", str(resp.data["parametros"]))
+
+    def test_clientes_nuevos_agrega_una_sola_consulta(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from terceros.api.views import ClienteViewSet
+
+        def _consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(self._get(self.vendedor_a).status_code, 200)
+            return len(ctx)
+
+        self._get(self.vendedor_a)  # calienta lo que se cachea por proceso
+        con_bloque = _consultas()
+        with patch.object(ClienteViewSet, "_kpi_clientes_nuevos", return_value={}):
+            sin_bloque = _consultas()
+
+        self.assertEqual(con_bloque - sin_bloque, 1)
+
+    def test_created_at_no_sale_en_listado_detalle_ni_mesa_de_control(self):
+        """EC-817 solo lo usa en ``kpis/``; ``ClienteMesaControlSerializer`` hereda el Meta."""
+        client = APIClient()
+        client.force_authenticate(user=self.admin_empresa)
+
+        def _filas(url):
+            resp = client.get(url)
+            self.assertEqual(resp.status_code, 200, resp.data)
+            data = resp.json()
+            return data["results"] if isinstance(data, dict) and "results" in data else data
+
+        listado = _filas("/api/v1/terceros/clientes/")
+        mesa = _filas("/api/v1/terceros/clientes-mesa-control/")
+        detalle = _filas(f"/api/v1/terceros/clientes/{self.cliente_a.pk}/")
+
+        self.assertTrue(listado and mesa)
+        for fila in [*listado, *mesa, detalle]:
+            self.assertIn("nombre", fila)
+            self.assertNotIn("created_at", fila)
+
+
+class ClienteCreatedAtBackfillTests(TestCase):
+    """Migración 0024 (EC-817): ``created_at`` sale del registro ``+`` del historial."""
+
+    def _rellenar(self):
+        from importlib import import_module
+
+        from django.apps import apps
+
+        migracion = import_module("terceros.migrations.0024_cliente_created_at_backfill")
+        migracion.rellenar_created_at(apps, None)
+
+    def test_toma_la_fecha_del_alta_en_el_historial_y_sin_ella_queda_null(self):
+        empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        con_alta = Cliente.objects.create(empresa=empresa, nombre="Con alta")
+        sin_alta = Cliente.objects.create(empresa=empresa, nombre="Sin alta")
+        ya_tiene = Cliente.objects.create(empresa=empresa, nombre="Ya tiene")
+        fecha_alta = datetime(2026, 9, 3, 17, 30, tzinfo=dt_timezone.utc)
+        fecha_propia = datetime(2026, 10, 1, 12, 0, tzinfo=dt_timezone.utc)
+        Cliente.history.filter(id=con_alta.pk, history_type="+").update(history_date=fecha_alta)
+        con_alta.nombre = "Con alta editado"
+        con_alta.save()  # un ``~`` posterior no cambia la fecha de alta
+        Cliente.history.filter(id=sin_alta.pk).delete()
+        Cliente.objects.filter(pk__in=[con_alta.pk, sin_alta.pk]).update(created_at=None)
+        Cliente.objects.filter(pk=ya_tiene.pk).update(created_at=fecha_propia)
+
+        self._rellenar()
+
+        fechas = dict(Cliente.objects.values_list("pk", "created_at"))
+        self.assertEqual(fechas[con_alta.pk], fecha_alta)
+        self.assertIsNone(fechas[sin_alta.pk])
+        self.assertEqual(fechas[ya_tiene.pk], fecha_propia)
+
+    def test_agregar_la_columna_no_rellena_los_clientes_existentes(self):
+        """Con ``auto_now_add`` el ``AddField`` les pondría a todos la hora de la
+        migración (y el backfill, que solo toca los NULL, ya no los corregiría)."""
+        from importlib import import_module
+
+        from django.db.backends.base.schema import BaseDatabaseSchemaEditor
+        from django.db.migrations.operations import AddField
+
+        migracion = import_module("terceros.migrations.0023_cliente_created_at").Migration
+        altas = [op for op in migracion.operations if isinstance(op, AddField) and op.name == "created_at"]
+
+        self.assertEqual(len(altas), 2)  # cliente y su historial
+        for op in altas:
+            self.assertIsNone(BaseDatabaseSchemaEditor._effective_default(op.field), op.model_name)
+            self.assertFalse(op.field.has_db_default(), op.model_name)  # el default va después del backfill
+
+    def test_insert_que_omite_la_columna_recibe_la_hora_del_alta(self):
+        """El código anterior a ``created_at`` (entre ``migrate`` y el deploy) inserta
+        sin la columna: el ``db_default`` le pone la hora en vez de dejarlo NULL."""
+        from django.db import connection
+
+        empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        base = Cliente.objects.create(empresa=empresa, nombre="Base")
+        columnas = [
+            f.column for f in Cliente._meta.concrete_fields if f.column not in ("id", "created_at")
+        ]
+        lista = ", ".join(connection.ops.quote_name(c) for c in columnas)
+        tabla = connection.ops.quote_name(Cliente._meta.db_table)
+        antes = timezone.now()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"INSERT INTO {tabla} ({lista}) SELECT {lista} FROM {tabla} WHERE id = %s RETURNING id",
+                [base.pk],
+            )
+            nuevo_id = cursor.fetchone()[0]
+
+        created_at = Cliente.objects.values_list("created_at", flat=True).get(pk=nuevo_id)
+        self.assertIsNotNone(created_at)
+        self.assertGreaterEqual(created_at, antes - timedelta(seconds=5))
+
 
 class ClienteCarteraTests(TestCase):
     """``resumen_comercial.cartera``: saldo por cobrar por moneda y antigüedad (30/60/90/120)."""
