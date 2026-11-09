@@ -2455,3 +2455,42 @@ class DetalleAlmacenSinUbicacionTests(TestCase):
                 [(f["almacen_id"], f["almacen_codigo"], f["cantidad"]) for f in data["results"]],
                 [(self.sin_ubic.pk, "DA-AP", "1.0000")], filtro,
             )
+
+    # --- backfill (migración 0025) ---------------------------------------------
+
+    def _renglon_op(self, folio, almacenes, empresa=None):
+        """Consumo de OP viejo: renglón sin ubicación ni almacén y su evento de
+        auditoría con ``almacenes`` (uno por item del mismo producto)."""
+        empresa = empresa or self.empresa
+        op = OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op=folio)
+        mov = MovimientoInventario.objects.create(
+            empresa=empresa, sucursal=self.sucursal, usuario=self.admin, tipo_movimiento="SALIDA", op=op,
+        )
+        d = MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=mov, producto=self.producto, cantidad=Decimal("1"),
+        )
+        items = [
+            {"producto_id": self.producto.pk, "producto_variante_id": None, "almacen_id": a.pk, "ubicacion_id": None}
+            for a in almacenes
+        ]
+        AuditoriaEvento.objects.create(
+            empresa=empresa, modulo="inventarios", accion="SALIDA", tabla="existencias",
+            id_registro=str(op.pk), antes_json={"items": items, "op_id": op.pk},
+        )
+        return d
+
+    def test_backfill_llena_solo_el_candidato_unico_de_la_misma_empresa(self):
+        import importlib
+
+        from django.apps import apps
+
+        unico = self._renglon_op("OP-DA-1", [self.sin_ubic])
+        ambiguo = self._renglon_op("OP-DA-2", [self.sin_ubic, self.con_ubic])
+        otra_empresa = self._renglon_op("OP-DA-3", [self.almacen_otra])
+        migracion = importlib.import_module("inventarios.migrations.0025_backfill_detalle_almacen_op")
+        migracion.backfill_almacen_op(apps, None)
+        for d in (unico, ambiguo, otra_empresa):
+            d.refresh_from_db()
+        self.assertEqual(
+            (unico.almacen_id, ambiguo.almacen_id, otra_empresa.almacen_id), (self.sin_ubic.pk, None, None),
+        )
