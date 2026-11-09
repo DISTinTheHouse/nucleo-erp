@@ -427,10 +427,8 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
                 {
                     "fecha_inicio": str(reporte["fecha_inicio"]),
                     "fecha_final": str(reporte["fecha_final"]),
-                    "filtros": {
-                        "producto_id": reporte["producto_id"],
-                        "producto_variante_id": reporte["producto_variante_id"],
-                    },
+                    # Misma forma que con resultados (EC-822).
+                    "filtros": {"almacen_id": reporte["almacen_id"]},
                     "resumen": reporte["resumen"],
                     "resumen_por_almacen": [],
                     "count": 0,

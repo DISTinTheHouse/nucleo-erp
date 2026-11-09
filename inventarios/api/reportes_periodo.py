@@ -52,12 +52,20 @@ def quantize_money(value):
     return to_decimal(value).quantize(Decimal("0.01"))
 
 
+def _fecha(query_params, nombre):
+    # ``parse_date`` regresa ``None`` si el formato no es YYYY-MM-DD, pero lanza
+    # ``ValueError`` con una fecha bien formada que no existe (2026-02-30): eso
+    # era un 500 (EC-822). Las dos cosas quedan como fecha inválida.
+    try:
+        return parse_date((query_params.get(nombre) or "").strip())
+    except ValueError:
+        return None
+
+
 def parse_fechas(query_params):
     """``fecha_inicio``/``fecha_final`` obligatorias (YYYY-MM-DD), en hora local."""
-    fecha_inicio_raw = (query_params.get("fecha_inicio") or "").strip()
-    fecha_final_raw = (query_params.get("fecha_final") or "").strip()
-    fecha_inicio = parse_date(fecha_inicio_raw)
-    fecha_final = parse_date(fecha_final_raw)
+    fecha_inicio = _fecha(query_params, "fecha_inicio")
+    fecha_final = _fecha(query_params, "fecha_final")
 
     if not fecha_inicio:
         raise ValidationError({"fecha_inicio": "fecha_inicio es requerida con formato YYYY-MM-DD."})
