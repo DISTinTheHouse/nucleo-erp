@@ -909,6 +909,7 @@ class ReporteExistenciasProduccionComprasTests(TestCase):
         for malo in (
             {"almacen": "abc"}, {"almacen": "0"}, {"almacen": "-1"}, {"almacen_id": "abc"},
             {"almacen": "abc", "almacen_id": valido},
+            {"almacen": "1_0"}, {"almacen": "٣"}, {"almacen": "+5"}, {"almacen": "1.0"},
         ):
             resp = self._client(self.a["regular"]).get(REPORTE_EXISTENCIAS_PRODUCCION_COMPRAS_URL, malo)
             self.assertEqual(resp.status_code, 400, malo)
@@ -2485,6 +2486,12 @@ class PermisoYValidacionReportesPeriodoTests(ReportesPeriodoBase):
             {"almacen_id": "-1"},
             {"almacen": "abc", "almacen_id": valido},
             {"almacen": "1.5"},
+            # Solo dígitos ASCII: ``int()`` aceptaría estos (``1_0`` → 10).
+            {"almacen": "1_0"},
+            {"almacen": "٣"},
+            {"almacen": "+5"},
+            {"almacen": "1.0"},
+            {"almacen_id": "1_0"},
         )
         for nombre, url, params in self._acciones():
             for malo in invalidos:
