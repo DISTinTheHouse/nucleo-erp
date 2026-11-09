@@ -279,7 +279,16 @@ def _ajustar_necesidades(pre, mats, usuario=None):
 def _estatus_segun(pre, mats):
     if not _faltan(mats):
         return E.LISTA
-    return E.EN_COMPRA if _necesidades_activas(pre).exists() else E.FALTAN_MATERIALES
+    return E.EN_COMPRA if (_necesidades_activas(pre).exists() or _oc_flujo_anterior(pre)) else E.FALTAN_MATERIALES
+
+
+def _oc_flujo_anterior(pre):
+    """OC creada antes de las necesidades (``OrdenCompra.pre_orden``) que sigue
+    abierta: la pre-orden sigue En compra."""
+    from compras.models import OrdenCompra
+    X = OrdenCompra.EstatusOrdenCompra
+    return OrdenCompra.objects.filter(pre_orden_id=pre.pk, activo=True).exclude(
+        estatus__in=[X.CANCELADA, X.RECIBIDA]).exists()
 
 
 # --------------------------------------------------------------------------- flujo
@@ -379,6 +388,9 @@ def recalcular(pre, mats=None, motivo_regreso=None, usuario=None):
         campos = _cambiar_estatus(pre, nuevo, campos)
         if nuevo != antes and nuevo == E.LISTA:
             evento(pre, EV.LISTA, usuario, "Hay el 100% de los materiales.")
+        elif nuevo != antes and antes != E.LISTA:
+            evento(pre, EV.EXISTENCIAS_CONFIRMADAS, usuario,
+                   f"Recalculada: {pre.get_estatus_display()}, faltan {faltantes} material(es).")
         if antes == E.LISTA and nuevo != E.LISTA:
             pre.regreso_fecha = timezone.now()
             pre.regreso_motivo = motivo_regreso or "Otra orden consumió el material."
