@@ -752,7 +752,7 @@ Permite consultar el inventario actual.
 
   - `count`/`next`/`previous`/`results` son la paginación estándar de DRF sobre el arreglo de detalle (antes expuesto como `detalle`).
   - `fecha_inicio`, `fecha_final`, `filtros`, `resumen` y `resumen_por_almacen` se mantienen igual que antes de paginar: reflejan todo el resultado filtrado, no cambian entre páginas.
-  - `filtros.almacen_id`: sin filtro de almacén trae el almacén de la ÚLTIMA fila del reporte, no `null` (comportamiento histórico que se conserva; no usarlo para saber si se filtró).
+  - `filtros.almacen_id`: el almacén pedido, `null` sin filtro de almacén (antes del EC-814 traía el almacén de la última fila).
 
 - **Exportar a PDF o XLSX (EC-814)**: `GET /api/v1/inventarios/existencias/reporte-existencias-periodo/exportar/?formato=pdf|xlsx`
   - Mismos query params, alcance (empresa + sucursales del usuario) y 400 que el JSON (`fecha_inicio`/`fecha_final` requeridos; `almacen`, `empresa`, `sucursal`, `producto`, `producto_variante` y sus alias `*_id`), con el reporte completo (sin `page`/`page_size`). `formato`: `pdf` (default) o `xlsx`; otro valor → `400 {"formato": ...}`.

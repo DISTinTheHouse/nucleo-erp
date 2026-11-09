@@ -405,13 +405,9 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         response = paginator.get_paginated_response(page)
         response.data["fecha_inicio"] = str(reporte["fecha_inicio"])
         response.data["fecha_final"] = str(reporte["fecha_final"])
-        # Compatibilidad: antes del EC-814 la variable ``almacen_id`` se reusaba
-        # dentro de los ciclos del cálculo, así que ``filtros.almacen_id`` salía
-        # con el almacén de la ÚLTIMA fila (no el filtro pedido) cuando había
-        # filas. Se conserva tal cual para no cambiar la respuesta.
-        response.data["filtros"] = {
-            "almacen_id": results[-1]["almacen_id"] if results else reporte["almacen_id"],
-        }
+        # El almacén pedido (``null`` sin filtro). Antes del EC-814 salía el
+        # almacén de la última fila: una variable del cálculo lo pisaba.
+        response.data["filtros"] = {"almacen_id": reporte["almacen_id"]}
         response.data["resumen"] = reporte["resumen"]
         response.data["resumen_por_almacen"] = reporte["resumen_por_almacen"]
         return response

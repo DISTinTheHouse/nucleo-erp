@@ -1766,11 +1766,12 @@ class ReporteExistenciasPeriodoTests(ReportesPeriodoBase):
             [("4.00", "44.00")],
         )
 
-    def test_filtros_almacen_id_conserva_el_valor_historico(self):
-        # Antes del EC-814 ``filtros.almacen_id`` traía el almacén de la última
-        # fila cuando no se filtraba por almacén; el refactor lo conserva.
+    def test_filtros_almacen_id_es_el_filtro_pedido(self):
+        # Antes del EC-814 traía el almacén de la última fila cuando no se
+        # filtraba por almacén; ahora ``null``.
         data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL, {"page_size": 100}).json()
-        self.assertEqual(data["filtros"], {"almacen_id": data["results"][-1]["almacen_id"]})
+        self.assertEqual(data["count"], 4)
+        self.assertEqual(data["filtros"], {"almacen_id": None})
         data = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, {"almacen_id": self.a["almacen"].pk}).json()
         self.assertEqual(data["filtros"], {"almacen_id": self.a["almacen"].pk})
 
