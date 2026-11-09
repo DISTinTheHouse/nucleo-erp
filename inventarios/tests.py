@@ -2431,11 +2431,11 @@ class DetalleAlmacenSinUbicacionTests(TestCase):
                     (almacen.codigo, tipo),
                 )
 
-    def test_con_ubicacion_el_almacen_sigue_en_null(self):
+    def test_con_ubicacion_tambien_llena_el_almacen(self):
         entrada = self._post("entrada", self.con_ubic, ubicacion=self.ubicacion.pk)
         salida = self._post("salida", self.con_ubic, ubicacion=self.ubicacion.pk)
-        self.assertEqual((entrada.almacen_id, entrada.ubicacion_destino_id), (None, self.ubicacion.pk))
-        self.assertEqual((salida.almacen_id, salida.ubicacion_origen_id), (None, self.ubicacion.pk))
+        self.assertEqual((entrada.almacen_id, entrada.ubicacion_destino_id), (self.con_ubic.pk, self.ubicacion.pk))
+        self.assertEqual((salida.almacen_id, salida.ubicacion_origen_id), (self.con_ubic.pk, self.ubicacion.pk))
 
     def test_ajuste_sin_ubicacion_no_cambia(self):
         # El almacén del ajuste sale de su cabecera (fuera de EC-821).

@@ -149,8 +149,8 @@ class RecalculoConsumoTelaService:
                     producto_variante_id=i["producto_variante_id"],
                     ubicacion_origen_id=i["ubicacion_id"] if tipo == TipoMovimiento.SALIDA else None,
                     ubicacion_destino_id=i["ubicacion_id"] if tipo == TipoMovimiento.ENTRADA else None,
-                    # Existencia sin ubicación: el almacén va en el renglón (EC-821).
-                    almacen_id=i["almacen_id"] if i["ubicacion_id"] is None else None,
+                    # El almacén de la existencia movida, como en ventas (EC-821).
+                    almacen_id=i["almacen_id"],
                     cantidad=abs(i["cantidad_consumida"]), costo_unitario=Decimal("0"),
                 )
                 for i in items

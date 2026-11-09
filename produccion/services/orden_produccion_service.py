@@ -222,8 +222,8 @@ class OrdenProduccionService:
                     producto_variante_id=item["producto_variante_id"],
                     ubicacion_origen_id=item["ubicacion_id"],
                     ubicacion_destino_id=None,
-                    # Existencia sin ubicación: el renglón dice de qué almacén salió (EC-821).
-                    almacen_id=item["almacen_id"] if item["ubicacion_id"] is None else None,
+                    # El almacén de la existencia consumida, como en ventas (EC-821).
+                    almacen_id=item["almacen_id"],
                     lote_id=None,
                     serie_id=None,
                     cantidad=item["cantidad_consumida"],

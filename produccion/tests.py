@@ -3668,7 +3668,7 @@ class ConsumoOPMovimientoVarianteTests(TestCase):
         ex_var.refresh_from_db()
         self.assertEqual((ex_sin_var.cantidad, ex_var.cantidad), (Decimal("0"), Decimal("2")))
 
-    # --- EC-821: ``detalle.almacen`` cuando la existencia no tiene ubicación ------
+    # --- EC-821: ``detalle.almacen`` con el almacén de cada existencia -------------
 
     def _consumir(self, cantidad):
         consumos = OrdenProduccionService._discount_existencias(
@@ -3680,7 +3680,7 @@ class ConsumoOPMovimientoVarianteTests(TestCase):
             .values_list("almacen_id", "ubicacion_origen_id", "cantidad")
         , key=lambda f: (f[0] or 0, f[1] or 0))
 
-    def test_existencia_sin_ubicacion_llena_el_almacen_y_con_ubicacion_no(self):
+    def test_llena_el_almacen_con_y_sin_ubicacion(self):
         Existencia.objects.create(producto=self.componente, almacen=self.almacen, cantidad=Decimal("5"))
         Existencia.objects.create(
             producto=self.componente, producto_variante=self.variante, almacen=self.almacen,
@@ -3688,7 +3688,8 @@ class ConsumoOPMovimientoVarianteTests(TestCase):
         )
         self.assertEqual(
             self._consumir("6"),
-            [(None, self.ubicacion.pk, Decimal("1")), (self.almacen.pk, None, Decimal("5"))],
+            sorted([(self.almacen.pk, self.ubicacion.pk, Decimal("1")), (self.almacen.pk, None, Decimal("5"))],
+                   key=lambda f: (f[0] or 0, f[1] or 0)),
         )
 
     def test_consumo_repartido_en_dos_almacenes_un_renglon_por_almacen(self):
@@ -7036,7 +7037,7 @@ class RecalculoConsumoTelaTests(TestCase):
             OrdenProduccionRutaCritica.objects.get(op=self.op).cantidad_real_corte, Decimal("100")
         )
 
-    # --- EC-821: ``detalle.almacen`` cuando la existencia no tiene ubicación ------
+    # --- EC-821: ``detalle.almacen`` con el almacén de la existencia ---------------
 
     def _ultimo_detalle(self):
         mov = MovimientoInventario.objects.filter(op=self.op).order_by("-id").first()
@@ -7048,13 +7049,13 @@ class RecalculoConsumoTelaTests(TestCase):
         self.assertEqual(self._post(95).status_code, 200)
         self.assertEqual(self._ultimo_detalle(), ("ENTRADA", [(self.almacen.pk, None, None)]))
 
-    def test_recalculo_con_ubicacion_no_llena_el_almacen(self):
+    def test_recalculo_con_ubicacion_tambien_llena_el_almacen(self):
         ubicacion = Ubicacion.objects.create(almacen=self.almacen, pasillo="1")
         Existencia.objects.filter(pk=self.existencia.pk).update(ubicacion=ubicacion)
         self.assertEqual(self._post(100).status_code, 200)
-        self.assertEqual(self._ultimo_detalle(), ("SALIDA", [(None, ubicacion.pk, None)]))
+        self.assertEqual(self._ultimo_detalle(), ("SALIDA", [(self.almacen.pk, ubicacion.pk, None)]))
         self.assertEqual(self._post(95).status_code, 200)
-        self.assertEqual(self._ultimo_detalle(), ("ENTRADA", [(None, None, ubicacion.pk)]))
+        self.assertEqual(self._ultimo_detalle(), ("ENTRADA", [(self.almacen.pk, None, ubicacion.pk)]))
 
     def test_sin_telas_es_400(self):
         resp = self.client.post(
