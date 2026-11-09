@@ -464,56 +464,63 @@ def tipo_movimiento_requerido(query_params):
     return tipo_movimiento
 
 
-# Almacén de cada renglón del reporte de movimientos, en orden de precedencia:
-# la ubicación del renglón, el ``almacen`` del detalle (existencia sin
-# ubicación, #803) y el del documento. El mismo orden filtra (``Coalesce``) y
-# se muestra, así que el almacén que pasó el alcance es el que sale en la fila
-# (EC-820). La transferencia usa su almacén de origen/destino, no
-# ``detalle.almacen``, que no dice de qué lado es (#801).
-_RUTAS_ALMACEN_MOVIMIENTO = {
-    "ENTRADA": (
-        "ubicacion_destino__almacen",
-        "almacen",
-        "movimiento_inventario__recepcion__almacen",
-        "movimiento_inventario__ajuste_inventario__almacen",
-    ),
-    "SALIDA": (
-        "ubicacion_origen__almacen",
-        "almacen",
-        "movimiento_inventario__ajuste_inventario__almacen",
-    ),
-    "AJUSTE": ("movimiento_inventario__ajuste_inventario__almacen",),
+# Almacén de cada lado (origen/destino) de un renglón de movimiento, por tipo y
+# en orden de precedencia: la ubicación del renglón, el ``almacen`` del detalle
+# (existencia sin ubicación, #803) y el del documento. La transferencia usa su
+# almacén de origen/destino, no ``detalle.almacen``, que no dice de qué lado es
+# (#801). Lo usan el reporte de movimientos (filtra y muestra con el mismo
+# almacén, EC-820) y el detalle de un movimiento formal.
+_RUTAS_AJUSTE = ("movimiento_inventario__ajuste_inventario__almacen",)
+RUTAS_ALMACEN_POR_LADO = {
+    "ENTRADA": {
+        "destino": (
+            "ubicacion_destino__almacen",
+            "almacen",
+            "movimiento_inventario__recepcion__almacen",
+            "movimiento_inventario__ajuste_inventario__almacen",
+        ),
+    },
+    "SALIDA": {
+        "origen": (
+            "ubicacion_origen__almacen",
+            "almacen",
+            "movimiento_inventario__ajuste_inventario__almacen",
+        ),
+    },
+    # El ajuste afecta un solo almacén: el mismo de los dos lados.
+    "AJUSTE": {"origen": _RUTAS_AJUSTE, "destino": _RUTAS_AJUSTE},
+    "TRANSFERENCIA": {
+        "origen": ("ubicacion_origen__almacen", "movimiento_inventario__transferencia__almacen_origen"),
+        "destino": ("ubicacion_destino__almacen", "movimiento_inventario__transferencia__almacen_destino"),
+    },
 }
-_RUTAS_ALMACEN_TRANSFERENCIA_ORIGEN = (
-    "ubicacion_origen__almacen",
-    "movimiento_inventario__transferencia__almacen_origen",
-)
-_RUTAS_ALMACEN_TRANSFERENCIA_DESTINO = (
-    "ubicacion_destino__almacen",
-    "movimiento_inventario__transferencia__almacen_destino",
-)
 
 
-def _almacen_coalesce(rutas):
-    """Id del primer almacén no nulo de ``rutas`` (en SQL)."""
-    campos = [f"{ruta}_id" for ruta in rutas]
-    return Coalesce(*campos) if len(campos) > 1 else models.F(campos[0])
+def _primer_almacen(rutas, campo):
+    """``campo`` del primer almacén no nulo de ``rutas``, en SQL."""
+    return models.Case(
+        *(models.When(**{f"{ruta}__isnull": False}, then=models.F(f"{ruta}__{campo}")) for ruta in rutas),
+        default=None,
+    )
 
 
-def _almacen_de(detalle, rutas, almacen_id):
-    """El objeto ``Almacen`` (ya cargado por ``select_related``) cuyo id resolvió
-    el ``Coalesce``."""
-    if not almacen_id:
-        return None
-    for ruta in rutas:
-        obj = detalle
-        for parte in ruta.split("__"):
-            obj = getattr(obj, parte, None)
-            if obj is None:
-                break
-        if obj is not None and obj.pk == almacen_id:
-            return obj
-    return None
+def anotar_almacenes(qs, tipo_movimiento, lados=None, campos=("codigo", "nombre")):
+    """Anota en un queryset de ``MovimientoInventarioDetalle`` el almacén de
+    cada lado del tipo (o solo de ``lados``): ``almacen_{lado}_res`` (id) y
+    ``almacen_{lado}_res_{campo}``.
+
+    Todo sale de ``RUTAS_ALMACEN_POR_LADO``, en la misma consulta: no hace
+    falta ``select_related`` ni recorrer relaciones por fila.
+    """
+    anotaciones = {}
+    for lado, rutas in RUTAS_ALMACEN_POR_LADO[tipo_movimiento].items():
+        if lados is not None and lado not in lados:
+            continue
+        ids = [f"{ruta}_id" for ruta in rutas]
+        anotaciones[f"almacen_{lado}_res"] = Coalesce(*ids) if len(ids) > 1 else models.F(ids[0])
+        for campo in campos:
+            anotaciones[f"almacen_{lado}_res_{campo}"] = _primer_almacen(rutas, campo)
+    return qs.annotate(**anotaciones)
 
 
 def reporte_movimientos(user, query_params):
@@ -548,24 +555,18 @@ def reporte_movimientos(user, query_params):
             "movimiento_inventario",
             "movimiento_inventario__usuario",
             "movimiento_inventario__pedido",
-            # El almacén del documento se lee cuando el renglón no trae
-            # ubicación (ENTRADA/SALIDA/AJUSTE): sin el join era una consulta
-            # por renglón.
-            "movimiento_inventario__recepcion__almacen",
-            "movimiento_inventario__ajuste_inventario__almacen",
+            # Observaciones/motivo del ajuste y folio de la transferencia. El
+            # almacén de la fila sale de ``anotar_almacenes``.
+            "movimiento_inventario__ajuste_inventario",
             "movimiento_inventario__op",
             "movimiento_inventario__transferencia",
-            "movimiento_inventario__transferencia__almacen_origen",
-            "movimiento_inventario__transferencia__almacen_destino",
-            "almacen",
             "producto",
             "producto_variante",
             "producto_variante__producto",
             "producto_variante__color",
             "producto_variante__talla",
-            "ubicacion_origen",
+            # ``str(ubicacion)`` lleva el nombre de su almacén.
             "ubicacion_origen__almacen",
-            "ubicacion_destino",
             "ubicacion_destino__almacen",
         )
         .filter(
@@ -584,19 +585,16 @@ def reporte_movimientos(user, query_params):
 
         detalles_qs = detalles_qs.filter(movimiento_inventario__empresa_id__in=empresa_ids_lectura(user))
 
-    if tipo_movimiento == "TRANSFERENCIA":
-        detalles_qs = detalles_qs.annotate(
-            almacen_origen_resuelto=_almacen_coalesce(_RUTAS_ALMACEN_TRANSFERENCIA_ORIGEN),
-            almacen_destino_resuelto=_almacen_coalesce(_RUTAS_ALMACEN_TRANSFERENCIA_DESTINO),
-        ).filter(
-            models.Q(almacen_origen_resuelto__in=allowed_almacen_ids)
-            | models.Q(almacen_destino_resuelto__in=allowed_almacen_ids)
-        )
-    else:
-        rutas_almacen = _RUTAS_ALMACEN_MOVIMIENTO[tipo_movimiento]
-        detalles_qs = detalles_qs.annotate(
-            almacen_resuelto=_almacen_coalesce(rutas_almacen),
-        ).filter(almacen_resuelto__in=allowed_almacen_ids)
+    # Un renglón entra si alguno de sus lados está en alcance, y se muestra con
+    # el primero que lo esté (origen antes que destino): en la transferencia,
+    # el origen si está en alcance, si no el destino. Una fila por renglón.
+    lados = tuple(RUTAS_ALMACEN_POR_LADO[tipo_movimiento])
+    if tipo_movimiento == "AJUSTE":
+        lados = ("origen",)  # los dos lados son el mismo almacén
+    filtro = models.Q()
+    for lado in lados:
+        filtro |= models.Q(**{f"almacen_{lado}_res__in": allowed_almacen_ids})
+    detalles_qs = anotar_almacenes(detalles_qs, tipo_movimiento, lados).filter(filtro)
 
     resultados = []
     total_cantidad = Decimal("0")
@@ -607,23 +605,17 @@ def reporte_movimientos(user, query_params):
         variante = detalle.producto_variante
         producto = getattr(variante, "producto", None) if variante else detalle.producto
 
-        if tipo_movimiento == "TRANSFERENCIA":
-            # Una fila por renglón: el origen si está en alcance, si no el
-            # destino (el filtro garantiza que uno de los dos lo está).
-            if detalle.almacen_origen_resuelto in allowed_almacen_ids:
-                almacen = _almacen_de(detalle, _RUTAS_ALMACEN_TRANSFERENCIA_ORIGEN, detalle.almacen_origen_resuelto)
-                ubicacion = detalle.ubicacion_origen
-            else:
-                almacen = _almacen_de(detalle, _RUTAS_ALMACEN_TRANSFERENCIA_DESTINO, detalle.almacen_destino_resuelto)
-                ubicacion = detalle.ubicacion_destino
+        # El filtro garantiza que alguno de los lados está en alcance.
+        lado = next(c for c in lados if getattr(detalle, f"almacen_{c}_res") in allowed_almacen_ids)
+        almacen_fila = {
+            "almacen_id": getattr(detalle, f"almacen_{lado}_res"),
+            "almacen_codigo": getattr(detalle, f"almacen_{lado}_res_codigo"),
+            "almacen_nombre": getattr(detalle, f"almacen_{lado}_res_nombre"),
+        }
+        if tipo_movimiento == "AJUSTE":
+            ubicacion = detalle.ubicacion_destino or detalle.ubicacion_origen
         else:
-            almacen = _almacen_de(detalle, rutas_almacen, detalle.almacen_resuelto)
-            if tipo_movimiento == "ENTRADA":
-                ubicacion = detalle.ubicacion_destino
-            elif tipo_movimiento == "SALIDA":
-                ubicacion = detalle.ubicacion_origen
-            else:
-                ubicacion = detalle.ubicacion_destino or detalle.ubicacion_origen
+            ubicacion = detalle.ubicacion_origen if lado == "origen" else detalle.ubicacion_destino
 
         usuario = getattr(movimiento, "usuario", None)
         pedido = getattr(movimiento, "pedido", None)
@@ -639,9 +631,7 @@ def reporte_movimientos(user, query_params):
                 "movimiento_detalle_id": detalle.pk,
                 "tipo_movimiento": movimiento.tipo_movimiento,
                 "fecha_movimiento": movimiento.fecha_movimiento,
-                "almacen_id": getattr(almacen, "pk", None),
-                "almacen_codigo": getattr(almacen, "codigo", None),
-                "almacen_nombre": getattr(almacen, "nombre", None),
+                **almacen_fila,
                 "ubicacion_id": getattr(ubicacion, "pk", None),
                 "ubicacion_nombre": str(ubicacion) if ubicacion else None,
                 "producto_id": getattr(producto, "pk", None),
