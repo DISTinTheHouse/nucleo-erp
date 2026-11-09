@@ -1942,3 +1942,19 @@ class AlcanceEmpresaActivaTests(SimpleTestCase):
         user = SimpleNamespace(empresa_id=None)
         self.assertEqual(empresa_ids_lectura(user), [])
         self.assertFalse(es_empresa_activa(user, None))
+
+
+class CorsExposeHeadersTests(SimpleTestCase):
+    """EC-824: el front (otro origen) debe poder leer ``Content-Disposition``."""
+
+    URL = "/api/v1/cors-probe-inexistente/"
+
+    def test_origen_permitido_expone_content_disposition(self):
+        response = self.client.get(self.URL, HTTP_ORIGIN="https://front-erp.vercel.app")
+        self.assertEqual(response["Access-Control-Allow-Origin"], "https://front-erp.vercel.app")
+        expuestos = [h.strip().lower() for h in response["Access-Control-Expose-Headers"].split(",")]
+        self.assertIn("content-disposition", expuestos)
+
+    def test_origen_no_permitido_no_recibe_cabeceras_cors(self):
+        response = self.client.get(self.URL, HTTP_ORIGIN="https://ajeno.example")
+        self.assertFalse([h for h in response.headers if h.lower().startswith("access-control-")])
