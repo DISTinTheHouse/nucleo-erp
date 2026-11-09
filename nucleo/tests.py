@@ -576,18 +576,15 @@ class AlcancePorEntidadTests(BusquedaGlobalBaseTestCase):
     """Cada entidad conserva el alcance de SU ViewSet, no uno inventado aquí."""
 
     def test_superuser_ve_las_dos_empresas(self):
+        # EC-798: pedidos y cotizaciones (ventas) se acotan a la empresa activa
+        # también para el superusuario; sin empresa no ve ninguno. Clientes
+        # (terceros) conservan su alcance global hasta alinear ese módulo.
         payload = self._buscar(self.superuser, "acme")
-        self.assertEqual(
-            sorted(self._ids(payload, "pedido")),
-            sorted([self.a["pedido"].pk, self.b["pedido"].pk]),
-        )
+        self.assertEqual(self._ids(payload, "pedido"), [])
+        self.assertEqual(self._ids(payload, "cotizacion"), [])
         self.assertEqual(
             sorted(self._ids(payload, "cliente")),
             sorted([self.a["cliente"].pk, self.b["cliente"].pk]),
-        )
-        self.assertEqual(
-            sorted(self._ids(payload, "cotizacion")),
-            sorted([self.a["cotizacion"].pk, self.b["cotizacion"].pk]),
         )
 
     def test_vendedor_no_admin_ve_el_pedido_pero_no_el_cliente_ni_la_cotizacion(self):

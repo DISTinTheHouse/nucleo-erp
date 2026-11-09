@@ -213,10 +213,6 @@ def _usuario(serializer):
     return getattr(serializer.context.get("request"), "user", None)
 
 
-def _es_superuser(serializer):
-    return bool(getattr(_usuario(serializer), "is_superuser", False))
-
-
 def _de_la_empresa(obj, empresa_id):
     # ``empresa_id`` None (usuario sin empresa) o un registro con empresa NULL
     # nunca coinciden: se rechaza.
@@ -269,15 +265,12 @@ def _exigir_empresa_documento(serializer, campo, obj, pertenece=_de_la_empresa):
 def _exigir_empresa_del_usuario(serializer, campo, obj):
     """FK de un renglón, validada A NIVEL DE CAMPO contra la empresa del usuario.
 
-    Para quien no es superuser equivale a la empresa del padre: su padre sólo
-    puede ser de su empresa (``validate_<padre>`` en alta, ``get_queryset`` en
-    update). Se hace a nivel de campo y no en ``validate()`` porque éste no corre
-    si otro campo ya falló: una FK ajena que "pasara" junto a un pk inexistente
-    delataría que existe. El superuser (sin esa garantía) se valida en
-    ``_exigir_empresa_del_padre``.
+    Equivale a la empresa del padre, superusuario incluido (EC-798): su padre
+    sólo puede ser de su empresa (``validate_<padre>`` en alta, ``get_queryset``
+    en update). Se hace a nivel de campo y no en ``validate()`` porque éste no
+    corre si otro campo ya falló: una FK ajena que "pasara" junto a un pk
+    inexistente delataría que existe.
     """
-    if _es_superuser(serializer):
-        return obj
     empresa_id = getattr(_usuario(serializer), "empresa_id", None)
     return _exigir_empresa(serializer, campo, obj, _de_la_empresa, empresa_id)
 
@@ -456,8 +449,6 @@ class CotizacionDetalleSerializer(serializers.ModelSerializer):
         # Misma convención que ``PedidoDetalleSerializer.validate_pedido``
         # (superuser puede todo; sin empresa no; el resto sólo la suya), pero con
         # el error de pk inexistente para no confirmar que la cotización existe.
-        if _es_superuser(self):
-            return cotizacion
         return _exigir_empresa(
             self, "cotizacion", cotizacion, _de_la_empresa,
             getattr(_usuario(self), "empresa_id", None),
@@ -1032,8 +1023,6 @@ class PedidoDetalleSerializer(serializers.ModelSerializer):
         # su empresa.
         request = self.context.get("request")
         user = getattr(request, "user", None)
-        if getattr(user, "is_superuser", False):
-            return pedido
         empresa = getattr(user, "empresa", None)
         if empresa is None or pedido.empresa_id != empresa.pk:
             raise serializers.ValidationError(
@@ -1079,8 +1068,6 @@ class PedidoDetalleTallaSerializer(serializers.ModelSerializer):
         # ``PedidoDetalleSerializer.validate_pedido``.
         request = self.context.get("request")
         user = getattr(request, "user", None)
-        if getattr(user, "is_superuser", False):
-            return pedido_detalle
         empresa = getattr(user, "empresa", None)
         if empresa is None or pedido_detalle.pedido.empresa_id != empresa.pk:
             raise serializers.ValidationError(
@@ -1203,8 +1190,6 @@ class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
     def validate_cliente(self, cliente):
         request = self.context.get("request")
         user = getattr(request, "user", None)
-        if getattr(user, "is_superuser", False):
-            return cliente
         empresa = getattr(user, "empresa", None)
         if empresa is None or getattr(cliente, "empresa_id", None) != empresa.pk:
             raise serializers.ValidationError(
@@ -1215,8 +1200,6 @@ class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
     def validate_sucursal(self, sucursal):
         request = self.context.get("request")
         user = getattr(request, "user", None)
-        if getattr(user, "is_superuser", False):
-            return sucursal
         empresa = getattr(user, "empresa", None)
         if empresa is None or getattr(sucursal, "empresa_id", None) != empresa.pk:
             raise serializers.ValidationError(

@@ -11,11 +11,20 @@ Se exponen dos cosas por entidad:
   clase del ViewSet, para que no haya dos definiciones de lo mismo.
 - ``*_visibles(qs, user)`` / ``alcance_*(qs, user)``: qué filas VE este usuario.
 
+El superusuario opera en su empresa activa, como cualquier usuario (EC-798, en
+línea con EC-816 y producción #361): ve toda la empresa —sin el sub-alcance por
+vendedor— pero nunca otras. Sin empresa activa no ve nada.
+
 Ninguna aplica filtros de UI (``?q=``, ``estatus``, ``mis_pedidos``), anotaciones ni
 orden: eso sigue siendo responsabilidad del ViewSet.
 """
 
 from ventas.models import Cotizacion, Oportunidad, Pedido
+
+
+def _ve_toda_la_empresa(user):
+    """Superusuario y admin de empresa ven toda su empresa; el resto, lo suyo."""
+    return bool(getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False))
 
 
 def pedidos_base():
@@ -31,11 +40,9 @@ def cotizaciones_base():
 def pedidos_visibles(qs, user):
     """Alcance de ``ventas.Pedido``: empresa directa.
 
-    El superusuario ve todo aunque tenga empresa asignada; sin empresa no se ve nada
-    (se falla cerrado).
+    Solo la empresa activa, superusuario incluido (EC-798); sin empresa no se ve
+    nada (se falla cerrado).
     """
-    if getattr(user, "is_superuser", False):
-        return qs
     empresa = getattr(user, "empresa", None)
     if not empresa:
         return qs.none()
@@ -45,8 +52,8 @@ def pedidos_visibles(qs, user):
 def alcance_cotizaciones(qs, user):
     """``(queryset, con_alcance)`` de ``ventas.Cotizacion``.
 
-    El superusuario ve todo; dentro de la empresa, quien no es ``is_admin_empresa``
-    sólo ve las cotizaciones de las que es vendedor; sin empresa no se ve nada.
+    Solo la empresa activa (superusuario incluido, EC-798); dentro de ella, quien
+    no es superusuario ni ``is_admin_empresa`` sólo ve las cotizaciones de las que es vendedor; sin empresa no se ve nada.
 
     Devuelve también ``con_alcance`` para que el ViewSet no tenga que volver a
     evaluar la misma condición por su cuenta: necesita saberlo para salir antes de
@@ -54,13 +61,11 @@ def alcance_cotizaciones(qs, user):
     devuelve ``200 []`` a quien no puede ver nada. Con dos funciones separadas, un
     cambio futuro del alcance dejaría las dos respuestas descoordinadas.
     """
-    if getattr(user, "is_superuser", False):
-        return qs, True
     empresa = getattr(user, "empresa", None)
     if not empresa:
         return qs.none(), False
     qs = qs.filter(empresa=empresa)
-    if not getattr(user, "is_admin_empresa", False):
+    if not _ve_toda_la_empresa(user):
         qs = qs.filter(vendedor=user)
     return qs, True
 
@@ -79,14 +84,13 @@ def oportunidades_base():
 def oportunidades_visibles(qs, user):
     """Alcance de ``ventas.Oportunidad``: el vendedor ve las suyas, el admin de empresa todas.
 
-    El superusuario ve todo; sin empresa no se ve nada (se falla cerrado).
+    Solo la empresa activa, superusuario incluido (EC-798); sin empresa no se ve
+    nada (se falla cerrado).
     """
-    if getattr(user, "is_superuser", False):
-        return qs
     empresa = getattr(user, "empresa", None)
     if not empresa:
         return qs.none()
     qs = qs.filter(empresa=empresa)
-    if not getattr(user, "is_admin_empresa", False):
+    if not _ve_toda_la_empresa(user):
         qs = qs.filter(vendedor=user)
     return qs

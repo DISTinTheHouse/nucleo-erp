@@ -113,6 +113,8 @@ Expected behavior: list returns `200 []` when out of scope; detail returns `404`
 
 **One company at a time (EC-816).** Data is always scoped to the *active* `user.empresa`; the `empresas` M2M only lists which companies the user may switch to (company selector / switch endpoint) and never widens reads or writes. Use `nucleo.scope.empresa_ids_lectura(user)` instead of re-deriving it.
 
+**`ventas` scopes superusers too (EC-798).** `ventas/scope.py` (pedidos, cotizaciones, oportunidades, Mesa de Control, the global search) and the ventas write validators use the superuser's active `user.empresa` like everyone else: whole company, no seller sub-scope, never other companies, empty without an empresa. This is the target rule for the whole ERP (compras, finanzas and terceros still give superusers a global view and are pending alignment).
+
 **Documented exception — `produccion` scopes superusers too.** Per decision #361, `orden-produccion` (list/detail and `kpis`), `lista-material`, `bom-detalle`, `consumo`, `producto-terminado-entradas` and `pedidos-especiales` always use `user.empresa`, superuser included: no `if user.is_superuser: return qs` branch, empty lists and `400` on writes without an empresa, and writable FKs validated against `user.empresa` (`_fk_de_la_empresa_del_usuario` in `produccion/api/serializers.py`). This is deliberate, not a deviation to fix. Bordado/reflejante/corte de manga keep the canonical global-superuser shape (`produccion/scope.py`).
 
 **`finanzas` scopes the commercial side by sucursal (#753).** Facturas, notas de crédito, CxC, cobros and CxC mora alerts also filter by `sucursales_permitidas()` for non-admins, via `finanzas/scope.py`. Pólizas, banks, CxP, conciliaciones and reports stay empresa-wide on purpose.
