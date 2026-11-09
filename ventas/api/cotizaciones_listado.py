@@ -197,7 +197,8 @@ def kpis(qs):
 
 def por_columna_param(request):
     """``?por_columna=`` entero de 1 a ``POR_COLUMNA_MAXIMO``; vacío → el default."""
-    valor = entero_param(request, "por_columna")
+    # Con signo (EC-829): ``-1`` llega al rango y responde su mensaje, como ``0``.
+    valor = entero_param(request, "por_columna", con_signo=True)
     if valor is None:
         return POR_COLUMNA_DEFECTO
     if not 1 <= valor <= POR_COLUMNA_MAXIMO:
