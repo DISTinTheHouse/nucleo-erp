@@ -599,7 +599,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         con ``get_object``; las OC, por la empresa del usuario con el mismo
         criterio que el listado de OC (superusuario incluido)."""
         from compras.models import OrdenCompra
-        from compras.api.serializers import OrdenCompraSerializer
+        from compras.api.serializers import OrdenCompraSerializer, con_pre_ordenes
         from compras.services.orden_compra_view_service import (
             puede_ver_contabilidad,
             quitar_montos_orden_compra,
@@ -612,6 +612,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
             .select_related("empresa", "sucursal", "moneda", "usuario", "pedido", "proveedor")
             .prefetch_related("pedidos")
         ) if empresa is not None else OrdenCompra.objects.none()
+        qs = con_pre_ordenes(qs)
 
         estatus = (request.query_params.get("estatus") or "").strip()
         if estatus:

@@ -61,6 +61,7 @@ from compras.api.serializers import (
     OrdenCompraRetrieveSerializer,
     OrdenCompraRutaCriticaSerializer,
     OrdenCompraSerializer,
+    con_pre_ordenes,
     OrdenCompraDetalleSerializer,
     RecepcionDetalleSerializer,
     RecepcionListSerializer,
@@ -255,13 +256,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(empresa=empresa)
         else:
             return qs.none()
-        from django.contrib.postgres.expressions import ArraySubquery
-        from django.db.models import OuterRef as _Outer
-        from compras.models import NecesidadCompra
-        qs = qs.annotate(pre_ordenes_ids=ArraySubquery(
-            NecesidadCompra.objects.filter(orden_compra_id=_Outer("pk")).order_by()
-            .values("pre_orden_id").distinct()
-        ))
+        qs = con_pre_ordenes(qs)
         if self.action == 'retrieve':
             qs = self._con_prefetch_retrieve(qs)
         elif self.action not in ('cancelar', 'aceptar'):
@@ -731,13 +726,12 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         return ids
 
     def _oc_para_respuesta(self, pk):
-        return (
+        return con_pre_ordenes(
             OrdenCompra.objects.select_related(
                 "proveedor", "pedido", "solicitud_compra", "empresa", "sucursal", "almacen", "moneda", "usuario",
             )
             .prefetch_related("pedidos")
-            .get(pk=pk)
-        )
+        ).get(pk=pk)
 
     def _respuesta_oc(self, oc):
         detalles_qs = (
