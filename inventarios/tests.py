@@ -2372,3 +2372,86 @@ class PartirTextoPdfTests(SimpleTestCase):
                     self.assertEqual(
                         _partir(texto, fuente, ancho), self._partir_anterior(texto, fuente, ancho), (texto, fuente, ancho),
                     )
+
+
+class DetalleAlmacenSinUbicacionTests(TestCase):
+    """EC-821: ``MovimientoInventarioDetalle.almacen`` en entradas/salidas
+    manuales sobre existencias sin ubicación (haya o no ubicaciones en el
+    almacén), su efecto en el reporte de movimientos y el backfill de OP."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-da", razon_social="acme-da SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ADA", nombre="acme-da")
+        cls.otra = Empresa.objects.create(codigo="globex-da", razon_social="globex-da SA")
+        cls.otra_suc = Sucursal.objects.create(empresa=cls.otra, codigo="GDA", nombre="globex-da")
+        # APARTADOS: sin ubicaciones. TELAS: con ubicaciones y existencias sin ella.
+        cls.sin_ubic = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="DA-AP", nombre="APARTADOS acme-da",
+        )
+        cls.con_ubic = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="DA-TE", nombre="TELAS acme-da",
+        )
+        cls.ubicacion = Ubicacion.objects.create(almacen=cls.con_ubic, pasillo="1")
+        cls.almacen_otra = Almacen.objects.create(
+            empresa=cls.otra, sucursal=cls.otra_suc, codigo="DA-GX", nombre="globex-da",
+        )
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Tela acme-da")
+        cls.admin = Usuario.objects.create(
+            username="a@acme-da.test", email="a@acme-da.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.admin.sucursales.add(cls.sucursal)
+
+    def setUp(self):
+        for almacen in (self.sin_ubic, self.con_ubic):
+            Existencia.objects.create(producto=self.producto, almacen=almacen, cantidad=Decimal("10"))
+        Existencia.objects.create(
+            producto=self.producto, almacen=self.con_ubic, ubicacion=self.ubicacion, cantidad=Decimal("10"),
+        )
+
+    def _post(self, tipo, almacen, **item):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resp = client.post(
+            f"{OPERACIONES_URL}{tipo}/",
+            {"almacen": almacen.pk, "items": [{"producto": self.producto.pk, "cantidad": "1", **item}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, (tipo, resp.content))
+        return MovimientoInventarioDetalle.objects.get(movimiento_inventario_id=resp.json()["movimiento_inventario_id"])
+
+    # --- operación manual ---------------------------------------------------------
+
+    def test_entrada_y_salida_sin_ubicacion_llenan_el_almacen(self):
+        for almacen in (self.sin_ubic, self.con_ubic):
+            for tipo in ("entrada", "salida"):
+                d = self._post(tipo, almacen)
+                self.assertEqual(
+                    (d.almacen_id, d.ubicacion_origen_id, d.ubicacion_destino_id), (almacen.pk, None, None),
+                    (almacen.codigo, tipo),
+                )
+
+    def test_con_ubicacion_el_almacen_sigue_en_null(self):
+        entrada = self._post("entrada", self.con_ubic, ubicacion=self.ubicacion.pk)
+        salida = self._post("salida", self.con_ubic, ubicacion=self.ubicacion.pk)
+        self.assertEqual((entrada.almacen_id, entrada.ubicacion_destino_id), (None, self.ubicacion.pk))
+        self.assertEqual((salida.almacen_id, salida.ubicacion_origen_id), (None, self.ubicacion.pk))
+
+    def test_ajuste_sin_ubicacion_no_cambia(self):
+        # El almacén del ajuste sale de su cabecera (fuera de EC-821).
+        self.assertIsNone(self._post("ajuste", self.sin_ubic).almacen_id)
+
+    def test_salida_sin_ubicacion_aparece_en_el_reporte_con_su_almacen(self):
+        self._post("salida", self.sin_ubic)
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        hoy = timezone.localdate().isoformat()
+        for filtro in ({}, {"almacen": self.sin_ubic.pk}):
+            data = client.get(
+                REPORTE_MOVIMIENTOS_PERIODO_URL,
+                {"fecha_inicio": hoy, "fecha_final": hoy, "tipo_movimiento": "SALIDA", **filtro},
+            ).json()
+            self.assertEqual(
+                [(f["almacen_id"], f["almacen_codigo"], f["cantidad"]) for f in data["results"]],
+                [(self.sin_ubic.pk, "DA-AP", "1.0000")], filtro,
+            )
