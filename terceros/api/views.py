@@ -28,7 +28,12 @@ from terceros.api.serializers import (
     verificar_rfc_cliente,
 )
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
-from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, booleano_param
+from nucleo.listados import (
+    OrdenamientoEstableFilter,
+    OrdenamientoNullsAlFinal,
+    PaginacionOpcionalLimitOffset,
+    booleano_param,
+)
 from terceros.cartera import cartera_de_cliente
 from terceros import csf, facturama
 from finanzas.services.facturama.acceso import puede_consultar_cfdis
@@ -78,12 +83,16 @@ class ClienteViewSet(viewsets.ModelViewSet):
     pagination_class = PaginacionOpcionalLimitOffset
     filter_backends = [
         *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
-        OrdenamientoEstableFilter,
+        OrdenamientoNullsAlFinal,
     ]
     search_fields = ["nombre", "razon_social", "rfc", "clave", "correo"]
+    # Sólo campos de ``Cliente``: ``fecha_alta``, ``fecha_ultima_compra`` y
+    # ``updated_at`` venían de la lista de proveedores y no existen aquí; al estar
+    # en la lista blanca llegaban al ``order_by`` y respondían 500 (EC-826).
+    # NULL al final en ambas direcciones (``created_at`` y ``clave`` son NULL-able).
     ordering_fields = [
         "id", "clave", "nombre", "razon_social", "rfc", "correo", "telefono", "ciudad", "estado",
-        "giro_empresarial", "dias_credito", "fecha_alta", "fecha_ultima_compra", "created_at", "updated_at",
+        "giro_empresarial", "dias_credito", "created_at",
     ]
 
     def get_queryset(self):
