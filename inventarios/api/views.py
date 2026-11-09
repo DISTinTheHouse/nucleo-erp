@@ -33,6 +33,7 @@ from catalogo.models import Producto, ProductoVariante, VarianteProductoProducci
 from auditoria.models import AuditoriaEvento
 from nucleo.models import Sucursal
 from ventas.models import Pedido
+from nucleo.kpis import entero_param
 from nucleo.listados import PaginacionOpcionalLimitOffset
 from . import auxiliar as auxiliar_mod
 from . import existencias_por_almacen as por_almacen_mod
@@ -1427,8 +1428,10 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
         if not request.user.is_superuser:
             almacenes, _almacen = self._movement_report_allowed_almacen_ids(request)
             alcance = (almacenes, request.user.sucursales_permitidas())
+        # ``limite`` no es un id: el lector general, con la misma regla (> 0).
         limite = min(
-            self._auxiliar_id(qp, "limite") or auxiliar_mod.LIMITE_RENGLONES, auxiliar_mod.LIMITE_RENGLONES_MAX
+            entero_param(request, "limite", positivo=True) or auxiliar_mod.LIMITE_RENGLONES,
+            auxiliar_mod.LIMITE_RENGLONES_MAX,
         )
         data = auxiliar_mod.kardex(request.user, variante["id"], almacen_id, inicio_dt, final_dt, alcance, limite)
         return Response({"variante": auxiliar_mod.opcion(variante), "opciones": [], "hay_mas": False, **data})

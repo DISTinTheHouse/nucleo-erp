@@ -24,6 +24,7 @@ from rest_framework.exceptions import ValidationError
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Producto, ProductoVariante
 from inventarios.models import Almacen, Existencia, MovimientoInventarioDetalle
+from nucleo.kpis import ESPACIOS_ASCII, entero_estricto
 
 TIPOS_MOVIMIENTO = ("ENTRADA", "SALIDA", "AJUSTE", "TRANSFERENCIA")
 
@@ -82,29 +83,19 @@ def parse_fechas(query_params):
 
 def id_positivo(valor, clave):
     """Id de un query param: vacío → ``None``; no numérico, 0 o negativo → 400
-    con ``clave``. Ignorarlo quitaba el filtro en silencio (#805, #815, EC-822)."""
-    raw = (valor or "").strip()
-    if not raw:
-        return None
-    try:
-        numero = int(raw)
-    except ValueError:
-        numero = 0
-    if numero <= 0:
-        raise ValidationError({clave: "Debe ser un id numérico mayor a 0."})
-    return numero
+    con ``clave``. Ignorarlo quitaba el filtro en silencio (#805, #815, EC-822).
+    Mismo lector estricto que ``entero_param`` (EC-829)."""
+    return entero_estricto(valor, clave, positivo=True)
 
 
 def almacen_del_query(query_params):
     """``almacen``/``almacen_id`` de los reportes por periodo (EC-822): el primer
     alias NO vacío, estricto, y el 400 siempre con la clave ``almacen``. Antes,
     ``almacen=abc&almacen_id=5`` tomaba ``abc`` y se quedaba sin filtro."""
-    raw = next((v for v in (query_params.get("almacen"), query_params.get("almacen_id")) if (v or "").strip()), None)
-    # Solo dígitos ASCII: ``int()`` acepta ``1_0`` (10), ``+5`` y dígitos no
-    # ASCII (``٣``), que filtraban otro almacén en vez de dar 400.
-    limpio = (raw or "").strip()
-    if limpio and not (limpio.isascii() and limpio.isdigit()):
-        raise ValidationError({"almacen": "Debe ser un id numérico mayor a 0."})
+    raw = next(
+        (v for v in (query_params.get("almacen"), query_params.get("almacen_id")) if (v or "").strip(ESPACIOS_ASCII)),
+        None,
+    )
     return id_positivo(raw, "almacen")
 
 

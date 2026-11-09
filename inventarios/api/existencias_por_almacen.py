@@ -57,17 +57,9 @@ _ES_CATALOGO = Q(producto__isnull=False) | Q(producto_variante__isnull=False)
 _ES_MUESTRA = Q(variante_produccion__isnull=False)
 
 
-def _entero_positivo(request, nombre):
-    """``entero_param`` (vacío → ``None``, no entero → 400) más positividad."""
-    valor = entero_param(request, nombre)
-    if valor is not None and valor <= 0:
-        raise ValidationError({nombre: "Debe ser un entero positivo."})
-    return valor
-
-
 def almacen_id_requerido(request):
     """``?almacen_id=`` obligatorio y entero positivo; si no, 400."""
-    almacen_id = _entero_positivo(request, "almacen_id")
+    almacen_id = entero_param(request, "almacen_id", positivo=True)
     if almacen_id is None:
         raise ValidationError({"almacen_id": "Este parámetro es obligatorio."})
     return almacen_id
@@ -157,7 +149,7 @@ def filtrar(request, qs, maximo):
         if valor:
             qs = qs.filter(**{campo: valor})
 
-    ubicacion_id = _entero_positivo(request, "ubicacion")
+    ubicacion_id = entero_param(request, "ubicacion", positivo=True)
     if ubicacion_id is not None:
         qs = qs.filter(ubicacion_id=ubicacion_id)
 
