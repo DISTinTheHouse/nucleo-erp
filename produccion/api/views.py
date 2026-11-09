@@ -2416,6 +2416,7 @@ def _resumen_pedido_especial():
         "lleva_corte_manga_any": Exists(base().filter(lleva_corte_manga=True)),
         "ops_json": ArraySubquery(ops),
         "pre_orden_json": _pre_orden_json(OuterRef("pk")),
+        **_ordenes_servicio_json(OuterRef("pk")),
     }
 
 
@@ -2429,6 +2430,32 @@ def _fecha_estimada_material(pre_orden_ref):
             orden_compra__fecha_entrega_estimada__isnull=False,
         ).order_by("-orden_compra__fecha_entrega_estimada").values("orden_compra__fecha_entrega_estimada")[:1]
     )
+
+
+def _ordenes_servicio_json(pedido_ref):
+    """``{bordado_json, reflejante_json, corte_manga_json}``: órdenes activas del
+    pedido como arreglos JSON (id, folio, estatus, asignado, proveedor). Tres
+    subconsultas por FK indexada, en la misma consulta del pedido."""
+    from django.contrib.postgres.expressions import ArraySubquery
+    from django.db.models.functions import Concat, JSONObject, Trim
+    from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejante
+
+    def arr(model, folio, estatus, proveedor=False):
+        campos = dict(
+            id="id", folio=folio, estatus=estatus,
+            asignado=Trim(Concat("usuario_asignado__first_name", Value(" "), "usuario_asignado__last_name")),
+        )
+        if proveedor:
+            campos["proveedor"] = "proveedor__nombre"
+        return ArraySubquery(
+            model.objects.filter(pedido_id=pedido_ref, activo=True).order_by("id").values(json=JSONObject(**campos))
+        )
+
+    return {
+        "bordado_json": arr(OrdenesBordado, "folio_bordado", "estatus_bordado", proveedor=True),
+        "reflejante_json": arr(OrdenesReflejante, "folio_reflejante", "estatus_reflejante"),
+        "corte_manga_json": arr(OrdenesCorteManga, "folio_ocm", "estatus_corte"),
+    }
 
 
 def _pre_orden_json(pedido_ref):
@@ -2712,9 +2739,13 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
                 dt.avance = avance_por_talla[dt.pk]
 
         pedido.detalles_especiales = detalles
-        pedido.pre_orden_json = (
-            Pedido.objects.filter(pk=pedido.pk).annotate(j=_pre_orden_json(OuterRef("pk"))).values_list("j", flat=True).first()
-        )
+        extra = (
+            Pedido.objects.filter(pk=pedido.pk)
+            .annotate(pre_orden_json=_pre_orden_json(OuterRef("pk")), **_ordenes_servicio_json(OuterRef("pk")))
+            .values("pre_orden_json", "bordado_json", "reflejante_json", "corte_manga_json").first()
+        ) or {}
+        for k, v in extra.items():
+            setattr(pedido, k, v)
         serializer = self.get_serializer(pedido)
         return Response(serializer.data)
 
