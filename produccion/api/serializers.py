@@ -2672,6 +2672,29 @@ class VarianteProduccionListSerializer(serializers.ModelSerializer):
         ]
 
 
+def ordenes_servicio_pedido(pedido):
+    """``{bordado, reflejante, corte_manga}``: órdenes del pedido con
+    ``id, folio, estatus, estatus_display, fecha_compromiso, asignado`` (y
+    ``proveedor`` en bordado). Lee lo anotado en la vista; sin consultas."""
+    from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejante
+    from ventas.services.clasificacion_service import rango_fecha_entrega
+    compromiso = rango_fecha_entrega(pedido)[1]
+    tipos = (
+        ("bordado", "bordado_json", OrdenesBordado.EstatusBordado),
+        ("reflejante", "reflejante_json", OrdenesReflejante.EstatusReflejante),
+        ("corte_manga", "corte_manga_json", OrdenesCorteManga.EstatusCorte),
+    )
+    out = {}
+    for clave, attr, choices in tipos:
+        etiquetas = dict(choices.choices)
+        out[clave] = [
+            {**o, "estatus_display": etiquetas.get(o.get("estatus"), ""), "fecha_compromiso": compromiso,
+             "asignado": o.get("asignado") or None}
+            for o in (getattr(pedido, attr, None) or [])
+        ]
+    return out
+
+
 def resumen_pre_orden_pedido(pedido):
     """``pre_orden {id, estatus, estatus_display, semaforo, fecha_estimada_material}``
     del pedido, a partir de ``pedido.pre_orden_json`` (anotado en la vista)."""
@@ -2702,13 +2725,17 @@ class PedidoEspecialListSerializer(serializers.ModelSerializer):
             # tallas con cantidad > 0 de las líneas de muestra.
             "tallas_total", "tallas_con_sku", "tallas_en_catalogo",
             "fecha_compromiso", "prendas_total", "piezas_total", "servicios",
-            "ordenes_produccion", "pre_orden",
+            "ordenes_produccion", "pre_orden", "ordenes_servicio",
         ]
 
     pre_orden = serializers.SerializerMethodField()
+    ordenes_servicio = serializers.SerializerMethodField()
 
     def get_pre_orden(self, obj):
         return resumen_pre_orden_pedido(obj)
+
+    def get_ordenes_servicio(self, obj):
+        return ordenes_servicio_pedido(obj)
 
     tallas_total = serializers.IntegerField(read_only=True)
     tallas_con_sku = serializers.IntegerField(read_only=True)
@@ -2828,13 +2855,17 @@ class PedidoEspecialDetailSerializer(serializers.ModelSerializer):
     # Llenado en la vista: solo las lineas con al menos una talla especial.
     detalles = PedidoDetalleEspecialSerializer(source="detalles_especiales", many=True, read_only=True)
     pre_orden = serializers.SerializerMethodField()
+    ordenes_servicio = serializers.SerializerMethodField()
 
     class Meta:
         model = Pedido
-        fields = ["id", "folio", "estatus", "cliente_nombre", "clasificacion", "fecha_confirmacion", "detalles", "pre_orden"]
+        fields = ["id", "folio", "estatus", "cliente_nombre", "clasificacion", "fecha_confirmacion", "detalles", "pre_orden", "ordenes_servicio"]
 
     def get_pre_orden(self, obj):
         return resumen_pre_orden_pedido(obj)
+
+    def get_ordenes_servicio(self, obj):
+        return ordenes_servicio_pedido(obj)
 
 
 class VarianteProduccionOnboardingSerializer(serializers.Serializer):
