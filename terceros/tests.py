@@ -2099,9 +2099,10 @@ class ClienteListadoOrderingTests(TestCase):
         datos = resp.data["results"] if "limit" in params else resp.data
         return [fila["id"] for fila in datos]
 
-    def _orden_por_defecto(self, qs=None):
-        qs = qs or Cliente.objects.filter(pk__in=self.ids_empresa)
-        return list(qs.order_by("nombre", "id").values_list("pk", flat=True))
+    def _orden_por_defecto(self):
+        return list(
+            Cliente.objects.filter(pk__in=self.ids_empresa).order_by("nombre", "id").values_list("pk", flat=True)
+        )
 
     def test_cada_campo_ordenable_responde_200_en_ambas_direcciones(self):
         for campo in self.CAMPOS:
@@ -2132,12 +2133,43 @@ class ClienteListadoOrderingTests(TestCase):
             with self.subTest(ordering=termino):
                 self.assertEqual(self._ids(ordering=termino), esperado)
 
-    def test_clave_deja_los_null_al_final_en_ambas_direcciones(self):
-        for termino in ("clave", "-clave"):
+    def test_nulls_last_solo_en_campos_null_ables(self):
+        """En columnas NOT NULL (``id``, ``nombre``) el término queda simple para que
+        un DESC pueda recorrer el índice al revés; ``created_at``/``clave`` llevan
+        ``NULLS LAST``."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        casos = {
+            "-created_at": '"clientes"."created_at" DESC NULLS LAST, "clientes"."id" DESC',
+            "-clave": '"clientes"."clave" DESC NULLS LAST, "clientes"."id" DESC',
+            "created_at": '"clientes"."created_at" ASC NULLS LAST, "clientes"."id" ASC',
+            "-id": '"clientes"."id" DESC',
+            "-nombre": '"clientes"."nombre" DESC, "clientes"."id" DESC',
+        }
+        for termino, esperado in casos.items():
             with self.subTest(ordering=termino):
-                ids = self._ids(ordering=termino)
-                nulos = set(Cliente.objects.filter(pk__in=ids, clave__isnull=True).values_list("pk", flat=True))
-                self.assertEqual(set(ids[-len(nulos):]), nulos)
+                with CaptureQueriesContext(connection) as consultas:
+                    self._ids(ordering=termino, limit=50)
+                sql = next(q["sql"] for q in consultas.captured_queries
+                           if 'FROM "clientes"' in q["sql"] and "LIMIT" in q["sql"])
+                self.assertEqual(sql.split("ORDER BY ")[-1].split(" LIMIT")[0], esperado)
+
+    def test_clave_ordena_las_claves_y_deja_los_null_al_final_en_ambas_direcciones(self):
+        """Mismo orden que el ORM con el desempate en la dirección del campo; sin
+        claves NULL la segunda parte queda vacía y la prueba sigue valiendo."""
+        empresa = Cliente.objects.filter(pk__in=self.ids_empresa)
+        con_clave = empresa.filter(clave__isnull=False)
+        sin_clave = empresa.filter(clave__isnull=True)
+        casos = {
+            "clave": [*con_clave.order_by("clave", "id").values_list("pk", flat=True),
+                      *sin_clave.order_by("id").values_list("pk", flat=True)],
+            "-clave": [*con_clave.order_by("-clave", "-id").values_list("pk", flat=True),
+                       *sin_clave.order_by("-id").values_list("pk", flat=True)],
+        }
+        for termino, esperado in casos.items():
+            with self.subTest(ordering=termino):
+                self.assertEqual(self._ids(ordering=termino), esperado)
 
     def test_paginas_concatenadas_de_menos_created_at_igualan_la_lista_completa(self):
         completo = self._ids(ordering="-created_at")
