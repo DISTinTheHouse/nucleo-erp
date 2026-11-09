@@ -132,21 +132,15 @@ def _almacenes_en_alcance(user, qs):
     return qs if user.is_superuser else almacenes_en_alcance(user, qs)
 
 
-def almacenes_del_reporte(user, query_params, almacen_estricto=False):
-    """Almacenes del reporte de existencias: alcance del usuario acotado por
-    ``empresa``, ``sucursal`` y ``almacen`` (y sus alias ``*_id``).
-
-    Con ``almacen_estricto`` el almacén se lee con ``almacen_del_query`` (400 si
-    es inválido); sin él, como siempre, porque también lo usa
-    ``reporte-existencias-produccion-compras``, fuera del EC-822."""
+def almacenes_del_reporte(user, query_params, almacen_id):
+    """Almacenes del reporte de existencias (y de
+    ``reporte-existencias-produccion-compras``): alcance del usuario acotado por
+    ``empresa``, ``sucursal`` (y sus alias ``*_id``) y por ``almacen_id``, que el
+    llamador ya leyó con ``almacen_del_query`` (una vez por petición)."""
     qs = _almacenes_en_alcance(user, Almacen.objects.select_related("empresa", "sucursal").all())
 
     empresa_id = to_int(query_params.get("empresa") or query_params.get("empresa_id"))
     sucursal_id = to_int(query_params.get("sucursal") or query_params.get("sucursal_id"))
-    if almacen_estricto:
-        almacen_id = almacen_del_query(query_params)
-    else:
-        almacen_id = to_int(query_params.get("almacen") or query_params.get("almacen_id"))
 
     if empresa_id:
         qs = qs.filter(empresa_id=empresa_id)
@@ -241,7 +235,10 @@ def _totales_en_cero():
     }
 
 
-def reporte_existencias(user, query_params):
+_SIN_LEER = object()
+
+
+def reporte_existencias(user, query_params, almacen_id=_SIN_LEER):
     """Reporte de existencias del periodo, completo y sin paginar.
 
     Regresa ``fecha_inicio``/``fecha_final`` (``date``), los filtros
@@ -253,12 +250,15 @@ def reporte_existencias(user, query_params):
     """
     fecha_inicio, fecha_final, inicio_dt, final_dt = parse_fechas(query_params)
     qp = query_params
-    almacen_id = almacen_del_query(qp)
+    # La exportación ya lo leyó con ``almacen_requerido``; el JSON lo lee aquí,
+    # después de las fechas (mismo orden de los 400).
+    if almacen_id is _SIN_LEER:
+        almacen_id = almacen_del_query(qp)
     producto_id = to_int(qp.get("producto") or qp.get("producto_id"))
     producto_variante_id = to_int(qp.get("producto_variante") or qp.get("producto_variante_id"))
 
     almacenes = list(
-        almacenes_del_reporte(user, qp, almacen_estricto=True).values(
+        almacenes_del_reporte(user, qp, almacen_id).values(
             "id_almacen",
             "codigo",
             "nombre",

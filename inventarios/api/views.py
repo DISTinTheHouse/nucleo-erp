@@ -411,8 +411,8 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
     def _quantize_qty(self, value):
         return reportes_mod.quantize_qty(value)
 
-    def _build_report_almacenes_queryset(self):
-        return reportes_mod.almacenes_del_reporte(self.request.user, self.request.query_params)
+    def _build_report_almacenes_queryset(self, almacen_id):
+        return reportes_mod.almacenes_del_reporte(self.request.user, self.request.query_params, almacen_id)
 
     @action(
         detail=False, methods=["get"], url_path="reporte-existencias-periodo",
@@ -479,8 +479,8 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
         formato = exportacion_mod.formato_requerido(request.query_params)
         # Fechas primero: sin ellas, el mismo 400 que el JSON.
         reportes_mod.parse_fechas(request.query_params)
-        reportes_mod.almacen_requerido(request.query_params)
-        reporte = reportes_mod.reporte_existencias(request.user, request.query_params)
+        almacen_id = reportes_mod.almacen_requerido(request.query_params)
+        reporte = reportes_mod.reporte_existencias(request.user, request.query_params, almacen_id)
         return respuesta_archivo(exportacion_mod.exportar_existencias(reporte, formato))
 
     @action(detail=False, methods=["get"], url_path="reporte-existencias-produccion-compras")
@@ -554,8 +554,12 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
         qp = request.query_params
         producto_id = self._report_to_int(qp.get("producto") or qp.get("producto_id"))
         sku_q = (qp.get("sku") or qp.get("q") or "").strip()
+        # Mismo lector estricto que los reportes por periodo (EC-822): ``almacen=abc``
+        # ya no se ignora (antes salían todos los almacenes PT). ``sucursal``,
+        # ``producto`` y ``empresa`` siguen como estaban.
+        almacen_id = reportes_mod.almacen_del_query(qp)
 
-        almacenes_pt = self._build_report_almacenes_queryset().filter(
+        almacenes_pt = self._build_report_almacenes_queryset(almacen_id).filter(
             tipo_almacen=TipoAlmacen.PRODUCTO_TERMINADO
         )
         almacenes_info = list(almacenes_pt.values("id_almacen", "empresa_id", "sucursal_id"))
@@ -566,7 +570,7 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
         # Con ``?sucursal``/``?almacen`` el reporte es de esa sucursal también en OP y OC.
         acotar_sucursal = bool(
             self._report_to_int(qp.get("sucursal") or qp.get("sucursal_id"))
-            or self._report_to_int(qp.get("almacen") or qp.get("almacen_id"))
+            or almacen_id
         )
         sucursal_ids = {a["sucursal_id"] for a in almacenes_info}
 
