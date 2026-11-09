@@ -1,5 +1,6 @@
 """Piezas de los listados paginados por servidor (#863): paginación opcional,
 ``?ordering=`` con desempate estable y los filtros comunes de Compras."""
+from django.core.exceptions import FieldDoesNotExist
 from django.db.models import F
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import OrderingFilter
@@ -58,10 +59,14 @@ class OrdenamientoEstableFilter(OrderingFilter):
 
 
 class OrdenamientoNullsAlFinal(OrdenamientoEstableFilter):
-    """``OrdenamientoEstableFilter`` con los NULL al final en ambas direcciones,
-    desempate incluido (EC-826). PostgreSQL los pone primero en DESC: con un
-    campo NULL-able (p. ej. ``created_at`` de clientes anteriores a su historial)
-    ``-campo`` encabezaba la lista con filas sin valor.
+    """``OrdenamientoEstableFilter`` con los NULL al final en ambas direcciones
+    (EC-826). PostgreSQL los pone primero en DESC: con un campo NULL-able (p. ej.
+    ``created_at`` de clientes anteriores a su historial) ``-campo`` encabezaba la
+    lista con filas sin valor. Sólo SQL NULL: una cadena vacía es un valor más.
+
+    ``NULLS LAST`` sólo en los términos que pueden ser NULL: en una columna
+    NOT NULL (``id``, ``nombre``…) no cambia el resultado y en DESC impide que
+    PostgreSQL recorra un btree al revés (eso da ``DESC NULLS FIRST``).
 
     Lista blanca, desempate y orden por defecto no cambian: sin ``?ordering=``
     válido no hay términos y el queryset conserva el orden de ``get_queryset``."""
@@ -70,10 +75,32 @@ class OrdenamientoNullsAlFinal(OrdenamientoEstableFilter):
         ordering = self.get_ordering(request, queryset, view)
         if not ordering:
             return queryset
-        return queryset.order_by(*[
-            F(campo[1:]).desc(nulls_last=True) if campo.startswith("-") else F(campo).asc(nulls_last=True)
-            for campo in ordering
-        ])
+        return queryset.order_by(*[self._termino(queryset.model, campo) for campo in ordering])
+
+    @staticmethod
+    def _termino(modelo, campo):
+        nombre = campo.lstrip("-")
+        if not _admite_null(modelo, nombre):
+            return campo
+        return F(nombre).desc(nulls_last=True) if campo.startswith("-") else F(nombre).asc(nulls_last=True)
+
+
+def _admite_null(modelo, ruta):
+    """``True`` si ``ruta`` (``campo`` o ``fk__campo``) puede valer NULL en la
+    consulta: algún campo del camino es ``null=True`` (las relaciones inversas
+    lo son) o es M2M (join externo). Lo que no resuelve a un campo del modelo
+    (una anotación) cuenta como NULL-able: ``NULLS LAST`` nunca está de más."""
+    try:
+        for parte in ruta.split("__"):
+            campo = modelo._meta.pk if parte == "pk" else modelo._meta.get_field(parte)
+            if campo.null or campo.many_to_many:
+                return True
+            modelo = campo.related_model
+            if modelo is None:
+                break
+    except FieldDoesNotExist:
+        return True
+    return False
 
 
 def estatus_param(request, estatus_validos, nombre="estatus"):
