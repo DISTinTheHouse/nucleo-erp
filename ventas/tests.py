@@ -3508,6 +3508,15 @@ class ServicioExtraCantidadCopiaTests(TestCase):
             self._esperadas(),
         )
 
+    def test_snapshot_no_anida_el_anterior(self):
+        """EC-801: re-autorizar no guarda el snapshot previo dentro del nuevo."""
+        self._autorizar()
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=5)
+        resp = self.client.post(f"/api/v1/ventas/cotizaciones/{self.cotizacion.pk}/aceptar-cambios/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.cotizacion.refresh_from_db()
+        self.assertNotIn("aprobado_snapshot", self.cotizacion.aprobado_snapshot["cotizacion"])
+
     def test_recomprar_conserva_cantidad(self):
         pedido = self._autorizar()
         resp = self.client.post(f"{PEDIDOS_URL}{pedido.pk}/recomprar/")
