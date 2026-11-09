@@ -537,6 +537,32 @@ class Pedido(StatusLifecycleModel):
     def __str__(self):
         return str(self.id)
 
+    def save(self, *args, **kwargs):
+        self._exigir_cliente_de_la_empresa(kwargs.get("update_fields"))
+        super().save(*args, **kwargs)
+
+    def _exigir_cliente_de_la_empresa(self, update_fields):
+        """Última barrera (#1024): el cliente del pedido es de su misma empresa.
+
+        Las altas por API ya lo validan en el serializer; esto cubre las rutas que
+        no pasan por él (servicios, shell, scripts). Sin consulta extra cuando el
+        cliente ya viene cargado; si no, una sola y sólo en el alta o cuando el
+        ``save`` toca ``cliente``/``empresa``.
+        """
+        if not (self.cliente_id and self.empresa_id):
+            return
+        if update_fields is not None and not {"cliente", "cliente_id", "empresa", "empresa_id"} & set(update_fields):
+            return
+        if Pedido.cliente.is_cached(self):
+            empresa_cliente = self.cliente.empresa_id
+        elif self._state.adding or update_fields is not None:
+            empresa_cliente = Cliente.objects.filter(pk=self.cliente_id).values_list("empresa_id", flat=True).first()
+        else:
+            return
+        if empresa_cliente != self.empresa_id:
+            from django.core.exceptions import ValidationError
+            raise ValidationError({"cliente": "El cliente no pertenece a la empresa del pedido."})
+
 class PedidoServicioExtra(models.Model):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="servicios_extras")
     nombre = models.CharField(max_length=150)
