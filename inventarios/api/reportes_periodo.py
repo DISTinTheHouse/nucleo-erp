@@ -72,10 +72,33 @@ def parse_fechas(query_params):
     return fecha_inicio, fecha_final, inicio_dt, final_dt
 
 
+def id_positivo(valor, clave):
+    """Id de un query param: vacío → ``None``; no numérico, 0 o negativo → 400
+    con ``clave``. Ignorarlo quitaba el filtro en silencio (#805, #815, EC-822)."""
+    raw = (valor or "").strip()
+    if not raw:
+        return None
+    try:
+        numero = int(raw)
+    except ValueError:
+        numero = 0
+    if numero <= 0:
+        raise ValidationError({clave: "Debe ser un id numérico mayor a 0."})
+    return numero
+
+
+def almacen_del_query(query_params):
+    """``almacen``/``almacen_id`` de los reportes por periodo (EC-822): el primer
+    alias NO vacío, estricto, y el 400 siempre con la clave ``almacen``. Antes,
+    ``almacen=abc&almacen_id=5`` tomaba ``abc`` y se quedaba sin filtro."""
+    raw = next((v for v in (query_params.get("almacen"), query_params.get("almacen_id")) if (v or "").strip()), None)
+    return id_positivo(raw, "almacen")
+
+
 def almacen_requerido(query_params):
     """``almacen``/``almacen_id`` obligatorio (exportación de existencias)."""
-    almacen_id = to_int(query_params.get("almacen") or query_params.get("almacen_id"))
-    if not almacen_id:
+    almacen_id = almacen_del_query(query_params)
+    if almacen_id is None:
         raise ValidationError({"almacen": "almacen es requerido para exportar el reporte de existencias."})
     return almacen_id
 
@@ -101,14 +124,21 @@ def _almacenes_en_alcance(user, qs):
     return qs if user.is_superuser else almacenes_en_alcance(user, qs)
 
 
-def almacenes_del_reporte(user, query_params):
+def almacenes_del_reporte(user, query_params, almacen_estricto=False):
     """Almacenes del reporte de existencias: alcance del usuario acotado por
-    ``empresa``, ``sucursal`` y ``almacen`` (y sus alias ``*_id``)."""
+    ``empresa``, ``sucursal`` y ``almacen`` (y sus alias ``*_id``).
+
+    Con ``almacen_estricto`` el almacén se lee con ``almacen_del_query`` (400 si
+    es inválido); sin él, como siempre, porque también lo usa
+    ``reporte-existencias-produccion-compras``, fuera del EC-822."""
     qs = _almacenes_en_alcance(user, Almacen.objects.select_related("empresa", "sucursal").all())
 
     empresa_id = to_int(query_params.get("empresa") or query_params.get("empresa_id"))
     sucursal_id = to_int(query_params.get("sucursal") or query_params.get("sucursal_id"))
-    almacen_id = to_int(query_params.get("almacen") or query_params.get("almacen_id"))
+    if almacen_estricto:
+        almacen_id = almacen_del_query(query_params)
+    else:
+        almacen_id = to_int(query_params.get("almacen") or query_params.get("almacen_id"))
 
     if empresa_id:
         qs = qs.filter(empresa_id=empresa_id)
@@ -121,8 +151,9 @@ def almacenes_del_reporte(user, query_params):
 
 def almacen_ids_movimientos(user, query_params):
     """Ids de almacén del reporte de movimientos (solo acota ``almacen``) y el
-    ``almacen`` pedido."""
-    almacen_id = to_int(query_params.get("almacen") or query_params.get("almacen_id"))
+    ``almacen`` pedido (estricto, ``almacen_del_query``). El auxiliar también
+    lo usa, pero valida ``almacen`` antes con la misma regla."""
+    almacen_id = almacen_del_query(query_params)
     qs = _almacenes_en_alcance(user, Almacen.objects.all())
     if almacen_id:
         qs = qs.filter(pk=almacen_id)
@@ -214,12 +245,12 @@ def reporte_existencias(user, query_params):
     """
     fecha_inicio, fecha_final, inicio_dt, final_dt = parse_fechas(query_params)
     qp = query_params
-    almacen_id = to_int(qp.get("almacen") or qp.get("almacen_id"))
+    almacen_id = almacen_del_query(qp)
     producto_id = to_int(qp.get("producto") or qp.get("producto_id"))
     producto_variante_id = to_int(qp.get("producto_variante") or qp.get("producto_variante_id"))
 
     almacenes = list(
-        almacenes_del_reporte(user, qp).values(
+        almacenes_del_reporte(user, qp, almacen_estricto=True).values(
             "id_almacen",
             "codigo",
             "nombre",

@@ -1349,16 +1349,10 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
     def _auxiliar_id(self, qp, *nombres):
         # A diferencia de ``_report_to_int``, un id no numérico es 400: ignorarlo
         # regresaba el kardex de todos los almacenes (#805).
+        # 0 o negativo también es 400: tratarlo como ausente quitaba el filtro (#815).
         for nombre in nombres:
-            raw = (qp.get(nombre) or "").strip()
-            if raw:
-                try:
-                    valor = int(raw)
-                except ValueError:
-                    valor = 0
-                # 0 o negativo también es 400: tratarlo como ausente quitaba el filtro (#815).
-                if valor <= 0:
-                    raise ValidationError({nombre: "Debe ser un id numérico mayor a 0."})
+            valor = reportes_mod.id_positivo(qp.get(nombre), nombre)
+            if valor is not None:
                 return valor
         return None
 
