@@ -37,7 +37,7 @@ from django.db.models.functions import Coalesce, Concat, JSONObject, NullIf, Tri
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
-from nucleo.kpis import entero_param
+from nucleo.kpis import entero_param, vacio
 from nucleo.listados import OrdenamientoEstableFilter, booleano_param
 from nucleo.opciones_filtros import clave_orden, mes_param, opciones_meses
 from ventas.models import Pedido, PedidoDetalleTalla
@@ -147,8 +147,8 @@ def _texto(request, nombre):
 def _entero_piezas(request, nombre, campo=None):
     """``piezas_min``/``piezas_max`` (``entero_param``: vacío → ``None``, una fracción o
     texto → 400); ``piezas`` es entero y truncar ``0.5`` a ``0`` cambiaba el rango.
-    Único lector con signo (EC-829): un mínimo negativo es válido desde EC-782
-    (no excluye ningún pedido)."""
+    Con signo (EC-829): un mínimo negativo es válido desde EC-782 (no excluye
+    ningún pedido)."""
     return entero_param(request, nombre, con_signo=True)
 
 
@@ -183,7 +183,7 @@ def _rango(request, qs, campo, lector):
 def filtra_piezas(request):
     """``True`` si la petición filtra por piezas o muestras (necesita
     ``anotar_piezas`` aunque la acción no pinte columnas)."""
-    return any(_texto(request, n) for n in ("piezas_min", "piezas_max", "muestras"))
+    return any(not vacio(request.query_params.get(n)) for n in ("piezas_min", "piezas_max", "muestras"))
 
 
 def filtrar(request, qs, ver_importes):

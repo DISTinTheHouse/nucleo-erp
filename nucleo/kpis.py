@@ -60,17 +60,24 @@ MENSAJE_ENTERO = "Debe ser un entero válido."
 MENSAJE_POSITIVO = "Debe ser un entero mayor a 0."
 
 
+def vacio(valor):
+    """Única definición de "parámetro ausente": ``None`` o solo espacios (también
+    Unicode, `` ``). Lo que no es vacío lo valida ``entero_estricto``."""
+    return not (valor or "").strip()
+
+
 def entero_estricto(valor, nombre, *, positivo=False, con_signo=False):
-    """Entero de un valor del query string; vacío → ``None``; inválido → 400 con
-    la clave ``nombre``.
+    """Entero de un valor del query string; ``vacio`` → ``None``; inválido → 400
+    con la clave ``nombre``.
 
     Solo dígitos ASCII (hasta 19, dentro de bigint), con los espacios ASCII de
-    alrededor recortados. ``con_signo`` admite un ``-`` inicial (nunca ``+``);
-    ``positivo`` rechaza 0 y negativos con ``MENSAJE_POSITIVO``.
+    alrededor recortados (`` 5`` es 400). ``con_signo`` admite un ``-``
+    inicial (nunca ``+``); ``positivo`` rechaza 0 y negativos con
+    ``MENSAJE_POSITIVO``.
     """
-    texto = (valor or "").strip(ESPACIOS_ASCII)
-    if not texto:
+    if vacio(valor):
         return None
+    texto = valor.strip(ESPACIOS_ASCII)
     negativo = texto.startswith("-")
     digitos = texto[1:] if negativo else texto
     if not (digitos.isascii() and digitos.isdigit()) or len(digitos) > DIGITOS_MAXIMOS:

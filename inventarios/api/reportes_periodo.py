@@ -24,7 +24,7 @@ from rest_framework.exceptions import ValidationError
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Producto, ProductoVariante
 from inventarios.models import Almacen, Existencia, MovimientoInventarioDetalle
-from nucleo.kpis import ESPACIOS_ASCII, entero_estricto
+from nucleo.kpis import entero_estricto, vacio
 
 TIPOS_MOVIMIENTO = ("ENTRADA", "SALIDA", "AJUSTE", "TRANSFERENCIA")
 
@@ -92,10 +92,7 @@ def almacen_del_query(query_params):
     """``almacen``/``almacen_id`` de los reportes por periodo (EC-822): el primer
     alias NO vacío, estricto, y el 400 siempre con la clave ``almacen``. Antes,
     ``almacen=abc&almacen_id=5`` tomaba ``abc`` y se quedaba sin filtro."""
-    raw = next(
-        (v for v in (query_params.get("almacen"), query_params.get("almacen_id")) if (v or "").strip(ESPACIOS_ASCII)),
-        None,
-    )
+    raw = next((v for v in (query_params.get("almacen"), query_params.get("almacen_id")) if not vacio(v)), None)
     return id_positivo(raw, "almacen")
 
 
