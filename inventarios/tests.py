@@ -1968,3 +1968,27 @@ class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
             self.assertIn("Exist. Final", texto)
             self.assertIn(f"de {len(paginas)}", texto)
         self.assertIn("acme-rp-X119", self._texto_pdf(resp.content))
+
+    def test_xlsx_guarda_como_texto_lo_que_parece_formula(self):
+        from openpyxl import load_workbook
+        import io
+        prefijos = ["=1+1", "+52 81", "-5", "@SUMA(A1)", "＠x", "#N/A"]
+        producto = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=self.a["empresa"], nombre='=HYPERLINK("http://x","Ver")',
+        )
+        for i, sku in enumerate(prefijos):
+            variante = ProductoVariante.objects.create(
+                producto=producto, empresa=self.a["empresa"], color=self.color, talla=self.talla,
+                sku=sku, precio_base="1",
+            )
+            Existencia.objects.create(almacen=self.a["almacen"], producto=producto, producto_variante=variante, cantidad=str(i))
+        resp = self._get(
+            self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx", "almacen": self.a["almacen"].pk},
+        )
+        hoja = load_workbook(io.BytesIO(resp.content)).active
+        celdas = {fila[0].value: fila for fila in hoja.iter_rows() if fila[0].value in prefijos}
+        self.assertEqual(set(celdas), set(prefijos))
+        for sku, fila in celdas.items():
+            self.assertEqual((fila[0].value, fila[0].data_type), (sku, "s"))
+            self.assertEqual((fila[1].value, fila[1].data_type), ('=HYPERLINK("http://x","Ver")', "s"))
+            self.assertEqual(fila[5].data_type, "n")  # las cantidades siguen siendo números

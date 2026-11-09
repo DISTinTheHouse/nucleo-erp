@@ -561,6 +561,11 @@ def _xlsx(titulo_hoja, titulo, subtitulo, filtros, generacion, resumen, seccion,
 
     def celda(valor, fuente=None, formato=None, alineacion=None, relleno=None):
         c = WriteOnlyCell(ws, value=valor)
+        if isinstance(valor, str):
+            # Siempre texto: openpyxl guarda como fórmula lo que empieza con "="
+            # (y como error "#N/A", "#REF!"...). Un nombre de producto o de
+            # usuario no debe volverse una fórmula activa al abrir el archivo.
+            c.data_type = "s"
         if fuente:
             c.font = fuente
         if formato:
@@ -602,7 +607,7 @@ def _xlsx(titulo_hoja, titulo, subtitulo, filtros, generacion, resumen, seccion,
     ])
     for fila in filas:
         ws.append([
-            celda(valor, None, formato) if formato and valor is not None else valor
+            celda(valor, None, formato) if (formato and valor is not None) or isinstance(valor, str) else valor
             for valor, (_, _, formato) in zip(fila, columnas)
         ])
 
