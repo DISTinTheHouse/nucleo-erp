@@ -41,6 +41,7 @@ from finanzas.services.facturama.client import FacturamaClient
 from finanzas.services.facturama.exceptions import FacturamaAPIException
 from terceros.scope import clientes_base, clientes_con_cartera_visible, clientes_visibles, ve_cartera_de_todos
 import logging
+from nucleo.permisos import CODIGOS_CLIENTES, CODIGOS_PEDIDO_NEUTRO, LecturaPorCodigo
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,13 @@ class ClienteViewSetMesaControl(viewsets.ModelViewSet):
         )
 
 class ClienteViewSet(viewsets.ModelViewSet):
+    # #1020: lecturas con código R-*; el detalle también desde ``/orders/[id]``.
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = {
+        "list": CODIGOS_CLIENTES,
+        "kpis": CODIGOS_CLIENTES,
+        "retrieve": CODIGOS_CLIENTES + CODIGOS_PEDIDO_NEUTRO,
+    }
     queryset = clientes_base()
     serializer_class = ClienteSerializer
     # Modo servidor como ``ProveedorViewSet`` (EC-757): sin ``?limit=`` regresa la
