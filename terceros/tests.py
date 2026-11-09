@@ -1071,6 +1071,26 @@ class ClienteKpisTests(TestCase):
 
         self.assertEqual(con_bloque - sin_bloque, 1)
 
+    def test_created_at_no_sale_en_listado_detalle_ni_mesa_de_control(self):
+        """EC-817 solo lo usa en ``kpis/``; ``ClienteMesaControlSerializer`` hereda el Meta."""
+        client = APIClient()
+        client.force_authenticate(user=self.admin_empresa)
+
+        def _filas(url):
+            resp = client.get(url)
+            self.assertEqual(resp.status_code, 200, resp.data)
+            data = resp.json()
+            return data["results"] if isinstance(data, dict) and "results" in data else data
+
+        listado = _filas("/api/v1/terceros/clientes/")
+        mesa = _filas("/api/v1/terceros/clientes-mesa-control/")
+        detalle = _filas(f"/api/v1/terceros/clientes/{self.cliente_a.pk}/")
+
+        self.assertTrue(listado and mesa)
+        for fila in [*listado, *mesa, detalle]:
+            self.assertIn("nombre", fila)
+            self.assertNotIn("created_at", fila)
+
 
 class ClienteCreatedAtBackfillTests(TestCase):
     """Migración 0024 (EC-817): ``created_at`` sale del registro ``+`` del historial."""
