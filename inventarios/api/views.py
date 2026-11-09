@@ -1500,12 +1500,21 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        detalle = []
-        for d in mov.detalles.select_related(
+        # Sin ubicación, el almacén de cada lado sale con la misma precedencia
+        # que el reporte por periodo (``detalle.almacen``, recepción, ajuste,
+        # transferencia): la fila del reporte y su detalle dicen el mismo
+        # almacén (EC-820). Solo llena los null.
+        detalles_qs = mov.detalles.select_related(
             "producto", "producto_variante", "ubicacion_origen__almacen",
             "ubicacion_destino__almacen",
-        ):
+        )
+        if mov.tipo_movimiento in reportes_mod.RUTAS_ALMACEN_POR_LADO:
+            detalles_qs = reportes_mod.anotar_almacenes(detalles_qs, mov.tipo_movimiento, campos=())
+        detalle = []
+        for d in detalles_qs:
             origen, destino = d.ubicacion_origen, d.ubicacion_destino
+            almacen_origen_id = getattr(origen, "almacen_id", None) or getattr(d, "almacen_origen_res", None)
+            almacen_destino_id = getattr(destino, "almacen_id", None) or getattr(d, "almacen_destino_res", None)
             detalle.append(
                 {
                     "id": d.pk,
@@ -1517,10 +1526,10 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
                     ),
                     "ubicacion_origen_id": d.ubicacion_origen_id,
                     "ubicacion_origen_nombre": str(origen) if origen else None,
-                    "almacen_origen_id": getattr(origen, "almacen_id", None),
+                    "almacen_origen_id": almacen_origen_id,
                     "ubicacion_destino_id": d.ubicacion_destino_id,
                     "ubicacion_destino_nombre": str(destino) if destino else None,
-                    "almacen_destino_id": getattr(destino, "almacen_id", None),
+                    "almacen_destino_id": almacen_destino_id,
                     "cantidad": str(d.cantidad),
                     "costo_unitario": str(d.costo_unitario),
                 }
