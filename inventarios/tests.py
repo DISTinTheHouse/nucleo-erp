@@ -1256,6 +1256,14 @@ class AuxiliarMovimientosTests(TestCase):
                 self.assertEqual(resp.status_code, 400)
                 self.assertEqual(set(resp.json()), {"limite"})
 
+    def test_limite_invalido_es_400_aunque_q_no_resuelva_una_variante(self):
+        # EC-829: ``limite`` se validaba solo con la variante resuelta.
+        for params in ({"q": "camisa"}, {"q": "no-existe-ec829"}, {"producto_variante": 999999999}):
+            with self.subTest(params=params):
+                resp = self._get(**params, limite="1_0")
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(resp.json(), {"limite": "Debe ser un entero válido."})
+
     def test_limite_cero_o_negativo_es_400_sin_hablar_de_ids(self):
         for valor in ("0", "-1"):
             with self.subTest(valor=valor):
@@ -1563,7 +1571,7 @@ class ExistenciasPorAlmacenTests(TestCase):
 
     def test_filtro_de_ubicacion(self):
         self.assertEqual(sorted(self._ids(ubicacion=self.u2.pk)), self._set("ok80", "low40", "crit15"))
-        for invalido in ("x", "0"):
+        for invalido in ("x", "0", "1_0", "٣"):  # EC-829: solo dígitos ASCII
             self.assertEqual(self._get({"almacen_id": self.alm.pk, "ubicacion": invalido}).status_code, 400)
 
     def test_filtro_de_rango_de_existencias(self):
@@ -2532,6 +2540,10 @@ class PermisoYValidacionReportesPeriodoTests(ReportesPeriodoBase):
             self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, {"almacen": " ", "almacen_id": self.a["almacen"].pk},
         ).json()
         self.assertEqual((data["count"], data["filtros"]), (1, {"almacen_id": self.a["almacen"].pk}))
+        # EC-829: solo espacios Unicode (`` ``) también es vacío y cede a ``almacen_id``.
+        for nombre, url, params in self._acciones():
+            resp = self._get(self.a["usuario"], url, {**params, "almacen": " ", "almacen_id": self.a["almacen"].pk})
+            self.assertEqual(resp.status_code, 200, nombre)
 
     def test_almacen_ajeno_o_inexistente_sigue_siendo_200_vacio(self):
         # Movimientos de A en sus dos almacenes, para que un filtro que se

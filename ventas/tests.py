@@ -8873,7 +8873,15 @@ class PedidoListadoFiltrosColumnaTests(_PedidosModoServidorBase, TestCase):
                     self.assertEqual(set(resp.json()), {next(iter(params))})
         self.assertEqual(self._ids({"piezas_max": "1"}), [self.p4.pk])
         self.assertEqual(sorted(self._ids({"piezas_min": " -5 "})), sorted([self.p1.pk, self.p2.pk, self.p3.pk, self.p4.pk]))
-        # EC-829: piezas_* son los únicos enteros con signo; el resto de los ids no.
+        # EC-829: solo espacios Unicode es ausente en las tres acciones (antes 400 en
+        # pedidos/ y exportar/, 200 sin filtrar en kpis-mesa/).
+        todos = sorted([self.p1.pk, self.p2.pk, self.p3.pk, self.p4.pk])
+        for url in (PEDIDOS_URL, f"{PEDIDOS_URL}exportar/", f"{PEDIDOS_URL}kpis-mesa/"):
+            with self.subTest(url=url):
+                self.assertEqual(self._get(url, {"piezas_min": " "}).status_code, 200)
+        self.assertEqual(sorted(self._ids({"piezas_min": " "})), todos)
+        self.assertEqual(self._get(PEDIDOS_URL, {"piezas_min": " 5"}).status_code, 400)
+        # EC-829: piezas_* admiten signo; los ids no.
         self.assertEqual(sorted(self._ids({"piezas_min": "-5"})), sorted([self.p1.pk, self.p2.pk, self.p3.pk, self.p4.pk]))
         self.assertEqual(self._get(PEDIDOS_URL, {"cliente": "-5"}).status_code, 400)
 
@@ -9595,6 +9603,8 @@ class CotizacionTableroTests(_CotizacionesModoServidorBase, TestCase):
             with self.subTest(params=params):
                 self.assertEqual(self._get(params=params).status_code, 400)
         self.assertEqual(self._tablero({"por_columna": "100"})["por_columna"], 100)
+        # EC-829: ``-1`` responde el mismo mensaje de rango que ``0``.
+        self.assertEqual(self._get(params={"por_columna": "-1"}).json(), self._get(params={"por_columna": "0"}).json())
         self.assertEqual(self._tablero({"por_columna": "1", "format": "json"})["por_columna"], 1)
 
     def test_aislamiento(self):

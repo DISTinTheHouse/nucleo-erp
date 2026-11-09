@@ -439,6 +439,9 @@ class ProveedorKpisTests(TestCase):
                       "?fecha_desde=2026-13-45", "?fecha_desde=2026-02-01&fecha_hasta=2026-01-01",
                       "?proveedor=x"):
             self.assertEqual(self._get(query=query).status_code, 400, query)
+        # EC-829: ``-5`` responde el mismo mensaje de rango que ``0``; ``1_0`` no es entero.
+        self.assertEqual(self._get(query="?limite=-5").data, self._get(query="?limite=0").data)
+        self.assertEqual(self._get(query="?limite=1_0").data, {"limite": "Debe ser un entero válido."})
 
     def test_meta_scorecard_cambia_el_semaforo_y_se_devuelve(self):
         resp = self._get(query="?meta_scorecard=30")

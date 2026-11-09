@@ -5300,6 +5300,12 @@ class OrdenProduccionKpisTests(TestCase):
         self.assertEqual(len(a_tiempo), otd["ops_a_tiempo"])
         self.assertEqual(len(sin_clasificar), otd["ops_sin_clasificar"])
 
+    def test_listado_estatus_negativo_da_vacio(self):
+        # EC-829: ``estatus_op`` admite signo; uno negativo no existe y da 200 vacío.
+        resp = self._listado(self.admin_empresa, "?estatus_op=-1")
+        self.assertEqual((resp.status_code, resp.data), (200, []))
+        self.assertEqual(self._listado(self.admin_empresa, "?estatus_op=1_0").status_code, 400)
+
     def test_listado_kpi_desconocido_es_400(self):
         self.assertEqual(self._listado(self.usuario, "?kpi=otro").status_code, 400)
 
