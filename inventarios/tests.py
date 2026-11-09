@@ -13,7 +13,7 @@ producción en solo lectura o dentro de una transacción con rollback (ver
 ``CLAUDE.md``, sección Pruebas); estos casos documentan el comportamiento esperado.
 """
 
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from unittest import mock
 
@@ -2372,3 +2372,180 @@ class PartirTextoPdfTests(SimpleTestCase):
                     self.assertEqual(
                         _partir(texto, fuente, ancho), self._partir_anterior(texto, fuente, ancho), (texto, fuente, ancho),
                     )
+
+
+class DetalleAlmacenSinUbicacionTests(TestCase):
+    """EC-821: ``MovimientoInventarioDetalle.almacen`` en entradas/salidas
+    manuales sobre existencias sin ubicación (haya o no ubicaciones en el
+    almacén), su efecto en el reporte de movimientos y el backfill de OP."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-da", razon_social="acme-da SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="ADA", nombre="acme-da")
+        cls.otra = Empresa.objects.create(codigo="globex-da", razon_social="globex-da SA")
+        cls.otra_suc = Sucursal.objects.create(empresa=cls.otra, codigo="GDA", nombre="globex-da")
+        # APARTADOS: sin ubicaciones. TELAS: con ubicaciones y existencias sin ella.
+        cls.sin_ubic = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="DA-AP", nombre="APARTADOS acme-da",
+        )
+        cls.con_ubic = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="DA-TE", nombre="TELAS acme-da",
+        )
+        cls.ubicacion = Ubicacion.objects.create(almacen=cls.con_ubic, pasillo="1")
+        cls.almacen_otra = Almacen.objects.create(
+            empresa=cls.otra, sucursal=cls.otra_suc, codigo="DA-GX", nombre="globex-da",
+        )
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Tela acme-da")
+        cls.admin = Usuario.objects.create(
+            username="a@acme-da.test", email="a@acme-da.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.admin.sucursales.add(cls.sucursal)
+
+    def setUp(self):
+        for almacen in (self.sin_ubic, self.con_ubic):
+            Existencia.objects.create(producto=self.producto, almacen=almacen, cantidad=Decimal("10"))
+        Existencia.objects.create(
+            producto=self.producto, almacen=self.con_ubic, ubicacion=self.ubicacion, cantidad=Decimal("10"),
+        )
+
+    def _post(self, tipo, almacen, **item):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resp = client.post(
+            f"{OPERACIONES_URL}{tipo}/",
+            {"almacen": almacen.pk, "items": [{"producto": self.producto.pk, "cantidad": "1", **item}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, (tipo, resp.content))
+        return MovimientoInventarioDetalle.objects.get(movimiento_inventario_id=resp.json()["movimiento_inventario_id"])
+
+    # --- operación manual ---------------------------------------------------------
+
+    def test_entrada_y_salida_sin_ubicacion_llenan_el_almacen(self):
+        for almacen in (self.sin_ubic, self.con_ubic):
+            for tipo in ("entrada", "salida"):
+                d = self._post(tipo, almacen)
+                self.assertEqual(
+                    (d.almacen_id, d.ubicacion_origen_id, d.ubicacion_destino_id), (almacen.pk, None, None),
+                    (almacen.codigo, tipo),
+                )
+
+    def test_con_ubicacion_tambien_llena_el_almacen(self):
+        entrada = self._post("entrada", self.con_ubic, ubicacion=self.ubicacion.pk)
+        salida = self._post("salida", self.con_ubic, ubicacion=self.ubicacion.pk)
+        self.assertEqual((entrada.almacen_id, entrada.ubicacion_destino_id), (self.con_ubic.pk, self.ubicacion.pk))
+        self.assertEqual((salida.almacen_id, salida.ubicacion_origen_id), (self.con_ubic.pk, self.ubicacion.pk))
+
+    def test_ajuste_sin_ubicacion_no_cambia(self):
+        # El almacén del ajuste sale de su cabecera (fuera de EC-821).
+        self.assertIsNone(self._post("ajuste", self.sin_ubic).almacen_id)
+
+    def test_salida_sin_ubicacion_aparece_en_el_reporte_con_su_almacen(self):
+        self._post("salida", self.sin_ubic)
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        hoy = timezone.localdate().isoformat()
+        for filtro in ({}, {"almacen": self.sin_ubic.pk}):
+            data = client.get(
+                REPORTE_MOVIMIENTOS_PERIODO_URL,
+                {"fecha_inicio": hoy, "fecha_final": hoy, "tipo_movimiento": "SALIDA", **filtro},
+            ).json()
+            self.assertEqual(
+                [(f["almacen_id"], f["almacen_codigo"], f["cantidad"]) for f in data["results"]],
+                [(self.sin_ubic.pk, "DA-AP", "1.0000")], filtro,
+            )
+
+    # --- backfill (migración 0025) ---------------------------------------------
+
+    def _renglon_op(self, folio):
+        """Consumo de OP viejo: renglón sin ubicación ni almacén (SALIDA)."""
+        op = OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op=folio)
+        mov = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, usuario=self.admin, tipo_movimiento="SALIDA", op=op,
+        )
+        return op, MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=mov, producto=self.producto, cantidad=Decimal("1"),
+        )
+
+    def _evento(self, id_registro, almacenes, accion="SALIDA", **payload):
+        """Evento de existencias con un item por almacén del mismo producto."""
+        items = [
+            {"producto_id": self.producto.pk, "producto_variante_id": None, "almacen_id": a.pk, "ubicacion_id": None}
+            for a in almacenes
+        ]
+        return AuditoriaEvento.objects.create(
+            empresa=self.empresa, modulo="inventarios", accion=accion, tabla="existencias",
+            id_registro=str(id_registro), antes_json={"items": items, **payload},
+        )
+
+    def _backfill(self, *detalles):
+        import importlib
+
+        from django.apps import apps
+
+        migracion = importlib.import_module("inventarios.migrations.0025_backfill_detalle_almacen_op")
+        with CaptureQueriesContext(connection) as ctx:
+            migracion.backfill_almacen_op(apps, None)
+        for d in detalles:
+            d.refresh_from_db()
+        return [d.almacen_id for d in detalles], len(ctx.captured_queries)
+
+    def test_backfill_llena_solo_el_candidato_unico_de_la_empresa_y_sucursal(self):
+        otra_suc = Sucursal.objects.create(empresa=self.empresa, codigo="ADN", nombre="acme-da norte")
+        almacen_otra_suc = Almacen.objects.create(
+            empresa=self.empresa, sucursal=otra_suc, codigo="DA-NT", nombre="NORTE acme-da",
+        )
+        casos = {}
+        for nombre, almacenes in (
+            ("unico", [self.sin_ubic]),
+            ("ambiguo", [self.sin_ubic, self.con_ubic]),
+            ("otra_empresa", [self.almacen_otra]),
+            ("otra_sucursal", [almacen_otra_suc]),
+        ):
+            op, casos[nombre] = self._renglon_op(f"OP-DA-{nombre}")
+            self._evento(op.pk, almacenes, op_id=op.pk)
+        almacenes, _ = self._backfill(*casos.values())
+        self.assertEqual(dict(zip(casos, almacenes)), {
+            "unico": self.sin_ubic.pk, "ambiguo": None, "otra_empresa": None, "otra_sucursal": None,
+        })
+
+    def test_backfill_ignora_eventos_de_pedido_o_almacen_con_el_mismo_id(self):
+        # ``id_registro`` lo comparten pedidos y almacenes: solo cuenta el
+        # evento cuyo ``antes_json.op_id`` es la OP del movimiento.
+        op, solo_ajeno = self._renglon_op("OP-DA-AJENO")
+        self._evento(op.pk, [self.sin_ubic], pedido_id=op.pk)
+        op2, con_ajeno = self._renglon_op("OP-DA-MIXTO")
+        self._evento(op2.pk, [self.sin_ubic], op_id=op2.pk)
+        self._evento(op2.pk, [self.con_ubic], pedido_id=op2.pk)
+        self._evento(op2.pk, [self.con_ubic])  # operación manual: sin op_id
+        almacenes, _ = self._backfill(solo_ajeno, con_ajeno)
+        self.assertEqual(almacenes, [None, self.sin_ubic.pk])
+
+    def test_backfill_fuera_de_ventana_o_sin_items_queda_null(self):
+        op, lejano = self._renglon_op("OP-DA-LEJOS")
+        ev = self._evento(op.pk, [self.sin_ubic], op_id=op.pk)
+        AuditoriaEvento.objects.filter(pk=ev.pk).update(created_at=ev.created_at + timedelta(seconds=31))
+        op2, sin_items = self._renglon_op("OP-DA-NULL")
+        AuditoriaEvento.objects.create(
+            empresa=self.empresa, modulo="inventarios", accion="SALIDA", tabla="existencias",
+            id_registro=str(op2.pk), antes_json={"items": None, "op_id": op2.pk},
+        )
+        op3, otro_tipo = self._renglon_op("OP-DA-TIPO")
+        self._evento(op3.pk, [self.sin_ubic], accion="ENTRADA", op_id=op3.pk)
+        almacenes, _ = self._backfill(lejano, sin_items, otro_tipo)
+        self.assertEqual(almacenes, [None, None, None])
+
+    def test_backfill_consultas_constantes(self):
+        def correr(n):
+            MovimientoInventarioDetalle.objects.update(almacen=None)
+            detalles = []
+            for i in range(n):
+                op, d = self._renglon_op(f"OP-DA-Q{n}-{i}")
+                self._evento(op.pk, [self.sin_ubic], op_id=op.pk)
+                detalles.append(d)
+            almacenes, consultas = self._backfill(*detalles)
+            self.assertEqual(almacenes, [self.sin_ubic.pk] * n)
+            return consultas
+
+        self.assertEqual(correr(1), correr(5))

@@ -222,6 +222,8 @@ class OrdenProduccionService:
                     producto_variante_id=item["producto_variante_id"],
                     ubicacion_origen_id=item["ubicacion_id"],
                     ubicacion_destino_id=None,
+                    # El almacén de la existencia consumida, como en ventas (EC-821).
+                    almacen_id=item["almacen_id"],
                     lote_id=None,
                     serie_id=None,
                     cantidad=item["cantidad_consumida"],

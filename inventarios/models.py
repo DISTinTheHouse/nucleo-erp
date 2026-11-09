@@ -208,8 +208,9 @@ class MovimientoInventarioDetalle(models.Model):
     )
     ubicacion_origen = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle_origen", null=True, blank=True)
     ubicacion_destino = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle_destino", null=True, blank=True)
-    # Almacén afectado cuando la existencia no tiene ubicación (movimientos por
-    # pedido o factura): sin esto el renglón no dice a qué almacén pegó (#803).
+    # Almacén de la existencia afectada (#803, EC-821): lo llenan ventas,
+    # factura, consumo y recálculo de OP y entrada/salida manual, haya o no
+    # ubicación. Si hay ubicación, ésta manda en reportes y auxiliar.
     almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle", null=True, blank=True)
     lote = models.ForeignKey(Lote, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle", null=True, blank=True)
     serie = models.ForeignKey(Serie, on_delete=models.PROTECT, related_name="movimiento_inventario_detalle", null=True, blank=True)

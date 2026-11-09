@@ -975,6 +975,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 variante_produccion_id=item["variante_produccion_id"],
                 ubicacion_origen_id=item["ubicacion_origen_id"],
                 ubicacion_destino_id=item["ubicacion_destino_id"],
+                almacen_id=item["almacen_id"],
                 lote_id=item["lote_id"],
                 serie_id=item["serie_id"],
                 cantidad=item["cantidad"],
@@ -1112,6 +1113,9 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                         "variante_produccion_id": ex.variante_produccion_id,
                         "ubicacion_origen_id": ubicacion_origen_id,
                         "ubicacion_destino_id": ubicacion_destino_id,
+                        # ENTRADA/SALIDA: el almacén de la existencia, como en
+                        # ventas (EC-821). El ajuste lo da su cabecera.
+                        "almacen_id": ex.almacen_id if tipo in {"ENTRADA", "SALIDA"} else None,
                         "lote_id": it["lote_id"],
                         "serie_id": it["serie_id"],
                         "cantidad": qty if tipo != "AJUSTE" else new_qty,
