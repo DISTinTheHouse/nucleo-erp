@@ -211,7 +211,9 @@ class ClienteMesaControlSerializer(ClienteSerializer):
     """``ClienteSerializer`` + ``fecha_ultima_compra`` para Mesa de Control.
 
     La fecha sale de ``ultimo_pedido_at``, que anota ``ClienteViewSetMesaControl``
-    (pedido más reciente activo y no cancelado); ``None`` si nunca ha comprado.
+    (pedido más reciente activo de su empresa que es venta real: sin MUESTRA,
+    PEDIDO DE ERROR, BORRADOR, POR AUTORIZAR ni CANCELADO, ver
+    ``ventas.scope.pedidos_venta_real``); ``None`` si nunca ha comprado.
     """
 
     fecha_ultima_compra = serializers.SerializerMethodField()

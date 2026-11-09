@@ -2190,3 +2190,142 @@ class ClienteListadoOrderingTests(TestCase):
             with self.subTest(ordering=termino):
                 self.assertCountEqual(self._ids(ordering=termino), self.ids_empresa)
                 self.assertCountEqual(self._ids(self.vendedor, ordering=termino), asignados)
+
+
+class ClienteMesaControlFechaUltimaCompraTests(TestCase):
+    """``fecha_ultima_compra`` de ``clientes-mesa-control`` (EC-744/EC-830): solo
+    cuentan las ventas reales (``ventas.scope.pedidos_venta_real``). MUESTRA,
+    PEDIDO DE ERROR, BORRADOR, POR AUTORIZAR y CANCELADO no son compra aunque
+    sean más recientes; tampoco un pedido inactivo ni uno de otra empresa."""
+
+    URL = "/api/v1/terceros/clientes-mesa-control/"
+    VENTA = datetime(2026, 3, 10, 18, 0, tzinfo=dt_timezone.utc)
+    POSTERIOR = datetime(2026, 4, 20, 18, 0, tzinfo=dt_timezone.utc)
+
+    @classmethod
+    def setUpTestData(cls):
+        from nucleo.models import Moneda, Sucursal
+
+        cls.empresa = Empresa.objects.create(codigo="ec830", razon_social="EC830 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="EC830", nombre="EC830")
+        cls.otra = Empresa.objects.create(codigo="ec830-otra", razon_social="Otra EC830 SA")
+        cls.sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="EC830O", nombre="EC830 otra")
+        cls.moneda = Moneda.objects.create(codigo_iso="XEC", nombre="Moneda EC830")
+        cls.admin = Usuario.objects.create(
+            username="admin-ec830", email="admin@ec830.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.admin_otra = Usuario.objects.create(
+            username="admin-otra-ec830", email="admin@otra-ec830.test", empresa=cls.otra, is_admin_empresa=True,
+        )
+
+    def _cliente(self, nombre="Cliente EC830"):
+        return Cliente.objects.create(empresa=self.empresa, nombre=nombre)
+
+    def _pedido(self, cliente, creado, empresa=None, sucursal=None, **campos):
+        from ventas.models import Pedido
+
+        campos.setdefault("estatus", Pedido.ESTATUS_AUTORIZADA)
+        pedido = Pedido.objects.create(
+            empresa=empresa or self.empresa, sucursal=sucursal or self.sucursal, cliente=cliente,
+            moneda=self.moneda, persona_pagos="Pagos", correo_facturas="p@ec830.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", **campos,
+        )
+        Pedido.objects.filter(pk=pedido.pk).update(created_at=creado)
+        return pedido
+
+    def _fechas(self, usuario=None):
+        client = APIClient()
+        client.force_authenticate(user=usuario or self.admin)
+        resp = client.get(self.URL)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        data = resp.json()
+        filas = data["results"] if isinstance(data, dict) and "results" in data else data
+        return {fila["id"]: fila["fecha_ultima_compra"] for fila in filas}
+
+    @staticmethod
+    def _local(momento):
+        return timezone.localtime(momento).date().isoformat()
+
+    @staticmethod
+    def _excluidos():
+        from ventas.models import TIPO_PEDIDO_ERROR, TIPO_PEDIDO_MUESTRA, Pedido
+
+        return {
+            "MUESTRA": {"tipo_pedido": TIPO_PEDIDO_MUESTRA},
+            "PEDIDO DE ERROR": {"tipo_pedido": TIPO_PEDIDO_ERROR},
+            "BORRADOR": {"estatus": Pedido.ESTATUS_BORRADOR},
+            "POR AUTORIZAR": {"estatus": Pedido.ESTATUS_POR_AUTORIZAR},
+            "CANCELADO": {"estatus": Pedido.ESTATUS_CANCELADO},
+        }
+
+    def test_excluidos_mas_recientes_no_ganan_a_la_venta_real(self):
+        clientes = {}
+        for caso, campos in self._excluidos().items():
+            cliente = self._cliente(f"Cliente {caso}")
+            self._pedido(cliente, self.VENTA)
+            self._pedido(cliente, self.POSTERIOR, **campos)
+            clientes[caso] = cliente
+        fechas = self._fechas()
+        for caso, cliente in clientes.items():
+            with self.subTest(caso=caso):
+                self.assertEqual(fechas[cliente.pk], self._local(self.VENTA))
+
+    def test_solo_excluidos_es_null(self):
+        cliente = self._cliente()
+        for campos in self._excluidos().values():
+            self._pedido(cliente, self.POSTERIOR, **campos)
+        sin_pedidos = self._cliente("Sin pedidos")
+        fechas = self._fechas()
+        self.assertIsNone(fechas[cliente.pk])
+        self.assertIsNone(fechas[sin_pedidos.pk])
+
+    def test_autorizada_y_en_proceso_cuentan(self):
+        from ventas.models import Pedido
+
+        for estatus in (Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO):
+            with self.subTest(estatus=estatus):
+                cliente = self._cliente(f"Cliente {estatus}")
+                self._pedido(cliente, self.VENTA)
+                self._pedido(cliente, self.POSTERIOR, estatus=estatus)
+                self.assertEqual(self._fechas()[cliente.pk], self._local(self.POSTERIOR))
+
+    def test_inactivo_no_cuenta(self):
+        cliente = self._cliente()
+        self._pedido(cliente, self.VENTA)
+        self._pedido(cliente, self.POSTERIOR, activo=False)
+        self.assertEqual(self._fechas()[cliente.pk], self._local(self.VENTA))
+
+    def test_pedido_de_otra_empresa_no_cuenta_ni_se_ve(self):
+        cliente = self._cliente()
+        self._pedido(cliente, self.VENTA)
+        # Pedido de OTRA empresa que apunta a este cliente: no es su compra.
+        self._pedido(cliente, self.POSTERIOR, empresa=self.otra, sucursal=self.sucursal_otra)
+        self.assertEqual(self._fechas()[cliente.pk], self._local(self.VENTA))
+        # El admin de la otra empresa ni siquiera ve al cliente.
+        self.assertNotIn(cliente.pk, self._fechas(self.admin_otra))
+
+    def test_fecha_en_hora_local(self):
+        # 02:00 UTC del 2 de enero = 1 de enero en America/Mexico_City.
+        cliente = self._cliente()
+        self._pedido(cliente, datetime(2026, 1, 2, 2, 0, tzinfo=dt_timezone.utc))
+        self.assertEqual(self._fechas()[cliente.pk], "2026-01-01")
+
+    def test_consultas_no_crecen_con_las_filas(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from ventas.models import Pedido
+
+        def _consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                self._fechas()
+            return len(ctx)
+
+        self._pedido(self._cliente("Primero"), self.VENTA)
+        self._fechas()  # calienta lo que se cachea por proceso
+        pocas = _consultas()
+        for i in range(5):
+            otro = self._cliente(f"Más {i}")
+            self._pedido(otro, self.VENTA)
+            self._pedido(otro, self.POSTERIOR, estatus=Pedido.ESTATUS_BORRADOR)
+        self.assertEqual(_consultas(), pocas)

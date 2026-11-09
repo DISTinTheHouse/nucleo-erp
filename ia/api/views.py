@@ -519,15 +519,18 @@ class AIAssistantAPIView(APIView):
 
         user = request.user
         ver_importes = puede_ver_contabilidad(user)
-        pedidos_qs = Pedido.objects.filter(activo=True).exclude(estatus=5)
-        if not getattr(user, "is_superuser", False):
-            empresa = getattr(user, "empresa", None)
-            if empresa:
-                pedidos_qs = pedidos_qs.filter(empresa=empresa)
-                if not getattr(user, "is_admin_empresa", False):
-                    pedidos_qs = pedidos_qs.filter(Q(cliente__vendedores=user) | Q(cotizacion__vendedor=user))
-            else:
-                pedidos_qs = pedidos_qs.none()
+        from ventas.scope import pedidos_base, pedidos_venta_real, pedidos_visibles
+
+        # Alcance canónico de pedidos (``ventas.scope``): sólo la empresa activa,
+        # superusuario incluido (EC-798/EC-839); sin empresa, nada. Encima, la
+        # misma regla de "compra" que ``fecha_ultima_compra`` de Mesa de Control
+        # (EC-830): sólo ventas reales, sin muestras, errores, borradores, por
+        # autorizar ni cancelados.
+        pedidos_qs = pedidos_venta_real(pedidos_visibles(pedidos_base(), user))
+        # Dentro de la empresa, superusuario y admin ven todo; el resto, sólo los
+        # pedidos de sus clientes o de sus cotizaciones.
+        if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
+            pedidos_qs = pedidos_qs.filter(Q(cliente__vendedores=user) | Q(cotizacion__vendedor=user))
 
         d_from, d_to = self._parse_date_filters(args)
         if d_from and d_to:

@@ -19,7 +19,7 @@ Ninguna aplica filtros de UI (``?q=``, ``estatus``, ``mis_pedidos``), anotacione
 orden: eso sigue siendo responsabilidad del ViewSet.
 """
 
-from ventas.models import Cotizacion, Oportunidad, Pedido
+from ventas.models import TIPO_PEDIDO_ERROR, TIPO_PEDIDO_MUESTRA, Cotizacion, Oportunidad, Pedido
 
 
 def _ve_toda_la_empresa(user):
@@ -30,6 +30,20 @@ def _ve_toda_la_empresa(user):
 def pedidos_base():
     """Filas existentes de ``ventas.Pedido``: excluye las borradas (soft delete)."""
     return Pedido.objects.filter(activo=True)
+
+
+def pedidos_venta_real(qs):
+    """Sólo los pedidos que cuentan como compra del cliente (EC-744/EC-830): fuera
+    MUESTRA y PEDIDO DE ERROR (``tipo_pedido``) y BORRADOR, POR AUTORIZAR y
+    CANCELADO (``estatus``). Lo usan ``fecha_ultima_compra`` de Mesa de Control y
+    la herramienta ``get_last_cliente_compra`` del asistente: una sola regla.
+
+    Es un filtro de negocio, no de alcance: no toca empresa ni ``activo``; se
+    combina con ``pedidos_base()``/``pedidos_visibles()`` o con un ``OuterRef``.
+    """
+    return qs.exclude(tipo_pedido__in=(TIPO_PEDIDO_MUESTRA, TIPO_PEDIDO_ERROR)).exclude(
+        estatus__in=(Pedido.ESTATUS_BORRADOR, Pedido.ESTATUS_POR_AUTORIZAR, Pedido.ESTATUS_CANCELADO)
+    )
 
 
 def cotizaciones_base():
