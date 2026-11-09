@@ -686,7 +686,7 @@ Permite consultar el inventario actual.
   - Clic en generar reporte
 - **Permiso (EC-822)**: `R-CORE-REPORTES`, también en `exportar/` (superusuario y admin de empresa pasan; `R-CORE` solo no basta). Sin él → `403`, en JSON aunque se pida el archivo.
 - **Query params mínimos**:
-  - `fecha_inicio`: requerido, formato `YYYY-MM-DD`; una fecha inexistente (`2026-02-30`) también es `400`
+  - `fecha_inicio`: requerido, formato `YYYY-MM-DD`; una fecha inexistente (`2026-02-30`) también es `400`, con el mensaje "no es una fecha válida: ese día no existe."
   - `fecha_final`: requerido, formato `YYYY-MM-DD`
   - `almacen_id` (alias `almacen`): opcional si el usuario quiere un almacén específico; si se omite, regresa todos los almacenes visibles para el usuario. Se toma el primer alias no vacío; no numérico, `0` o negativo → `400 {"almacen": ...}` (EC-822). Un almacén válido pero fuera del alcance o inexistente da `200` vacío.
   - `filtros` siempre es `{"almacen_id": <el pedido o null>}`, haya o no resultados.
@@ -767,7 +767,7 @@ Permite consultar el inventario actual.
 - **Query params** (todos opcionales):
   - `producto` / `producto_id`: filtra a un producto específico.
   - `sku` / `q`: coincidencia parcial contra `sku` de la variante, o `nombre`/`codigo` del producto.
-  - `empresa`/`empresa_id`, `sucursal`/`sucursal_id`, `almacen`/`almacen_id`: mismo alcance de almacenes que `reporte-existencias-periodo` (`_build_report_almacenes_queryset`); no abren el scope del usuario, solo lo acotan dentro de lo ya visible.
+  - `empresa`/`empresa_id`, `sucursal`/`sucursal_id`, `almacen`/`almacen_id`: mismo alcance de almacenes que `reporte-existencias-periodo` (`_build_report_almacenes_queryset`); no abren el scope del usuario, solo lo acotan dentro de lo ya visible. `almacen` usa el mismo lector estricto que los reportes por periodo (EC-822): primer alias no vacío; no numérico, `0` o negativo → `400 {"almacen": ...}`. `empresa`/`sucursal` inválidos siguen ignorándose.
 - **Alcance**: solo considera almacenes con `tipo_almacen = PRODUCTO_TERMINADO` dentro del alcance del usuario (empresas + sucursales). Si el usuario no tiene ningún almacén PT visible, responde `{"resultados": []}`.
 - **Sin paginar**: `resultados` es la lista completa (agrupada por producto, no por variante), ordenada por `codigo`.
 - **Qué cuenta como "en producción"**: detalle de `OrdenProduccion` con `activo=True` y `estatus_op` distinto de `COMPLETADO`/`CANCELADO`. Una OP completada o cancelada no debe seguir "reservando" resurtido, así que se excluye aunque siga activa en el sistema.
