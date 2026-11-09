@@ -821,6 +821,16 @@ class PedidoSerializer(serializers.ModelSerializer):
     folio_consecutivo = serializers.IntegerField(read_only=True)
     servicios_extras = serializers.SerializerMethodField()
     documentos = serializers.SerializerMethodField()
+    # Pre-orden de producción ``{id, estatus, estatus_display, semaforo, ...}``;
+    # solo en el detalle (``retrieve`` anota ``pre_orden_json``), si no ``None``.
+    pre_orden = serializers.SerializerMethodField()
+
+    def get_pre_orden(self, obj):
+        if not hasattr(obj, "pre_orden_json"):
+            return None
+        from produccion.api.serializers import resumen_pre_orden_pedido
+        return resumen_pre_orden_pedido(obj)
+
     tracker_picking = serializers.SerializerMethodField()
     folios_picking = serializers.SerializerMethodField()
     # Solo lectura: no cambia el contrato de escritura de ningún endpoint de

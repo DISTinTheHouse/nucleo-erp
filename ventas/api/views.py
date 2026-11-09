@@ -2856,10 +2856,14 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # FK ``pedido.cotizacion`` (el único documento ``is_single``), que sin
         # esto disparaba una consulta extra durante la serialización. Sólo aquí,
         # no en el listado — ``PedidoListSerializer`` no la toca.
+        # ``pre_orden`` (seguimiento de producción para Ventas): subconsulta en
+        # la misma consulta del pedido.
+        from produccion.api.views import _pre_orden_json
         qs = (
             self.get_queryset()
             .select_related("cotizacion")
             .prefetch_related(*documentos_related_prefetch_args())
+            .annotate(pre_orden_json=_pre_orden_json(OuterRef("pk")))
         )
         instance = get_object_or_404(qs, pk=kwargs.get("pk"))
 
