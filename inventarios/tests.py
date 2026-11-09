@@ -47,6 +47,7 @@ from nucleo.models import (
     UnidadMedida,
 )
 from produccion.models import ListaMaterialBom, OrdenProduccion, OrdenProduccionDetalle
+from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
 from terceros.models import Proveedor
 from usuarios.models import Usuario
 from wms.models import Transferencia
@@ -1677,6 +1678,16 @@ class ReportesPeriodoBase(TestCase):
     dentro del periodo y -1 después; una entrada costeada a 5 dentro del periodo.
     """
 
+    @staticmethod
+    def _dar_permisos(usuario, empresa, *claves):
+        rol = Rol.objects.create(
+            empresa=empresa, codigo=f"rp-{usuario.username}", nombre="Reportes", estatus=Rol.Estatus.ACTIVO,
+        )
+        for clave in claves:
+            permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+            RolPermiso.objects.create(rol=rol, permiso=permiso)
+        UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=empresa)
+
     @classmethod
     def _tenant(cls, codigo):
         empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
@@ -1694,6 +1705,8 @@ class ReportesPeriodoBase(TestCase):
             first_name="Ana", last_name=codigo,
         )
         usuario.sucursales.add(matriz)
+        # EC-822: los reportes exigen R-CORE-REPORTES.
+        cls._dar_permisos(usuario, empresa, "R-CORE-REPORTES")
         producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Playera {codigo}")
         variante = ProductoVariante.objects.create(
             producto=producto, empresa=empresa, color=cls.color, talla=cls.talla,
@@ -2334,6 +2347,170 @@ class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
         }).content)
         for nombre in ("acme-rp SA", "Matriz acme-rp", "Playera acme-rp", "acme-rp-AZ-M"):
             self.assertIn(nombre, texto)
+
+
+class PermisoYValidacionReportesPeriodoTests(ReportesPeriodoBase):
+    """EC-822: los dos reportes por periodo (JSON y ``exportar/``) exigen
+    ``R-CORE-REPORTES`` y validan ``almacen`` y las fechas con 400."""
+
+    def _acciones(self):
+        """``(nombre, url, params mínimos sin almacén)`` de las cuatro acciones."""
+        tipo = {"tipo_movimiento": "ENTRADA"}
+        return (
+            ("existencias", REPORTE_EXISTENCIAS_PERIODO_URL, {}),
+            ("movimientos", REPORTE_MOVIMIENTOS_PERIODO_URL, tipo),
+            ("existencias/exportar", REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx"}),
+            ("movimientos/exportar", REPORTE_MOVIMIENTOS_EXPORTAR_URL, {**tipo, "formato": "xlsx"}),
+        )
+
+    def _validos(self, tenant):
+        """Params que dan 200 en cada acción (la exportación de existencias exige almacén)."""
+        for nombre, url, params in self._acciones():
+            yield nombre, url, {**params, "almacen": tenant["almacen"].pk}
+
+    def _usuario(self, tenant, username, **extra):
+        usuario = Usuario.objects.create(username=username, email=username, empresa=tenant["empresa"], **extra)
+        usuario.sucursales.add(tenant["matriz"])
+        return usuario
+
+    def _assert_403(self, usuario):
+        for nombre, url, params in self._validos(self.a):
+            resp = self._get(usuario, url, params)
+            self.assertEqual(resp.status_code, 403, nombre)
+            self.assertIn("detail", resp.json(), nombre)
+
+    # --- Permiso -----------------------------------------------------------------
+
+    def test_sin_r_core_reportes_es_403_tambien_al_pedir_el_archivo(self):
+        sin_permiso = self._usuario(self.a, "sin@acme-rp.test")
+        self._assert_403(sin_permiso)
+        cliente = APIClient()
+        cliente.force_authenticate(user=sin_permiso)
+        for url, extra in (
+            (REPORTE_EXISTENCIAS_EXPORTAR_URL, {}),
+            (REPORTE_MOVIMIENTOS_EXPORTAR_URL, {"tipo_movimiento": "ENTRADA"}),
+        ):
+            for accept in ("application/pdf", CONTENT_TYPE_XLSX):
+                resp = cliente.get(
+                    url, {**PERIODO_REPORTE, **extra, "almacen": self.a["almacen"].pk}, HTTP_ACCEPT=accept,
+                )
+                self.assertEqual((resp.status_code, resp["Content-Type"]), (403, "application/json"), (url, accept))
+
+    def test_r_core_solo_no_basta(self):
+        usuario = self._usuario(self.a, "core@acme-rp.test")
+        self._dar_permisos(usuario, self.a["empresa"], "R-CORE", "R-WMS-EXISTENCIAS")
+        self._assert_403(usuario)
+
+    def test_deny_gana_al_rol(self):
+        usuario = self.a["usuario"]
+        UsuarioPermiso.objects.create(
+            usuario=usuario, permiso=Permiso.objects.get(clave="R-CORE-REPORTES"), tipo=UsuarioPermiso.TIPO_DENY,
+        )
+        self._assert_403(usuario)
+
+    def test_grant_directo_basta(self):
+        usuario = self._usuario(self.a, "grant@acme-rp.test")
+        UsuarioPermiso.objects.create(
+            usuario=usuario, permiso=Permiso.objects.get(clave="R-CORE-REPORTES"), tipo=UsuarioPermiso.TIPO_GRANT,
+        )
+        for nombre, url, params in self._validos(self.a):
+            self.assertEqual(self._get(usuario, url, params).status_code, 200, nombre)
+
+    def test_superusuario_admin_y_usuario_con_el_codigo_pasan(self):
+        admin = self._usuario(self.a, "admin@acme-rp.test", is_admin_empresa=True)
+        for usuario in (self.superuser, admin, self.a["usuario"]):
+            for nombre, url, params in self._validos(self.a):
+                self.assertEqual(self._get(usuario, url, params).status_code, 200, (usuario.username, nombre))
+
+    def test_sin_sesion_sigue_siendo_401(self):
+        for nombre, url, params in self._validos(self.a):
+            resp = APIClient().get(url, {**PERIODO_REPORTE, **params})
+            self.assertEqual(resp.status_code, 401, nombre)
+
+    def test_el_permiso_cuesta_consultas_fijas(self):
+        """El permiso suma sus 2 consultas fijas (overrides y roles) y nada más."""
+        from inventarios.api.views import PermisoReportesInventario
+
+        def consultas(url, params):
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(self._get(self.a["usuario"], url, params).status_code, 200)
+            return len(ctx.captured_queries)
+
+        for nombre, url, params in self._validos(self.a):
+            con_permiso = consultas(url, params)
+            with mock.patch.object(PermisoReportesInventario, "has_permission", return_value=True):
+                sin_permiso = consultas(url, params)
+            self.assertEqual(con_permiso - sin_permiso, 2, nombre)
+
+    # --- Almacén -------------------------------------------------------------------
+
+    def test_almacen_invalido_es_400_con_la_clave_almacen(self):
+        valido = self.a["almacen"].pk
+        invalidos = (
+            {"almacen": "abc"},
+            {"almacen": "0"},
+            {"almacen": "-1"},
+            {"almacen_id": "abc"},
+            {"almacen_id": "-1"},
+            {"almacen": "abc", "almacen_id": valido},
+            {"almacen": "1.5"},
+        )
+        for nombre, url, params in self._acciones():
+            for malo in invalidos:
+                resp = self._get(self.a["usuario"], url, {**params, **malo})
+                self.assertEqual(resp.status_code, 400, (nombre, malo))
+                self.assertEqual(list(resp.json()), ["almacen"], (nombre, malo))
+
+    def test_se_toma_el_primer_alias_no_vacio(self):
+        for nombre, url, params in self._acciones():
+            resp = self._get(self.a["usuario"], url, {**params, "almacen": "", "almacen_id": self.a["almacen"].pk})
+            self.assertEqual(resp.status_code, 200, nombre)
+        data = self._get(
+            self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, {"almacen": " ", "almacen_id": self.a["almacen"].pk},
+        ).json()
+        self.assertEqual((data["count"], data["filtros"]), (1, {"almacen_id": self.a["almacen"].pk}))
+
+    def test_almacen_ajeno_o_inexistente_sigue_siendo_200_vacio(self):
+        for almacen in (self.b["almacen"].pk, self.a["almacen_norte"].pk, 999999):
+            for nombre, url, params in self._acciones()[:2]:
+                resp = self._get(self.a["usuario"], url, {**params, "almacen": almacen})
+                self.assertEqual(resp.status_code, 200, (nombre, almacen))
+                data = resp.json()
+                self.assertEqual((data["count"], data["results"]), (0, []), (nombre, almacen))
+                self.assertEqual(data["filtros"], {"almacen_id": almacen}, (nombre, almacen))
+            for nombre, url, params in self._acciones()[2:]:
+                resp = self._get(self.a["usuario"], url, {**params, "almacen": almacen})
+                self.assertEqual(resp.status_code, 200, (nombre, almacen))
+
+    # --- Fechas y filtros ------------------------------------------------------------
+
+    def test_fecha_inexistente_es_400_no_500(self):
+        casos = (
+            ({"fecha_inicio": "2026-02-30"}, "fecha_inicio"),
+            ({"fecha_final": "2026-13-01"}, "fecha_final"),
+            ({"fecha_inicio": "abc"}, "fecha_inicio"),
+        )
+        for nombre, url, params in self._validos(self.a):
+            for fechas, clave in casos:
+                resp = self._get(self.a["usuario"], url, {**params, **fechas})
+                self.assertEqual(resp.status_code, 400, (nombre, fechas))
+                self.assertEqual(list(resp.json()), [clave], (nombre, fechas))
+
+    def test_filtros_de_existencias_con_una_sola_forma(self):
+        # Con permiso pero sin sucursales: ningún almacén en alcance y sin filtro.
+        sin_sucursal = Usuario.objects.create(
+            username="sin-suc@acme-rp.test", email="sin-suc@acme-rp.test", empresa=self.a["empresa"],
+        )
+        self._dar_permisos(sin_sucursal, self.a["empresa"], "R-CORE-REPORTES")
+        a_pk, b_pk = self.a["almacen"].pk, self.b["almacen"].pk
+        for usuario, params, count, filtros in (
+            (self.a["usuario"], {}, 1, {"almacen_id": None}),
+            (self.a["usuario"], {"almacen": a_pk}, 1, {"almacen_id": a_pk}),
+            (self.a["usuario"], {"almacen": b_pk}, 0, {"almacen_id": b_pk}),
+            (sin_sucursal, {}, 0, {"almacen_id": None}),
+        ):
+            data = self._get(usuario, REPORTE_EXISTENCIAS_PERIODO_URL, params).json()
+            self.assertEqual((data["count"], data["filtros"]), (count, filtros), (usuario.username, params))
 
 
 class PartirTextoPdfTests(SimpleTestCase):
