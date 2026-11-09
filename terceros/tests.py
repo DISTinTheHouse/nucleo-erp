@@ -2220,7 +2220,7 @@ class ClienteMesaControlFechaUltimaCompraTests(TestCase):
     def _pedido(self, cliente, creado, empresa=None, sucursal=None, **campos):
         from ventas.models import Pedido
 
-        campos.setdefault("estatus", 3)  # AUTORIZADA
+        campos.setdefault("estatus", Pedido.ESTATUS_AUTORIZADA)
         pedido = Pedido.objects.create(
             empresa=empresa or self.empresa, sucursal=sucursal or self.sucursal, cliente=cliente,
             moneda=self.moneda, persona_pagos="Pagos", correo_facturas="p@ec830.test",
@@ -2276,7 +2276,9 @@ class ClienteMesaControlFechaUltimaCompraTests(TestCase):
         self.assertIsNone(fechas[sin_pedidos.pk])
 
     def test_autorizada_y_en_proceso_cuentan(self):
-        for estatus in (3, 4):  # AUTORIZADA, EN PROCESO
+        from ventas.models import Pedido
+
+        for estatus in (Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO):
             with self.subTest(estatus=estatus):
                 cliente = self._cliente(f"Cliente {estatus}")
                 self._pedido(cliente, self.VENTA)
@@ -2308,6 +2310,8 @@ class ClienteMesaControlFechaUltimaCompraTests(TestCase):
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
+        from ventas.models import Pedido
+
         def _consultas():
             with CaptureQueriesContext(connection) as ctx:
                 self._fechas()
@@ -2319,5 +2323,5 @@ class ClienteMesaControlFechaUltimaCompraTests(TestCase):
         for i in range(5):
             otro = self._cliente(f"Más {i}")
             self._pedido(otro, self.VENTA)
-            self._pedido(otro, self.POSTERIOR, estatus=1)
+            self._pedido(otro, self.POSTERIOR, estatus=Pedido.ESTATUS_BORRADOR)
         self.assertEqual(_consultas(), pocas)
