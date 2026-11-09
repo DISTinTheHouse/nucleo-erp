@@ -1,3 +1,4 @@
+from django.db.models import F
 from django.db import IntegrityError, transaction
 from django.db.models import Exists, OuterRef, Q, Subquery
 from django.db.models.functions import Lower
@@ -201,7 +202,7 @@ class ProductoViewSet(viewsets.ModelViewSet):
     serializer_class = ProductoSerializer
 
     def get_queryset(self):
-        qs = _alcance_empresa(super().get_queryset().filter(activo=True), self.request.user)
+        qs = _alcance_empresa(super().get_queryset().filter(activo=True).annotate(unidad_nombre=F('unidad_medida__nombre'), unidad_abreviatura=F('unidad_medida__clave')), self.request.user)
         # ``tipo_id`` acepta uno o varios: repetido (``?tipo_id=1&tipo_id=3``) o
         # separado por comas (``?tipo_id=1,3``). Un solo valor filtra igual que antes.
         tipo_ids = self.request.query_params.getlist('tipo_id')

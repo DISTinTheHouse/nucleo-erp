@@ -211,6 +211,26 @@ class BomDetalleSerializer(serializers.ModelSerializer):
     def get_unidad_clave(self, obj):
         return obj.unidad.clave if obj.unidad else None
 
+    def validate(self, attrs):
+        """La unidad sale del material (``Producto.unidad_medida``): si llega otra,
+        error por campo. Si el material aún no tiene unidad, se exige en el
+        payload y se le queda al material (las siguientes veces ya no se pide)."""
+        attrs = super().validate(attrs)
+        componente = attrs.get("componente", getattr(self.instance, "componente", None))
+        unidad = attrs.get("unidad")
+        if componente is not None and componente.unidad_medida_id:
+            if unidad is not None and unidad.pk != componente.unidad_medida_id:
+                raise serializers.ValidationError(
+                    {"unidad": f"La unidad del material es {componente.unidad_medida.clave}; no se puede cambiar en el BOM."}
+                )
+            attrs["unidad"] = componente.unidad_medida
+        elif unidad is None and self.instance is None:
+            raise serializers.ValidationError({"unidad": "El material no tiene unidad; indícala."})
+        elif componente is not None and unidad is not None:
+            type(componente).objects.filter(pk=componente.pk, unidad_medida__isnull=True).update(unidad_medida=unidad)
+            componente.unidad_medida = unidad
+        return attrs
+
     # Aislamiento multi-tenant: aplica a todos los consumidores del serializer
     # (anidado en ``lista-material``, ``bom-detalle`` y ``variante-onboarding``).
     def validate_componente(self, componente):
@@ -223,14 +243,38 @@ class BomDetalleSerializer(serializers.ModelSerializer):
         model = BomDetalle
         fields = '__all__'
         read_only_fields = ['bom', 'activo']
+        extra_kwargs = {'unidad': {'required': False}}
+
+
+def validar_sin_duplicados(detalles):
+    """Un material una sola vez por BOM (y variante): error por renglón."""
+    vistos, errores = {}, [{} for _ in detalles]
+    for i, d in enumerate(detalles):
+        comp = d.get("componente")
+        clave = (getattr(comp, "pk", comp), getattr(d.get("variante_produccion"), "pk", None))
+        if clave[0] is None:
+            continue
+        if clave in vistos:
+            errores[i] = {"componente": [f"Material repetido (renglón {vistos[clave] + 1}); junta las cantidades en un solo renglón."]}
+        else:
+            vistos[clave] = i
+    if any(errores):
+        raise serializers.ValidationError(errores)
+    return detalles
 
 class BomBulkItemSerializer(serializers.Serializer):
     producto_variante_id = serializers.IntegerField()
     bom_id = serializers.IntegerField(allow_null=True)
     detalles = BomDetalleSerializer(many=True)
 
+    def validate_detalles(self, value):
+        return validar_sin_duplicados(value)
+
 class ListaMaterialBomSerializer(serializers.ModelSerializer):
     materia_prima_detalle = BomDetalleSerializer(many=True)
+
+    def validate_materia_prima_detalle(self, value):
+        return validar_sin_duplicados(value)
 
     class Meta:
         model = ListaMaterialBom
@@ -2689,6 +2733,7 @@ def ordenes_servicio_pedido(pedido):
         etiquetas = dict(choices.choices)
         out[clave] = [
             {**o, "estatus_display": etiquetas.get(o.get("estatus"), ""), "fecha_compromiso": compromiso,
+             "estatus_previo_display": etiquetas.get(o.get("estatus_previo")) if o.get("estatus_previo") else None,
              "asignado": o.get("asignado") or None}
             for o in (getattr(pedido, attr, None) or [])
         ]
@@ -2888,7 +2933,7 @@ class VarianteProduccionOnboardingSerializer(serializers.Serializer):
     def validate_materia_prima_detalle(self, value):
         if not value:
             raise serializers.ValidationError("Se requiere al menos un insumo.")
-        return value
+        return validar_sin_duplicados(value)
 
 
 class AltaCatalogoInputSerializer(serializers.Serializer):

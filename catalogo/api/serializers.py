@@ -76,6 +76,11 @@ class TallaSerializer(serializers.ModelSerializer):
         exclude = ['activo']
 
 class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+    # Unidad de inventario (``unidad_medida``) legible; el BOM la toma de aquí.
+    unidad_id = serializers.IntegerField(source='unidad_medida_id', read_only=True, allow_null=True)
+    unidad_nombre = serializers.CharField(read_only=True, allow_null=True, default=None)
+    unidad_abreviatura = serializers.CharField(read_only=True, allow_null=True, default=None)
+
     # ``perform_create`` de ``ProductoViewSet`` ya inyecta ``user.empresa``, que es
     # justo el contrato de ``EmpresaResueltaEnServidorMixin``: sólo lectura en update
     # para todos; en create sólo la manda el superusuario.
