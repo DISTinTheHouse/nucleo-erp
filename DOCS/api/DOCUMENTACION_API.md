@@ -949,9 +949,14 @@ Historial operativo de entradas, salidas y ajustes.
   - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=SALIDA&fecha_inicio=2026-07-01&fecha_final=2026-07-31&almacen_id=1`
   - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=SALIDA&fecha_inicio=2026-07-01&fecha_final=2026-07-31`
   - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=TRANSFERENCIA&fecha_inicio=2026-07-01&fecha_final=2026-07-31`
+- **Almacén de cada renglón (EC-820)**: el primero no nulo, en este orden; el mismo almacén filtra (alcance y `almacen`) y se muestra. Un renglón sin ningún almacén no sale.
+  - `ENTRADA`: ubicación destino → `detalle.almacen` → recepción → ajuste.
+  - `SALIDA`: ubicación origen → `detalle.almacen` → ajuste.
+  - `AJUSTE`: ajuste.
+  - `TRANSFERENCIA`: origen = ubicación origen → `transferencia.almacen_origen`; destino = ubicación destino → `transferencia.almacen_destino`.
 - **Nota TRANSFERENCIA**:
   - Cada renglón incluye `transferencia_id` y `transferencia_folio`.
-  - El reporte incluye la transferencia si el usuario tiene acceso al almacén de origen o al de destino.
+  - El reporte incluye la transferencia si el usuario tiene acceso al almacén de origen o al de destino, aunque el renglón no tenga ubicaciones (picking). Sale una sola fila por renglón: con el origen si está en alcance, si no con el destino.
   - Al crear una transferencia (WMS) se registra automáticamente `AuditoriaEvento` (`modulo=inventarios`, `accion=TRANSFERENCIA`, `tabla=existencias`), por lo que también aparece en el listado general de movimientos (`GET /api/v1/inventarios/movimientos/`).
 - **Respuesta**:
   ```json

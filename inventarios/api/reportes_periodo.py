@@ -16,6 +16,7 @@ from datetime import datetime, time
 from decimal import Decimal
 
 from django.db import models
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework.exceptions import ValidationError
@@ -463,6 +464,58 @@ def tipo_movimiento_requerido(query_params):
     return tipo_movimiento
 
 
+# Almacén de cada renglón del reporte de movimientos, en orden de precedencia:
+# la ubicación del renglón, el ``almacen`` del detalle (existencia sin
+# ubicación, #803) y el del documento. El mismo orden filtra (``Coalesce``) y
+# se muestra, así que el almacén que pasó el alcance es el que sale en la fila
+# (EC-820). La transferencia usa su almacén de origen/destino, no
+# ``detalle.almacen``, que no dice de qué lado es (#801).
+_RUTAS_ALMACEN_MOVIMIENTO = {
+    "ENTRADA": (
+        "ubicacion_destino__almacen",
+        "almacen",
+        "movimiento_inventario__recepcion__almacen",
+        "movimiento_inventario__ajuste_inventario__almacen",
+    ),
+    "SALIDA": (
+        "ubicacion_origen__almacen",
+        "almacen",
+        "movimiento_inventario__ajuste_inventario__almacen",
+    ),
+    "AJUSTE": ("movimiento_inventario__ajuste_inventario__almacen",),
+}
+_RUTAS_ALMACEN_TRANSFERENCIA_ORIGEN = (
+    "ubicacion_origen__almacen",
+    "movimiento_inventario__transferencia__almacen_origen",
+)
+_RUTAS_ALMACEN_TRANSFERENCIA_DESTINO = (
+    "ubicacion_destino__almacen",
+    "movimiento_inventario__transferencia__almacen_destino",
+)
+
+
+def _almacen_coalesce(rutas):
+    """Id del primer almacén no nulo de ``rutas`` (en SQL)."""
+    campos = [f"{ruta}_id" for ruta in rutas]
+    return Coalesce(*campos) if len(campos) > 1 else models.F(campos[0])
+
+
+def _almacen_de(detalle, rutas, almacen_id):
+    """El objeto ``Almacen`` (ya cargado por ``select_related``) cuyo id resolvió
+    el ``Coalesce``."""
+    if not almacen_id:
+        return None
+    for ruta in rutas:
+        obj = detalle
+        for parte in ruta.split("__"):
+            obj = getattr(obj, parte, None)
+            if obj is None:
+                break
+        if obj is not None and obj.pk == almacen_id:
+            return obj
+    return None
+
+
 def reporte_movimientos(user, query_params):
     """Reporte de movimientos de un tipo en el periodo, completo y sin paginar.
 
@@ -502,6 +555,9 @@ def reporte_movimientos(user, query_params):
             "movimiento_inventario__ajuste_inventario__almacen",
             "movimiento_inventario__op",
             "movimiento_inventario__transferencia",
+            "movimiento_inventario__transferencia__almacen_origen",
+            "movimiento_inventario__transferencia__almacen_destino",
+            "almacen",
             "producto",
             "producto_variante",
             "producto_variante__producto",
@@ -521,26 +577,26 @@ def reporte_movimientos(user, query_params):
         .order_by("-movimiento_inventario__fecha_movimiento", "-id")
     )
 
-    if tipo_movimiento == "ENTRADA":
-        detalles_qs = detalles_qs.filter(
-            models.Q(ubicacion_destino__almacen_id__in=allowed_almacen_ids)
-            | models.Q(movimiento_inventario__recepcion__almacen_id__in=allowed_almacen_ids)
-            | models.Q(movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids)
-        )
-    elif tipo_movimiento == "SALIDA":
-        detalles_qs = detalles_qs.filter(
-            models.Q(ubicacion_origen__almacen_id__in=allowed_almacen_ids)
-            | models.Q(movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids)
-        )
-    elif tipo_movimiento == "TRANSFERENCIA":
-        detalles_qs = detalles_qs.filter(
-            models.Q(ubicacion_origen__almacen_id__in=allowed_almacen_ids)
-            | models.Q(ubicacion_destino__almacen_id__in=allowed_almacen_ids)
+    if not user.is_superuser:
+        # Defensa: además del almacén, el movimiento debe ser de la empresa
+        # activa del usuario (como el auxiliar).
+        from nucleo.scope import empresa_ids_lectura
+
+        detalles_qs = detalles_qs.filter(movimiento_inventario__empresa_id__in=empresa_ids_lectura(user))
+
+    if tipo_movimiento == "TRANSFERENCIA":
+        detalles_qs = detalles_qs.annotate(
+            almacen_origen_resuelto=_almacen_coalesce(_RUTAS_ALMACEN_TRANSFERENCIA_ORIGEN),
+            almacen_destino_resuelto=_almacen_coalesce(_RUTAS_ALMACEN_TRANSFERENCIA_DESTINO),
+        ).filter(
+            models.Q(almacen_origen_resuelto__in=allowed_almacen_ids)
+            | models.Q(almacen_destino_resuelto__in=allowed_almacen_ids)
         )
     else:
-        detalles_qs = detalles_qs.filter(
-            movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids
-        )
+        rutas_almacen = _RUTAS_ALMACEN_MOVIMIENTO[tipo_movimiento]
+        detalles_qs = detalles_qs.annotate(
+            almacen_resuelto=_almacen_coalesce(rutas_almacen),
+        ).filter(almacen_resuelto__in=allowed_almacen_ids)
 
     resultados = []
     total_cantidad = Decimal("0")
@@ -551,38 +607,23 @@ def reporte_movimientos(user, query_params):
         variante = detalle.producto_variante
         producto = getattr(variante, "producto", None) if variante else detalle.producto
 
-        if tipo_movimiento == "ENTRADA":
-            almacen = (
-                getattr(detalle.ubicacion_destino, "almacen", None)
-                or getattr(movimiento, "recepcion", None) and movimiento.recepcion.almacen
-                or getattr(movimiento, "ajuste_inventario", None)
-                and movimiento.ajuste_inventario.almacen
-            )
-            ubicacion = detalle.ubicacion_destino
-        elif tipo_movimiento == "SALIDA":
-            almacen = (
-                getattr(detalle.ubicacion_origen, "almacen", None)
-                or getattr(movimiento, "ajuste_inventario", None)
-                and movimiento.ajuste_inventario.almacen
-            )
-            ubicacion = detalle.ubicacion_origen
-        elif tipo_movimiento == "TRANSFERENCIA":
-            origen_almacen = getattr(detalle.ubicacion_origen, "almacen", None)
-            destino_almacen = getattr(detalle.ubicacion_destino, "almacen", None)
-            origen_ok = getattr(origen_almacen, "pk", None) in allowed_almacen_ids
-            destino_ok = getattr(destino_almacen, "pk", None) in allowed_almacen_ids
-            if origen_ok:
-                almacen = origen_almacen
+        if tipo_movimiento == "TRANSFERENCIA":
+            # Una fila por renglón: el origen si está en alcance, si no el
+            # destino (el filtro garantiza que uno de los dos lo está).
+            if detalle.almacen_origen_resuelto in allowed_almacen_ids:
+                almacen = _almacen_de(detalle, _RUTAS_ALMACEN_TRANSFERENCIA_ORIGEN, detalle.almacen_origen_resuelto)
                 ubicacion = detalle.ubicacion_origen
-            elif destino_ok:
-                almacen = destino_almacen
-                ubicacion = detalle.ubicacion_destino
             else:
-                almacen = origen_almacen or destino_almacen
-                ubicacion = detalle.ubicacion_origen or detalle.ubicacion_destino
+                almacen = _almacen_de(detalle, _RUTAS_ALMACEN_TRANSFERENCIA_DESTINO, detalle.almacen_destino_resuelto)
+                ubicacion = detalle.ubicacion_destino
         else:
-            almacen = getattr(movimiento, "ajuste_inventario", None) and movimiento.ajuste_inventario.almacen
-            ubicacion = detalle.ubicacion_destino or detalle.ubicacion_origen
+            almacen = _almacen_de(detalle, rutas_almacen, detalle.almacen_resuelto)
+            if tipo_movimiento == "ENTRADA":
+                ubicacion = detalle.ubicacion_destino
+            elif tipo_movimiento == "SALIDA":
+                ubicacion = detalle.ubicacion_origen
+            else:
+                ubicacion = detalle.ubicacion_destino or detalle.ubicacion_origen
 
         usuario = getattr(movimiento, "usuario", None)
         pedido = getattr(movimiento, "pedido", None)
