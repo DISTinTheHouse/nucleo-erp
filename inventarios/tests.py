@@ -2034,3 +2034,35 @@ class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
             self.assertEqual(resp.status_code, 400)
             self.assertEqual(resp["Content-Type"], "application/json")
             self.assertEqual(list(resp.json()), ["almacen"])
+
+    def test_encabezado_no_muestra_nombres_de_otra_empresa(self):
+        base = {"almacen": self.a["almacen"].pk}
+        ajenos = {
+            "empresa": self.b["empresa"].pk, "sucursal": self.b["matriz"].pk,
+            "producto": self.b["producto"].pk, "producto_variante": self.b["variante"].pk,
+        }
+        # Cada filtro ajeno por separado (con alcance propio, el nombre se buscaría
+        # en BD) y todos juntos (alcance vacío).
+        for params in [{clave: valor} for clave, valor in ajenos.items()] + [ajenos]:
+            resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {**base, **params})
+            self.assertEqual(resp.status_code, 200, params)
+            texto = self._texto_pdf(resp.content)
+            for nombre in ("globex-rp SA", "Norte globex-rp", "Matriz globex-rp", "Playera globex-rp", "globex-rp-AZ-M"):
+                self.assertNotIn(nombre, texto, params)
+            for clave, etiqueta in (
+                ("empresa", "Empresa"), ("sucursal", "Sucursal"),
+                ("producto", "Producto"), ("producto_variante", "Variante"),
+            ):
+                if clave in params:
+                    self.assertIn(f"{etiqueta} #{params[clave]}", texto, params)
+            resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {**base, **params, "formato": "xlsx"})
+            valores = {v for fila in self._hoja(resp.content).iter_rows(values_only=True) for v in fila if v}
+            self.assertFalse({"globex-rp SA", "Matriz globex-rp", "Playera globex-rp", "globex-rp-AZ-M"} & valores, params)
+        # Control: los propios sí se resuelven por nombre.
+        texto = self._texto_pdf(self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {
+            **base, "empresa": self.a["empresa"].pk, "sucursal": self.a["matriz"].pk,
+            "producto": self.a["producto"].pk, "producto_variante": self.a["variante"].pk,
+        }).content)
+        for nombre in ("acme-rp SA", "Matriz acme-rp", "Playera acme-rp", "acme-rp-AZ-M"):
+            self.assertIn(nombre, texto)
+
