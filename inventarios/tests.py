@@ -18,7 +18,7 @@ from decimal import Decimal
 from unittest import mock
 
 from django.db import DatabaseError, connection
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
@@ -2066,3 +2066,40 @@ class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
         for nombre in ("acme-rp SA", "Matriz acme-rp", "Playera acme-rp", "acme-rp-AZ-M"):
             self.assertIn(nombre, texto)
 
+
+class PartirTextoPdfTests(SimpleTestCase):
+    """``_partir`` (EC-814): mismas líneas que el corte carácter por carácter
+    anterior, sin su costo cuadrático."""
+
+    @staticmethod
+    def _partir_anterior(texto, fuente, ancho, tamano=8):
+        from reportlab.lib.utils import simpleSplit
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        lineas = []
+        for linea in simpleSplit(texto, fuente, tamano, ancho) or [texto]:
+            while stringWidth(linea, fuente, tamano) > ancho and len(linea) > 1:
+                corte = len(linea) - 1
+                while corte > 1 and stringWidth(linea[:corte], fuente, tamano) > ancho:
+                    corte -= 1
+                lineas.append(linea[:corte])
+                linea = linea[corte:]
+            lineas.append(linea)
+        return lineas
+
+    def test_mismas_lineas_que_el_corte_anterior(self):
+        from inventarios.services.reportes_exportacion import _partir
+        casos = [
+            "QA-5000-100-['S', 'L', 'F']",
+            "SKU-" + "X1Y2Z3" * 60,
+            "BOTA BORCEGUI DIELECTRICA CON CASCO DE POLIAMIDA " + "W" * 120 + " FIN",
+            "Ñandú — ññññññññññññññññññññññññññññññññ",
+            "corto",
+            "",
+            "MMMM",
+        ]
+        for texto in casos:
+            for fuente in ("Helvetica", "Helvetica-Bold"):
+                for ancho in (3, 20, 58.5, 120):
+                    self.assertEqual(
+                        _partir(texto, fuente, ancho), self._partir_anterior(texto, fuente, ancho), (texto, fuente, ancho),
+                    )

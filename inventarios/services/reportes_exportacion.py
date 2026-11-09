@@ -347,11 +347,18 @@ def _partir(texto, fuente, ancho, tamano=8):
     lineas = []
     for linea in simpleSplit(texto, fuente, tamano, ancho) or [texto]:
         while stringWidth(linea, fuente, tamano) > ancho and len(linea) > 1:
-            corte = len(linea) - 1
-            while corte > 1 and stringWidth(linea[:corte], fuente, tamano) > ancho:
-                corte -= 1
-            lineas.append(linea[:corte])
-            linea = linea[corte:]
+            # Prefijo más largo (al menos 1 carácter) que cabe, por búsqueda
+            # binaria: el ancho de un prefijo nunca baja al agregar caracteres.
+            # Medir carácter por carácter desde el final era cuadrático.
+            bajo, alto = 1, len(linea) - 1
+            while bajo < alto:
+                medio = (bajo + alto + 1) // 2
+                if stringWidth(linea[:medio], fuente, tamano) > ancho:
+                    alto = medio - 1
+                else:
+                    bajo = medio
+            lineas.append(linea[:bajo])
+            linea = linea[bajo:]
         lineas.append(linea)
     return lineas
 
