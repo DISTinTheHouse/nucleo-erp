@@ -947,6 +947,29 @@ class DetallesMovimientoFormalTests(TestCase):
     def test_movimiento_de_otra_empresa_es_404(self):
         self.assertEqual(self._get(self.ajeno.pk).status_code, 404)
 
+    def test_transferencia_sin_ubicaciones_toma_los_almacenes_de_la_transferencia(self):
+        # EC-820: antes salían null; mismas llaves que con ubicaciones.
+        origen = Almacen.objects.create(empresa=self.empresa, sucursal=self.sucursal, codigo="DO", nombre="Origen")
+        destino = Almacen.objects.create(empresa=self.empresa, sucursal=self.sucursal, codigo="DD", nombre="Destino")
+        transferencia = Transferencia.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, almacen_origen=origen, almacen_destino=destino,
+            folio="TR-DET", usuario=self.user,
+        )
+        mov = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, usuario=self.user,
+            tipo_movimiento="TRANSFERENCIA", transferencia=transferencia,
+        )
+        MovimientoInventarioDetalle.objects.create(movimiento_inventario=mov, cantidad=Decimal("2"))
+        llaves = set(self._get(self.mov.pk).json()["detalle"][0])
+        renglon = self._get(mov.pk).json()["detalle"][0]
+        self.assertEqual(set(renglon), llaves)
+        self.assertEqual((renglon["almacen_origen_id"], renglon["almacen_destino_id"]), (origen.pk, destino.pk))
+        self.assertEqual((renglon["ubicacion_origen_id"], renglon["ubicacion_destino_id"]), (None, None))
+
+    def test_movimiento_sin_transferencia_ni_ubicacion_sigue_en_null(self):
+        renglon = self._get(self.mov.pk).json()["detalle"][0]
+        self.assertEqual((renglon["almacen_origen_id"], renglon["almacen_destino_id"]), (None, None))
+
 
 class AlmacenPermiteEntradaTests(TestCase):
     """EC-607: ``permite_entrada`` se lee en ``/inventarios/almacenes/`` pero no se
@@ -1666,18 +1689,27 @@ class ReportesPeriodoBase(TestCase):
         client.force_authenticate(user=user)
         return client.get(url, {**PERIODO_REPORTE, **(params or {})})
 
-    def _movimiento(self, tenant, tipo="ENTRADA", fecha=None, **kwargs):
-        """Movimiento de una línea sin ubicación (el almacén sale del documento)."""
+    def _movimiento(self, tenant, tipo="ENTRADA", fecha=None, almacen=None, cantidad="2", **kwargs):
+        """Movimiento de una línea sin ubicación (el almacén sale del documento
+        o, con ``almacen``, de ``detalle.almacen``)."""
         mov = MovimientoInventario.objects.create(
             empresa=tenant["empresa"], sucursal=tenant["matriz"], tipo_movimiento=tipo,
             usuario=tenant["usuario"], **kwargs,
         )
         MovimientoInventarioDetalle.objects.create(
             movimiento_inventario=mov, producto=tenant["producto"], producto_variante=tenant["variante"],
-            cantidad="2", costo_unitario="4",
+            almacen=almacen, cantidad=cantidad, costo_unitario="4",
         )
         MovimientoInventario.objects.filter(pk=mov.pk).update(fecha_movimiento=fecha or _fecha_reporte(2026, 4, 1))
         return mov
+
+    def _transferencia(self, tenant, origen, destino, folio, cantidad="3"):
+        """Transferencia de picking: renglón sin ubicaciones (EC-820)."""
+        transferencia = Transferencia.objects.create(
+            empresa=tenant["empresa"], sucursal=tenant["matriz"], almacen_origen=origen, almacen_destino=destino,
+            folio=folio, usuario=tenant["usuario"],
+        )
+        return self._movimiento(tenant, "TRANSFERENCIA", transferencia=transferencia, cantidad=cantidad)
 
     def _entrada_por_recepcion(self, tenant, folio):
         recepcion = Recepcion.objects.create(
@@ -1819,6 +1851,115 @@ class ReporteMovimientosPeriodoTests(ReportesPeriodoBase):
         self.assertEqual((data["count"], data["results"]), (0, []))
         self.assertEqual(data["filtros"], {"almacen_id": self.a["almacen"].pk})
 
+    # --- EC-820: transferencias sin ubicación y ``detalle.almacen`` --------------
+
+    def _filas_mov(self, user, tipo, **params):
+        data = self._get(user, REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": tipo, **params}).json()
+        return [(f["almacen_codigo"], f["cantidad"]) for f in data["results"]], data
+
+    def test_transferencia_sin_ubicaciones_por_origen_destino_y_sin_filtro(self):
+        apartados = Almacen.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["matriz"], codigo="acme-rp-AP", nombre="APARTADOS acme-rp",
+        )
+        self._transferencia(self.a, self.a["almacen"], apartados, folio="TR-RP-1")
+
+        # Sin filtro: una sola fila (sin doble conteo), con el origen.
+        filas, data = self._filas_mov(self.a["usuario"], "TRANSFERENCIA")
+        self.assertEqual(filas, [("acme-rp-PT", "3.0000")])
+        self.assertEqual(data["results"][0]["transferencia_folio"], "TR-RP-1")
+        self.assertIsNone(data["results"][0]["ubicacion_id"])
+        self.assertEqual(data["resumen"], {"total_movimientos": 1, "total_registros": 1, "total_cantidad": "3.0000"})
+        # Por origen y por destino: la fila sale con el almacén pedido.
+        self.assertEqual(self._filas_mov(self.a["usuario"], "TRANSFERENCIA", almacen=self.a["almacen"].pk)[0], [("acme-rp-PT", "3.0000")])
+        self.assertEqual(self._filas_mov(self.a["usuario"], "TRANSFERENCIA", almacen=apartados.pk)[0], [("acme-rp-AP", "3.0000")])
+        self.assertEqual(self._filas_mov(self.superuser, "TRANSFERENCIA")[0], [("acme-rp-PT", "3.0000")])
+
+    def test_transferencia_con_el_otro_lado_fuera_de_alcance(self):
+        a = self.a
+        self._transferencia(a, a["almacen"], a["almacen_norte"], folio="TR-RP-SAL")
+        self._transferencia(a, a["almacen_norte"], a["almacen"], folio="TR-RP-ENT", cantidad="4")
+        self._transferencia(a, a["almacen_norte"], a["almacen_norte"], folio="TR-RP-AJENA", cantidad="5")
+
+        # El usuario (solo matriz) ve el lado de matriz de las dos primeras.
+        filas, _ = self._filas_mov(a["usuario"], "TRANSFERENCIA")
+        self.assertEqual(sorted(filas), [("acme-rp-PT", "3.0000"), ("acme-rp-PT", "4.0000")])
+        self.assertEqual(self._filas_mov(a["usuario"], "TRANSFERENCIA", almacen=a["almacen_norte"].pk)[0], [])
+        # El superusuario ve todas, cada una con su origen.
+        filas, _ = self._filas_mov(self.superuser, "TRANSFERENCIA")
+        self.assertEqual(sorted(filas), [("acme-rp-NT", "4.0000"), ("acme-rp-NT", "5.0000"), ("acme-rp-PT", "3.0000")])
+
+    def test_transferencia_con_almacen_de_otra_empresa_no_se_filtra(self):
+        # Dato corrupto: movimiento de A cuyo destino es el almacén de B. El
+        # respaldo por ``almacen_destino`` no debe abrirlo a B.
+        self._transferencia(self.a, self.a["almacen"], self.b["almacen"], folio="TR-RP-X1")
+        self._transferencia(self.a, self.a["almacen_norte"], self.b["almacen"], folio="TR-RP-X2")
+        for params in ({}, {"almacen": self.b["almacen"].pk}):
+            filas, data = self._filas_mov(self.b["usuario"], "TRANSFERENCIA", **params)
+            self.assertEqual((filas, data["resumen"]["total_registros"]), ([], 0), params)
+        self.assertEqual(self._filas_mov(self.a["usuario"], "TRANSFERENCIA")[0], [("acme-rp-PT", "3.0000")])
+
+    def test_salida_y_entrada_por_detalle_almacen(self):
+        # Movimientos por pedido sobre una existencia sin ubicación (#803).
+        self._movimiento(self.a, "SALIDA", almacen=self.a["almacen"])
+        self._movimiento(self.a, "SALIDA", almacen=self.a["almacen_norte"])
+        self._movimiento(self.a, "ENTRADA", almacen=self.a["almacen"])
+
+        self.assertEqual(self._filas_mov(self.a["usuario"], "SALIDA")[0], [("acme-rp-PT", "2.0000")])
+        self.assertEqual(
+            self._filas_mov(self.a["usuario"], "SALIDA", almacen=self.a["almacen"].pk)[0], [("acme-rp-PT", "2.0000")],
+        )
+        self.assertEqual(self._filas_mov(self.a["usuario"], "SALIDA", almacen=self.a["almacen_norte"].pk)[0], [])
+        filas, _ = self._filas_mov(self.superuser, "SALIDA")
+        self.assertEqual(sorted(filas), [("acme-rp-NT", "2.0000"), ("acme-rp-PT", "2.0000")])
+        # La entrada de la base (por ubicación) más la de ``detalle.almacen``.
+        filas, data = self._filas_mov(self.a["usuario"], "ENTRADA")
+        self.assertEqual(filas, [("acme-rp-PT", "2.0000"), ("acme-rp-PT", "10.0000")])
+        self.assertEqual(data["resumen"]["total_cantidad"], "12.0000")
+        # Otra empresa no lo ve.
+        self.assertEqual(self._filas_mov(self.b["usuario"], "SALIDA", almacen=self.a["almacen"].pk)[0], [])
+
+    def test_la_ubicacion_gana_y_el_almacen_filtrado_es_el_mostrado(self):
+        # Ubicación en norte (fuera de alcance) y ``detalle.almacen`` en matriz:
+        # manda la ubicación, así que el usuario de matriz no la ve, y nunca
+        # se muestra un almacén distinto al que pasó el filtro.
+        ubicacion_norte = Ubicacion.objects.create(almacen=self.a["almacen_norte"], pasillo="9")
+        mov = self._movimiento(self.a, "SALIDA", almacen=self.a["almacen"])
+        mov.detalles.update(ubicacion_origen=ubicacion_norte)
+        self.assertEqual(self._filas_mov(self.a["usuario"], "SALIDA")[0], [])
+        self.assertEqual(self._filas_mov(self.superuser, "SALIDA")[0], [("acme-rp-NT", "2.0000")])
+
+    def test_renglon_sin_almacen_sigue_fuera(self):
+        # Sin ubicación, ``detalle.almacen`` ni documento: EC-821 lo rellena.
+        self._movimiento(self.a, "SALIDA")
+        self._movimiento(self.a, "ENTRADA")
+        for user in (self.a["usuario"], self.superuser):
+            self.assertEqual(self._filas_mov(user, "SALIDA")[0], [])
+        # Solo las entradas por ubicación de la base (la de B la ve el superusuario).
+        self.assertEqual(self._filas_mov(self.a["usuario"], "ENTRADA")[0], [("acme-rp-PT", "10.0000")])
+        self.assertEqual(
+            sorted(self._filas_mov(self.superuser, "ENTRADA")[0]),
+            [("acme-rp-PT", "10.0000"), ("globex-rp-PT", "10.0000")],
+        )
+
+    def test_sin_n_mas_1_con_transferencias_y_detalle_almacen(self):
+        def consultas(tipo):
+            with CaptureQueriesContext(connection) as ctx:
+                data = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": tipo}).json()
+            return data["count"], len(ctx.captured_queries)
+
+        def agregar(i):
+            self._transferencia(self.a, self.a["almacen"], self.a["almacen_norte"], folio=f"TR-RP-N{i}")
+            self._movimiento(self.a, "SALIDA", almacen=self.a["almacen"])
+
+        agregar(0)
+        antes = {tipo: consultas(tipo) for tipo in ("TRANSFERENCIA", "SALIDA")}
+        for i in range(1, 5):
+            agregar(i)
+        despues = {tipo: consultas(tipo) for tipo in ("TRANSFERENCIA", "SALIDA")}
+        for tipo in antes:
+            self.assertEqual((antes[tipo][0], despues[tipo][0]), (1, 5), tipo)
+            self.assertEqual(despues[tipo][1], antes[tipo][1], tipo)
+
     def test_tipo_y_fechas_requeridos(self):
         resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL)
         self.assertEqual(resp.status_code, 400)
@@ -1902,6 +2043,24 @@ class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
         self.assertEqual([f[5] for f in filas], [2, 10])
         # Hora de México, sin zona (Excel no la guarda): 18:00 UTC = 12:00.
         self.assertEqual(filas[-1][0], datetime(2026, 2, 1, 12, 0))
+
+    def test_movimientos_exporta_transferencias_y_detalle_almacen(self):
+        # EC-820: la exportación usa el mismo cálculo, así que también los ve.
+        a = self.a
+        self._transferencia(a, a["almacen_norte"], a["almacen"], folio="TR-RP-EXP", cantidad="4")
+        self._movimiento(a, "SALIDA", almacen=a["almacen"], cantidad="6")
+        self._movimiento(a, "SALIDA", cantidad="7")  # sin almacén: fuera
+        self._transferencia(self.b, self.b["almacen"], self.b["almacen_norte"], folio="TR-RP-EXP-B")
+        for tipo, esperado in (("TRANSFERENCIA", [4]), ("SALIDA", [6])):
+            resp = self._get(a["usuario"], REPORTE_MOVIMIENTOS_EXPORTAR_URL, {"tipo_movimiento": tipo, "formato": "xlsx"})
+            _, filas = self._tabla_xlsx(resp.content, "Fecha")
+            self.assertEqual([f[5] for f in filas], esperado, tipo)
+            self.assertEqual({f[3] for f in filas}, {"PRODUCTO TERMINADO acme-rp"}, tipo)
+            texto = self._texto_pdf(self._get(a["usuario"], REPORTE_MOVIMIENTOS_EXPORTAR_URL, {"tipo_movimiento": tipo}).content)
+            # El PDF parte el nombre del almacén en dos líneas.
+            self.assertIn("Playera acme-rp", texto)
+            self.assertIn("PRODUCTO TERMINADO", texto)
+            self.assertNotIn("globex-rp", texto)
 
     def test_validacion_igual_que_el_json(self):
         casos = (
