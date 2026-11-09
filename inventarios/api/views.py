@@ -1,14 +1,12 @@
 from nucleo.scope import empresa_ids_lectura
 from nucleo.middleware import ip_auditoria
 from collections import defaultdict
-from datetime import datetime, time
 from decimal import Decimal
 
 from django.db import models, transaction
 from django.db.models import ExpressionWrapper, F, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
-from django.utils import timezone
-from django.utils.dateparse import parse_date
+from django.http import HttpResponse
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers as drf_serializers
@@ -16,9 +14,11 @@ from rest_framework import status, viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.response import Response
 
 from inventarios.services import costeo
+from inventarios.services import reportes_exportacion as exportacion_mod
 from inventarios.models import (
     Almacen,
     TipoAlmacen,
@@ -35,6 +35,8 @@ from ventas.models import Pedido
 from nucleo.listados import PaginacionOpcionalLimitOffset
 from . import auxiliar as auxiliar_mod
 from . import existencias_por_almacen as por_almacen_mod
+from . import reportes_periodo as reportes_mod
+from .reportes_periodo import almacenes_en_alcance
 from .serializers import (
     AlmacenSerializer,
     UbicacionSerializer,
@@ -134,18 +136,68 @@ class UbicacionViewSet(viewsets.ModelViewSet):
                     raise PermissionDenied("No tiene acceso a esta empresa")
         serializer.save()
 
-def almacenes_en_alcance(user):
-    """Almacenes sobre los que opera un usuario NO superusuario.
+# --- Exportación de los reportes por periodo (EC-814) ---------------------------
 
-    Mismo alcance que almacenes/ubicaciones y los reportes: empresas del usuario
-    (solo la activa, EC-816) Y sus sucursales. Sin empresa activa o sin
-    sucursales el alcance queda vacío. El superusuario se trata aparte.
-    """
-    empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
-    sucursal_ids = list(user.sucursales_permitidas())
-    return Almacen.objects.filter(
-        models.Q(empresa_id__in=empresa_ids) & models.Q(sucursal_id__in=sucursal_ids)
-    )
+PARAMETRO_FORMATO_EXPORTACION = OpenApiParameter(
+    "formato", OpenApiTypes.STR, enum=list(exportacion_mod.FORMATOS), description="pdf (por defecto) o xlsx.",
+)
+PARAMETROS_FECHAS_REPORTE = [
+    OpenApiParameter("fecha_inicio", OpenApiTypes.DATE, required=True, description="YYYY-MM-DD."),
+    OpenApiParameter("fecha_final", OpenApiTypes.DATE, required=True, description="YYYY-MM-DD."),
+]
+RESPUESTAS_EXPORTACION = {
+    (200, exportacion_mod.CONTENT_TYPES["pdf"]): OpenApiTypes.BINARY,
+    (200, exportacion_mod.CONTENT_TYPES["xlsx"]): OpenApiTypes.BINARY,
+    400: OpenApiResponse(description="Validación (formato, fechas, tipo_movimiento)."),
+}
+
+
+class _RendererArchivo(BaseRenderer):
+    """Solo para que la negociación de contenido acepte ``Accept`` con el tipo
+    del archivo: la acción responde con un ``HttpResponse`` ya armado, que DRF
+    no vuelve a renderizar. Los errores se van a JSON en ``finalize_response``
+    de ``ExportacionArchivoMixin``."""
+
+    charset = None
+    render_style = "binary"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
+class RendererPdf(_RendererArchivo):
+    media_type = exportacion_mod.CONTENT_TYPES["pdf"]
+    format = "pdf"
+
+
+class RendererXlsx(_RendererArchivo):
+    media_type = exportacion_mod.CONTENT_TYPES["xlsx"]
+    format = "xlsx"
+
+
+# JSON primero: con ``*/*`` o sin ``Accept`` gana JSON (los 400 salen igual).
+RENDERERS_EXPORTACION = [JSONRenderer, RendererPdf, RendererXlsx]
+
+
+class ExportacionArchivoMixin:
+    """Un 400/403/404 de una acción de exportación sale en JSON aunque el
+    cliente haya pedido ``Accept: application/pdf`` (o el tipo del XLSX)."""
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        if isinstance(response, Response) and isinstance(
+            getattr(request, "accepted_renderer", None), _RendererArchivo
+        ):
+            request.accepted_renderer = JSONRenderer()
+            request.accepted_media_type = JSONRenderer.media_type
+        return super().finalize_response(request, response, *args, **kwargs)
+
+
+def respuesta_archivo(exportacion):
+    """Descarga (``attachment``) con el nombre del reporte y su rango de fechas,
+    como el ``pdf-fusionado/`` de facturas de proveedor."""
+    response = HttpResponse(exportacion.contenido, content_type=exportacion.content_type)
+    response["Content-Disposition"] = f'attachment; filename="{exportacion.nombre_archivo}"'
+    return response
 
 
 class ReporteExistenciasPeriodoPagination(PageNumberPagination):
@@ -155,7 +207,7 @@ class ReporteExistenciasPeriodoPagination(PageNumberPagination):
     page_size_query_param = "page_size"
 
 
-class ExistenciaViewSet(viewsets.ModelViewSet):
+class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
     queryset = Existencia.objects.all().select_related(
         "producto",
         "producto__tipo",
@@ -328,148 +380,32 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         return Response({"almacen_id": almacen_id, **por_almacen_mod.resumen(qs, maximo)})
 
     def _report_to_int(self, value):
-        if value in (None, ""):
-            return None
-        try:
-            return int(value)
-        except Exception:
-            return None
+        return reportes_mod.to_int(value)
 
     def _report_to_decimal(self, value):
-        try:
-            return Decimal(str(value or 0))
-        except Exception:
-            return Decimal("0")
+        return reportes_mod.to_decimal(value)
 
     def _quantize_qty(self, value):
-        return self._report_to_decimal(value).quantize(Decimal("0.0001"))
-
-    def _quantize_money(self, value):
-        return self._report_to_decimal(value).quantize(Decimal("0.01"))
+        return reportes_mod.quantize_qty(value)
 
     def _build_report_almacenes_queryset(self):
-        user = self.request.user
-        qp = self.request.query_params
-        qs = Almacen.objects.select_related("empresa", "sucursal").all()
-
-        if not user.is_superuser:
-            empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
-            sucursal_ids = list(user.sucursales_permitidas())
-            qs = qs.filter(
-                models.Q(empresa_id__in=empresa_ids)
-                & models.Q(sucursal_id__in=sucursal_ids)
-            )
-
-        empresa_id = self._report_to_int(qp.get("empresa") or qp.get("empresa_id"))
-        sucursal_id = self._report_to_int(qp.get("sucursal") or qp.get("sucursal_id"))
-        almacen_id = self._report_to_int(qp.get("almacen") or qp.get("almacen_id"))
-
-        if empresa_id:
-            qs = qs.filter(empresa_id=empresa_id)
-        if sucursal_id:
-            qs = qs.filter(sucursal_id=sucursal_id)
-        if almacen_id:
-            qs = qs.filter(pk=almacen_id)
-        return qs
-
-    def _parse_report_dates(self):
-        fecha_inicio_raw = (self.request.query_params.get("fecha_inicio") or "").strip()
-        fecha_final_raw = (self.request.query_params.get("fecha_final") or "").strip()
-        fecha_inicio = parse_date(fecha_inicio_raw)
-        fecha_final = parse_date(fecha_final_raw)
-
-        if not fecha_inicio:
-            raise ValidationError({"fecha_inicio": "fecha_inicio es requerida con formato YYYY-MM-DD."})
-        if not fecha_final:
-            raise ValidationError({"fecha_final": "fecha_final es requerida con formato YYYY-MM-DD."})
-        if fecha_final < fecha_inicio:
-            raise ValidationError({"fecha_final": "fecha_final no puede ser menor a fecha_inicio."})
-
-        tz = timezone.get_current_timezone()
-        inicio_dt = timezone.make_aware(datetime.combine(fecha_inicio, time.min), tz)
-        final_dt = timezone.make_aware(datetime.combine(fecha_final, time.max), tz)
-        return fecha_inicio, fecha_final, inicio_dt, final_dt
-
-    def _iter_auditoria_items(self, eventos, allowed_almacen_ids, producto_id=None, producto_variante_id=None):
-        for evento in eventos.iterator():
-            payload = evento.despues_json or evento.antes_json or {}
-            evento_almacen_id = self._report_to_int(payload.get("almacen_id"))
-            for item in payload.get("items", []) or []:
-                # Most audit writers (inventarios manual, compras) store almacen_id
-                # only at the event level, not per item; fall back to it so those
-                # movements aren't silently dropped from the period aggregation.
-                almacen_id = self._report_to_int(item.get("almacen_id")) or evento_almacen_id
-                if not almacen_id or almacen_id not in allowed_almacen_ids:
-                    continue
-
-                item_producto_id = self._report_to_int(item.get("producto_id"))
-                item_variante_id = self._report_to_int(item.get("producto_variante_id"))
-
-                if producto_variante_id and item_variante_id != producto_variante_id:
-                    continue
-                if producto_id and item_producto_id != producto_id:
-                    continue
-
-                yield {
-                    "almacen_id": almacen_id,
-                    "producto_id": item_producto_id,
-                    "producto_variante_id": item_variante_id,
-                    "delta": self._report_to_decimal(item.get("delta")),
-                }
-
-    def _movement_almacen_ids(self, detalle):
-        movimiento = detalle.movimiento_inventario
-        origen_id = (
-            getattr(detalle.ubicacion_origen, "almacen_id", None)
-            or getattr(getattr(movimiento, "transferencia", None), "almacen_origen_id", None)
-            or getattr(getattr(movimiento, "ajuste_inventario", None), "almacen_id", None)
-        )
-        destino_id = (
-            getattr(detalle.ubicacion_destino, "almacen_id", None)
-            or getattr(getattr(movimiento, "recepcion", None), "almacen_id", None)
-            or getattr(getattr(movimiento, "transferencia", None), "almacen_destino_id", None)
-            or getattr(getattr(movimiento, "ajuste_inventario", None), "almacen_id", None)
-        )
-        return origen_id, destino_id
+        return reportes_mod.almacenes_del_reporte(self.request.user, self.request.query_params)
 
     @action(detail=False, methods=["get"], url_path="reporte-existencias-periodo")
     def reporte_existencias_periodo(self, request):
-        fecha_inicio, fecha_final, inicio_dt, final_dt = self._parse_report_dates()
-        qp = request.query_params
-        almacen_id = self._report_to_int(qp.get("almacen") or qp.get("almacen_id"))
-        producto_id = self._report_to_int(qp.get("producto") or qp.get("producto_id"))
-        producto_variante_id = self._report_to_int(
-            qp.get("producto_variante") or qp.get("producto_variante_id")
-        )
-
-        almacenes_qs = self._build_report_almacenes_queryset()
-        almacenes = list(
-            almacenes_qs.values(
-                "id_almacen",
-                "codigo",
-                "nombre",
-                "empresa_id",
-                "sucursal_id",
-            )
-        )
-        allowed_almacen_ids = {row["id_almacen"] for row in almacenes}
-
-        if not allowed_almacen_ids:
+        # Cálculo completo (alcance + filtros + totales) en ``reportes_periodo``;
+        # aquí solo se pagina y se arma el sobre JSON.
+        reporte = reportes_mod.reporte_existencias(request.user, request.query_params)
+        if reporte["sin_almacenes"]:
             return Response(
                 {
-                    "fecha_inicio": str(fecha_inicio),
-                    "fecha_final": str(fecha_final),
+                    "fecha_inicio": str(reporte["fecha_inicio"]),
+                    "fecha_final": str(reporte["fecha_final"]),
                     "filtros": {
-                        "producto_id": producto_id,
-                        "producto_variante_id": producto_variante_id,
+                        "producto_id": reporte["producto_id"],
+                        "producto_variante_id": reporte["producto_variante_id"],
                     },
-                    "resumen": {
-                        "existencia_inicial": "0.0000",
-                        "entradas": "0.0000",
-                        "salidas": "0.0000",
-                        "existencia_final": "0.0000",
-                        "costo_total_existencia_final": "0.00",
-                    },
+                    "resumen": reporte["resumen"],
                     "resumen_por_almacen": [],
                     "count": 0,
                     "next": None,
@@ -479,248 +415,49 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_200_OK,
             )
 
-        almacen_map = {row["id_almacen"]: row for row in almacenes}
-        empresa_ids = {row["empresa_id"] for row in almacenes if row["empresa_id"]}
-
-        current_map = defaultdict(lambda: Decimal("0"))
-        keys = set()
-
-        # Only the identity keys and cantidad are consumed here, so fetch scalar
-        # tuples via values_list instead of materializing full Existencia + related
-        # model graphs for thousands of rows (producto/variante display detail is
-        # resolved later via productos_map/variantes_map).
-        current_qs = Existencia.objects.filter(almacen_id__in=allowed_almacen_ids)
-
-        if producto_variante_id:
-            current_qs = current_qs.filter(producto_variante_id=producto_variante_id)
-        if producto_id:
-            current_qs = current_qs.filter(
-                models.Q(producto_id=producto_id)
-                | models.Q(producto_variante__producto_id=producto_id)
-            )
-
-        current_rows = current_qs.values_list(
-            "almacen_id",
-            "producto_id",
-            "producto_variante_id",
-            "producto_variante__producto_id",
-            "cantidad",
-        )
-        for (
-            row_almacen_id,
-            row_producto_id,
-            row_variante_id,
-            row_variante_producto_id,
-            row_cantidad,
-        ) in current_rows.iterator():
-            key = (
-                row_almacen_id,
-                row_producto_id or row_variante_producto_id,
-                row_variante_id,
-            )
-            current_map[key] += self._report_to_decimal(row_cantidad)
-            keys.add(key)
-
-        auditoria_base = AuditoriaEvento.objects.filter(
-            modulo="inventarios",
-            tabla="existencias",
-            empresa_id__in=empresa_ids,
-        ).order_by("created_at", "id_evento")
-
-        period_delta_map = defaultdict(lambda: Decimal("0"))
-        period_in_map = defaultdict(lambda: Decimal("0"))
-        period_out_map = defaultdict(lambda: Decimal("0"))
-        post_end_delta_map = defaultdict(lambda: Decimal("0"))
-
-        period_events = auditoria_base.filter(created_at__gte=inicio_dt, created_at__lte=final_dt)
-        for item in self._iter_auditoria_items(
-            period_events,
-            allowed_almacen_ids=allowed_almacen_ids,
-            producto_id=producto_id,
-            producto_variante_id=producto_variante_id,
-        ):
-            key = (item["almacen_id"], item["producto_id"], item["producto_variante_id"])
-            delta = item["delta"]
-            period_delta_map[key] += delta
-            if delta >= 0:
-                period_in_map[key] += delta
-            else:
-                period_out_map[key] += abs(delta)
-            keys.add(key)
-
-        post_end_events = auditoria_base.filter(created_at__gt=final_dt)
-        for item in self._iter_auditoria_items(
-            post_end_events,
-            allowed_almacen_ids=allowed_almacen_ids,
-            producto_id=producto_id,
-            producto_variante_id=producto_variante_id,
-        ):
-            key = (item["almacen_id"], item["producto_id"], item["producto_variante_id"])
-            post_end_delta_map[key] += item["delta"]
-            keys.add(key)
-
-        product_ids = {key[1] for key in keys if key[1]}
-        variante_ids = {key[2] for key in keys if key[2]}
-
-        productos_map = {
-            producto.pk: producto
-            for producto in Producto.objects.filter(pk__in=product_ids).only(
-                "id", "nombre", "precio_base"
-            )
-        }
-        variantes_map = {
-            variante.pk: variante
-            for variante in ProductoVariante.objects.select_related("producto", "color", "talla")
-            .filter(pk__in=variante_ids)
-        }
-
-        cost_map = {}
-        if keys:
-            movement_cost_qs = (
-                MovimientoInventarioDetalle.objects.select_related(
-                    "movimiento_inventario",
-                    "movimiento_inventario__recepcion",
-                    "movimiento_inventario__ajuste_inventario",
-                    "movimiento_inventario__transferencia",
-                    "ubicacion_origen",
-                    "ubicacion_destino",
-                )
-                .filter(
-                    movimiento_inventario__fecha_movimiento__lte=final_dt,
-                    costo_unitario__gt=0,
-                )
-                .filter(
-                    models.Q(ubicacion_origen__almacen_id__in=allowed_almacen_ids)
-                    | models.Q(ubicacion_destino__almacen_id__in=allowed_almacen_ids)
-                    | models.Q(movimiento_inventario__recepcion__almacen_id__in=allowed_almacen_ids)
-                    | models.Q(movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids)
-                    | models.Q(movimiento_inventario__transferencia__almacen_origen_id__in=allowed_almacen_ids)
-                    | models.Q(movimiento_inventario__transferencia__almacen_destino_id__in=allowed_almacen_ids)
-                )
-                .order_by("-movimiento_inventario__fecha_movimiento", "-id")
-            )
-            if producto_variante_id:
-                movement_cost_qs = movement_cost_qs.filter(producto_variante_id=producto_variante_id)
-            if producto_id:
-                movement_cost_qs = movement_cost_qs.filter(producto_id=producto_id)
-
-            for detalle in movement_cost_qs:
-                producto_key_id = detalle.producto_id
-                variante_key_id = detalle.producto_variante_id
-                origen_id, destino_id = self._movement_almacen_ids(detalle)
-                for almacen_id in {origen_id, destino_id}:
-                    key = (almacen_id, producto_key_id, variante_key_id)
-                    if almacen_id and key in keys and key not in cost_map:
-                        cost_map[key] = self._report_to_decimal(detalle.costo_unitario)
-                if len(cost_map) >= len(keys):
-                    break
-
-        detalle = []
-        resumen_por_almacen = defaultdict(
-            lambda: {
-                "existencia_inicial": Decimal("0"),
-                "entradas": Decimal("0"),
-                "salidas": Decimal("0"),
-                "existencia_final": Decimal("0"),
-                "costo_total_existencia_final": Decimal("0"),
-            }
-        )
-        resumen_total = {
-            "existencia_inicial": Decimal("0"),
-            "entradas": Decimal("0"),
-            "salidas": Decimal("0"),
-            "existencia_final": Decimal("0"),
-            "costo_total_existencia_final": Decimal("0"),
-        }
-
-        for key in sorted(keys, key=lambda row: (row[0], row[1] or 0, row[2] or 0)):
-            almacen_id, producto_key_id, variante_key_id = key
-            current_qty = current_map[key]
-            period_delta = period_delta_map[key]
-            entradas = period_in_map[key]
-            salidas = period_out_map[key]
-            existencia_final = current_qty - post_end_delta_map[key]
-            existencia_inicial = existencia_final - period_delta
-            costo_unitario = cost_map.get(key, Decimal("0"))
-            costo_existencia_final = self._quantize_money(existencia_final * costo_unitario)
-
-            variante = variantes_map.get(variante_key_id)
-            producto = variantes_map[variante_key_id].producto if variante else productos_map.get(producto_key_id)
-            almacen = almacen_map.get(almacen_id, {})
-
-            row = {
-                "almacen_id": almacen_id,
-                "almacen_codigo": almacen.get("codigo"),
-                "almacen_nombre": almacen.get("nombre"),
-                "producto_id": producto_key_id,
-                "producto_variante_id": variante_key_id,
-                "producto_nombre": getattr(producto, "nombre", None),
-                "sku": getattr(variante, "sku", None) if variante else None,
-                "color": getattr(getattr(variante, "color", None), "nombre", None) if variante else None,
-                "talla": getattr(getattr(variante, "talla", None), "nombre", None) if variante else None,
-                "existencia_inicial": str(self._quantize_qty(existencia_inicial)),
-                "entradas": str(self._quantize_qty(entradas)),
-                "salidas": str(self._quantize_qty(salidas)),
-                "existencia_final": str(self._quantize_qty(existencia_final)),
-                "costo_unitario_final": str(self._quantize_money(costo_unitario)),
-                "costo_existencia_final": str(costo_existencia_final),
-            }
-            detalle.append(row)
-
-            resumen_por_almacen[almacen_id]["existencia_inicial"] += existencia_inicial
-            resumen_por_almacen[almacen_id]["entradas"] += entradas
-            resumen_por_almacen[almacen_id]["salidas"] += salidas
-            resumen_por_almacen[almacen_id]["existencia_final"] += existencia_final
-            resumen_por_almacen[almacen_id]["costo_total_existencia_final"] += self._report_to_decimal(
-                costo_existencia_final
-            )
-
-            resumen_total["existencia_inicial"] += existencia_inicial
-            resumen_total["entradas"] += entradas
-            resumen_total["salidas"] += salidas
-            resumen_total["existencia_final"] += existencia_final
-            resumen_total["costo_total_existencia_final"] += self._report_to_decimal(
-                costo_existencia_final
-            )
-
-        resumen_almacenes_payload = []
-        for almacen_id, totals in sorted(resumen_por_almacen.items(), key=lambda item: item[0]):
-            almacen = almacen_map.get(almacen_id, {})
-            resumen_almacenes_payload.append(
-                {
-                    "almacen_id": almacen_id,
-                    "almacen_codigo": almacen.get("codigo"),
-                    "almacen_nombre": almacen.get("nombre"),
-                    "existencia_inicial": str(self._quantize_qty(totals["existencia_inicial"])),
-                    "entradas": str(self._quantize_qty(totals["entradas"])),
-                    "salidas": str(self._quantize_qty(totals["salidas"])),
-                    "existencia_final": str(self._quantize_qty(totals["existencia_final"])),
-                    "costo_total_existencia_final": str(
-                        self._quantize_money(totals["costo_total_existencia_final"])
-                    ),
-                }
-            )
-
+        results = reporte["results"]
         paginator = ReporteExistenciasPeriodoPagination()
-        page = paginator.paginate_queryset(detalle, request, view=self)
+        page = paginator.paginate_queryset(results, request, view=self)
 
         response = paginator.get_paginated_response(page)
-        response.data["fecha_inicio"] = str(fecha_inicio)
-        response.data["fecha_final"] = str(fecha_final)
-        response.data["filtros"] = {
-            "almacen_id": almacen_id,
-        }
-        response.data["resumen"] = {
-            "existencia_inicial": str(self._quantize_qty(resumen_total["existencia_inicial"])),
-            "entradas": str(self._quantize_qty(resumen_total["entradas"])),
-            "salidas": str(self._quantize_qty(resumen_total["salidas"])),
-            "existencia_final": str(self._quantize_qty(resumen_total["existencia_final"])),
-            "costo_total_existencia_final": str(
-                self._quantize_money(resumen_total["costo_total_existencia_final"])
-            ),
-        }
-        response.data["resumen_por_almacen"] = resumen_almacenes_payload
+        response.data["fecha_inicio"] = str(reporte["fecha_inicio"])
+        response.data["fecha_final"] = str(reporte["fecha_final"])
+        # El almacén pedido (``null`` sin filtro). Antes del EC-814 salía el
+        # almacén de la última fila: una variable del cálculo lo pisaba.
+        response.data["filtros"] = {"almacen_id": reporte["almacen_id"]}
+        response.data["resumen"] = reporte["resumen"]
+        response.data["resumen_por_almacen"] = reporte["resumen_por_almacen"]
         return response
+
+    @extend_schema(
+        summary="Reporte de existencias por periodo en PDF o XLSX",
+        description=(
+            "Mismos parámetros, alcance y validación que reporte-existencias-periodo/, "
+            "con el reporte completo (sin paginar). A diferencia del JSON, el almacén es "
+            "obligatorio: todos los almacenes juntos tardan más de lo aceptable."
+        ),
+        parameters=[
+            PARAMETRO_FORMATO_EXPORTACION,
+            *PARAMETROS_FECHAS_REPORTE,
+            OpenApiParameter("almacen", OpenApiTypes.INT, required=True, description="Almacén (alias almacen_id)."),
+            OpenApiParameter("empresa", OpenApiTypes.INT, description="Empresa (alias empresa_id)."),
+            OpenApiParameter("sucursal", OpenApiTypes.INT, description="Sucursal (alias sucursal_id)."),
+            OpenApiParameter("producto", OpenApiTypes.INT, description="Producto (alias producto_id)."),
+            OpenApiParameter("producto_variante", OpenApiTypes.INT, description="Variante (alias producto_variante_id)."),
+        ],
+        responses=RESPUESTAS_EXPORTACION,
+    )
+    @action(
+        detail=False, methods=["get"], url_path="reporte-existencias-periodo/exportar",
+        renderer_classes=RENDERERS_EXPORTACION,
+    )
+    def reporte_existencias_periodo_exportar(self, request):
+        formato = exportacion_mod.formato_requerido(request.query_params)
+        # Fechas primero: sin ellas, el mismo 400 que el JSON.
+        reportes_mod.parse_fechas(request.query_params)
+        reportes_mod.almacen_requerido(request.query_params)
+        reporte = reportes_mod.reporte_existencias(request.user, request.query_params)
+        return respuesta_archivo(exportacion_mod.exportar_existencias(reporte, formato))
 
     @action(detail=False, methods=["get"], url_path="reporte-existencias-produccion-compras")
     def reporte_existencias_produccion_compras(self, request):
@@ -1502,7 +1239,7 @@ class ReporteMovimientosPeriodoPagination(PageNumberPagination):
     page_size_query_param = "page_size"
 
 
-class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
+class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModelViewSet):
     serializer_class = AuditoriaMovimientoSerializer
     permission_classes = [IsAuthenticatedAndScoped]
 
@@ -1513,91 +1250,24 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
             .order_by("-created_at", "-id_evento")
         )
 
-    def _report_to_int(self, value):
-        if value in (None, ""):
-            return None
-        try:
-            return int(value)
-        except Exception:
-            return None
-
-    def _report_to_decimal(self, value):
-        try:
-            return Decimal(str(value or 0))
-        except Exception:
-            return Decimal("0")
-
     def _movement_report_allowed_almacen_ids(self, request):
-        qp = request.query_params
-        almacen_id = self._report_to_int(qp.get("almacen") or qp.get("almacen_id"))
-        qs = Almacen.objects.all()
-        user = request.user
-
-        if not user.is_superuser:
-            empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
-            sucursal_ids = list(user.sucursales_permitidas())
-            qs = qs.filter(
-                models.Q(empresa_id__in=empresa_ids)
-                & models.Q(sucursal_id__in=sucursal_ids)
-            )
-
-        if almacen_id:
-            qs = qs.filter(pk=almacen_id)
-        return set(qs.values_list("pk", flat=True)), almacen_id
+        return reportes_mod.almacen_ids_movimientos(request.user, request.query_params)
 
     def _movement_report_parse_dates(self, request):
-        fecha_inicio_raw = (request.query_params.get("fecha_inicio") or "").strip()
-        fecha_final_raw = (request.query_params.get("fecha_final") or "").strip()
-        fecha_inicio = parse_date(fecha_inicio_raw)
-        fecha_final = parse_date(fecha_final_raw)
-
-        if not fecha_inicio:
-            raise ValidationError(
-                {"fecha_inicio": "fecha_inicio es requerida con formato YYYY-MM-DD."}
-            )
-        if not fecha_final:
-            raise ValidationError(
-                {"fecha_final": "fecha_final es requerida con formato YYYY-MM-DD."}
-            )
-        if fecha_final < fecha_inicio:
-            raise ValidationError(
-                {"fecha_final": "fecha_final no puede ser menor a fecha_inicio."}
-            )
-
-        tz = timezone.get_current_timezone()
-        inicio_dt = timezone.make_aware(datetime.combine(fecha_inicio, time.min), tz)
-        final_dt = timezone.make_aware(datetime.combine(fecha_final, time.max), tz)
-        return fecha_inicio, fecha_final, inicio_dt, final_dt
+        return reportes_mod.parse_fechas(request.query_params)
 
     @action(detail=False, methods=["get"], url_path="reporte-movimientos-periodo")
     def reporte_movimientos_periodo(self, request):
-        tipo_movimiento = (request.query_params.get("tipo_movimiento") or "").strip().upper()
-        if tipo_movimiento not in {"ENTRADA", "SALIDA", "AJUSTE", "TRANSFERENCIA"}:
-            raise ValidationError(
-                {
-                    "tipo_movimiento": (
-                        "tipo_movimiento es requerido y debe ser ENTRADA, SALIDA, AJUSTE o TRANSFERENCIA."
-                    )
-                }
-            )
-
-        fecha_inicio, fecha_final, inicio_dt, final_dt = self._movement_report_parse_dates(
-            request
-        )
-        allowed_almacen_ids, almacen_id = self._movement_report_allowed_almacen_ids(request)
-
-        if not allowed_almacen_ids:
+        # Cálculo completo en ``reportes_periodo``; aquí solo se pagina.
+        reporte = reportes_mod.reporte_movimientos(request.user, request.query_params)
+        if reporte["sin_almacenes"]:
             return Response(
                 {
-                    "tipo_movimiento": tipo_movimiento,
-                    "fecha_inicio": str(fecha_inicio),
-                    "fecha_final": str(fecha_final),
-                    "filtros": {"almacen_id": almacen_id},
-                    "resumen": {
-                        "total_movimientos": 0,
-                        "total_registros": 0,
-                        "total_cantidad": "0.0000",
-                    },
+                    "tipo_movimiento": reporte["tipo_movimiento"],
+                    "fecha_inicio": str(reporte["fecha_inicio"]),
+                    "fecha_final": str(reporte["fecha_final"]),
+                    "filtros": {"almacen_id": reporte["almacen_id"]},
+                    "resumen": reporte["resumen"],
                     "count": 0,
                     "next": None,
                     "previous": None,
@@ -1606,177 +1276,42 @@ class MovimientoOperacionViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_200_OK,
             )
 
-        detalles_qs = (
-            MovimientoInventarioDetalle.objects.select_related(
-                "movimiento_inventario",
-                "movimiento_inventario__usuario",
-                "movimiento_inventario__pedido",
-                "movimiento_inventario__recepcion",
-                "movimiento_inventario__ajuste_inventario",
-                "movimiento_inventario__op",
-                "movimiento_inventario__transferencia",
-                "producto",
-                "producto_variante",
-                "producto_variante__producto",
-                "producto_variante__color",
-                "producto_variante__talla",
-                "ubicacion_origen",
-                "ubicacion_origen__almacen",
-                "ubicacion_destino",
-                "ubicacion_destino__almacen",
-            )
-            .filter(
-                movimiento_inventario__activo=True,
-                movimiento_inventario__tipo_movimiento=tipo_movimiento,
-                movimiento_inventario__fecha_movimiento__gte=inicio_dt,
-                movimiento_inventario__fecha_movimiento__lte=final_dt,
-            )
-            .order_by("-movimiento_inventario__fecha_movimiento", "-id")
-        )
-
-        if tipo_movimiento == "ENTRADA":
-            detalles_qs = detalles_qs.filter(
-                models.Q(ubicacion_destino__almacen_id__in=allowed_almacen_ids)
-                | models.Q(
-                    movimiento_inventario__recepcion__almacen_id__in=allowed_almacen_ids
-                )
-                | models.Q(
-                    movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids
-                )
-            )
-        elif tipo_movimiento == "SALIDA":
-            detalles_qs = detalles_qs.filter(
-                models.Q(ubicacion_origen__almacen_id__in=allowed_almacen_ids)
-                | models.Q(
-                    movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids
-                )
-            )
-        elif tipo_movimiento == "TRANSFERENCIA":
-            detalles_qs = detalles_qs.filter(
-                models.Q(ubicacion_origen__almacen_id__in=allowed_almacen_ids)
-                | models.Q(ubicacion_destino__almacen_id__in=allowed_almacen_ids)
-            )
-        else:
-            detalles_qs = detalles_qs.filter(
-                movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids
-            )
-
-        resultados = []
-        total_cantidad = Decimal("0")
-        movimiento_ids = set()
-
-        for detalle in detalles_qs:
-            movimiento = detalle.movimiento_inventario
-            variante = detalle.producto_variante
-            producto = getattr(variante, "producto", None) if variante else detalle.producto
-
-            if tipo_movimiento == "ENTRADA":
-                almacen = (
-                    getattr(detalle.ubicacion_destino, "almacen", None)
-                    or getattr(movimiento, "recepcion", None) and movimiento.recepcion.almacen
-                    or getattr(movimiento, "ajuste_inventario", None)
-                    and movimiento.ajuste_inventario.almacen
-                )
-                ubicacion = detalle.ubicacion_destino
-            elif tipo_movimiento == "SALIDA":
-                almacen = (
-                    getattr(detalle.ubicacion_origen, "almacen", None)
-                    or getattr(movimiento, "ajuste_inventario", None)
-                    and movimiento.ajuste_inventario.almacen
-                )
-                ubicacion = detalle.ubicacion_origen
-            elif tipo_movimiento == "TRANSFERENCIA":
-                origen_almacen = getattr(detalle.ubicacion_origen, "almacen", None)
-                destino_almacen = getattr(detalle.ubicacion_destino, "almacen", None)
-                origen_ok = getattr(origen_almacen, "pk", None) in allowed_almacen_ids
-                destino_ok = getattr(destino_almacen, "pk", None) in allowed_almacen_ids
-                if origen_ok:
-                    almacen = origen_almacen
-                    ubicacion = detalle.ubicacion_origen
-                elif destino_ok:
-                    almacen = destino_almacen
-                    ubicacion = detalle.ubicacion_destino
-                else:
-                    almacen = origen_almacen or destino_almacen
-                    ubicacion = detalle.ubicacion_origen or detalle.ubicacion_destino
-            else:
-                almacen = getattr(movimiento, "ajuste_inventario", None) and movimiento.ajuste_inventario.almacen
-                ubicacion = detalle.ubicacion_destino or detalle.ubicacion_origen
-
-            usuario = getattr(movimiento, "usuario", None)
-            pedido = getattr(movimiento, "pedido", None)
-            transferencia = getattr(movimiento, "transferencia", None)
-            cantidad = self._report_to_decimal(detalle.cantidad)
-            costo_unitario = self._report_to_decimal(detalle.costo_unitario)
-            total_cantidad += cantidad
-            movimiento_ids.add(movimiento.pk)
-
-            resultados.append(
-                {
-                    "movimiento_inventario_id": movimiento.pk,
-                    "movimiento_detalle_id": detalle.pk,
-                    "tipo_movimiento": movimiento.tipo_movimiento,
-                    "fecha_movimiento": movimiento.fecha_movimiento,
-                    "almacen_id": getattr(almacen, "pk", None),
-                    "almacen_codigo": getattr(almacen, "codigo", None),
-                    "almacen_nombre": getattr(almacen, "nombre", None),
-                    "ubicacion_id": getattr(ubicacion, "pk", None),
-                    "ubicacion_nombre": str(ubicacion) if ubicacion else None,
-                    "producto_id": getattr(producto, "pk", None),
-                    "producto_variante_id": getattr(variante, "pk", None),
-                    "sku": getattr(variante, "sku", None),
-                    "producto_nombre": (
-                        getattr(variante, "nombre", None)
-                        or getattr(producto, "nombre", None)
-                    ),
-                    "producto_base_nombre": getattr(producto, "nombre", None),
-                    "color": getattr(getattr(variante, "color", None), "nombre", None)
-                    if variante
-                    else None,
-                    "talla": getattr(getattr(variante, "talla", None), "nombre", None)
-                    if variante
-                    else None,
-                    "cantidad": str(cantidad.quantize(Decimal("0.0001"))),
-                    "costo_unitario": str(costo_unitario.quantize(Decimal("0.01"))),
-                    "costo_total": str((cantidad * costo_unitario).quantize(Decimal("0.01"))),
-                    "pedido_id": getattr(pedido, "pk", None),
-                    "pedido_folio": getattr(pedido, "folio", None),
-                    "transferencia_id": getattr(transferencia, "pk", None),
-                    "transferencia_folio": getattr(transferencia, "folio", None),
-                    "recepcion_id": getattr(movimiento, "recepcion_id", None),
-                    "ajuste_inventario_id": getattr(movimiento, "ajuste_inventario_id", None),
-                    "op_id": getattr(movimiento, "op_id", None),
-                    "usuario_id": getattr(usuario, "pk", None),
-                    "usuario_nombre": (
-                        usuario.get_full_name().strip() or usuario.email
-                        if usuario
-                        else None
-                    ),
-                    "observaciones": movimiento.observaciones,
-                    "comentarios": (
-                        getattr(getattr(movimiento, "ajuste_inventario", None), "observaciones", None)
-                        or movimiento.observaciones
-                    ),
-                    "motivo_ajuste": getattr(
-                        getattr(movimiento, "ajuste_inventario", None), "motivo", None
-                    ),
-                }
-            )
-
         paginator = ReporteMovimientosPeriodoPagination()
-        page = paginator.paginate_queryset(resultados, request, view=self)
+        page = paginator.paginate_queryset(reporte["results"], request, view=self)
 
         response = paginator.get_paginated_response(page)
-        response.data["tipo_movimiento"] = tipo_movimiento
-        response.data["fecha_inicio"] = str(fecha_inicio)
-        response.data["fecha_final"] = str(fecha_final)
-        response.data["filtros"] = {"almacen_id": almacen_id}
-        response.data["resumen"] = {
-            "total_movimientos": len(movimiento_ids),
-            "total_registros": len(resultados),
-            "total_cantidad": str(total_cantidad.quantize(Decimal("0.0001"))),
-        }
+        response.data["tipo_movimiento"] = reporte["tipo_movimiento"]
+        response.data["fecha_inicio"] = str(reporte["fecha_inicio"])
+        response.data["fecha_final"] = str(reporte["fecha_final"])
+        response.data["filtros"] = {"almacen_id": reporte["almacen_id"]}
+        response.data["resumen"] = reporte["resumen"]
         return response
+
+    @extend_schema(
+        summary="Reporte de movimientos por periodo en PDF o XLSX",
+        description=(
+            "Mismos parámetros, alcance y validación que reporte-movimientos-periodo/, "
+            "con el reporte completo (sin paginar)."
+        ),
+        parameters=[
+            PARAMETRO_FORMATO_EXPORTACION,
+            OpenApiParameter(
+                "tipo_movimiento", OpenApiTypes.STR, required=True,
+                enum=list(reportes_mod.TIPOS_MOVIMIENTO), description="Tipo de movimiento.",
+            ),
+            *PARAMETROS_FECHAS_REPORTE,
+            OpenApiParameter("almacen", OpenApiTypes.INT, description="Almacén (alias almacen_id)."),
+        ],
+        responses=RESPUESTAS_EXPORTACION,
+    )
+    @action(
+        detail=False, methods=["get"], url_path="reporte-movimientos-periodo/exportar",
+        renderer_classes=RENDERERS_EXPORTACION,
+    )
+    def reporte_movimientos_periodo_exportar(self, request):
+        formato = exportacion_mod.formato_requerido(request.query_params)
+        reporte = reportes_mod.reporte_movimientos(request.user, request.query_params)
+        return respuesta_archivo(exportacion_mod.exportar_movimientos(reporte, formato))
 
     def _auxiliar_id(self, qp, *nombres):
         # A diferencia de ``_report_to_int``, un id no numérico es 400: ignorarlo
