@@ -68,6 +68,15 @@ def direccion_sucursal(sucursal):
 
 
 class OrdenCompraSerializer(serializers.ModelSerializer):
+    def get_pre_ordenes(self, obj):
+        ids = getattr(obj, "pre_ordenes_ids", None)
+        if ids is None:
+            ids = obj.necesidades.values_list("pre_orden_id", flat=True).distinct()
+        ids = set(ids or [])
+        if obj.pre_orden_id:
+            ids.add(obj.pre_orden_id)
+        return sorted(ids)
+
     estatus_label = serializers.SerializerMethodField()
     proveedor_nombre = serializers.SerializerMethodField()
     proveedor_correo = serializers.SerializerMethodField()
@@ -80,6 +89,9 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
     empresa_nombre = serializers.CharField(source='empresa.razon_social', read_only=True)
     # Pre-orden de producción que generó la OC (faltantes), o ``null``.
     pre_orden_id = serializers.IntegerField(read_only=True, allow_null=True)
+    # Pre-órdenes de la OC: la del flujo anterior (``pre_orden_id``) más las de
+    # sus necesidades consolidadas (anotado en el queryset: ``pre_ordenes_ids``).
+    pre_ordenes = serializers.SerializerMethodField()
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     # Dirección de entrega para el proveedor: la de la sucursal de la OC.
     sucursal_direccion = serializers.SerializerMethodField()
@@ -170,6 +182,7 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'pedido',
             'pedido_folio',
             'pre_orden_id',
+            'pre_ordenes',
             'pedidos',
             'pedidos_vinculados',
             'tipo_compra',

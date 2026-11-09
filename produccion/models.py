@@ -169,6 +169,8 @@ class PreOrdenProduccion(models.Model):
     materiales_faltantes = models.PositiveIntegerField(default=0)
     regreso_fecha = models.DateTimeField(null=True, blank=True)
     regreso_motivo = models.CharField(max_length=255, blank=True, default="")
+    # Ya se avisó que el semáforo está en rojo (se reinicia al salir de rojo).
+    semaforo_rojo_avisado = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

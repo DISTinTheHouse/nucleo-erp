@@ -39,11 +39,61 @@ DIAS_AMARILLO = 3
 
 # --------------------------------------------------------------------------- utilidades
 
+# Áreas a avisar por evento (rol de departamento -> ``crear_notificacion_por_rol``).
+AVISOS = {
+    "creada": (("almacen", "Pre-orden por validar"),),
+    "necesidad_enviada": (("compras", "Faltantes de pre-orden"),),
+    "material_recibido": (("produccion", "Material recibido"),),
+    "lista": (("produccion", "Pre-orden lista para producir"),),
+    "regreso_consumo": (("almacen", "Pre-orden regresó por consumo"), ("produccion", "Pre-orden regresó por consumo")),
+    "semaforo_rojo": (("produccion", "Pre-orden en rojo"), ("compras", "Pre-orden en rojo")),
+}
+ROL_AREA = {"almacen": "almacen-mp", "compras": "compras", "produccion": "produccion"}
+
+
+def avisar(pre, tipo, mensaje):
+    """Notificaciones a las áreas de ``AVISOS[tipo]``, al confirmar la transacción."""
+    from notificaciones.services.notificacion_service import crear_notificacion_por_rol
+    avisos = AVISOS.get(tipo)
+    if not avisos:
+        return
+    folio = getattr(pre.pedido, "folio", None) or pre.pedido_id
+    data = {"pre_orden": pre.pk, "pedido": pre.pedido_id, "url": f"/produccion/pre-ordenes/{pre.pk}"}
+
+    def _enviar():
+        for area, titulo in avisos:
+            crear_notificacion_por_rol(
+                pre.empresa, ROL_AREA[area], f"{titulo}: pedido {folio}", mensaje or titulo,
+                "produccion", f"pre_orden_{tipo}", data=data,
+            )
+    transaction.on_commit(_enviar)
+
+
 def evento(pre, tipo, usuario=None, descripcion=""):
     PreOrdenEvento.objects.create(
         pre_orden=pre, evento=tipo, usuario=usuario if getattr(usuario, "pk", None) else None,
         descripcion=(descripcion or "")[:500],
     )
+    avisar(pre, str(tipo), descripcion)
+
+
+def revisar_semaforo(pre):
+    """Avisa una vez cuando la pre-orden entra a rojo; se rearma al salir."""
+    from compras.models import NecesidadCompra as N
+    if pre.estatus not in RECALCULABLES:
+        return
+    fem = (
+        N.objects.filter(pre_orden=pre, estatus=N.Estatus.EN_OC, orden_compra__fecha_entrega_estimada__isnull=False)
+        .order_by("-orden_compra__fecha_entrega_estimada")
+        .values_list("orden_compra__fecha_entrega_estimada", flat=True).first()
+    )
+    rojo = semaforo(pre.estatus, pre.materiales_faltantes, fem, fecha_compromiso(pre.pedido)) == "rojo"
+    if rojo != pre.semaforo_rojo_avisado:
+        pre.semaforo_rojo_avisado = rojo
+        pre.save(update_fields=["semaforo_rojo_avisado", "updated_at"])
+        if rojo:
+            avisar(pre, "semaforo_rojo",
+                   f"El material llega después de la fecha compromiso. Faltan {pre.materiales_faltantes} material(es).")
 
 
 def _cambiar_estatus(pre, nuevo, campos=None):
@@ -398,6 +448,7 @@ def recalcular(pre, mats=None, motivo_regreso=None, usuario=None):
             evento(pre, EV.REGRESO_CONSUMO, usuario, pre.regreso_motivo + f" Faltan {faltantes} material(es).")
     if campos:
         pre.save(update_fields=[*campos, "updated_at"])
+    revisar_semaforo(pre)
     return pre
 
 
