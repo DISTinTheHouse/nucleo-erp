@@ -439,6 +439,9 @@ class ProveedorKpisTests(TestCase):
                       "?fecha_desde=2026-13-45", "?fecha_desde=2026-02-01&fecha_hasta=2026-01-01",
                       "?proveedor=x"):
             self.assertEqual(self._get(query=query).status_code, 400, query)
+        # EC-829: ``-5`` responde el mismo mensaje de rango que ``0``; ``1_0`` no es entero.
+        self.assertEqual(self._get(query="?limite=-5").data, self._get(query="?limite=0").data)
+        self.assertEqual(self._get(query="?limite=1_0").data, {"limite": "Debe ser un entero válido."})
 
     def test_meta_scorecard_cambia_el_semaforo_y_se_devuelve(self):
         resp = self._get(query="?meta_scorecard=30")
@@ -1738,7 +1741,8 @@ class DireccionClienteTests(TestCase):
         self.assertEqual(self._listado(self.admin_otra, cliente=self.cliente.pk), [])
 
     def test_filtro_con_valor_invalido_es_400(self):
-        for valor in ("abc", "1.5", "1,2"):
+        # EC-829: ``1_0`` y ``٣`` los aceptaba ``int()`` (10 y 3).
+        for valor in ("abc", "1.5", "1,2", "1_0", "٣", "+5", " 5"):
             with self.subTest(valor=valor):
                 resp = self._api(self.admin).get(DIRECCIONES_URL, {"cliente": valor})
                 self.assertEqual(resp.status_code, 400)

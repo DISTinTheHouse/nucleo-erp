@@ -582,7 +582,8 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # reproducen los conjuntos del tablero: ``?kpi=tardias`` etc.
         params = self.request.query_params
         queryset = queryset.filter(activo=True)
-        estatus = entero_param(self.request, "estatus_op")
+        # Con signo (EC-829): un estatus negativo no existe y da vacío, como antes.
+        estatus = entero_param(self.request, "estatus_op", con_signo=True)
         if estatus is not None:
             queryset = queryset.filter(estatus_op=estatus)
         sucursal = entero_param(self.request, "sucursal")

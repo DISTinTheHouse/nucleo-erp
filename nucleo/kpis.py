@@ -50,15 +50,51 @@ def rango_fechas(request, desde="fecha_desde", hasta="fecha_hasta"):
     return fecha_desde, fecha_hasta
 
 
-def entero_param(request, nombre):
-    """Entero del query string; vacío → ``None``; inválido → 400."""
-    valor = (request.query_params.get(nombre) or "").strip()
-    if not valor:
+# Lector único de enteros del query string (EC-829). ``int()`` acepta ``1_0`` (10),
+# ``+5``, dígitos no ASCII (``٣``, ``５``) y espacios Unicode alrededor: un valor
+# así filtraba otro registro en vez de dar 400.
+ESPACIOS_ASCII = " \t\n\r\x0b\x0c"
+ENTERO_MAXIMO = 2**63 - 1  # bigint de Postgres
+DIGITOS_MAXIMOS = 19
+MENSAJE_ENTERO = "Debe ser un entero válido."
+MENSAJE_POSITIVO = "Debe ser un entero mayor a 0."
+
+
+def vacio(valor):
+    """Única definición de "parámetro ausente": ``None`` o solo espacios (también
+    Unicode, `` ``). Lo que no es vacío lo valida ``entero_estricto``."""
+    return not (valor or "").strip()
+
+
+def entero_estricto(valor, nombre, *, positivo=False, con_signo=False):
+    """Entero de un valor del query string; ``vacio`` → ``None``; inválido → 400
+    con la clave ``nombre``.
+
+    Solo dígitos ASCII (hasta 19, dentro de bigint), con los espacios ASCII de
+    alrededor recortados (`` 5`` es 400). ``con_signo`` admite un ``-``
+    inicial (nunca ``+``); ``positivo`` rechaza 0 y negativos con
+    ``MENSAJE_POSITIVO``.
+    """
+    if vacio(valor):
         return None
-    try:
-        return int(valor)
-    except ValueError:
-        raise ValidationError({nombre: "Debe ser un entero válido."})
+    texto = valor.strip(ESPACIOS_ASCII)
+    negativo = texto.startswith("-")
+    digitos = texto[1:] if negativo else texto
+    if not (digitos.isascii() and digitos.isdigit()) or len(digitos) > DIGITOS_MAXIMOS:
+        raise ValidationError({nombre: MENSAJE_ENTERO})
+    if negativo and not con_signo:
+        raise ValidationError({nombre: MENSAJE_POSITIVO if positivo else MENSAJE_ENTERO})
+    numero = int(texto)
+    if not -ENTERO_MAXIMO - 1 <= numero <= ENTERO_MAXIMO:
+        raise ValidationError({nombre: MENSAJE_ENTERO})
+    if positivo and numero <= 0:
+        raise ValidationError({nombre: MENSAJE_POSITIVO})
+    return numero
+
+
+def entero_param(request, nombre, *, positivo=False, con_signo=False):
+    """Entero del query param ``nombre`` (``entero_estricto``); vacío → ``None``."""
+    return entero_estricto(request.query_params.get(nombre), nombre, positivo=positivo, con_signo=con_signo)
 
 
 def con_tope(queryset_o_lista, tope=TOPE_DRILL_DOWN):

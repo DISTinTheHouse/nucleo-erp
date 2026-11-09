@@ -5213,7 +5213,10 @@ class OrdenProduccionKpisTests(TestCase):
         self.assertIn("linea", str(resp.data["parametros"]))
 
     def test_parametros_invalidos_responden_400(self):
-        for query in ("?sucursal=abc", "?fecha_desde=2026-13-40", "?fecha_desde=2026-02-01&fecha_hasta=2026-01-01"):
+        for query in (
+            "?sucursal=abc", "?fecha_desde=2026-13-40", "?fecha_desde=2026-02-01&fecha_hasta=2026-01-01",
+            "?sucursal=1_0", "?sucursal=%D9%A3",  # EC-829: solo dígitos ASCII
+        ):
             with self.subTest(query=query):
                 self.assertEqual(self._get(self.usuario, query).status_code, 400)
 
@@ -5296,6 +5299,12 @@ class OrdenProduccionKpisTests(TestCase):
         self.assertEqual(len(terminadas), otd["ops_terminadas"])
         self.assertEqual(len(a_tiempo), otd["ops_a_tiempo"])
         self.assertEqual(len(sin_clasificar), otd["ops_sin_clasificar"])
+
+    def test_listado_estatus_negativo_da_vacio(self):
+        # EC-829: ``estatus_op`` admite signo; uno negativo no existe y da 200 vacío.
+        resp = self._listado(self.admin_empresa, "?estatus_op=-1")
+        self.assertEqual((resp.status_code, resp.data), (200, []))
+        self.assertEqual(self._listado(self.admin_empresa, "?estatus_op=1_0").status_code, 400)
 
     def test_listado_kpi_desconocido_es_400(self):
         self.assertEqual(self._listado(self.usuario, "?kpi=otro").status_code, 400)

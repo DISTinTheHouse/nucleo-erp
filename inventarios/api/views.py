@@ -33,6 +33,7 @@ from catalogo.models import Producto, ProductoVariante, VarianteProductoProducci
 from auditoria.models import AuditoriaEvento
 from nucleo.models import Sucursal
 from ventas.models import Pedido
+from nucleo.kpis import entero_param
 from nucleo.listados import PaginacionOpcionalLimitOffset
 from . import auxiliar as auxiliar_mod
 from . import existencias_por_almacen as por_almacen_mod
@@ -1395,6 +1396,10 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
         qp = request.query_params
         variante_id = self._auxiliar_id(qp, "producto_variante", "producto_variante_id")
         almacen_id = self._auxiliar_id(qp, "almacen", "almacen_id")
+        # ``limite`` no es un id: el lector general, con la misma regla (> 0). Se
+        # valida aquí, con los demás, para que su 400 no dependa de que la
+        # búsqueda por ``q`` resuelva una sola variante (EC-829).
+        limite = entero_param(request, "limite", positivo=True)
         q = (qp.get("q") or "").strip()
         if not variante_id:
             if not q:
@@ -1427,9 +1432,7 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
         if not request.user.is_superuser:
             almacenes, _almacen = self._movement_report_allowed_almacen_ids(request)
             alcance = (almacenes, request.user.sucursales_permitidas())
-        limite = min(
-            self._auxiliar_id(qp, "limite") or auxiliar_mod.LIMITE_RENGLONES, auxiliar_mod.LIMITE_RENGLONES_MAX
-        )
+        limite = min(limite or auxiliar_mod.LIMITE_RENGLONES, auxiliar_mod.LIMITE_RENGLONES_MAX)
         data = auxiliar_mod.kardex(request.user, variante["id"], almacen_id, inicio_dt, final_dt, alcance, limite)
         return Response({"variante": auxiliar_mod.opcion(variante), "opciones": [], "hay_mas": False, **data})
 

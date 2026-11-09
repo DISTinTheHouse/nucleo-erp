@@ -700,7 +700,8 @@ class ProveedorViewSet(viewsets.ModelViewSet):
 
         validar_parametros(request, self.PARAMS_KPIS)
         meta = self._numero_param(request, "meta_scorecard", META_SCORECARD, 0, 100)
-        limite = entero_param(request, "limite")
+        # Con signo (EC-829): ``-5`` llega al rango y responde su mensaje, como ``0``.
+        limite = entero_param(request, "limite", con_signo=True)
         limite = LIMITE_PROVEEDORES if limite is None else limite
         if not 1 <= limite <= TOPE_LIMITE_PROVEEDORES:
             raise ValidationError({"limite": f"Debe estar entre 1 y {TOPE_LIMITE_PROVEEDORES}."})
