@@ -393,9 +393,6 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
     def _quantize_qty(self, value):
         return reportes_mod.quantize_qty(value)
 
-    def _quantize_money(self, value):
-        return reportes_mod.quantize_money(value)
-
     def _build_report_almacenes_queryset(self):
         return reportes_mod.almacenes_del_reporte(self.request.user, self.request.query_params)
 

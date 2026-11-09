@@ -22,6 +22,7 @@ from django.utils.text import slugify
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle
@@ -32,6 +33,7 @@ from reportlab.platypus import Flowable, HRFlowable, Paragraph, SimpleDocTemplat
 from rest_framework.exceptions import ValidationError
 
 from catalogo.models import Producto, ProductoVariante
+from inventarios.api.reportes_periodo import to_decimal
 from inventarios.models import Almacen
 from nucleo.models import Empresa, Sucursal
 
@@ -79,15 +81,8 @@ def formato_requerido(query_params):
 # --- Formato de valores (espejo de ``formatCurrency``/``formatDate`` del front) ---
 
 
-def _decimal(valor):
-    try:
-        return Decimal(str(valor if valor not in (None, "") else 0))
-    except Exception:
-        return Decimal("0")
-
-
 def _con_miles(valor, decimales):
-    q = _decimal(valor).quantize(Decimal(1).scaleb(-decimales), rounding=ROUND_HALF_UP)
+    q = to_decimal(valor).quantize(Decimal(1).scaleb(-decimales), rounding=ROUND_HALF_UP)
     if q == 0:
         q = abs(q)  # sin "-0.00"
     return f"{q:,.{decimales}f}"
@@ -557,7 +552,7 @@ def _xlsx(titulo_hoja, titulo, subtitulo, filtros, generacion, resumen, seccion,
     wb = Workbook(write_only=True)
     ws = wb.create_sheet(titulo_hoja)
     for i, (_, ancho, _) in enumerate(columnas):
-        ws.column_dimensions[_columna(i)].width = ancho
+        ws.column_dimensions[get_column_letter(i + 1)].width = ancho
 
     def celda(valor, fuente=None, formato=None, alineacion=None, relleno=None):
         c = WriteOnlyCell(ws, value=valor)
@@ -596,7 +591,7 @@ def _xlsx(titulo_hoja, titulo, subtitulo, filtros, generacion, resumen, seccion,
     fila_encabezado = len(filas_previas) + 1
     ws.freeze_panes = f"A{fila_encabezado + 1}"
     ultima = fila_encabezado + max(len(filas), 1)
-    ws.auto_filter.ref = f"A{fila_encabezado}:{_columna(len(columnas) - 1)}{ultima}"
+    ws.auto_filter.ref = f"A{fila_encabezado}:{get_column_letter(len(columnas))}{ultima}"
 
     for fila in filas_previas:
         ws.append(fila)
@@ -614,10 +609,6 @@ def _xlsx(titulo_hoja, titulo, subtitulo, filtros, generacion, resumen, seccion,
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
-
-
-def _columna(i):
-    return chr(ord("A") + i)
 
 
 # --- Existencias -------------------------------------------------------------------
@@ -710,11 +701,11 @@ def exportar_existencias(reporte, formato, generado_en=None):
                 ("Generado el", formato_generado(generado_en), None),
             ],
             resumen=[
-                ("Exist. inicial", _decimal(resumen["existencia_inicial"]), _FMT_CANTIDAD),
-                ("Entradas", _decimal(resumen["entradas"]), _FMT_CANTIDAD),
-                ("Salidas", _decimal(resumen["salidas"]), _FMT_CANTIDAD),
-                ("Exist. final", _decimal(resumen["existencia_final"]), _FMT_CANTIDAD),
-                ("Costo total", _decimal(resumen["costo_total_existencia_final"]), _FMT_DINERO),
+                ("Exist. inicial", to_decimal(resumen["existencia_inicial"]), _FMT_CANTIDAD),
+                ("Entradas", to_decimal(resumen["entradas"]), _FMT_CANTIDAD),
+                ("Salidas", to_decimal(resumen["salidas"]), _FMT_CANTIDAD),
+                ("Exist. final", to_decimal(resumen["existencia_final"]), _FMT_CANTIDAD),
+                ("Costo total", to_decimal(resumen["costo_total_existencia_final"]), _FMT_DINERO),
             ],
             seccion="DETALLE DE EXISTENCIAS",
             columnas=_COLUMNAS_EXISTENCIAS_XLSX,
@@ -725,12 +716,12 @@ def exportar_existencias(reporte, formato, generado_en=None):
                     f["color"],
                     f["talla"],
                     f["almacen_nombre"],
-                    _decimal(f["existencia_inicial"]),
-                    _decimal(f["entradas"]),
-                    _decimal(f["salidas"]),
-                    _decimal(f["existencia_final"]),
-                    _decimal(f["costo_unitario_final"]),
-                    _decimal(f["costo_existencia_final"]),
+                    to_decimal(f["existencia_inicial"]),
+                    to_decimal(f["entradas"]),
+                    to_decimal(f["salidas"]),
+                    to_decimal(f["existencia_final"]),
+                    to_decimal(f["costo_unitario_final"]),
+                    to_decimal(f["costo_existencia_final"]),
                 ]
                 for f in filas
             ],
@@ -834,7 +825,7 @@ def exportar_movimientos(reporte, formato, generado_en=None):
             resumen=[
                 ("Total movimientos", resumen["total_movimientos"], _FMT_ENTERO),
                 ("Total registros", resumen["total_registros"], _FMT_ENTERO),
-                ("Cantidad total", _decimal(resumen["total_cantidad"]), _FMT_CANTIDAD),
+                ("Cantidad total", to_decimal(resumen["total_cantidad"]), _FMT_CANTIDAD),
             ],
             seccion="DETALLE DE MOVIMIENTOS",
             columnas=_COLUMNAS_MOVIMIENTOS_XLSX,
@@ -845,8 +836,8 @@ def exportar_movimientos(reporte, formato, generado_en=None):
                     producto(f),
                     f["almacen_nombre"],
                     f["ubicacion_nombre"],
-                    _decimal(f["cantidad"]),
-                    _decimal(f["costo_total"]),
+                    to_decimal(f["cantidad"]),
+                    to_decimal(f["costo_total"]),
                     f["usuario_nombre"],
                 ]
                 for f in filas
