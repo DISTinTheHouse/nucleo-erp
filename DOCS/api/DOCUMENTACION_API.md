@@ -684,10 +684,12 @@ Permite consultar el inventario actual.
   - Seleccionar `fecha_final`
   - Seleccionar `almacen_id`
   - Clic en generar reporte
+- **Permiso (EC-822)**: `R-CORE-REPORTES`, también en `exportar/` (superusuario y admin de empresa pasan; `R-CORE` solo no basta). Sin él → `403`, en JSON aunque se pida el archivo.
 - **Query params mínimos**:
-  - `fecha_inicio`: requerido, formato `YYYY-MM-DD`
+  - `fecha_inicio`: requerido, formato `YYYY-MM-DD`; una fecha inexistente (`2026-02-30`) también es `400`
   - `fecha_final`: requerido, formato `YYYY-MM-DD`
-  - `almacen_id`: opcional si el usuario quiere un almacén específico; si se omite, regresa todos los almacenes visibles para el usuario
+  - `almacen_id` (alias `almacen`): opcional si el usuario quiere un almacén específico; si se omite, regresa todos los almacenes visibles para el usuario. Se toma el primer alias no vacío; no numérico, `0` o negativo → `400 {"almacen": ...}` (EC-822). Un almacén válido pero fuera del alcance o inexistente da `200` vacío.
+  - `filtros` siempre es `{"almacen_id": <el pedido o null>}`, haya o no resultados.
 - **Paginación**: aplica únicamente sobre `results` (el detalle por almacén/producto/variante). `fecha_inicio`, `fecha_final`, `filtros`, `resumen` y `resumen_por_almacen` son agregados de todo el periodo/consulta, no solo de la página actual.
   - `page`: opcional, número de página (default `1`)
   - `page_size`: opcional, tamaño de página (default `200`, sin máximo). El reporte se calcula completo en cada página; para descargarlo entero usar `exportar/` (abajo).
@@ -944,7 +946,8 @@ Historial operativo de entradas, salidas y ajustes.
   - `tipo_movimiento`: requerido, `ENTRADA`, `SALIDA`, `AJUSTE` o `TRANSFERENCIA`
   - `fecha_inicio`: requerido, formato `YYYY-MM-DD`
   - `fecha_final`: requerido, formato `YYYY-MM-DD`
-  - `almacen_id`: opcional; si no se envía, el reporte incluye todos los almacenes visibles para el usuario
+  - `almacen_id` (alias `almacen`): opcional; si no se envía, el reporte incluye todos los almacenes visibles para el usuario. Mismas reglas que existencias (EC-822): primer alias no vacío, no numérico/`0`/negativo → `400 {"almacen": ...}`, ajeno o inexistente → `200` vacío.
+  - Permiso `R-CORE-REPORTES` (también en `exportar/`) y fecha inexistente → `400`, igual que existencias.
 - **Ejemplo**:
   - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=SALIDA&fecha_inicio=2026-07-01&fecha_final=2026-07-31&almacen_id=1`
   - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=SALIDA&fecha_inicio=2026-07-01&fecha_final=2026-07-31`
