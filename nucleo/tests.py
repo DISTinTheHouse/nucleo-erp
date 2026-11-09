@@ -1985,3 +1985,74 @@ class CorsExposeHeadersTests(SimpleTestCase):
                 self.assertFalse(
                     [h for h in response.headers if h.lower().startswith("access-control-")]
                 )
+
+
+class EnteroEstrictoTests(SimpleTestCase):
+    """EC-829: un solo lector de enteros del query string. ``int()`` aceptaba
+    ``1_0`` (10), ``+5``, dígitos no ASCII y espacios Unicode, y filtraba otro
+    registro en vez de responder 400."""
+
+    def _leer(self, valor, **opciones):
+        from nucleo.kpis import entero_estricto
+
+        return entero_estricto(valor, "x", **opciones)
+
+    def _error(self, valor, **opciones):
+        from rest_framework.exceptions import ValidationError
+
+        with self.assertRaises(ValidationError) as ctx:
+            self._leer(valor, **opciones)
+        self.assertEqual(set(ctx.exception.detail), {"x"})
+        return str(ctx.exception.detail["x"])
+
+    def test_formatos_que_int_aceptaba_son_400(self):
+        invalidos = (
+            "1_0", "\u0663", "\uff15", "+5", "\xa05", "5\xa0", "1.0", "1e3", "abc", "-", "--5", "5-",
+            "1 0", "9" * 20, "1" + "0" * 19, str(2**63),
+        )
+        for valor in invalidos:
+            for opciones in ({}, {"positivo": True}, {"con_signo": True}):
+                with self.subTest(valor=valor, **opciones):
+                    self.assertEqual(self._error(valor, **opciones), "Debe ser un entero válido.")
+
+    def test_espacios_ascii_y_ceros_a_la_izquierda(self):
+        for valor in (" 5 ", "\t5\n", "05", "5"):
+            with self.subTest(valor=valor):
+                self.assertEqual(self._leer(valor), 5)
+        self.assertEqual(self._leer(str(2**63 - 1)), 2**63 - 1)
+
+    def test_vacio_es_none(self):
+        for valor in (None, "", "   ", "\t"):
+            with self.subTest(valor=valor):
+                self.assertIsNone(self._leer(valor))
+                self.assertIsNone(self._leer(valor, positivo=True))
+
+    def test_signo_solo_con_con_signo(self):
+        self.assertEqual(self._error("-5"), "Debe ser un entero válido.")
+        self.assertEqual(self._leer("-5", con_signo=True), -5)
+        self.assertEqual(self._leer(" -5 ", con_signo=True), -5)
+        self.assertEqual(self._leer(str(-(2**63)), con_signo=True), -(2**63))
+        self.assertEqual(self._error(str(-(2**63) - 1), con_signo=True), "Debe ser un entero válido.")
+
+    def test_positivo_rechaza_cero_y_negativos_con_un_solo_mensaje(self):
+        self.assertEqual(self._leer("0"), 0)
+        for valor in ("0", "00", "-5"):
+            with self.subTest(valor=valor):
+                self.assertEqual(self._error(valor, positivo=True), "Debe ser un entero mayor a 0.")
+        self.assertEqual(self._leer("7", positivo=True), 7)
+
+    def test_entero_param_lee_del_query_string(self):
+        from django.http import QueryDict
+        from rest_framework.exceptions import ValidationError
+
+        from nucleo.kpis import entero_param
+
+        class Peticion:
+            query_params = QueryDict("a=7&b=1_0&c=-2")
+
+        self.assertEqual(entero_param(Peticion, "a"), 7)
+        self.assertIsNone(entero_param(Peticion, "falta"))
+        self.assertEqual(entero_param(Peticion, "c", con_signo=True), -2)
+        with self.assertRaises(ValidationError) as ctx:
+            entero_param(Peticion, "b")
+        self.assertEqual(ctx.exception.detail, {"b": "Debe ser un entero válido."})

@@ -1241,6 +1241,28 @@ class AuxiliarMovimientosTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("producto_variante", resp.json())
 
+    def test_formatos_que_int_aceptaba_son_400_con_las_mismas_claves(self):
+        # EC-829: ``1_0`` (10), ``٣`` (3) y ``+5`` llegaban como otro id. El front
+        # (MovementLedgerView) lee las claves ``almacen`` y ``producto_variante``.
+        for valor in ("1_0", "٣", "+5", " 5"):
+            with self.subTest(valor=valor):
+                resp = self._get(producto_variante=self.variante.pk, almacen=valor)
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(set(resp.json()), {"almacen"})
+                resp = self._get(producto_variante=valor)
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(set(resp.json()), {"producto_variante"})
+                resp = self._get(producto_variante=self.variante.pk, limite=valor)
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(set(resp.json()), {"limite"})
+
+    def test_limite_cero_o_negativo_es_400_sin_hablar_de_ids(self):
+        for valor in ("0", "-1"):
+            with self.subTest(valor=valor):
+                resp = self._get(producto_variante=self.variante.pk, limite=valor)
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(resp.json(), {"limite": "Debe ser un entero mayor a 0."})
+
     def test_fecha_que_no_existe_es_400_no_500(self):
         # EC-822: ``parse_fechas`` (compartida con los reportes por periodo)
         # dejaba escapar el ``ValueError`` de ``parse_date``.
@@ -1400,7 +1422,10 @@ class ExistenciasPorAlmacenTests(TestCase):
 
     def test_almacen_id_obligatorio_y_entero_positivo(self):
         for url in (POR_ALMACEN_URL, POR_ALMACEN_RESUMEN_URL):
-            for params in ({}, {"almacen_id": ""}, {"almacen_id": "x"}, {"almacen_id": "0"}, {"almacen_id": "-3"}):
+            for params in (
+                {}, {"almacen_id": ""}, {"almacen_id": "x"}, {"almacen_id": "0"}, {"almacen_id": "-3"},
+                {"almacen_id": "1_0"}, {"almacen_id": "٣"},  # EC-829
+            ):
                 resp = self._get(params, url=url)
                 self.assertEqual(resp.status_code, 400, (url, params))
                 self.assertIn("almacen_id", resp.json())

@@ -5213,7 +5213,10 @@ class OrdenProduccionKpisTests(TestCase):
         self.assertIn("linea", str(resp.data["parametros"]))
 
     def test_parametros_invalidos_responden_400(self):
-        for query in ("?sucursal=abc", "?fecha_desde=2026-13-40", "?fecha_desde=2026-02-01&fecha_hasta=2026-01-01"):
+        for query in (
+            "?sucursal=abc", "?fecha_desde=2026-13-40", "?fecha_desde=2026-02-01&fecha_hasta=2026-01-01",
+            "?sucursal=1_0", "?sucursal=%D9%A3",  # EC-829: solo dígitos ASCII
+        ):
             with self.subTest(query=query):
                 self.assertEqual(self._get(self.usuario, query).status_code, 400)
 

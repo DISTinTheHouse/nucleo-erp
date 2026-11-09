@@ -1738,7 +1738,8 @@ class DireccionClienteTests(TestCase):
         self.assertEqual(self._listado(self.admin_otra, cliente=self.cliente.pk), [])
 
     def test_filtro_con_valor_invalido_es_400(self):
-        for valor in ("abc", "1.5", "1,2"):
+        # EC-829: ``1_0`` y ``٣`` los aceptaba ``int()`` (10 y 3).
+        for valor in ("abc", "1.5", "1,2", "1_0", "٣", "+5", " 5"):
             with self.subTest(valor=valor):
                 resp = self._api(self.admin).get(DIRECCIONES_URL, {"cliente": valor})
                 self.assertEqual(resp.status_code, 400)

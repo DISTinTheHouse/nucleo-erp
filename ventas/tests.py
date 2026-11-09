@@ -7324,6 +7324,7 @@ class PedidoListadoFiltrosTests(TestCase):
 
     def test_invalidos_responden_400(self):
         for params in ({"cliente": "abc"}, {"vendedor": "x"}, {"sucursal": "1.5"}, {"fecha_desde": "no-es-fecha"},
+                       {"cliente": "1_0"}, {"vendedor": "٣"}, {"sucursal": "-1"},  # EC-829
                        {"fecha_desde": "2026-12-31", "fecha_hasta": "2026-01-01"}):
             with self.subTest(params=params):
                 resp = self._get(params)
@@ -8864,13 +8865,17 @@ class PedidoListadoFiltrosColumnaTests(_PedidosModoServidorBase, TestCase):
         """``piezas`` es entero: una fracción → 400, sin truncar (``piezas_max=0.5`` se
         volvía ``piezas < 0`` y dejaba fuera los pedidos de 0 piezas)."""
         for url in (PEDIDOS_URL, f"{PEDIDOS_URL}exportar/", f"{PEDIDOS_URL}kpis-mesa/"):
-            for params in ({"piezas_max": "0.5"}, {"piezas_min": "1.5"}, {"piezas_min": "1.0"}, {"piezas_max": "1e3"}):
+            for params in ({"piezas_max": "0.5"}, {"piezas_min": "1.5"}, {"piezas_min": "1.0"}, {"piezas_max": "1e3"},
+                           {"piezas_min": "1_0"}, {"piezas_max": "+5"}, {"piezas_min": "٣"}):  # EC-829
                 with self.subTest(url=url, params=params):
                     resp = self._get(url, params)
                     self.assertEqual(resp.status_code, 400, resp.content)
                     self.assertEqual(set(resp.json()), {next(iter(params))})
         self.assertEqual(self._ids({"piezas_max": "1"}), [self.p4.pk])
         self.assertEqual(sorted(self._ids({"piezas_min": " -5 "})), sorted([self.p1.pk, self.p2.pk, self.p3.pk, self.p4.pk]))
+        # EC-829: piezas_* son los únicos enteros con signo; el resto de los ids no.
+        self.assertEqual(sorted(self._ids({"piezas_min": "-5"})), sorted([self.p1.pk, self.p2.pk, self.p3.pk, self.p4.pk]))
+        self.assertEqual(self._get(PEDIDOS_URL, {"cliente": "-5"}).status_code, 400)
 
     def test_sin_permiso_de_importes_se_ignoran_los_rangos_de_importe(self):
         """Contar las filas de un rango dejaría deducir el importe oculto."""

@@ -1556,7 +1556,8 @@ class RecepcionKpisTests(TestCase):
         otro = Almacen.objects.create(empresa=self.empresa, sucursal=self.sucursal, codigo="ALM2", nombre="Otro")
         self.assertEqual(ids(url, f"almacen={otro.pk}"), set())
         self.assertEqual(ids(url, f"orden_compra={self.oc1.pk}&limit=1&search=RC"), {self.rec1.pk})
-        for query in ("almacen=x", "orden_compra=1.5"):
+        # EC-829: solo dígitos ASCII; ``int()`` leía ``1_0`` como 10 y ``٣`` como 3.
+        for query in ("almacen=x", "orden_compra=1.5", "almacen=1_0", "orden_compra=%D9%A3", "almacen=%2B5"):
             self.assertEqual(client.get(f"{url}?{query}").status_code, 400, query)
 
         ordenes = "/api/v1/compras/ordenes/"
