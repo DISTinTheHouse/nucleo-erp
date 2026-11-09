@@ -78,6 +78,8 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
     # una FK opcional (``SET_NULL``): sin ``allow_null=True`` DRF omitiría el
     # campo (``SkipField``) en vez de devolver ``null``.
     empresa_nombre = serializers.CharField(source='empresa.razon_social', read_only=True)
+    # Pre-orden de producción que generó la OC (faltantes), o ``null``.
+    pre_orden_id = serializers.IntegerField(read_only=True, allow_null=True)
     sucursal_nombre = serializers.CharField(source='sucursal.nombre', read_only=True)
     # Dirección de entrega para el proveedor: la de la sucursal de la OC.
     sucursal_direccion = serializers.SerializerMethodField()
@@ -167,6 +169,7 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'usuario_nombre',
             'pedido',
             'pedido_folio',
+            'pre_orden_id',
             'pedidos',
             'pedidos_vinculados',
             'tipo_compra',

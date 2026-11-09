@@ -135,6 +135,74 @@ class OrdenProduccionDetalle(models.Model):
     def __str__(self):
         return str(self.op_detalle_id)
 
+class PreOrdenProduccion(models.Model):
+    """Pre-orden de producción de Fabricación especial (una abierta por pedido).
+
+    Nace sola al generar/actualizar el BOM de una variante de producción de
+    muestra (``produccion.services.pre_orden_service.sincronizar_pre_orden``) con
+    las tallas que ya tienen BOM. Almacén confirma existencias; si faltan
+    materiales se crea una OC en Borrador ligada (``OrdenCompra.pre_orden``). No
+    aparta material: el estatus se recalcula al recibir la OC y al crear otras OP.
+    """
+
+    class Estatus(models.TextChoices):
+        PENDIENTE_VALIDAR = "pendiente_validar", "Pendiente de validar"
+        FALTAN_MATERIALES = "faltan_materiales", "Faltan materiales"
+        EN_COMPRA = "en_compra", "En compra"
+        LISTA = "lista", "Lista para producir"
+        CONVERTIDA = "convertida", "Convertida en OP"
+        CANCELADA = "cancelada", "Cancelada"
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT)
+    pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="pre_ordenes_produccion")
+    estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.PENDIENTE_VALIDAR, db_index=True)
+    op = models.ForeignKey(
+        OrdenProduccion, on_delete=models.SET_NULL, null=True, blank=True, related_name="pre_ordenes",
+    )
+    fecha_confirmacion_existencias = models.DateTimeField(null=True, blank=True)
+    usuario_confirma = models.ForeignKey(
+        'usuarios.Usuario', on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        db_table = "pre_ordenes_produccion"
+        verbose_name = "Pre-orden Produccion"
+        verbose_name_plural = "Pre-ordenes Produccion"
+        constraints = [
+            # Una sola abierta por pedido (convertidas y canceladas quedan de historial).
+            models.UniqueConstraint(
+                fields=["pedido"],
+                condition=~models.Q(estatus__in=["convertida", "cancelada"]),
+                name="uq_pre_orden_abierta_por_pedido",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Pre-orden {self.pk} (pedido {self.pedido_id})"
+
+
+class PreOrdenProduccionDetalle(models.Model):
+    """Talla de muestra con BOM: su variante de producción y las piezas."""
+
+    pre_orden = models.ForeignKey(PreOrdenProduccion, on_delete=models.CASCADE, related_name="detalles")
+    variante_produccion = models.ForeignKey(VarianteProductoProduccion, on_delete=models.PROTECT, related_name="+")
+    pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, related_name="+")
+    cantidad = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        db_table = "pre_ordenes_produccion_detalles"
+        verbose_name = "Pre-orden Produccion Detalle"
+        verbose_name_plural = "Pre-ordenes Produccion Detalle"
+        constraints = [
+            models.UniqueConstraint(fields=["pre_orden", "variante_produccion"], name="uq_pre_orden_variante"),
+        ]
+
+
 class OrdenProduccionRutaCritica(models.Model):
     """Seguimiento de ruta crítica de la OP: un renglón por orden (no por
     línea/variante), pensado para que mesa de control/producción actualice

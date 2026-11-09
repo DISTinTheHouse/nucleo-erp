@@ -124,6 +124,12 @@ class OrdenCompra(StatusLifecycleModel):
     )
     proveedor = models.ForeignKey(Proveedor, on_delete=models.SET_NULL, null=True, blank=True)
     solicitud_compra = models.ForeignKey(SolicitudCompra, on_delete=models.SET_NULL, null=True, blank=True)
+    # OC en Borrador que generó una pre-orden de producción con faltantes
+    # (``pre-ordenes/{id}/confirmar-existencias``); al recibirla se recalcula.
+    pre_orden = models.ForeignKey(
+        'produccion.PreOrdenProduccion', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='ordenes_compra',
+    )
     moneda = models.ForeignKey(Moneda, on_delete=models.CASCADE)
     # Pesos por unidad de ``moneda``; obligatorio si no es MXN. Convierte el
     # precio de la OC al costo en pesos del inventario que se recibe (#809).

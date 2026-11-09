@@ -303,6 +303,11 @@ class OrdenProduccionService:
         movimiento = OrdenProduccionService._registrar_movimiento_inventario(op, user, consumos)
         auditoria = OrdenProduccionService._registrar_auditoria(op, user, consumos, request=request)
 
+        # Sin apartado: lo que consumió esta OP puede dejar sin material a una
+        # pre-orden "Lista para producir" de la misma sucursal.
+        from produccion.services.pre_orden_service import recalcular_listas
+        transaction.on_commit(lambda: recalcular_listas(empresa.pk, sucursal.pk))
+
         return {
             "op": op,
             "consumo_produccion": consumo,
