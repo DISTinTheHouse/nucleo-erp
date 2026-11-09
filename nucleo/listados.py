@@ -1,5 +1,6 @@
 """Piezas de los listados paginados por servidor (#863): paginación opcional,
 ``?ordering=`` con desempate estable y los filtros comunes de Compras."""
+from django.db.models import F
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import OrderingFilter
 from rest_framework.pagination import LimitOffsetPagination
@@ -54,6 +55,25 @@ class OrdenamientoEstableFilter(OrderingFilter):
         if ordering and not any(campo.lstrip("-") in ("id", "pk") for campo in ordering):
             ordering = [*ordering, "-id" if ordering[0].startswith("-") else "id"]
         return ordering
+
+
+class OrdenamientoNullsAlFinal(OrdenamientoEstableFilter):
+    """``OrdenamientoEstableFilter`` con los NULL al final en ambas direcciones,
+    desempate incluido (EC-826). PostgreSQL los pone primero en DESC: con un
+    campo NULL-able (p. ej. ``created_at`` de clientes anteriores a su historial)
+    ``-campo`` encabezaba la lista con filas sin valor.
+
+    Lista blanca, desempate y orden por defecto no cambian: sin ``?ordering=``
+    válido no hay términos y el queryset conserva el orden de ``get_queryset``."""
+
+    def filter_queryset(self, request, queryset, view):
+        ordering = self.get_ordering(request, queryset, view)
+        if not ordering:
+            return queryset
+        return queryset.order_by(*[
+            F(campo[1:]).desc(nulls_last=True) if campo.startswith("-") else F(campo).asc(nulls_last=True)
+            for campo in ordering
+        ])
 
 
 def estatus_param(request, estatus_validos, nombre="estatus"):
