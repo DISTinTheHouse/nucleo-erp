@@ -695,8 +695,13 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         servicios_extras_qs = CotizacionServicioExtra.objects.filter(
             cotizacion=cotizacion_obj
         ).order_by("id")
+        cotizacion_data = dict(CotizacionSerializer(cotizacion_obj).data)
+        # Sin el snapshot anterior (EC-801): antes cada autorización guardaba el
+        # previo dentro del nuevo (hasta 7 niveles, 123 KB). ``rechazar-cambios``
+        # nunca lo usó (lo salta al revertir).
+        cotizacion_data.pop("aprobado_snapshot", None)
         snapshot = {
-            "cotizacion": CotizacionSerializer(cotizacion_obj).data,
+            "cotizacion": cotizacion_data,
             "detalles": CotizacionDetalleWithTallasSerializer(
                 detalles_qs, many=True
             ).data,
