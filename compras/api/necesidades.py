@@ -92,6 +92,11 @@ class NecesidadCompraViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, G
                 qs = qs.filter(**{f"{campo}_id": v})
         return qs
 
+    @action(detail=False, methods=["get"], url_path="resumen")
+    def resumen(self, request):
+        """Badge del menú: ``{pendientes}`` (necesidades pendientes). 1 consulta."""
+        return Response({"pendientes": self.get_queryset().filter(estatus=N.PENDIENTE).count()})
+
     @action(detail=False, methods=["get"], url_path="agrupadas")
     def agrupadas(self, request):
         """Pendientes por material y sucursal: total, pedidos, fecha más urgente,

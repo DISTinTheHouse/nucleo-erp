@@ -255,6 +255,13 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(empresa=empresa)
         else:
             return qs.none()
+        from django.contrib.postgres.expressions import ArraySubquery
+        from django.db.models import OuterRef as _Outer
+        from compras.models import NecesidadCompra
+        qs = qs.annotate(pre_ordenes_ids=ArraySubquery(
+            NecesidadCompra.objects.filter(orden_compra_id=_Outer("pk")).order_by()
+            .values("pre_orden_id").distinct()
+        ))
         if self.action == 'retrieve':
             qs = self._con_prefetch_retrieve(qs)
         elif self.action not in ('cancelar', 'aceptar'):

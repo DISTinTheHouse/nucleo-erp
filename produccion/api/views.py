@@ -3029,6 +3029,23 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         data = self.get_serializer(pre, context={**self.get_serializer_context(), "materiales": mats}).data
         return Response(data)
 
+    @action(detail=False, methods=["get"], url_path="resumen")
+    def resumen(self, request):
+        """Conteos para los badges: ``{urgentes, por_validar, en_compra, listas}``.
+        ``urgentes`` = semáforo rojo. 1 consulta."""
+        from produccion.services.pre_orden_service import fecha_compromiso, semaforo
+        E = PreOrdenProduccion.Estatus
+        out = {"urgentes": 0, "por_validar": 0, "en_compra": 0, "listas": 0}
+        abiertas = self.get_queryset().filter(
+            estatus__in=[E.PENDIENTE_VALIDAR, E.FALTAN_MATERIALES, E.EN_COMPRA, E.LISTA]
+        )
+        for p in abiertas:
+            out["por_validar"] += p.estatus == E.PENDIENTE_VALIDAR
+            out["en_compra"] += p.estatus == E.EN_COMPRA
+            out["listas"] += p.estatus == E.LISTA
+            out["urgentes"] += semaforo(p.estatus, p.materiales_faltantes, p.fem, fecha_compromiso(p.pedido)) == "rojo"
+        return Response(out)
+
     @action(detail=True, methods=["get"], url_path="historial")
     def historial(self, request, pk=None):
         """Línea de tiempo: ``[{fecha, evento, evento_display, usuario, descripcion}]``."""
