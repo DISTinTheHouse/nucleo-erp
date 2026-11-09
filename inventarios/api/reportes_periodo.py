@@ -71,6 +71,14 @@ def parse_fechas(query_params):
     return fecha_inicio, fecha_final, inicio_dt, final_dt
 
 
+def almacen_requerido(query_params):
+    """``almacen``/``almacen_id`` obligatorio (exportación de existencias)."""
+    almacen_id = to_int(query_params.get("almacen") or query_params.get("almacen_id"))
+    if not almacen_id:
+        raise ValidationError({"almacen": "almacen es requerido para exportar el reporte de existencias."})
+    return almacen_id
+
+
 def _almacenes_en_alcance(user, qs):
     if user.is_superuser:
         return qs

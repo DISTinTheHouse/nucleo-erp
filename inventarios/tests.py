@@ -1869,10 +1869,12 @@ class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
             self.assertIn(esperado, texto)
 
     def test_existencias_xlsx_con_numeros_reales(self):
-        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx"})
+        resp = self._get(
+            self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx", "almacen_id": self.a["almacen"].pk},
+        )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp["Content-Type"], CONTENT_TYPE_XLSX)
-        self.assertIn("reporte-existencias-todos-2026-01-01-a-2026-06-30.xlsx", resp["Content-Disposition"])
+        self.assertIn("reporte-existencias-acme-rp-pt-2026-01-01-a-2026-06-30.xlsx", resp["Content-Disposition"])
         encabezado, filas = self._tabla_xlsx(resp.content, "SKU")
         self.assertEqual(encabezado[:6], ["SKU", "Producto", "Color", "Talla", "Almacén", "Exist. Inicial"])
         self.assertEqual(len(filas), 1)
@@ -1915,8 +1917,21 @@ class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
                 self.assertEqual(resp.status_code, 400, (exportar, params))
                 self.assertEqual(resp.json(), esperado.json(), (exportar, params))
 
+    def test_existencias_sin_almacen_es_400(self):
+        # Solo la exportación: el JSON sigue aceptando todos los almacenes.
+        for params in ({}, {"almacen": ""}, {"almacen_id": "abc"}, {"formato": "xlsx"}):
+            resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, params)
+            self.assertEqual(resp.status_code, 400, params)
+            self.assertEqual(list(resp.json()), ["almacen"], params)
+        self.assertEqual(self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL).status_code, 200)
+        # Las fechas se validan antes que el almacén, igual que en el JSON.
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"fecha_inicio": ""})
+        self.assertEqual(list(resp.json()), ["fecha_inicio"])
+
     def test_formato_invalido_es_400(self):
-        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "csv"})
+        resp = self._get(
+            self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "csv", "almacen": self.a["almacen"].pk},
+        )
         self.assertEqual(resp.status_code, 400)
         self.assertIn("formato", resp.json())
 
@@ -1930,9 +1945,11 @@ class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
         self.assertIn("Sin existencias en el periodo.", texto)
         self.assertNotIn("acme-rp", texto.replace(f"Almacén #{self.a['almacen'].pk}", ""))
         # Misma empresa, sucursal sin acceso: el almacén norte no sale.
-        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx"})
+        resp = self._get(
+            self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"formato": "xlsx", "almacen": self.a["almacen_norte"].pk},
+        )
         _, filas = self._tabla_xlsx(resp.content, "SKU")
-        self.assertEqual([f[4] for f in filas], ["PRODUCTO TERMINADO acme-rp"])
+        self.assertEqual(filas, [])
         # Movimientos de otra empresa.
         resp = self._get(
             self.b["usuario"], REPORTE_MOVIMIENTOS_EXPORTAR_URL,
@@ -1959,7 +1976,7 @@ class ExportacionReportesPeriodoTests(ReportesPeriodoBase):
             Existencia(almacen=self.a["almacen"], producto=self.a["producto"], producto_variante=v, cantidad="1")
             for v in variantes
         ])
-        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL)
+        resp = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_EXPORTAR_URL, {"almacen": self.a["almacen"].pk})
         from pypdf import PdfReader
         import io
         paginas = PdfReader(io.BytesIO(resp.content)).pages

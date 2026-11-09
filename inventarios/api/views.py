@@ -416,12 +416,13 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
         summary="Reporte de existencias por periodo en PDF o XLSX",
         description=(
             "Mismos parámetros, alcance y validación que reporte-existencias-periodo/, "
-            "con el reporte completo (sin paginar)."
+            "con el reporte completo (sin paginar). A diferencia del JSON, el almacén es "
+            "obligatorio: todos los almacenes juntos tardan más de lo aceptable."
         ),
         parameters=[
             PARAMETRO_FORMATO_EXPORTACION,
             *PARAMETROS_FECHAS_REPORTE,
-            OpenApiParameter("almacen", OpenApiTypes.INT, description="Almacén (alias almacen_id)."),
+            OpenApiParameter("almacen", OpenApiTypes.INT, required=True, description="Almacén (alias almacen_id)."),
             OpenApiParameter("empresa", OpenApiTypes.INT, description="Empresa (alias empresa_id)."),
             OpenApiParameter("sucursal", OpenApiTypes.INT, description="Sucursal (alias sucursal_id)."),
             OpenApiParameter("producto", OpenApiTypes.INT, description="Producto (alias producto_id)."),
@@ -432,6 +433,9 @@ class ExistenciaViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], url_path="reporte-existencias-periodo/exportar")
     def reporte_existencias_periodo_exportar(self, request):
         formato = exportacion_mod.formato_requerido(request.query_params)
+        # Fechas primero: sin ellas, el mismo 400 que el JSON.
+        reportes_mod.parse_fechas(request.query_params)
+        reportes_mod.almacen_requerido(request.query_params)
         reporte = reportes_mod.reporte_existencias(request.user, request.query_params)
         return respuesta_archivo(exportacion_mod.exportar_existencias(reporte, formato))
 
