@@ -314,10 +314,11 @@ class ExistenciaViewSetScopeTenantTests(TestCase):
         )
         self.assertEqual(self._ids(sin_sucursal), [])
 
-    def test_multi_empresa_ve_las_empresas_de_su_alcance(self):
+    def test_multi_empresa_solo_ve_su_empresa_activa(self):
+        """Solo la empresa activa (EC-816); el M2M ``empresas`` no amplía la lectura."""
+        self.assertEqual(self._ids(self.multi_empresa), [self.a["existencia"].pk])
         self.assertEqual(
-            self._ids(self.multi_empresa),
-            sorted([self.a["existencia"].pk, self.b["existencia"].pk]),
+            self._ids(self.multi_empresa, {"empresa_id": self.b["empresa"].pk}), [],
         )
 
     def test_superusuario_ve_todo_y_puede_filtrar(self):
@@ -878,7 +879,7 @@ class ReporteExistenciasProduccionComprasTests(TestCase):
         self.assertEqual(self._get(sin_sucursal), [])
 
     def test_filtro_por_producto_id_y_por_sku(self):
-        otro_producto = Producto.objects.create(tipo=_tipo_producto(), empresa=self.a["empresa"], nombre="Otro", codigo="OTRO-RS")
+        otro_producto = Producto.objects.create(tipo=_tipo_producto(), empresa=self.a["empresa"], nombre="Otro", codigo="OTRRS")
         otra_var = ProductoVariante.objects.create(
             producto=otro_producto, empresa=self.a["empresa"], color=self.color, talla=self.talla_ch,
             sku="OTRO-RS-CH", precio_base="50",
@@ -1674,15 +1675,15 @@ class ExistenciasPorAlmacenTests(TestCase):
     def test_numero_de_consultas_constante(self):
         params = {"almacen_id": self.alm.pk, "limit": 3, "search": "a", "ordering": "nombre"}
 
-        # Cada request: 2 del alcance del usuario (sus empresas M2M y sus
-        # sucursales, ``almacenes_en_alcance``, igual que el listado) + 1 del
+        # Cada request: 1 del alcance del usuario (sus sucursales,
+        # ``almacenes_en_alcance``; la empresa activa no consulta, EC-816) + 1 del
         # ``max_stock`` del almacén, que entra como constante a las demás.
         def medir():
-            with self.assertNumQueries(2 + 1 + 2):   # count + página
+            with self.assertNumQueries(1 + 1 + 2):   # count + página
                 self._get(params)
-            with self.assertNumQueries(2 + 1 + 1):   # sin limit: la lista
+            with self.assertNumQueries(1 + 1 + 1):   # sin limit: la lista
                 self._get({"almacen_id": self.alm.pk})
-            with self.assertNumQueries(2 + 1 + 1):   # todo el resumen
+            with self.assertNumQueries(1 + 1 + 1):   # todo el resumen
                 self._get({"almacen_id": self.alm.pk}, url=POR_ALMACEN_RESUMEN_URL)
 
         medir()
