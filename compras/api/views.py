@@ -1018,6 +1018,20 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
         return self._respuesta_oc(oc)
 
+    @action(detail=False, methods=["post"], url_path="desde-necesidades")
+    def desde_necesidades(self, request):
+        """Una OC consolidada (Borrador) desde necesidades de compra pendientes:
+        ``{proveedor, necesidades: [ids]}``. Un renglón por material, redondeado
+        al mínimo/múltiplo de compra del material si lo tiene."""
+        from compras.api.necesidades import crear_oc_desde_necesidades
+        oc = crear_oc_desde_necesidades(
+            request.user, request.data.get("proveedor"), request.data.get("necesidades"),
+        )
+        return Response(
+            {"orden_compra": OrdenCompraSerializer(self._oc_para_respuesta(oc.pk)).data},
+            status=status.HTTP_201_CREATED,
+        )
+
     @action(detail=True, methods=["post"], url_path="aceptar")
     def aceptar(self, request, pk=None):
         user = request.user
@@ -1057,6 +1071,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             oc.estatus = OrdenCompra.EstatusOrdenCompra.AUTORIZADA
             oc.fecha_autorizacion = timezone.now()
             oc.save(update_fields=["proveedor", "folio", "estatus", "fecha_autorizacion", "updated_at"])
+            if oc.necesidades.exists():
+                from produccion.models import PreOrdenEvento
+                from produccion.services.pre_orden_service import eventos_oc
+                eventos_oc(oc.pk, PreOrdenEvento.Evento.OC_AUTORIZADA, user)
 
         return Response(
             {"orden_compra": OrdenCompraSerializer(self._oc_para_respuesta(oc.pk)).data},
@@ -1777,11 +1795,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         else:
             oc.estatus = OrdenCompra.EstatusOrdenCompra.RECIBIDA
         oc.save(update_fields=["estatus", "updated_at"])
-        if oc.pre_orden_id:
-            # Recepción de los faltantes de una pre-orden de producción: al
-            # confirmar la transacción (ya con la existencia nueva) se recalcula.
-            from produccion.services.pre_orden_service import recalcular_por_oc
-            transaction.on_commit(lambda oc_id=oc.pk: recalcular_por_oc(oc_id))
+        if oc.pre_orden_id or oc.necesidades.exists():
+            # Faltantes de pre-órdenes de producción: al confirmar la transacción
+            # (ya con la existencia nueva) se reparte lo recibido entre las
+            # necesidades y se recalculan sus pre-órdenes.
+            from produccion.services.pre_orden_service import repartir_recepcion_oc
+            transaction.on_commit(lambda oc_id=oc.pk: repartir_recepcion_oc(oc_id))
 
     def _actualizar_estatus_op(self, op):
         # Solo reabre: un rechazo de Calidad puede volver a dejar pendiente una

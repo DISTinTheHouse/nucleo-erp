@@ -206,6 +206,47 @@ class OrdenCompraRutaCritica(models.Model):
         return f"Ruta crítica OC {self.oc_id}"
 
 
+class NecesidadCompra(models.Model):
+    """Material que le falta a una pre-orden de producción (al confirmar
+    existencias). Compras las agrupa por material (``necesidades/agrupadas``) y
+    las consolida en una OC (``ordenes/desde-necesidades``); al recibir la OC lo
+    recibido se reparte entre ellas por ``fecha_requerida``.
+    """
+
+    class Estatus(models.TextChoices):
+        PENDIENTE = "pendiente", "Pendiente"
+        EN_OC = "en_oc", "En OC"
+        RECIBIDA = "recibida", "Recibida"
+        HUERFANA = "huerfana", "Huérfana"     # pre-orden cancelada con la necesidad ya en una OC
+        CANCELADA = "cancelada", "Cancelada"  # pre-orden cancelada antes de pasar a OC
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT)
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name='necesidades_compra')
+    unidad = models.ForeignKey('nucleo.UnidadMedida', on_delete=models.SET_NULL, null=True, blank=True)
+    cantidad = models.DecimalField(max_digits=14, decimal_places=4)
+    cantidad_recibida = models.DecimalField(max_digits=14, decimal_places=4, default=0)
+    # Lo que ya no hace falta (BOM editado con la necesidad en una OC): la OC no se toca.
+    sobrante = models.DecimalField(max_digits=14, decimal_places=4, default=0)
+    pre_orden = models.ForeignKey('produccion.PreOrdenProduccion', on_delete=models.CASCADE, related_name='necesidades')
+    pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name='necesidades_compra')
+    fecha_requerida = models.DateField(null=True, blank=True)
+    estatus = models.CharField(max_length=10, choices=Estatus.choices, default=Estatus.PENDIENTE, db_index=True)
+    orden_compra = models.ForeignKey('OrdenCompra', on_delete=models.SET_NULL, null=True, blank=True, related_name='necesidades')
+    orden_compra_detalle = models.ForeignKey('OrdenCompraDetalle', on_delete=models.SET_NULL, null=True, blank=True, related_name='necesidades')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'necesidades_compra'
+        verbose_name = 'Necesidad de compra'
+        verbose_name_plural = 'Necesidades de compra'
+        indexes = [models.Index(fields=['empresa', 'estatus', 'producto'], name='ix_necesidad_emp_est_prod')]
+
+    def __str__(self):
+        return f"Necesidad {self.pk} ({self.producto_id})"
+
+
 class OrdenCompraDetalle(models.Model):
     orden_compra = models.ForeignKey(OrdenCompra, on_delete=models.CASCADE)
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE)

@@ -308,7 +308,7 @@ class OrdenProduccionService:
         # Sin apartado: lo que consumió esta OP puede dejar sin material a una
         # pre-orden "Lista para producir" de la misma sucursal.
         from produccion.services.pre_orden_service import recalcular_listas
-        transaction.on_commit(lambda: recalcular_listas(empresa.pk, sucursal.pk))
+        transaction.on_commit(lambda: recalcular_listas(empresa.pk, sucursal.pk, op))
 
         return {
             "op": op,

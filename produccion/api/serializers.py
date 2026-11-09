@@ -7,6 +7,7 @@ from rest_framework import serializers
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
 
 from produccion.models import (
+    PreOrdenEvento,
     PreOrdenProduccion,
     PreOrdenProduccionDetalle,
     ListaMaterialBom,
@@ -2671,6 +2672,25 @@ class VarianteProduccionListSerializer(serializers.ModelSerializer):
         ]
 
 
+def resumen_pre_orden_pedido(pedido):
+    """``pre_orden {id, estatus, estatus_display, semaforo, fecha_estimada_material}``
+    del pedido, a partir de ``pedido.pre_orden_json`` (anotado en la vista)."""
+    from datetime import date
+    from produccion.services.pre_orden_service import fecha_compromiso, semaforo
+    p = getattr(pedido, "pre_orden_json", None)
+    if not p:
+        return None
+    fem = p.get("fecha_estimada_material")
+    fem = date.fromisoformat(fem) if isinstance(fem, str) else fem
+    return {
+        "id": p["id"],
+        "estatus": p["estatus"],
+        "estatus_display": dict(PreOrdenProduccion.Estatus.choices).get(p["estatus"]),
+        "semaforo": semaforo(p["estatus"], p.get("materiales_faltantes") or 0, fem, fecha_compromiso(pedido)),
+        "fecha_estimada_material": fem,
+    }
+
+
 class PedidoEspecialListSerializer(serializers.ModelSerializer):
     """Listado ligero: solo lo necesario para que produccion elija cual abrir."""
 
@@ -2688,12 +2708,7 @@ class PedidoEspecialListSerializer(serializers.ModelSerializer):
     pre_orden = serializers.SerializerMethodField()
 
     def get_pre_orden(self, obj):
-        """Pre-orden vigente (la más reciente no cancelada): ``{id, estatus,
-        estatus_display}`` o ``null``."""
-        p = getattr(obj, "pre_orden_json", None)
-        if not p:
-            return None
-        return {**p, "estatus_display": dict(PreOrdenProduccion.Estatus.choices).get(p["estatus"])}
+        return resumen_pre_orden_pedido(obj)
 
     tallas_total = serializers.IntegerField(read_only=True)
     tallas_con_sku = serializers.IntegerField(read_only=True)
@@ -2812,10 +2827,14 @@ class PedidoDetalleEspecialSerializer(serializers.ModelSerializer):
 class PedidoEspecialDetailSerializer(serializers.ModelSerializer):
     # Llenado en la vista: solo las lineas con al menos una talla especial.
     detalles = PedidoDetalleEspecialSerializer(source="detalles_especiales", many=True, read_only=True)
+    pre_orden = serializers.SerializerMethodField()
 
     class Meta:
         model = Pedido
-        fields = ["id", "folio", "estatus", "cliente_nombre", "clasificacion", "fecha_confirmacion", "detalles"]
+        fields = ["id", "folio", "estatus", "cliente_nombre", "clasificacion", "fecha_confirmacion", "detalles", "pre_orden"]
+
+    def get_pre_orden(self, obj):
+        return resumen_pre_orden_pedido(obj)
 
 
 class VarianteProduccionOnboardingSerializer(serializers.Serializer):
@@ -2914,21 +2933,44 @@ class OrdenesCorteMangaEditarSerializer(_EditarOrdenServicioSerializer):
 
 
 class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
-    """Listado de pre-órdenes. ``piezas_total``/``tallas_total`` vienen anotados."""
+    """Listado de pre-órdenes. ``piezas_total``/``tallas_total``/``fem`` vienen
+    anotados (subconsultas); el resto del seguimiento se deriva sin consultas."""
     estatus_display = serializers.CharField(source="get_estatus_display", read_only=True)
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
     cliente_nombre = serializers.CharField(source="pedido.cliente_nombre", read_only=True, allow_null=True)
     op_folio = serializers.CharField(source="op.folio_op", read_only=True, allow_null=True, default=None)
     piezas_total = serializers.FloatField(read_only=True, default=0.0)
     tallas_total = serializers.IntegerField(read_only=True, default=0)
+    fecha_compromiso = serializers.SerializerMethodField()
+    dias_en_estatus = serializers.SerializerMethodField()
+    fecha_estimada_material = serializers.DateField(source="fem", read_only=True, allow_null=True, default=None)
+    regreso = serializers.SerializerMethodField()
+    semaforo = serializers.SerializerMethodField()
 
     class Meta:
         model = PreOrdenProduccion
         fields = [
             "id", "pedido", "pedido_folio", "cliente_nombre", "sucursal", "estatus", "estatus_display",
             "op", "op_folio", "piezas_total", "tallas_total", "fecha_confirmacion_existencias",
-            "created_at", "updated_at",
+            "fecha_compromiso", "dias_en_estatus", "materiales_faltantes", "fecha_estimada_material",
+            "regreso", "semaforo", "created_at", "updated_at",
         ]
+
+    def get_fecha_compromiso(self, obj):
+        from produccion.services.pre_orden_service import fecha_compromiso
+        return fecha_compromiso(obj.pedido)
+
+    def get_dias_en_estatus(self, obj):
+        from django.utils import timezone
+        desde = obj.estatus_desde or obj.created_at
+        return (timezone.localdate() - timezone.localdate(desde)).days if desde else 0
+
+    def get_regreso(self, obj):
+        return {"fecha": obj.regreso_fecha, "motivo": obj.regreso_motivo} if obj.regreso_fecha else None
+
+    def get_semaforo(self, obj):
+        from produccion.services.pre_orden_service import fecha_compromiso, semaforo
+        return semaforo(obj.estatus, obj.materiales_faltantes, getattr(obj, "fem", None), fecha_compromiso(obj.pedido))
 
 
 class PreOrdenProduccionDetalleSerializer(serializers.ModelSerializer):
@@ -2944,29 +2986,52 @@ class PreOrdenProduccionDetalleSerializer(serializers.ModelSerializer):
 
 
 class PreOrdenProduccionDetailSerializer(PreOrdenProduccionListSerializer):
-    """Detalle: tallas, materiales (``context["materiales"]``) y OC ligadas."""
+    """Detalle: tallas, materiales (``context["materiales"]``), necesidades de
+    compra y las OC donde están."""
     detalles = PreOrdenProduccionDetalleSerializer(many=True, read_only=True)
     materiales = serializers.SerializerMethodField()
+    necesidades = serializers.SerializerMethodField()
     ordenes_compra = serializers.SerializerMethodField()
     usuario_confirma_nombre = serializers.SerializerMethodField()
 
     class Meta(PreOrdenProduccionListSerializer.Meta):
         fields = PreOrdenProduccionListSerializer.Meta.fields + [
-            "usuario_confirma", "usuario_confirma_nombre", "detalles", "materiales", "ordenes_compra",
+            "usuario_confirma", "usuario_confirma_nombre", "detalles", "materiales", "necesidades", "ordenes_compra",
         ]
 
     def get_materiales(self, obj):
+        dec = ("requerido", "existencia", "en_transito", "comprometido", "faltante", "faltante_real")
         return [
-            {**m, "requerido": float(m["requerido"]), "existencia": float(m["existencia"]), "faltante": float(m["faltante"])}
+            {**{k: v for k, v in m.items() if k != "unidad_id"}, **{k: float(m[k]) for k in dec}}
             for m in self.context.get("materiales") or []
         ]
 
+    def get_necesidades(self, obj):
+        from compras.api.necesidades import NecesidadCompraSerializer
+        return NecesidadCompraSerializer(obj.necesidades.all(), many=True).data
+
     def get_ordenes_compra(self, obj):
+        ocs = {n.orden_compra_id: n.orden_compra for n in obj.necesidades.all() if n.orden_compra_id}
+        ocs.update({oc.pk: oc for oc in obj.ordenes_compra.all()})
         return [
-            {"id": oc.pk, "folio": oc.folio, "estatus": oc.estatus, "estatus_label": oc.get_estatus_display()}
-            for oc in obj.ordenes_compra.all()
+            {"id": oc.pk, "folio": oc.folio, "estatus": oc.estatus, "estatus_label": oc.get_estatus_display(),
+             "proveedor": oc.proveedor_id, "fecha_entrega_estimada": oc.fecha_entrega_estimada}
+            for oc in sorted(ocs.values(), key=lambda o: o.pk)
         ]
 
     def get_usuario_confirma_nombre(self, obj):
         u = obj.usuario_confirma
         return (u.get_full_name().strip() or u.email) if u else None
+
+
+class PreOrdenEventoSerializer(serializers.ModelSerializer):
+    evento_display = serializers.CharField(source="get_evento_display", read_only=True)
+    usuario = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PreOrdenEvento
+        fields = ["id", "fecha", "evento", "evento_display", "usuario", "descripcion"]
+
+    def get_usuario(self, obj):
+        u = obj.usuario
+        return {"id": u.pk, "nombre": u.get_full_name().strip() or u.email} if u else None
