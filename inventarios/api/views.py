@@ -35,6 +35,7 @@ from nucleo.listados import PaginacionOpcionalLimitOffset
 from . import auxiliar as auxiliar_mod
 from . import existencias_por_almacen as por_almacen_mod
 from . import reportes_periodo as reportes_mod
+from .reportes_periodo import almacenes_en_alcance
 from .serializers import (
     AlmacenSerializer,
     UbicacionSerializer,
@@ -139,23 +140,6 @@ class UbicacionViewSet(viewsets.ModelViewSet):
                 if user.empresa_id and empresa.pk != user.empresa_id and not user.empresas.filter(pk=empresa.pk).exists():
                     raise PermissionDenied("No tiene acceso a esta empresa")
         serializer.save()
-
-def almacenes_en_alcance(user):
-    """Almacenes sobre los que opera un usuario NO superusuario.
-
-    Mismo alcance que almacenes/ubicaciones y los reportes: empresas del usuario
-    (``empresa`` + M2M ``empresas``) Y sus sucursales. Sin empresas o sin
-    sucursales el alcance queda vacío. El superusuario se trata aparte.
-    """
-    empresa_ids = []
-    if getattr(user, "empresa_id", None):
-        empresa_ids.append(user.empresa_id)
-    empresa_ids += list(user.empresas.values_list("pk", flat=True))
-    sucursal_ids = list(user.sucursales_permitidas())
-    return Almacen.objects.filter(
-        models.Q(empresa_id__in=empresa_ids) & models.Q(sucursal_id__in=sucursal_ids)
-    )
-
 
 # --- Exportación de los reportes por periodo (EC-814) ---------------------------
 

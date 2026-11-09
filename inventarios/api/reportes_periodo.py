@@ -79,15 +79,26 @@ def almacen_requerido(query_params):
     return almacen_id
 
 
-def _almacenes_en_alcance(user, qs):
-    if user.is_superuser:
-        return qs
+def almacenes_en_alcance(user, qs=None):
+    """Almacenes sobre los que opera un usuario NO superusuario (``qs`` acotado,
+    o todos los almacenes).
+
+    Única definición del alcance de almacenes: la usan existencias, las
+    operaciones de inventario y los reportes por periodo. Empresas del usuario
+    (``empresa`` + M2M ``empresas``) Y sus sucursales. Sin empresas o sin
+    sucursales el alcance queda vacío. El superusuario se trata aparte.
+    """
     empresa_ids = []
     if getattr(user, "empresa_id", None):
         empresa_ids.append(user.empresa_id)
     empresa_ids += list(user.empresas.values_list("pk", flat=True))
     sucursal_ids = list(user.sucursales_permitidas())
+    qs = Almacen.objects.all() if qs is None else qs
     return qs.filter(models.Q(empresa_id__in=empresa_ids) & models.Q(sucursal_id__in=sucursal_ids))
+
+
+def _almacenes_en_alcance(user, qs):
+    return qs if user.is_superuser else almacenes_en_alcance(user, qs)
 
 
 def almacenes_del_reporte(user, query_params):
