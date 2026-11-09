@@ -493,11 +493,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         user = self.request.user
         empresa = getattr(user, "empresa", None)
         cotizacion = self.get_object()
-        if (
-            not getattr(user, "is_superuser", False)
-            and empresa
-            and cotizacion.empresa_id != empresa.pk
-        ):
+        if not empresa or cotizacion.empresa_id != empresa.pk:  # superusuario incluido (EC-798)
             raise ValidationError({"cotizacion": "No tienes acceso a esta cotización."})
         if not getattr(user, "is_superuser", False) and not getattr(
             user, "is_admin_empresa", False
@@ -1275,10 +1271,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 limit = 20
             limit = max(1, min(limit, 1000))
 
-        empresa_id = request.query_params.get("empresa_id")
-        
-        if getattr(user, "is_superuser", False) and not empresa and empresa_id:
-            empresa = Empresa.objects.filter(pk=empresa_id).first()
+        # El superusuario ya no elige otra empresa con ``?empresa_id=`` (EC-798).
 
         cliente_q = (request.query_params.get("cliente_q") or "").strip()
         cliente_id_raw = (
@@ -1291,12 +1284,14 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
         clientes_qs = Cliente.objects.filter(activo=True)
         productos_qs = Producto.objects.filter(activo=True)
-        if not getattr(user, "is_superuser", False) and empresa:
+        # Solo la empresa activa, superusuario incluido (EC-798): sin empresa,
+        # catálogos vacíos (antes el superusuario sin empresa veía todos).
+        if empresa:
             clientes_qs = clientes_qs.filter(empresa=empresa)
             productos_qs = productos_qs.filter(empresa=empresa)
-        if getattr(user, "is_superuser", False) and empresa:
-            clientes_qs = clientes_qs.filter(empresa=empresa)
-            productos_qs = productos_qs.filter(empresa=empresa)
+        else:
+            clientes_qs = clientes_qs.none()
+            productos_qs = productos_qs.none()
         if not getattr(user, "is_superuser", False) and not getattr(
             user, "is_admin_empresa", False
         ):
@@ -1438,10 +1433,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 direcciones_qs = DireccionCliente.objects.filter(
                     activo=True, cliente_id=cliente_id
                 )
-                if not getattr(user, "is_superuser", False) and empresa:
-                    direcciones_qs = direcciones_qs.filter(empresa=empresa)
-                elif getattr(user, "is_superuser", False) and empresa:
-                    direcciones_qs = direcciones_qs.filter(empresa=empresa)
+                direcciones_qs = direcciones_qs.filter(empresa=empresa)
                 direcciones_envio = list(
                     direcciones_qs.order_by("id").values(
                         "id",
@@ -1632,7 +1624,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         detalle_data = serializer.validated_data["detalle"]
         servicios_extras_data = serializer.validated_data.get("servicios_extras") or []
 
-        if not getattr(user, "is_superuser", False) and not empresa:
+        if not empresa:  # superusuario incluido (EC-798)
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         with transaction.atomic():
@@ -1722,11 +1714,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         superusuario o admin de empresa, su vendedor."""
         if not cotizacion:
             raise ValidationError({"cotizacion_id": "Cotización no encontrada."})
-        if (
-            not getattr(user, "is_superuser", False)
-            and empresa
-            and cotizacion.empresa_id != empresa.pk
-        ):
+        if not empresa or cotizacion.empresa_id != empresa.pk:  # superusuario incluido (EC-798)
             raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
         if not getattr(user, "is_superuser", False) and not getattr(user, "is_admin_empresa", False):
             if (cotizacion.vendedor_id and cotizacion.vendedor_id != getattr(user, "id", None)
@@ -2722,8 +2710,7 @@ class CotizacionDetalleViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset()
-        if getattr(user, "is_superuser", False):
-            return qs
+        # Solo la empresa activa, superusuario incluido (EC-798).
         empresa = getattr(user, "empresa", None)
         if empresa:
             return qs.filter(cotizacion__empresa=empresa)
@@ -4439,12 +4426,11 @@ class PedidoDetalleViewSet(viewsets.ModelViewSet):
         # ve nada; el resto sólo su empresa.
         user = self.request.user
         qs = super().get_queryset()
-        if not getattr(user, "is_superuser", False):
-            empresa = getattr(user, "empresa", None)
-            if not empresa:
-                return qs.none()
-            qs = qs.filter(pedido__empresa=empresa)
-        return qs
+        # Solo la empresa activa, superusuario incluido (EC-798).
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(pedido__empresa=empresa)
 
     @action(detail=True, methods=["post"])
     def anular(self, request, pk=None):
@@ -4463,12 +4449,11 @@ class PedidoDetalleTallaViewSet(viewsets.ModelViewSet):
         # Misma convención que ``PedidoViewSet.get_queryset()``.
         user = self.request.user
         qs = super().get_queryset()
-        if not getattr(user, "is_superuser", False):
-            empresa = getattr(user, "empresa", None)
-            if not empresa:
-                return qs.none()
-            qs = qs.filter(pedido_detalle__pedido__empresa=empresa)
-        return qs
+        # Solo la empresa activa, superusuario incluido (EC-798).
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            return qs.none()
+        return qs.filter(pedido_detalle__pedido__empresa=empresa)
 
 
 class MesaControlViewSet(CotizacionViewSet):

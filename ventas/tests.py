@@ -171,11 +171,14 @@ class PedidoViewSetScopeTenantTests(TestCase):
     def test_admin_empresa_sigue_viendo_los_de_su_empresa(self):
         self.assertEqual(self._ids(self.admin_a), [self.a["pedido"].pk])
 
-    def test_superuser_sigue_viendo_todas_las_empresas(self):
-        self.assertCountEqual(
-            self._ids(self.superuser),
-            [self.a["pedido"].pk, self.b["pedido"].pk],
-        )
+    def test_superuser_sin_empresa_activa_no_ve_ningun_pedido(self):
+        """EC-798: el superusuario opera en su empresa activa, como todos."""
+        self.assertEqual(self._ids(self.superuser), [])
+
+    def test_superuser_ve_solo_su_empresa_activa(self):
+        Usuario.objects.filter(pk=self.superuser.pk).update(empresa=self.a["pedido"].empresa)
+        self.superuser.refresh_from_db()
+        self.assertEqual(self._ids(self.superuser), [self.a["pedido"].pk])
 
     def test_filtro_q_sigue_funcionando_dentro_del_scope(self):
         folio = self.a["pedido"].folio
@@ -461,11 +464,9 @@ class PedidoDetalleScopeTenantTests(TestCase):
         )
         self.assertEqual(resp.status_code, 404)
 
-    def test_detalle_superuser_ve_todas_las_empresas(self):
-        self.assertCountEqual(
-            self._ids(self.superuser, PEDIDO_DETALLE_URL),
-            [self.a["detalle"].pk, self.b["detalle"].pk],
-        )
+    def test_detalle_superuser_sin_empresa_no_ve_nada(self):
+        """EC-798: solo la empresa activa, superusuario incluido."""
+        self.assertEqual(self._ids(self.superuser, PEDIDO_DETALLE_URL), [])
 
     # --- PedidoDetalleTalla ---------------------------------------------------
 
@@ -540,11 +541,9 @@ class PedidoDetalleScopeTenantTests(TestCase):
     def test_talla_sin_empresa_no_ve_nada(self):
         self.assertEqual(self._ids(self.sin_empresa, PEDIDO_DETALLE_TALLA_URL), [])
 
-    def test_talla_superuser_ve_todas_las_empresas(self):
-        self.assertCountEqual(
-            self._ids(self.superuser, PEDIDO_DETALLE_TALLA_URL),
-            [self.a["talla_row"].pk, self.b["talla_row"].pk],
-        )
+    def test_talla_superuser_sin_empresa_no_ve_nada(self):
+        """EC-798: solo la empresa activa, superusuario incluido."""
+        self.assertEqual(self._ids(self.superuser, PEDIDO_DETALLE_TALLA_URL), [])
 
 
 class TiposServicioBordadoValidacionTests(TestCase):
@@ -4001,8 +4000,10 @@ class FkCrossTenantEscrituraTests(TestCase):
         cls.color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
         cls.a = cls._tenant("acme", "MTY", "a@acme.test")
         cls.b = cls._tenant("globex", "GDL", "b@globex.test")
+        # EC-798: el superusuario opera en su empresa activa (B); A le es ajena.
         cls.superuser = Usuario.objects.create(
-            username="root", email="root@nowhere.test", is_superuser=True
+            username="root", email="root@nowhere.test", is_superuser=True,
+            empresa=cls.b["pedido"].empresa,
         )
 
     def _client(self, user):
@@ -4209,20 +4210,20 @@ class FkCrossTenantEscrituraTests(TestCase):
 
     def test_superuser_no_mezcla_empresas_en_un_pedido(self):
         client = self._client(self.superuser)
-        url = f"{PEDIDOS_URL}{self.a['pedido'].pk}/"
+        url = f"{PEDIDOS_URL}{self.b['pedido'].pk}/"
         self._assert_rechazo_como_inexistente(
             lambda pk: client.patch(url, {"cliente": pk}, format="json"),
-            self.b["cliente"].pk,
+            self.a["cliente"].pk,
         )
 
-    def test_superuser_edita_pedido_ajeno_con_fks_de_esa_empresa(self):
-        """La referencia es la empresa del pedido, no la del superusuario (que no tiene)."""
+    def test_superuser_no_edita_pedido_de_otra_empresa(self):
+        """EC-798: fuera de su empresa activa el pedido no existe para él (404)."""
         resp = self._client(self.superuser).patch(
             f"{PEDIDOS_URL}{self.a['pedido'].pk}/",
             {"cliente": self.a["cliente"].pk, "sucursal": self.a["sucursal"].pk},
             format="json",
         )
-        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.status_code, 404, resp.content)
 
     # --- PedidoDetalle / PedidoDetalleTalla ---------------------------------------
 
@@ -4337,7 +4338,8 @@ class FkCrossTenantEscrituraTests(TestCase):
             {"pedido": self.b["pedido"].pk},
             format="json",
         )
-        self.assertEqual(resp.status_code, 400, resp.content)
+        # EC-798: el renglón es de A, fuera de su empresa activa → 404.
+        self.assertEqual(resp.status_code, 404, resp.content)
         detalle.refresh_from_db()
         self.assertEqual(detalle.pedido_id, self.a["pedido"].pk)
 
@@ -4348,7 +4350,8 @@ class FkCrossTenantEscrituraTests(TestCase):
             {"pedido_detalle": self.b["detalle"].pk},
             format="json",
         )
-        self.assertEqual(resp.status_code, 400, resp.content)
+        # EC-798: la talla es de A, fuera de su empresa activa → 404.
+        self.assertEqual(resp.status_code, 404, resp.content)
         talla_row.refresh_from_db()
         self.assertEqual(talla_row.pedido_detalle_id, self.a["detalle"].pk)
 
