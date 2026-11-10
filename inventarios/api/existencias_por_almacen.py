@@ -32,7 +32,7 @@ from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param
 from nucleo.opciones_filtros import clave_orden, mes_param, opciones_meses
-from nucleo.listados import OrdenamientoEstableFilter
+from nucleo.listados import OrdenamientoNullsAlFinal
 
 # (estado, porcentaje mínimo EXCLUSIVO), de mayor a menor; el último
 # (``critical``) no tiene piso: es el resto. Única fuente de los cortes de la
@@ -189,10 +189,10 @@ def _condiciones_estado(estado, maximo):
     return condiciones
 
 
-class OrdenamientoPorAlmacenFilter(OrdenamientoEstableFilter):
+class OrdenamientoPorAlmacenFilter(OrdenamientoNullsAlFinal):
     """``?ordering=`` con lista blanca propia (no la del viewset, que sigue
     siendo la del listado clásico), ``id`` como desempate y los NULL siempre al
-    final: ~60 % de las existencias no tienen ``fecha_actualizacion`` y en
+    final (``OrdenamientoNullsAlFinal``, sólo en los campos NULL-able): ~60 % de las existencias no tienen ``fecha_actualizacion`` y en
     PostgreSQL un DESC los pondría primero."""
 
     def get_valid_fields(self, queryset, view, context={}):
@@ -200,13 +200,6 @@ class OrdenamientoPorAlmacenFilter(OrdenamientoEstableFilter):
 
     def get_default_ordering(self, view):
         return ["-fecha_actualizacion", "-id"]
-
-    def filter_queryset(self, request, queryset, view):
-        ordering = self.get_ordering(request, queryset, view)
-        return queryset.order_by(*[
-            F(campo[1:]).desc(nulls_last=True) if campo.startswith("-") else F(campo).asc(nulls_last=True)
-            for campo in ordering
-        ])
 
 
 def filas(qs):
