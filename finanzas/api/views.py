@@ -521,9 +521,7 @@ class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
         if not superuser:
             if empresa is None:
                 return CuentaPorCobrar.objects.none()
-            qs = qs.filter(
-                Q(empresa=empresa) | Q(empresa__isnull=True, factura__empresa=empresa)
-            ).distinct()
+            qs = qs.filter(CuentaPorCobrar.q_de_la_empresa(empresa)).distinct()
         qs = por_sucursal(qs, user, 'factura__sucursal')
 
         qp = self.request.query_params
@@ -2097,10 +2095,8 @@ class CobroViewSet(FinanzasBaseViewSet):
             # cazaba con ``estatus="Aplicado"``; en ``Borrador`` no corre.
             cxc = d.get("cxc")
             if cxc is not None:
-                # ``CuentaPorCobrar.empresa`` es NULL-able: las filas antiguas se
-                # resuelven por su factura, igual que en ``get_queryset``.
-                cxc_emp = getattr(cxc, "empresa_id", None) or getattr(getattr(cxc, "factura", None), "empresa_id", None)
-                if cxc_emp != cobro.empresa_id:
+                # Las CxC antiguas sin empresa son de la de su factura.
+                if cxc.empresa_efectiva_id != cobro.empresa_id:
                     raise ValidationError(
                         {"cobro_detalles": [f"La CxC {cxc.pk} no pertenece a la misma empresa que el cobro."]}
                     )

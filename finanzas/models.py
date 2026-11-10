@@ -557,6 +557,26 @@ class CuentaPorCobrar(models.Model):
     def __str__(self):
         return str(self.id)
 
+    # ``empresa`` es NULL-able: las CxC antiguas no la cargan y son de la empresa
+    # de su factura. Esta regla vive sólo aquí (EC-846): la propiedad para una
+    # instancia cargada y el ``Q`` para filtrar querysets.
+
+    @property
+    def empresa_efectiva_id(self):
+        """Empresa de la CxC: la suya o, si es null, la de su factura.
+
+        Sólo toca ``factura`` cuando ``empresa_id`` es null; quien la use en un
+        bucle debe traer la factura con ``select_related``.
+        """
+        return self.empresa_id or self.factura.empresa_id
+
+    @staticmethod
+    def q_de_la_empresa(empresa):
+        """Filtro de las CxC de ``empresa`` (instancia o id), incluidas las antiguas
+        sin empresa cuya factura es de ella."""
+        empresa_id = getattr(empresa, "pk", empresa)
+        return models.Q(empresa_id=empresa_id) | models.Q(empresa__isnull=True, factura__empresa_id=empresa_id)
+
 class CuentaPorPagar(models.Model):
     class EstatusCxP(models.TextChoices):
         PENDIENTE = 'Pendiente', 'Pendiente'

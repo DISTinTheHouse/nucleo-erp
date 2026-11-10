@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db.models import Q, Sum
+from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
@@ -226,9 +226,8 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
         # #568: el cliente debe ser de la empresa de la CxC.
         cliente = attrs.get("cliente")
         if self.instance is not None and cliente is not None:
-            # La empresa de una CxC antigua (``empresa`` null) es la de su factura,
-            # como en ``get_queryset``; un cliente sin empresa no es de ninguna (EC-846).
-            empresa_id = self.instance.empresa_id or getattr(self.instance.factura, "empresa_id", None)
+            # Un cliente sin empresa no es de ninguna (EC-846).
+            empresa_id = self.instance.empresa_efectiva_id
             if empresa_id is None or cliente.empresa_id != empresa_id:
                 raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
         attrs = super().validate(attrs)
@@ -1153,9 +1152,7 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
         fields["cliente"].queryset = Cliente.objects.filter(empresa_id=empresa_id, activo=True)
         fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id, activo=True).select_related("moneda")
-        cxcs = CuentaPorCobrar.objects.filter(
-            Q(empresa_id=empresa_id) | Q(empresa__isnull=True, factura__empresa_id=empresa_id)
-        )
+        cxcs = CuentaPorCobrar.objects.filter(CuentaPorCobrar.q_de_la_empresa(empresa_id))
         user = getattr(self.context.get("request"), "user", None)
         fields["cobro_detalles"].child.fields["cxc"].queryset = por_sucursal(cxcs, user, "factura__sucursal") if user else cxcs
         return fields
