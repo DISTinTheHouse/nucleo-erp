@@ -149,11 +149,8 @@ class UsuarioViewSet(viewsets.ModelViewSet):
         if getattr(user, 'is_admin_empresa', False):
             self._bloquear_concesion_de_privilegios(serializer)
 
-            # Validar integridad de sucursal
-            sucursal = serializer.validated_data.get('sucursal_default')
-            if sucursal and sucursal.empresa != user.empresa:
-                raise PermissionDenied("La sucursal seleccionada no pertenece a tu empresa.")
-
+            # Sucursales y departamentos ya se validaron contra esta empresa en
+            # ``UsuarioSerializer.validate`` (EC-844).
             # Forzar asignación a la empresa del admin
             serializer.save(empresa=user.empresa)
         else:
@@ -175,11 +172,7 @@ class UsuarioViewSet(viewsets.ModelViewSet):
             if 'empresa' in serializer.validated_data and serializer.validated_data['empresa'] != user.empresa:
                  raise PermissionDenied("No puedes mover usuarios a otra empresa.")
 
-            # Validar integridad de sucursal si se está actualizando
-            sucursal = serializer.validated_data.get('sucursal_default')
-            if sucursal and sucursal.empresa != user.empresa:
-                raise PermissionDenied("La sucursal seleccionada no pertenece a tu empresa.")
-
+            # Sucursales y departamentos: ``UsuarioSerializer.validate`` (EC-844).
             serializer.save(empresa=user.empresa)
         else:
             raise PermissionDenied("No tienes permisos para editar usuarios.")

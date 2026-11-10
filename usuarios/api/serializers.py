@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from nucleo.permisos import permisos_efectivos
 from seguridad.models import Rol, UsuarioRol
+from ..alcance import errores_de_alcance
 from ..models import Usuario
 
 class UsuarioSerializer(serializers.ModelSerializer):
@@ -62,16 +63,20 @@ class UsuarioSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         request_user = getattr(request, 'user', None)
 
-        empresa = data.get('empresa')
-        sucursal = data.get('sucursal_default')
         roles_ids = data.get('roles')
+        empresa_final = self._empresa_destino(data, request_user)
 
-        # Si estamos creando (no hay instancia) o si se están actualizando ambos campos
-        if empresa and sucursal:
-            if sucursal.empresa != empresa:
-                raise serializers.ValidationError({
-                    "sucursal_default": "La sucursal seleccionada no pertenece a la empresa asignada."
-                })
+        # Sucursales, departamentos y sucursal por defecto, de la empresa del
+        # usuario editado aunque llegue uno solo (EC-844). Antes solo se comparaba
+        # sucursal_default cuando venía junto con empresa.
+        errores = errores_de_alcance(
+            empresa_final,
+            sucursal_default=data.get('sucursal_default'),
+            sucursales=data.get('sucursales'),
+            departamentos=data.get('departamentos'),
+        )
+        if errores:
+            raise serializers.ValidationError(errores)
 
         if roles_ids is not None:
             if not request_user or not request_user.is_authenticated:
@@ -79,20 +84,26 @@ class UsuarioSerializer(serializers.ModelSerializer):
             if not (request_user.is_superuser or getattr(request_user, 'is_admin_empresa', False)):
                 raise serializers.ValidationError({"roles": "No tienes permisos para asignar roles."})
 
-            empresa_final = None
-            if getattr(request_user, 'is_admin_empresa', False) and not request_user.is_superuser:
-                empresa_final = getattr(request_user, 'empresa', None)
-            else:
-                empresa_final = data.get('empresa') or getattr(self.instance, 'empresa', None)
-
             if not empresa_final:
                 raise serializers.ValidationError({"roles": "No se puede validar roles sin empresa."})
 
             roles_qs = Rol.objects.filter(id__in=roles_ids, empresa=empresa_final)
             if roles_qs.count() != len(set(roles_ids)):
                 raise serializers.ValidationError({"roles": "Uno o más roles no existen o no pertenecen a la empresa."})
-        
+
         return data
+
+    def _empresa_destino(self, data, request_user):
+        """Empresa en la que queda el usuario editado: la del admin de empresa
+        (``UsuarioViewSet`` y el asistente la fuerzan al guardar); para el
+        superusuario, la que llega o la que ya tenía."""
+        if (
+            request_user is not None
+            and getattr(request_user, 'is_admin_empresa', False)
+            and not getattr(request_user, 'is_superuser', False)
+        ):
+            return getattr(request_user, 'empresa', None)
+        return data.get('empresa') or getattr(self.instance, 'empresa', None)
 
     def _set_roles(self, user, roles_ids):
         UsuarioRol.objects.filter(usuario=user).delete()
