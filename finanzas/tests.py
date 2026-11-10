@@ -10258,6 +10258,43 @@ class CobrosResumenTests(LecturaJerarquicaBase):
         dashboard = self._client(root).get(self.DASHBOARD_URL).json()
         self.assertEqual(dashboard["cobros_periodo"]["monto_total"], "50.01")
 
+    def test_parametros_invalidos_400_en_el_dashboard_como_en_el_resumen(self):
+        # EC-849: antes el dashboard daba 500 con una fecha o ``moneda_id`` mal formados y
+        # 200 con el rango invertido. Se valida antes de mirar la empresa: también sin ella.
+        con_empresa = Usuario.objects.create(
+            username="ec849-param@x.test", email="ec849-param@x.test", is_superuser=True, empresa=self.a["empresa"],
+        )
+        sin_empresa = Usuario.objects.create(
+            username="ec849-param-sin@x.test", email="ec849-param-sin@x.test", is_superuser=True,
+        )
+        ayer, manana = self.hoy - timedelta(days=1), self.hoy + timedelta(days=1)
+        casos = [
+            ("?fecha_inicio=abc", "fecha_inicio", "Usa el formato AAAA-MM-DD."),
+            ("?fecha_desde=2026-13-01", "fecha_inicio", "Usa el formato AAAA-MM-DD."),
+            ("?fecha_fin=31/12/2026", "fecha_fin", "Usa el formato AAAA-MM-DD."),
+            ("?fecha_hasta=abc", "fecha_fin", "Usa el formato AAAA-MM-DD."),
+            (f"?fecha_inicio={self.hoy}&fecha_fin={ayer}", "fecha_fin", "No puede ser anterior a fecha_inicio."),
+            (f"?fecha_desde={self.hoy}&fecha_hasta={ayer}", "fecha_fin", "No puede ser anterior a fecha_inicio."),
+            (f"?fecha_inicio={manana}", "fecha_fin", "No puede ser anterior a fecha_inicio."),
+        ]
+        solo_dashboard = [
+            ("?moneda_id=abc", "moneda_id", "Debe ser un entero válido."),
+            ("?moneda=1.5", "moneda_id", "Debe ser un entero válido."),
+            ("?moneda_id=-1", "moneda_id", "Debe ser un entero válido."),
+        ]
+        for user in (con_empresa, sin_empresa):
+            client = self._client(user)
+            for url, lista in ((self.URL, casos), (self.DASHBOARD_URL, casos + solo_dashboard)):
+                for query, campo, mensaje in lista:
+                    with self.subTest(user=user.username, url=url, query=query):
+                        resp = client.get(f"{url}{query}")
+                        self.assertEqual(resp.status_code, 400)
+                        self.assertEqual(str(resp.data[campo]), mensaje)
+            # Válidos: mismo día y una moneda numérica (la de A filtra; inexistente, en cero).
+            mismo_dia = client.get(f"{self.DASHBOARD_URL}?fecha_inicio={self.hoy}&fecha_fin={self.hoy}")
+            self.assertEqual(mismo_dia.status_code, 200)
+            self.assertEqual(client.get(f"{self.DASHBOARD_URL}?moneda_id={self.moneda.pk}").status_code, 200)
+
     def _superusuario_y_admin_de_a(self, sufijo):
         root = Usuario.objects.create(
             username=f"ec849-{sufijo}-root@x.test", email=f"ec849-{sufijo}-root@x.test",

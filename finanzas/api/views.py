@@ -106,6 +106,7 @@ from finanzas.services.poliza_service import PolizaService
 from finanzas.services.reporte_contable_service import LIMITE_OMISION, ReporteContableService
 from finanzas.scope import cobros_por_sucursal, exigir_factura_visible, por_sucursal, sucursales_visibles
 from finanzas.utils.folios import generate_factura_folio
+from nucleo.kpis import entero_estricto
 from nucleo.models import Moneda, Sucursal
 
 PERMISO_CANCELAR_FACTURA = 'E-FIN-FACTURAS'
@@ -127,6 +128,33 @@ def _bool_param(v, campo="valor"):
     if s in _FALSOS:
         return False
     raise ValidationError({campo: "Debe ser true o false."})
+
+
+def _fecha_param(qp, nombre, alias, defecto):
+    """Fecha ``AAAA-MM-DD`` de ``?nombre=`` (o ``?alias=``); vacía → ``defecto``;
+    mal formada → 400 con la clave ``nombre``."""
+    valor = (qp.get(nombre) or qp.get(alias) or "").strip()
+    if not valor:
+        return defecto
+    try:
+        fecha = parse_date(valor)
+    except ValueError:
+        fecha = None
+    if fecha is None:
+        raise ValidationError({nombre: "Usa el formato AAAA-MM-DD."})
+    return fecha
+
+
+def _periodo_param(qp):
+    """``(fecha_inicio, fecha_fin)`` de un resumen de lectura (resumen de cobros y
+    dashboard): por omisión del día 1 del mes a hoy; alias ``fecha_desde`` /
+    ``fecha_hasta``; un rango invertido → 400, mismo mensaje que reportes-contables/."""
+    hoy = timezone.localdate()
+    fecha_inicio = _fecha_param(qp, "fecha_inicio", "fecha_desde", hoy.replace(day=1))
+    fecha_fin = _fecha_param(qp, "fecha_fin", "fecha_hasta", hoy)
+    if fecha_inicio > fecha_fin:
+        raise ValidationError({"fecha_fin": "No puede ser anterior a fecha_inicio."})
+    return fecha_inicio, fecha_fin
 
 
 def _puede_ver_todo(user):
@@ -1959,19 +1987,6 @@ class CobroViewSet(FinanzasBaseViewSet):
     # Mueve CxC, banco y póliza (#581), revisado antes de validar el body (#589).
     mensaje_sin_permiso_escritura = "No tienes permiso para registrar o cancelar cobros."
 
-    @staticmethod
-    def _fecha_param(qp, nombre, alias, defecto):
-        valor = (qp.get(nombre) or qp.get(alias) or "").strip()
-        if not valor:
-            return defecto
-        try:
-            fecha = parse_date(valor)
-        except ValueError:
-            fecha = None
-        if fecha is None:
-            raise ValidationError({nombre: "Usa el formato AAAA-MM-DD."})
-        return fecha
-
     @action(detail=False, methods=["get"], url_path="resumen", url_name="resumen")
     def resumen(self, request):
         """Cobros aplicados del periodo por moneda de la cuenta bancaria (EC-746).
@@ -1987,12 +2002,7 @@ class CobroViewSet(FinanzasBaseViewSet):
         agregado, además de las de permisos.
         """
         user = request.user
-        qp = request.query_params
-        hoy = timezone.localdate()
-        fecha_inicio = self._fecha_param(qp, "fecha_inicio", "fecha_desde", hoy.replace(day=1))
-        fecha_fin = self._fecha_param(qp, "fecha_fin", "fecha_hasta", hoy)
-        if fecha_inicio > fecha_fin:  # mismo mensaje que reportes-contables/
-            raise ValidationError({"fecha_fin": "No puede ser anterior a fecha_inicio."})
+        fecha_inicio, fecha_fin = _periodo_param(request.query_params)
 
         # La empresa activa del usuario, superusuario incluido (EC-798); ``?empresa_id=``
         # no se lee (EC-849). Sin empresa no ve nada: monedas y cobros quedan vacíos.
@@ -2798,13 +2808,14 @@ class DashboardFinancieroViewSet(FinanzasBaseSimpleViewSet):
 
     def list(self, request):
         qp = request.query_params
+        # Los parámetros se validan como en el resumen de cobros, antes de mirar la
+        # empresa: mal formados o rango invertido → 400 también sin empresa (EC-849).
+        fecha_inicio, fecha_fin = _periodo_param(qp)
+        moneda = entero_estricto(qp.get("moneda") or qp.get("moneda_id"), "moneda_id")
         # La empresa activa, superusuario incluido (EC-798); ``?empresa_id=`` no se lee.
         # Sin empresa, 200 con la forma de siempre en cero (EC-849), igual que el resumen
         # de cobros: el servicio no consulta nada para ``None``.
         empresa = getattr(request.user, "empresa", None)
-        fecha_inicio = qp.get("fecha_inicio") or qp.get("fecha_desde")
-        fecha_fin = qp.get("fecha_fin") or qp.get("fecha_hasta")
-        moneda = qp.get("moneda") or qp.get("moneda_id")
         return Response(
             DashboardFinancieroService.obtener_resumen(
                 empresa=empresa,
