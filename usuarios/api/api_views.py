@@ -5,7 +5,8 @@ from rest_framework import permissions, viewsets, status
 from rest_framework.permissions import AllowAny
 from rest_framework.exceptions import PermissionDenied
 from django.contrib.auth import authenticate
-from nucleo.permisos import permisos_efectivos
+from rest_framework.decorators import action
+from nucleo.permisos import permisos_de_la_peticion, permisos_efectivos
 from nucleo.scope import empresa_ids_lectura
 from ..models import Usuario
 from .serializers import UsuarioSerializer
@@ -21,6 +22,27 @@ class IsSuperUserOrReadOnly(permissions.BasePermission):
         if request.method in permissions.SAFE_METHODS:
             return request.user and request.user.is_authenticated
         return request.user and request.user.is_superuser
+
+# Lectura de la administración de usuarios (#1040): mismo código que la
+# pantalla de Configuración del frontend. Superusuario y admin de empresa pasan.
+CODIGOS_USUARIOS = ("R-CONFIGURACION",)
+
+
+class LecturaUsuarios(permissions.BasePermission):
+    """``list`` exige ``CODIGOS_USUARIOS``; ``retrieve`` también, salvo el propio
+    perfil. ``catalogo`` (id y nombre) queda abierto a cualquier autenticado."""
+
+    message = "No tienes permiso para consultar usuarios."
+
+    def has_permission(self, request, view):
+        if view.action == "list":
+            return any(c in permisos_de_la_peticion(request) for c in CODIGOS_USUARIOS)
+        if view.action == "retrieve":
+            if str(view.kwargs.get("pk")) == str(request.user.pk):
+                return True
+            return any(c in permisos_de_la_peticion(request) for c in CODIGOS_USUARIOS)
+        return True
+
 
 class LoginAPIView(APIView):
     """
@@ -93,7 +115,22 @@ class UsuarioViewSet(viewsets.ModelViewSet):
     """
     queryset = Usuario.objects.all()
     serializer_class = UsuarioSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, LecturaUsuarios]
+
+    @action(detail=False, methods=["get"], url_path="catalogo")
+    def catalogo(self, request):
+        """Catálogo para selectores (vendedor, operador...): solo ``id`` y
+        ``nombre_completo`` de los usuarios activos de la empresa activa (#1040).
+        Una consulta, sin paginar."""
+        filas = (
+            Usuario.objects.filter(empresa_id__in=empresa_ids_lectura(request.user), is_active=True)
+            .order_by("first_name", "last_name", "id")
+            .values_list("id", "first_name", "last_name", "email")
+        )
+        return Response([
+            {"id": pk, "nombre_completo": f"{fn or ''} {ln or ''}".strip() or em}
+            for pk, fn, ln, em in filas
+        ])
 
     def get_queryset(self):
         user = self.request.user
