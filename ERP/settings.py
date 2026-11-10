@@ -89,6 +89,9 @@ AUTH_KIT = {
     'USE_MFA': True,
     # Perfil propio: solo nombre, apellido, teléfono y avatar (EC-844).
     'USER_SERIALIZER': 'usuarios.api.serializers.PerfilUsuarioSerializer',
+    # /api/auth/password/change/ exige la contraseña actual (EC-844); por
+    # defecto auth_kit la omite y bastaba un token para fijar otra.
+    'OLD_PASSWORD_FIELD_ENABLED': True,
     'AUTH_COOKIE_SECURE': config('AUTH_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool),
     'AUTH_COOKIE_SAMESITE': config('AUTH_COOKIE_SAMESITE', default='None'),
 }
