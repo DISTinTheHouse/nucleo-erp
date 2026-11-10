@@ -38,7 +38,8 @@ class UsuarioSerializer(serializers.ModelSerializer):
 
     def get_roles_ids(self, obj):
         # ``asignaciones_roles`` viene precargado en el listado (#1043).
-        return [a.rol_id for a in obj.asignaciones_roles.all()]
+        # Solo los roles de su empresa activa (#1038).
+        return [a.rol_id for a in obj.asignaciones_roles.all() if a.empresa_id == obj.empresa_id]
 
     def get_empresa_id(self, obj):
         return getattr(obj, "empresa_id", None)

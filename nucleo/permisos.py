@@ -42,13 +42,15 @@ el DENY gana en ambas formulaciones.
 
 Dos detalles de fidelidad que es fácil perder de vista:
 
-- ``UsuarioPermiso`` tiene columnas de contexto ``empresa``/``sucursal``, pero
-  ``tiene_permiso()`` **no** filtra por ellas: usa todos los overrides del usuario.
-  Aquí se hace igual, a propósito.
+- Empresa (#1038): sólo cuentan los roles (``UsuarioRol.empresa``) y overrides
+  (``UsuarioPermiso.empresa``) de la empresa ACTIVA del usuario; un override sin
+  empresa es global. La sucursal del override no se evalúa. ``tiene_permiso()``
+  ya no tiene cálculo propio: delega aquí.
 - Un ``tipo`` de override que no sea ni ``grant`` ni ``deny`` no cuenta como ninguno
   de los dos, igual que en ``tiene_permiso()``, que consulta cada uno por separado.
 """
 
+from django.db.models import Q
 from rest_framework.permissions import BasePermission
 from seguridad.models import Rol, UsuarioPermiso
 
@@ -110,7 +112,10 @@ def permisos_efectivos(user) -> PermisosEfectivos:
     # Consulta 1: los overrides del usuario, grants y denies de una sola pasada.
     concedidos = set()
     denegados = set()
-    for tipo, clave in user.overrides_permisos.values_list("tipo", "permiso__clave"):
+    empresa_id = getattr(user, "empresa_id", None)
+    for tipo, clave in user.overrides_permisos.filter(
+        Q(empresa__isnull=True) | Q(empresa_id=empresa_id)
+    ).values_list("tipo", "permiso__clave"):
         if tipo == UsuarioPermiso.TIPO_DENY:
             denegados.add(clave)
         elif tipo == UsuarioPermiso.TIPO_GRANT:
@@ -124,7 +129,7 @@ def permisos_efectivos(user) -> PermisosEfectivos:
     concedidos.update(
         clave
         for clave in user.asignaciones_roles.filter(
-            rol__estatus=Rol.Estatus.ACTIVO
+            rol__estatus=Rol.Estatus.ACTIVO, empresa_id=empresa_id
         ).values_list("rol__permisos__clave", flat=True)
         if clave is not None
     )
@@ -142,13 +147,16 @@ def permisos_efectivos_precargados(user) -> PermisosEfectivos:
 
     concedidos = set()
     denegados = set()
+    empresa_id = getattr(user, "empresa_id", None)
     for ov in user.overrides_permisos.all():
+        if ov.empresa_id is not None and ov.empresa_id != empresa_id:
+            continue
         if ov.tipo == UsuarioPermiso.TIPO_DENY:
             denegados.add(ov.permiso.clave)
         elif ov.tipo == UsuarioPermiso.TIPO_GRANT:
             concedidos.add(ov.permiso.clave)
     for asignacion in user.asignaciones_roles.all():
-        if asignacion.rol.estatus == Rol.Estatus.ACTIVO:
+        if asignacion.empresa_id == empresa_id and asignacion.rol.estatus == Rol.Estatus.ACTIVO:
             concedidos.update(p.clave for p in asignacion.rol.permisos.all() if p.clave is not None)
 
     return PermisosEfectivos(todo=False, claves=frozenset(concedidos - denegados))
