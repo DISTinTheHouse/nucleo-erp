@@ -10258,14 +10258,49 @@ class CobrosResumenTests(LecturaJerarquicaBase):
         dashboard = self._client(root).get(self.DASHBOARD_URL).json()
         self.assertEqual(dashboard["cobros_periodo"]["monto_total"], "50.01")
 
-    def test_empresa_id_no_numerico_o_inexistente_es_400_tambien_en_el_dashboard(self):
-        root = Usuario.objects.create(username="ec746-root2@x.test", email="ec746-root2@x.test", is_superuser=True)
-        for url in (self.URL, "/api/v1/finanzas/dashboard/"):
-            for valor in ("abc", "1.5", "999999999"):
-                with self.subTest(url=url, empresa_id=valor):
-                    resp = self._client(root).get(f"{url}?empresa_id={valor}")
-                    self.assertEqual(resp.status_code, 400)
-                    self.assertEqual(str(resp.data["empresa"]), "Empresa no encontrada.")
+    def _superusuario_y_admin_de_a(self, sufijo):
+        root = Usuario.objects.create(
+            username=f"ec849-{sufijo}-root@x.test", email=f"ec849-{sufijo}-root@x.test",
+            is_superuser=True, empresa=self.a["empresa"],
+        )
+        admin = self._usuario_con(f"{sufijo}-admin", [])
+        admin.is_admin_empresa = True
+        admin.save()
+        return root, admin
+
+    def test_empresa_id_de_otra_empresa_se_ignora_en_el_resumen_y_el_dashboard(self):
+        # EC-849: ``?empresa_id=`` / ``?empresa=`` ya no se leen; ni el superusuario ni el
+        # admin de A ven lo de B (EUR 999.00, MXN 40.00), sólo lo de A.
+        b = self.b["empresa"].pk
+        for user in self._superusuario_y_admin_de_a("ajena"):
+            client = self._client(user)
+            resumen_a = client.get(self.URL).json()
+            dashboard_a = client.get(self.DASHBOARD_URL).json()
+            self.assertEqual(
+                [(m["moneda_codigo"], m["monto_total"]) for m in resumen_a["por_moneda"]],
+                [("MXN", "50.01"), ("USD", "0.00")],
+            )
+            self.assertEqual(dashboard_a["cobros_periodo"]["monto_total"], "50.01")
+            for query in (f"?empresa_id={b}", f"?empresa={b}", f"?empresa={b}&empresa_id={b}"):
+                with self.subTest(user=user.username, query=query):
+                    resumen = client.get(f"{self.URL}{query}")
+                    self.assertEqual(resumen.status_code, 200)
+                    self.assertEqual(resumen.json(), resumen_a)
+                    dashboard = client.get(f"{self.DASHBOARD_URL}{query}")
+                    self.assertEqual(dashboard.status_code, 200)
+                    self.assertEqual(dashboard.json(), dashboard_a)
+
+    def test_empresa_id_no_numerico_o_inexistente_se_ignora_tambien_en_el_dashboard(self):
+        # Antes de EC-849 era 400 "Empresa no encontrada."; ahora el parámetro no se lee.
+        for user in self._superusuario_y_admin_de_a("invalida"):
+            client = self._client(user)
+            for url in (self.URL, self.DASHBOARD_URL):
+                sin_parametro = client.get(url).json()
+                for valor in ("abc", "1.5", "999999999", ""):
+                    with self.subTest(user=user.username, url=url, empresa_id=valor):
+                        resp = client.get(f"{url}?empresa_id={valor}")
+                        self.assertEqual(resp.status_code, 200)
+                        self.assertEqual(resp.json(), sin_parametro)
 
     def test_permiso_de_seccion(self):
         for claves in (["R-CONTABILIDAD-FACTURACION"], ["R-CONTABILIDAD-CLIENTES"], []):
