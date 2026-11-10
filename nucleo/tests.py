@@ -2059,3 +2059,175 @@ class EnteroEstrictoTests(SimpleTestCase):
         with self.assertRaises(ValidationError) as ctx:
             entero_param(Peticion, "b")
         self.assertEqual(ctx.exception.detail, {"b": "Debe ser un entero válido."})
+
+
+class CambiarEmpresaTests(TestCase):
+    """``POST /api/v1/nucleo/cambiar-empresa/`` (EC-843): solo el superusuario
+    cambia su propia empresa activa, a una empresa activa, y su alcance por
+    sucursal se rehace para cumplir EC-844."""
+
+    URL = "/api/v1/nucleo/cambiar-empresa/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from nucleo.models import Departamento
+
+        cls.a = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.suc_a = Sucursal.objects.create(empresa=cls.a, codigo="MTY", nombre="Monterrey")
+        cls.dep_a = Departamento.objects.create(
+            empresa=cls.a, sucursal=cls.suc_a, codigo="VTA", nombre="Ventas",
+        )
+        # Destino con varias sucursales: gana la primera ACTIVA por ``codigo``,
+        # no la primera creada ni una inactiva que ordena antes.
+        cls.b = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        Sucursal.objects.create(empresa=cls.b, codigo="Z01", nombre="Zacatecas")
+        Sucursal.objects.create(empresa=cls.b, codigo="A02", nombre="Aguascalientes", activo=False)
+        cls.suc_b = Sucursal.objects.create(empresa=cls.b, codigo="M03", nombre="Mérida")
+        cls.sin_sucursales = Empresa.objects.create(codigo="vacia", razon_social="VACIA SA")
+        cls.inactiva = Empresa.objects.create(codigo="baja", razon_social="BAJA SA", activo=False)
+
+        cls.operador_b = Usuario.objects.create(
+            username="operador_b", email="operador@globex.test", empresa=cls.b,
+        )
+        cls.operador_a = Usuario.objects.create(
+            username="operador_a", email="operador@acme.test", empresa=cls.a,
+        )
+
+    def setUp(self):
+        self.root = Usuario.objects.create(
+            username="root", email="root@acme.test", empresa=self.a,
+            sucursal_default=self.suc_a, is_superuser=True,
+        )
+        self.root.sucursales.set([self.suc_a])
+        self.root.departamentos.set([self.dep_a])
+
+    def _cliente(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _alcance(self, user):
+        u = Usuario.objects.get(pk=user.pk)
+        return (
+            u.empresa_id, u.sucursal_default_id,
+            sorted(u.sucursales.values_list("pk", flat=True)),
+            sorted(u.departamentos.values_list("pk", flat=True)),
+        )
+
+    def _eventos(self):
+        from auditoria.models import AuditoriaEvento
+
+        return AuditoriaEvento.objects.filter(accion="CAMBIAR_EMPRESA")
+
+    def test_superusuario_cambia_de_empresa_y_rehace_su_alcance(self):
+        from rest_framework_simplejwt.tokens import AccessToken
+
+        # El token se emite ANTES del cambio y se reusa después: la empresa no
+        # viaja en el JWT, la siguiente petición la lee de la BD.
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {AccessToken.for_user(self.root)}")
+
+        resp = client.post(self.URL, {"empresa": self.b.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._alcance(self.root), (self.b.pk, self.suc_b.pk, [], []))
+        self.assertEqual(resp.data["empresa"], self.b.pk)
+        self.assertEqual(resp.data["empresa_id"], self.b.pk)
+        self.assertEqual(resp.data["sucursal_default"], self.suc_b.pk)
+        self.assertEqual(resp.data["sucursales"], [])
+        self.assertEqual(resp.data["departamentos"], [])
+
+        # Mismo payload que ``GET /api/auth/user/``, que ya ve la empresa nueva.
+        perfil = client.get("/api/auth/user/")
+        self.assertEqual(perfil.status_code, 200)
+        self.assertEqual(resp.data, perfil.data)
+
+        # Un endpoint acotado por empresa ya opera en la nueva: los usuarios de B
+        # (él incluido), ninguno de A.
+        ids = {u["id"] for u in client.get("/api/v1/usuarios/").data}
+        self.assertEqual(ids, {self.operador_b.pk, self.root.pk})
+        self.assertNotIn(self.operador_a.pk, ids)
+
+        evento = self._eventos().get()
+        self.assertEqual(evento.empresa_id, self.b.pk)
+        self.assertEqual(evento.usuario_id, self.root.pk)
+        self.assertEqual(evento.id_registro, str(self.root.pk))
+        self.assertEqual(evento.antes_json, {
+            "empresa": self.a.pk, "sucursal_default": self.suc_a.pk,
+            "sucursales": [self.suc_a.pk], "departamentos": [self.dep_a.pk],
+        })
+        self.assertEqual(evento.despues_json, {
+            "empresa": self.b.pk, "sucursal_default": self.suc_b.pk,
+            "sucursales": [], "departamentos": [],
+        })
+
+    def test_misma_empresa_no_cambia_nada(self):
+        antes = self._alcance(self.root)
+        client = self._cliente(self.root)
+
+        resp = client.post(self.URL, {"empresa": self.a.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._alcance(self.root), antes)
+        self.assertEqual(resp.data, client.get("/api/auth/user/").data)
+        self.assertFalse(self._eventos().exists())
+
+    def test_empresa_sin_sucursales_deja_sucursal_default_nula(self):
+        resp = self._cliente(self.root).post(self.URL, {"empresa": self.sin_sucursales.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._alcance(self.root), (self.sin_sucursales.pk, None, [], []))
+        self.assertIsNone(resp.data["sucursal_default"])
+
+    def test_superusuario_sin_empresa_puede_elegir_una(self):
+        Usuario.objects.filter(pk=self.root.pk).update(empresa=None, sucursal_default=None)
+        self.root.sucursales.clear()
+        self.root.departamentos.clear()
+
+        resp = self._cliente(self.root).post(self.URL, {"empresa": self.b.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._alcance(self.root), (self.b.pk, self.suc_b.pk, [], []))
+
+    def test_no_superusuario_403_aunque_tenga_la_empresa_en_el_m2m(self):
+        admin = Usuario.objects.create(
+            username="admin", email="admin@acme.test", empresa=self.a,
+            sucursal_default=self.suc_a, is_admin_empresa=True,
+        )
+        multi = Usuario.objects.create(
+            username="multi", email="multi@acme.test", empresa=self.a, sucursal_default=self.suc_a,
+        )
+        multi.empresas.set([self.a, self.b])
+        for user in (admin, multi):
+            with self.subTest(usuario=user.username):
+                antes = self._alcance(user)
+                resp = self._cliente(user).post(self.URL, {"empresa": self.b.pk}, format="json")
+                self.assertEqual(resp.status_code, 403, resp.data)
+                self.assertEqual(self._alcance(user), antes)
+        self.assertFalse(self._eventos().exists())
+
+    def test_anonimo_401(self):
+        resp = APIClient().post(self.URL, {"empresa": self.b.pk}, format="json")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_inactiva_inexistente_o_invalida_responden_igual(self):
+        antes = self._alcance(self.root)
+        client = self._cliente(self.root)
+        cuerpos = set()
+        for valor in (self.inactiva.pk, 999_999_999, 2**70, "abc", True):
+            with self.subTest(empresa=valor):
+                resp = client.post(self.URL, {"empresa": valor}, format="json")
+                self.assertEqual(resp.status_code, 400, resp.data)
+                cuerpos.add(resp.content)
+        self.assertEqual(cuerpos, {'{"empresa":["Empresa no válida."]}'.encode()})
+        self.assertEqual(self._alcance(self.root), antes)
+        self.assertFalse(self._eventos().exists())
+
+    def test_sin_empresa_en_el_cuerpo_400(self):
+        resp = self._cliente(self.root).post(self.URL, {}, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("empresa", resp.data)
+
+    def test_solo_post(self):
+        resp = self._cliente(self.root).get(self.URL)
+        self.assertEqual(resp.status_code, 405)

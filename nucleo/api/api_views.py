@@ -4,7 +4,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, viewsets, permissions
-from django.db import connections, models
+from django.db import connections, models, transaction
 from ..choices import StatusChoices
 from ..models import (
     Empresa, Sucursal, Departamento, Moneda, SerieFolio,
@@ -17,7 +17,8 @@ from .serializers import (
     SatUsoCfdiSerializer, SatMetodoPagoSerializer, SatFormaPagoSerializer,
     SatClaveProdServSerializer, SatClaveUnidadSerializer,
     UnidadMedidaSerializer, ImpuestoSerializer,
-    EmpresaSerializer, SucursalSerializer, DepartamentoSerializer, MonedaSerializer, SerieFolioSerializer
+    EmpresaSerializer, SucursalSerializer, DepartamentoSerializer, MonedaSerializer, SerieFolioSerializer,
+    CambiarEmpresaSerializer,
 )
 from seguridad.api.api_views import IsSuperUserOrReadOnly
 
@@ -319,6 +320,82 @@ class UserEmpresasAPIView(APIView):
             })
         
         return Response(data)
+
+class SoloSuperusuario(permissions.BasePermission):
+    """Solo el superusuario (EC-843). El M2M ``empresas`` no concede nada aquí."""
+
+    message = "Solo un superusuario puede cambiar de empresa activa."
+
+    def has_permission(self, request, view):
+        return bool(getattr(request.user, "is_superuser", False))
+
+
+class CambiarEmpresaAPIView(APIView):
+    """``POST /api/v1/nucleo/cambiar-empresa/`` con ``{"empresa": <id>}`` (EC-843).
+
+    El superusuario cambia **su propia** empresa activa (``user.empresa``) a
+    cualquier empresa activa. Todo el ERP lee y escribe solo en la empresa activa
+    (EC-798, EC-816); este es el único camino para cambiarla: ni el perfil
+    (``/api/auth/user/``, EC-844) ni ``/api/v1/usuarios/`` mueven al propio
+    usuario.
+
+    El alcance por sucursal se rehace para cumplir la regla de EC-844
+    (``usuarios/alcance.py``): ``sucursal_default`` pasa a la primera sucursal
+    activa de la empresa nueva por ``codigo`` (``None`` si no tiene) y
+    ``sucursales``/``departamentos`` quedan vacíos; el superusuario no se acota
+    por sucursal, así que no pierde lectura. No toca el M2M ``empresas``, los
+    roles, los overrides ni ``is_admin_empresa``.
+
+    Pedir la empresa que ya está activa no cambia nada (200, misma respuesta).
+    Responde lo mismo que ``GET /api/auth/user/`` para que el front actualice la
+    sesión sin volver a iniciarla. El JWT solo lleva ``user_id`` y el usuario se
+    lee de la BD en cada petición: la siguiente petición ya ve la empresa nueva.
+    """
+
+    permission_classes = [IsAuthenticated, SoloSuperusuario]
+
+    def post(self, request):
+        from auth_kit.app_settings import auth_kit_settings
+        from auditoria.models import AuditoriaEvento
+        from nucleo.middleware import ip_auditoria
+        from usuarios.models import Usuario
+
+        entrada = CambiarEmpresaSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        empresa = entrada.validated_data["empresa"]
+
+        with transaction.atomic():
+            user = Usuario.objects.select_for_update().get(pk=request.user.pk)
+            if user.empresa_id != empresa.pk:
+                antes = {
+                    "empresa": user.empresa_id,
+                    "sucursal_default": user.sucursal_default_id,
+                    "sucursales": sorted(user.sucursales.values_list("pk", flat=True)),
+                    "departamentos": sorted(user.departamentos.values_list("pk", flat=True)),
+                }
+                user.empresa = empresa
+                user.sucursal_default = (
+                    Sucursal.objects.filter(empresa=empresa, activo=True)
+                    .order_by("codigo", "pk").first()
+                )
+                user.save(update_fields=["empresa", "sucursal_default", "updated_at"])
+                user.sucursales.clear()
+                user.departamentos.clear()
+                AuditoriaEvento.objects.create(
+                    empresa=empresa, usuario=user, modulo="usuarios", accion="CAMBIAR_EMPRESA",
+                    tabla=Usuario._meta.db_table, id_registro=str(user.pk),
+                    antes_json=antes,
+                    despues_json={
+                        "empresa": empresa.pk, "sucursal_default": user.sucursal_default_id,
+                        "sucursales": [], "departamentos": [],
+                    },
+                    ip=ip_auditoria(request),
+                    user_agent=request.META.get("HTTP_USER_AGENT", "")[:200],
+                )
+
+        perfil = auth_kit_settings.USER_SERIALIZER(user, context={"request": request})
+        return Response(perfil.data)
+
 
 class UserSucursalesAPIView(APIView):
     permission_classes = [IsAuthenticated]

@@ -4,7 +4,7 @@ from .api.api_views import (
     EmpresaViewSet, SucursalViewSet, DepartamentoViewSet, MonedaViewSet, SerieFolioViewSet,
     SatClaveProdServViewSet, SatClaveUnidadViewSet,
     UnidadMedidaViewSet, ImpuestoViewSet,
-    UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView,
+    UserEmpresasAPIView, UserSucursalesAPIView, SatCatalogosAPIView, CambiarEmpresaAPIView,
     HealthzAPIView, ReadyzAPIView
 )
 from .api.search import BusquedaGlobalAPIView
@@ -41,6 +41,7 @@ urlpatterns = [
     
     # API Custom (Next.js)
     path('api/v1/nucleo/mis-empresas/', UserEmpresasAPIView.as_view(), name='api_mis_empresas'),
+    path('api/v1/nucleo/cambiar-empresa/', CambiarEmpresaAPIView.as_view(), name='api_cambiar_empresa'),
     path('api/v1/nucleo/mis-sucursales/', UserSucursalesAPIView.as_view(), name='api_mis_sucursales'),
     path('api/v1/nucleo/sat/catalogos/', SatCatalogosAPIView.as_view(), name='api_sat_catalogos'),
     # Buscador global del header. Se declara aquí, con el resto de APIView de
