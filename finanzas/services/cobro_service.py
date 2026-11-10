@@ -76,7 +76,8 @@ class CobroService:
                 raise ErrorDeNegocio(
                     {"cobro_detalles": f"La factura de la CxC {cxc.pk} está cancelada y no admite cobros."}
                 )
-            if det.cxc.empresa_id and cobro.empresa_id and det.cxc.empresa_id != cobro.empresa_id:
+            # La factura ya viene cargada (``select_related``): sin consulta extra.
+            if cxc.empresa_efectiva_id != cobro.empresa_id:
                 raise ErrorDeNegocio(
                     {"cobro_detalles": "CxC no pertenece a la misma empresa que el cobro."}
                 )
