@@ -3272,7 +3272,9 @@ No agregan consultas: el listado une cliente, cuenta y moneda y trae las líneas
 
 Los cobros aplicados del periodo, agrupados por el código de la moneda de la cuenta bancaria, legibles con `R-CONTABILIDAD-CXC`.
 
-- **Parámetros**: `fecha_inicio` / `fecha_fin` (`AAAA-MM-DD`; alias `fecha_desde` / `fecha_hasta`). Por omisión, del día 1 del mes en curso a hoy, igual que el dashboard. Fecha mal formada → `400` con el nombre del parámetro; `fecha_inicio` posterior a `fecha_fin` → `400 {"fecha_fin": "No puede ser anterior a fecha_inicio."}` (mismo mensaje que `reportes-contables/`). Superusuario: `?empresa_id=` (o `?empresa=`); sin él usa su propia empresa y, si no tiene, `400`, como el dashboard. Un `empresa_id` que no es un entero o no existe → `400 {"empresa": "Empresa no encontrada."}`, aquí y en `dashboard/` (antes uno no numérico daba `500`).
+- **Parámetros**: `fecha_inicio` / `fecha_fin` (`AAAA-MM-DD`; alias `fecha_desde` / `fecha_hasta`). Por omisión, del día 1 del mes en curso a hoy, igual que el dashboard. Fecha mal formada → `400 {"<parámetro>": "Usa el formato AAAA-MM-DD."}`, con la clave `fecha_inicio` / `fecha_fin` aunque llegue por su alias; `fecha_inicio` posterior a `fecha_fin` → `400 {"fecha_fin": "No puede ser anterior a fecha_inicio."}` (mismo mensaje que `reportes-contables/`). Sin `fecha_fin`, un `fecha_inicio` futuro también es rango invertido.
+- **Mismas reglas en `dashboard/`** (EC-849): sus fechas se validan igual (alias, valores por omisión y los mismos `400`), y `moneda_id` (alias `moneda`) que no es un entero no negativo → `400 {"moneda_id": "Debe ser un entero válido."}`. Antes esos casos daban `500` y el rango invertido `200`. En ambos endpoints los parámetros se validan antes de mirar la empresa, así que los `400` aplican también sin empresa.
+- **Empresa** (EC-849): siempre la empresa activa del usuario, superusuario incluido. `empresa_id` / `empresa` ya no se leen (se ignoran, sin `400`): aquí, en `dashboard/`, en `reportes-contables/` y en `POST alertas-mora/generar/` (ni en el body ni en el query). Sin empresa activa, `cobros/resumen/` responde `200` con `por_moneda: []` y `dashboard/` `200` con su forma de siempre en cero (`cantidad`/`total_documentos` en `0`, montos en `"0.00"`, `top_clientes`, `top_proveedores`, `cuentas` y `saldos_por_moneda` vacíos, `por_dia: {}`, `alertas_mora` en `0`); antes el dashboard daba `403`. `reportes-contables/` y `alertas-mora/generar/` siguen respondiendo `403` sin empresa.
 - **Respuesta**:
 
 ```json
@@ -3289,7 +3291,7 @@ Los cobros aplicados del periodo, agrupados por el código de la moneda de la cu
 - `moneda_id` es **nullable**: el id cuando una sola `Moneda` respalda la entrada, `null` cuando son varias con ese código. La clave estable de cada entrada es `moneda_codigo`.
 - Por código: cobros `Aplicado` con `fecha_cobro` dentro del periodo y cuenta en una moneda con ese código; `cantidad` es el número y `monto_total` la suma de `total_cobrado` con 2 decimales, en string.
 - **Alcance**: el del listado de cobros (activos, empresa y, para quien no es admin, sucursal #753), sin sus filtros de query (`cliente`, `estatus`, etc.). Para quien ve toda la empresa, cada entrada es la SUMA de `cobros_periodo` del dashboard con `?moneda_id=` sobre cada moneda de ese código (el dashboard filtra por id, no por código).
-- Tres consultas como máximo, sin importar cuántos cobros haya.
+- Dos consultas como máximo (monedas y agregado), sin importar cuántos cobros haya.
 
 ### Catálogo oficial de endpoints
 
@@ -3313,7 +3315,7 @@ Los cobros aplicados del periodo, agrupados por el código de la moneda de la cu
 | Contabilización (switch) | `GET/POST /api/v1/finanzas/parametros-contabilidad/`  | CRUD estándar                                                                                             | `id`, `empresa`                                             |
 | Pólizas                  | `GET/POST /api/v1/finanzas/polizas/`                  | `POST /polizas/{id}/contabilizar/`, `POST /polizas/{id}/validar-cuadre/`, `POST /polizas/{id}/cancelar/`  | `id`, `sucursal`, `centro_costo`, `poliza_detalles[].cuenta_contable` |
 | Alertas de mora          | `GET /api/v1/finanzas/alertas-mora/`                  | `POST /alertas-mora/generar/`                                                                             | `id`, `cuenta_por_cobrar`, `cuenta_por_pagar`               |
-| Dashboard                | `GET /api/v1/finanzas/dashboard/`                     | lectura agregada                                                                                          | `empresa_id`                                                |
+| Dashboard                | `GET /api/v1/finanzas/dashboard/`                     | lectura agregada de la empresa activa; filtros `fecha_inicio`, `fecha_fin`, `moneda_id`                   | `moneda_id`                                                 |
 
 ### Pólizas automáticas — avance
 
