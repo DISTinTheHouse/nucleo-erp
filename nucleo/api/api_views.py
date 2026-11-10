@@ -4,6 +4,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, viewsets, permissions
+from rest_framework.exceptions import ValidationError
 from django.db import connections, models, transaction
 from ..choices import StatusChoices
 from ..models import (
@@ -307,7 +308,10 @@ class UserEmpresasAPIView(APIView):
         activas = empresas_activas()
         if not user.is_superuser:
             activas = activas.filter(pk__in=user.empresas.values('pk'))
-        empresas = (activas | Empresa.objects.filter(pk=user.empresa_id)).distinct()
+        empresas = (
+            (activas | Empresa.objects.filter(pk=user.empresa_id))
+            .distinct().order_by('razon_social', 'pk')
+        )
         
         # Usamos el serializer existente o construimos data simple
         data = []
@@ -338,7 +342,8 @@ class CambiarEmpresaAPIView(APIView):
     El superusuario cambia **su propia** empresa activa (``user.empresa``) a
     cualquier empresa activa. Todo el ERP lee y escribe solo en la empresa activa
     (EC-798, EC-816); este es el único camino para cambiarla: ni el perfil
-    (``/api/auth/user/``, EC-844) ni ``/api/v1/usuarios/`` mueven al propio
+    (``/api/auth/user/``, EC-844), ni ``/api/v1/usuarios/``, ni el Web Core
+    (``/core/usuarios/<id>/editar/``), ni el admin de Django mueven al propio
     usuario.
 
     El alcance por sucursal se rehace para cumplir la regla de EC-844
@@ -348,7 +353,10 @@ class CambiarEmpresaAPIView(APIView):
     por sucursal, así que no pierde lectura. No toca el M2M ``empresas``, los
     roles, los overrides ni ``is_admin_empresa``.
 
-    Pedir la empresa que ya está activa no cambia nada (200, misma respuesta).
+    Pedir la empresa que ya está activa no cambia nada (200, misma respuesta),
+    aunque esté inactiva. Cualquier otro valor que no sea una empresa activa
+    (``null``, sin ``empresa``, texto, inexistente, inactiva) responde el mismo
+    400 ``{"empresa": ["Empresa no válida."]}``.
     Responde lo mismo que ``GET /api/auth/user/`` para que el front actualice la
     sesión sin volver a iniciarla. El JWT solo lleva ``user_id`` y el usuario se
     lee de la BD en cada petición: la siguiente petición ya ve la empresa nueva.
@@ -362,18 +370,33 @@ class CambiarEmpresaAPIView(APIView):
         from nucleo.middleware import ip_auditoria
         from usuarios.models import Usuario
 
-        entrada = CambiarEmpresaSerializer(data=request.data, context={"request": request})
-        entrada.is_valid(raise_exception=True)
-        empresa = entrada.validated_data["empresa"]
+        entrada = CambiarEmpresaSerializer(data=request.data)
+        empresa_id = entrada.validated_data.get("empresa") if entrada.is_valid() else None
 
         with transaction.atomic():
+            # Una sola decisión, sobre la fila bloqueada y no sobre ``request.user``
+            # (leído al autenticar): si otra petición cambió la empresa entretanto,
+            # manda la BD. La empresa actual es no-op aunque esté inactiva; lo
+            # demás tiene que ser una empresa activa. Todo lo inválido (``null``,
+            # sin ``empresa``, texto, inexistente, inactiva) sale por el mismo 400.
             user = Usuario.objects.select_for_update().get(pk=request.user.pk)
-            if user.empresa_id != empresa.pk:
+            if empresa_id is None or empresa_id != user.empresa_id:
+                empresa = (
+                    empresas_activas().filter(pk=empresa_id).first()
+                    if empresa_id is not None else None
+                )
+                if empresa is None:
+                    raise ValidationError({"empresa": [CambiarEmpresaSerializer.MENSAJE]})
+
+                SucursalesUsuario = Usuario.sucursales.through
+                DepartamentosUsuario = Usuario.departamentos.through
+                sucursales = SucursalesUsuario.objects.filter(usuario_id=user.pk)
+                departamentos = DepartamentosUsuario.objects.filter(usuario_id=user.pk)
                 antes = {
                     "empresa": user.empresa_id,
                     "sucursal_default": user.sucursal_default_id,
-                    "sucursales": sorted(user.sucursales.values_list("pk", flat=True)),
-                    "departamentos": sorted(user.departamentos.values_list("pk", flat=True)),
+                    "sucursales": sorted(sucursales.values_list("sucursal_id", flat=True)),
+                    "departamentos": sorted(departamentos.values_list("departamento_id", flat=True)),
                 }
                 user.empresa = empresa
                 user.sucursal_default = (
@@ -381,8 +404,13 @@ class CambiarEmpresaAPIView(APIView):
                     .order_by("codigo", "pk").first()
                 )
                 user.save(update_fields=["empresa", "sucursal_default", "updated_at"])
-                user.sucursales.clear()
-                user.departamentos.clear()
+                # Directo sobre las tablas intermedias y solo si había filas (ya se
+                # leyeron arriba): ``clear()`` lanza su DELETE aunque no haya nada.
+                # No hay receptores de ``m2m_changed`` que se salten.
+                if antes["sucursales"]:
+                    sucursales.delete()
+                if antes["departamentos"]:
+                    departamentos.delete()
                 AuditoriaEvento.objects.create(
                     empresa=empresa, usuario=user, modulo="usuarios", accion="CAMBIAR_EMPRESA",
                     tabla=Usuario._meta.db_table, id_registro=str(user.pk),

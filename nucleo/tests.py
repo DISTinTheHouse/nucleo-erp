@@ -2257,16 +2257,40 @@ class MisEmpresasActivasTests(TestCase):
         self.assertEqual(len(ids), len(set(ids)), "sin duplicados")
         return set(ids)
 
+    @staticmethod
+    def _estado(user_id):
+        u = Usuario.objects.get(pk=user_id)
+        return (
+            u.empresa_id, u.sucursal_default_id,
+            sorted(u.sucursales.values_list("pk", flat=True)),
+            sorted(u.departamentos.values_list("pk", flat=True)),
+        )
+
     def _todas_las_que_acepta_cambiar_empresa(self, user):
-        client = APIClient()
-        client.force_authenticate(user=user)
+        """Ids que ``cambiar-empresa`` acepta (200) para ``user``. Cada intento
+        parte del mismo estado: empresa, sucursal por defecto, sucursales,
+        departamentos y eventos de auditoría restaurados, y un usuario recién
+        leído de la BD (no la instancia del llamador)."""
+        from auditoria.models import AuditoriaEvento
+
+        original = self._estado(user.pk)
+        eventos_previos = list(AuditoriaEvento.objects.values_list("pk", flat=True))
         aceptadas = set()
-        for empresa in Empresa.objects.all():
-            resp = client.post(self.CAMBIAR, {"empresa": empresa.pk}, format="json")
+        for empresa_id in Empresa.objects.values_list("pk", flat=True):
+            client = APIClient()
+            client.force_authenticate(user=Usuario.objects.get(pk=user.pk))
+            resp = client.post(self.CAMBIAR, {"empresa": empresa_id}, format="json")
             if resp.status_code == 200:
-                aceptadas.add(empresa.pk)
-            # Regresar a la empresa original sin pasar por el endpoint.
-            Usuario.objects.filter(pk=user.pk).update(empresa=user.empresa)
+                aceptadas.add(empresa_id)
+            # Restaurar sin pasar por el endpoint.
+            Usuario.objects.filter(pk=user.pk).update(
+                empresa_id=original[0], sucursal_default_id=original[1],
+            )
+            restaurado = Usuario.objects.get(pk=user.pk)
+            restaurado.sucursales.set(original[2])
+            restaurado.departamentos.set(original[3])
+            AuditoriaEvento.objects.exclude(pk__in=eventos_previos).delete()
+            self.assertEqual(self._estado(user.pk), original)
         return aceptadas
 
     def test_superusuario_no_recibe_empresas_inactivas(self):
@@ -2375,3 +2399,122 @@ class CambiarEmpresaNoOpTests(TestCase):
         root.refresh_from_db()
         self.assertIsNone(root.empresa_id)
         self.assertFalse(self._eventos().exists())
+
+
+class CambiarEmpresaFilaBloqueadaTests(TestCase):
+    """EC-843 (revisión): la decisión de ``cambiar-empresa`` se toma sobre la fila
+    bloqueada, no sobre ``request.user`` (leído al autenticar), y todo cuerpo
+    inválido responde el mismo 400."""
+
+    URL = "/api/v1/nucleo/cambiar-empresa/"
+    ERROR = '{"empresa":["Empresa no válida."]}'.encode()
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.activa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.suc_activa = Sucursal.objects.create(empresa=cls.activa, codigo="MTY", nombre="Monterrey")
+        cls.inactiva = Empresa.objects.create(codigo="cerrada", razon_social="CERRADA SA", activo=False)
+
+    def _eventos(self):
+        from auditoria.models import AuditoriaEvento
+
+        return AuditoriaEvento.objects.filter(accion="CAMBIAR_EMPRESA")
+
+    def _post_con_instancia(self, instancia, body):
+        client = APIClient()
+        client.force_authenticate(user=instancia)
+        return client.post(self.URL, body, format="json")
+
+    def test_no_entra_a_una_inactiva_aunque_request_user_diga_que_es_la_suya(self):
+        """Al autenticar estaba en la inactiva; otra petición ya la movió a la
+        activa. Pedir la inactiva ya no es no-op: 400 y sigue en la activa."""
+        root = Usuario.objects.create(
+            username="root", email="root@acme.test", empresa=self.inactiva, is_superuser=True,
+        )
+        Usuario.objects.filter(pk=root.pk).update(empresa=self.activa, sucursal_default=self.suc_activa)
+
+        resp = self._post_con_instancia(root, {"empresa": self.inactiva.pk})  # ``root`` sigue en la inactiva
+
+        self.assertEqual((resp.status_code, resp.content), (400, self.ERROR))
+        self.assertEqual(Usuario.objects.get(pk=root.pk).empresa_id, self.activa.pk)
+        self.assertFalse(self._eventos().exists())
+
+    def test_no_op_segun_la_fila_bloqueada(self):
+        """Al autenticar estaba en la activa; en la BD ya está en la inactiva.
+        Pedir la inactiva es la suya: 200 sin cambios ni auditoría."""
+        root = Usuario.objects.create(
+            username="root", email="root@acme.test", empresa=self.activa,
+            sucursal_default=self.suc_activa, is_superuser=True,
+        )
+        Usuario.objects.filter(pk=root.pk).update(empresa=self.inactiva, sucursal_default=None)
+
+        resp = self._post_con_instancia(root, {"empresa": self.inactiva.pk})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data["empresa"], self.inactiva.pk)
+        actual = Usuario.objects.get(pk=root.pk)
+        self.assertEqual((actual.empresa_id, actual.sucursal_default_id), (self.inactiva.pk, None))
+        self.assertFalse(self._eventos().exists())
+
+    def test_cuerpo_vacio_o_nulo_mismo_400(self):
+        for con_empresa in (True, False):
+            root = Usuario.objects.create(
+                username=f"root{con_empresa}", email=f"root{con_empresa}@acme.test",
+                empresa=self.activa if con_empresa else None, is_superuser=True,
+            )
+            for body in ({}, {"empresa": None}, {"empresa": ""}, {"empresa": [1]}):
+                with self.subTest(con_empresa=con_empresa, body=body):
+                    resp = self._post_con_instancia(root, body)
+                    self.assertEqual((resp.status_code, resp.content), (400, self.ERROR))
+            self.assertEqual(
+                Usuario.objects.get(pk=root.pk).empresa_id, self.activa.pk if con_empresa else None
+            )
+        self.assertFalse(self._eventos().exists())
+
+    def test_consultas_del_cambio_no_dependen_del_alcance(self):
+        """El cambio lee el alcance una vez para la auditoría y borra directo las
+        tablas intermedias: mismo número de consultas con 1 o 3 sucursales."""
+        from nucleo.models import Departamento
+
+        destino = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        Sucursal.objects.create(empresa=destino, codigo="GDL", nombre="Guadalajara")
+        conteos = []
+        for n in (1, 3):
+            sucs = [self.suc_activa] + [
+                Sucursal.objects.create(empresa=self.activa, codigo=f"S{n}{i}", nombre=f"S{n}{i}")
+                for i in range(n - 1)
+            ]
+            dep = Departamento.objects.create(
+                empresa=self.activa, sucursal=self.suc_activa, codigo=f"D{n}", nombre=f"D{n}",
+            )
+            root = Usuario.objects.create(
+                username=f"root{n}", email=f"root{n}@acme.test", empresa=self.activa,
+                sucursal_default=self.suc_activa, is_superuser=True,
+            )
+            root.sucursales.set(sucs)
+            root.departamentos.set([dep])
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._post_con_instancia(root, {"empresa": destino.pk})
+            self.assertEqual(resp.status_code, 200, resp.data)
+            actual = Usuario.objects.get(pk=root.pk)
+            self.assertEqual(
+                (actual.sucursales.count(), actual.departamentos.count()), (0, 0)
+            )
+            conteos.append(len(ctx.captured_queries))
+        self.assertEqual(conteos[0], conteos[1], conteos)
+
+
+class MisEmpresasOrdenTests(TestCase):
+    """``mis-empresas`` sale en orden estable: ``razon_social`` y luego id."""
+
+    def test_orden_por_razon_social_y_pk(self):
+        z = Empresa.objects.create(codigo="z", razon_social="ZETA SA")
+        a2 = Empresa.objects.create(codigo="a2", razon_social="ALFA SA")
+        m = Empresa.objects.create(codigo="m", razon_social="MEDIA SA")
+        a1 = Empresa.objects.create(codigo="a1", razon_social="ALFA SA")
+        root = Usuario.objects.create(username="root", email="root@z.test", empresa=z, is_superuser=True)
+        client = APIClient()
+        client.force_authenticate(user=root)
+        ids = [e["id"] for e in client.get("/api/v1/nucleo/mis-empresas/").data]
+        esperados = [e.pk for e in sorted((a2, a1, m, z), key=lambda e: (e.razon_social, e.pk))]
+        self.assertEqual([i for i in ids if i in set(esperados)], esperados)
