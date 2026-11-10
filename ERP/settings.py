@@ -92,6 +92,12 @@ AUTH_KIT = {
     # /api/auth/password/change/ exige la contraseña actual (EC-844); por
     # defecto auth_kit la omite y bastaba un token para fijar otra.
     'OLD_PASSWORD_FIELD_ENABLED': True,
+    # Borrar el método MFA activo o cambiar el primario exige un código válido
+    # (EC-844): con un token robado bastaba para quitarle el MFA a la víctima.
+    'MFA_DELETE_ACTIVE_METHOD_REQUIRE_CODE': True,
+    'MFA_UPDATE_PRIMARY_METHOD_REQUIRED_PRIMARY_CODE': True,
+    'MFA_METHOD_DELETE_SERIALIZER': 'usuarios.api.mfa.BorrarMetodoMfaSerializer',
+    'MFA_METHOD_PRIMARY_UPDATE_SERIALIZER': 'usuarios.api.mfa.CambiarMetodoPrimarioMfaSerializer',
     'AUTH_COOKIE_SECURE': config('AUTH_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool),
     'AUTH_COOKIE_SAMESITE': config('AUTH_COOKIE_SAMESITE', default='None'),
 }
