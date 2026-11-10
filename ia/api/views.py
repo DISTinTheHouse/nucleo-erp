@@ -5,7 +5,7 @@ from django.urls import reverse
 from django.utils.text import slugify
 from django.db import transaction
 from rest_framework import permissions, status
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 import json
@@ -640,20 +640,16 @@ class AIAssistantAPIView(APIView):
 
         if not is_superuser and is_admin_empresa:
             payload["empresa"] = getattr(request_user, "empresa_id", None)
-            payload["is_admin_empresa"] = False
 
+        # Banderas de privilegio, sucursal por defecto, sucursales y departamentos
+        # se validan en ``UsuarioSerializer.validate``, igual que en
+        # ``/api/v1/usuarios/`` (EC-844). Las banderas responden PermissionDenied.
         serializer = UsuarioSerializer(data=payload, context={"request": request})
-        if not serializer.is_valid():
-            return {"ok": False, "error": "Validación falló", "details": serializer.errors}
-
-        if not is_superuser and is_admin_empresa:
-            if serializer.validated_data.get("is_superuser", False):
-                return {"ok": False, "error": "No puedes crear superusuarios."}
-            if serializer.validated_data.get("is_admin_empresa", False):
-                return {"ok": False, "error": "No puedes crear otros administradores de empresa."}
-            sucursal = serializer.validated_data.get("sucursal_default")
-            if sucursal and getattr(sucursal, "empresa_id", None) != getattr(request_user, "empresa_id", None):
-                return {"ok": False, "error": "La sucursal seleccionada no pertenece a tu empresa."}
+        try:
+            if not serializer.is_valid():
+                return {"ok": False, "error": "Validación falló", "details": serializer.errors}
+        except PermissionDenied as exc:
+            return {"ok": False, "error": str(exc.detail)}
 
         created_user = serializer.save()
         return {

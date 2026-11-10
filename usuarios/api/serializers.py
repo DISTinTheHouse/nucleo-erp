@@ -1,6 +1,8 @@
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 from nucleo.permisos import permisos_efectivos
 from seguridad.models import Rol, UsuarioRol
+from ..alcance import errores_de_alcance
 from ..models import Usuario
 
 class UsuarioSerializer(serializers.ModelSerializer):
@@ -11,7 +13,11 @@ class UsuarioSerializer(serializers.ModelSerializer):
     empresa_id = serializers.SerializerMethodField(read_only=True)
     nombre_completo = serializers.SerializerMethodField(read_only=True)
     es_admin = serializers.SerializerMethodField(read_only=True)
-    
+
+    # Banderas que un admin de empresa no concede, ni al crear ni al editar
+    # (#306). Una sola lista para ``/api/v1/usuarios/`` y el asistente (EC-844).
+    BANDERAS_PRIVILEGIO = ("is_superuser", "is_admin_empresa", "is_staff")
+
     class Meta:
         model = Usuario
         fields = [
@@ -62,16 +68,31 @@ class UsuarioSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         request_user = getattr(request, 'user', None)
 
-        empresa = data.get('empresa')
-        sucursal = data.get('sucursal_default')
         roles_ids = data.get('roles')
+        empresa_final = self._empresa_destino_id(data, request_user)
 
-        # Si estamos creando (no hay instancia) o si se están actualizando ambos campos
-        if empresa and sucursal:
-            if sucursal.empresa != empresa:
-                raise serializers.ValidationError({
-                    "sucursal_default": "La sucursal seleccionada no pertenece a la empresa asignada."
-                })
+        # Sucursales, departamentos y sucursal por defecto, de la empresa del
+        # usuario editado aunque llegue uno solo (EC-844). Antes solo se comparaba
+        # sucursal_default cuando venía junto con empresa. Si la empresa cambia,
+        # lo que no llega se valida con su valor actual: mover al usuario no lo
+        # deja con sucursales de la empresa anterior.
+        cambia_empresa = (
+            self.instance is not None and empresa_final != self.instance.empresa_id
+        )
+
+        def efectivo(campo, actual):
+            if campo in data:
+                return data[campo]
+            return actual() if cambia_empresa else None
+
+        errores = errores_de_alcance(
+            empresa_final,
+            sucursal_default=efectivo('sucursal_default', lambda: self.instance.sucursal_default),
+            sucursales=efectivo('sucursales', lambda: list(self.instance.sucursales.all())),
+            departamentos=efectivo('departamentos', lambda: list(self.instance.departamentos.all())),
+        )
+        if errores:
+            raise serializers.ValidationError(errores)
 
         if roles_ids is not None:
             if not request_user or not request_user.is_authenticated:
@@ -79,20 +100,47 @@ class UsuarioSerializer(serializers.ModelSerializer):
             if not (request_user.is_superuser or getattr(request_user, 'is_admin_empresa', False)):
                 raise serializers.ValidationError({"roles": "No tienes permisos para asignar roles."})
 
-            empresa_final = None
-            if getattr(request_user, 'is_admin_empresa', False) and not request_user.is_superuser:
-                empresa_final = getattr(request_user, 'empresa', None)
-            else:
-                empresa_final = data.get('empresa') or getattr(self.instance, 'empresa', None)
-
             if not empresa_final:
                 raise serializers.ValidationError({"roles": "No se puede validar roles sin empresa."})
 
-            roles_qs = Rol.objects.filter(id__in=roles_ids, empresa=empresa_final)
+            roles_qs = Rol.objects.filter(id__in=roles_ids, empresa_id=empresa_final)
             if roles_qs.count() != len(set(roles_ids)):
                 raise serializers.ValidationError({"roles": "Uno o más roles no existen o no pertenecen a la empresa."})
-        
+
+        # Al final, como cuando vivía en ``perform_create``/``perform_update``:
+        # los 400 de validación siguen saliendo antes que este 403.
+        self._bloquear_concesion_de_privilegios(data, request_user)
         return data
+
+    @staticmethod
+    def _es_admin_de_empresa(request_user):
+        return (
+            request_user is not None
+            and getattr(request_user, 'is_admin_empresa', False)
+            and not getattr(request_user, 'is_superuser', False)
+        )
+
+    def _bloquear_concesion_de_privilegios(self, data, request_user):
+        """Un admin de empresa no concede banderas de privilegio, ni al crear ni
+        al editar. Reenviar el valor que el usuario ya tiene no cuenta. El
+        superusuario sí las concede (#306)."""
+        if not self._es_admin_de_empresa(request_user):
+            return
+        for bandera in self.BANDERAS_PRIVILEGIO:
+            if data.get(bandera) and not getattr(self.instance, bandera, False):
+                raise PermissionDenied(f"No puedes conceder `{bandera}`.")
+
+    def _empresa_destino_id(self, data, request_user):
+        """Id de la empresa en la que queda el usuario editado: la del admin de
+        empresa (``UsuarioViewSet`` y el asistente la fuerzan al guardar); para
+        el superusuario, la que llega o la que ya tenía. Por id, sin leer la
+        fila de ``empresas``."""
+        if self._es_admin_de_empresa(request_user):
+            return getattr(request_user, 'empresa_id', None)
+        # La clave manda aunque traiga ``null``: el usuario queda sin empresa.
+        if 'empresa' in data:
+            return data['empresa'].pk if data['empresa'] is not None else None
+        return getattr(self.instance, 'empresa_id', None)
 
     def _set_roles(self, user, roles_ids):
         UsuarioRol.objects.filter(usuario=user).delete()
@@ -124,3 +172,39 @@ class UsuarioSerializer(serializers.ModelSerializer):
         if roles_ids is not None:
             self._set_roles(user, roles_ids)
         return user
+
+
+class PerfilUsuarioSerializer(UsuarioSerializer):
+    """Perfil propio en ``/api/auth/user/`` (``AUTH_KIT['USER_SERIALIZER']``).
+
+    ``UserView`` de auth_kit edita ``request.user`` sin más permiso que estar
+    autenticado, así que aquí solo se escriben nombre, apellido, teléfono y
+    avatar (EC-844). La respuesta conserva los campos de ``UsuarioSerializer``
+    (NextAuth lee id, username, email, nombre, permisos y banderas). Cualquier
+    otra clave se rechaza con 400 y no se guarda nada, en lugar de ignorarla con
+    200; la contraseña solo cambia por ``/api/auth/password/change/``, que pide
+    la actual.
+    """
+
+    CAMPOS_EDITABLES = ("first_name", "last_name", "telefono", "avatar_url")
+
+    password = None
+    roles = None
+
+    class Meta(UsuarioSerializer.Meta):
+        fields = [f for f in UsuarioSerializer.Meta.fields if f not in ("password", "roles")]
+        read_only_fields = [
+            f for f in fields if f not in ("first_name", "last_name", "telefono", "avatar_url")
+        ]
+        extra_kwargs = {}
+
+    def validate(self, data):
+        errores = {}
+        for campo in self.initial_data:
+            if campo == "password":
+                errores[campo] = "La contraseña se cambia en /api/auth/password/change/ con la actual."
+            elif campo not in self.CAMPOS_EDITABLES:
+                errores[campo] = "Este campo no se edita desde el perfil."
+        if errores:
+            raise serializers.ValidationError(errores)
+        return data
