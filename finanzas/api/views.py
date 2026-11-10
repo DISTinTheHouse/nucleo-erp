@@ -254,6 +254,15 @@ def _validate_fk_empresa(user, related_obj, field_name, user_emp, *, permite_glo
         )
 
 
+def _exigir_de_la_empresa_del_usuario(user, empresa_id):
+    """Guard de edición, borrado y acciones (EC-846): el registro --o el documento
+    del que cuelga-- es de la empresa activa del usuario. Falla cerrado: sin empresa
+    en el usuario o en el registro → 403; antes ambos casos pasaban sin comprobar."""
+    empresa = getattr(user, "empresa", None)
+    if empresa is None or empresa_id is None or empresa_id != empresa.pk:
+        raise PermissionDenied()
+
+
 def _attr_chain(obj, *attrs):
     current = obj
     for attr in attrs:
@@ -1136,9 +1145,7 @@ class CuentaContableViewSet(FinanzasBaseViewSet):
         user = self.request.user
         superuser = _puede_ver_todo(user)
         if not superuser:
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, serializer.instance.empresa_id)
         # La cuenta padre, de la empresa de la cuenta, también al editar (#894).
         if "cuenta_padre" in serializer.validated_data:
             _validate_fk_empresa(
@@ -1150,9 +1157,7 @@ class CuentaContableViewSet(FinanzasBaseViewSet):
         user = self.request.user
         superuser = _puede_ver_todo(user)
         if not superuser:
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         instance.delete()
 
 
@@ -1190,17 +1195,13 @@ class CentroCostoViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, serializer.instance.empresa_id)
         serializer.save()
 
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         # Baja lógica, como en FacturaViewSet y en el resto de los catálogos del
         # proyecto: ``Poliza.centro_costo`` es CASCADE, así que un borrado físico
         # se llevaba las pólizas que lo usan --contabilizadas incluidas-- saltándose
@@ -1241,17 +1242,13 @@ class ConfiguracionContableViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and serializer.instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, serializer.instance.empresa_id)
         serializer.save()
 
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         # Baja lógica: la constraint única sólo mira las activas, así que una
         # baja libera el concepto y conserva el rastro de con qué cuenta se
         # contabilizó en su momento.
@@ -1330,9 +1327,7 @@ class ParametrosContabilidadViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and serializer.instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, serializer.instance.empresa_id)
         serializer.save()
 
 
@@ -1412,9 +1407,7 @@ class PolizaViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, serializer.instance.empresa_id)
         # Un asiento contabilizado es un hecho registrado: se corrige con una
         # póliza de reversa, no editándolo. Sin este guard, un PATCH podía
         # cambiarle concepto, tipo, centro de costo e incluso el ``estatus``
@@ -1432,9 +1425,7 @@ class PolizaViewSet(FinanzasBaseViewSet):
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         if instance.estatus == Poliza.PolizaStatus.CONTABILIZADA:
             raise ValidationError("No se puede eliminar una póliza contabilizada. Cancelela primero.")
         instance.delete()
@@ -1562,9 +1553,7 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, serializer.instance.empresa_id)
         # La decisión "esta petición es la que registra la factura" se toma con la
         # fila bloqueada, igual que en NotaCreditoViewSet.perform_update: con el
         # estatus del objeto cargado antes del lock, dos registros concurrentes
@@ -1622,9 +1611,7 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         # Borrar la factura se lleva su CxP. La FK es PROTECT (ningún borrado
         # ajeno a este flujo puede arrastrarla), así que la CxP se borra aquí, ya
         # bloqueada y comprobada sin pagos aplicados. Se bloquea primero la
@@ -1720,17 +1707,13 @@ class BancoViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, serializer.instance.empresa_id)
         serializer.save()
 
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         instance.delete()
 
 
@@ -1779,17 +1762,13 @@ class CuentaBancariaViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, serializer.instance.empresa_id)
         serializer.save()
 
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         instance.delete()
 
     @action(detail=True, methods=["get"], url_path="resumen")
@@ -1900,9 +1879,7 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, serializer.instance.empresa_id)
         factura = serializer.validated_data.get("factura_proveedor")
         requested_status = serializer.validated_data.get("estatus")
         locked_invoice = None
@@ -1954,9 +1931,7 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         CuentaPorPagarService.ensure_account_deletable(instance)
         if instance.pago_detalles.exists():
             # Con pagos cancelados o en borrador hay histórico (FK PROTECT): la
@@ -2163,9 +2138,7 @@ class CobroViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, serializer.instance.empresa_id)
         # Bloqueo: dos PATCH a la vez aplicaban o revertían dos veces (#575).
         bloqueado = Cobro.objects.select_for_update().get(pk=serializer.instance.pk)
         if bloqueado.estatus == Cobro.Estatus.CANCELADO:
@@ -2201,9 +2174,7 @@ class CobroViewSet(FinanzasBaseViewSet):
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         with transaction.atomic():
             if instance.estatus == Cobro.Estatus.APLICADO:
                 CobroService.cancelar_cobro(instance, self.request.user)
@@ -2318,9 +2289,7 @@ class PagoViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(serializer.instance, "empresa_id", None) and serializer.instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, serializer.instance.empresa_id)
         if serializer.instance.estatus == Pago.Estatus.CANCELADO:
             raise ValidationError("No se puede editar un pago cancelado.")
         anterior_estatus = serializer.instance.estatus
@@ -2338,9 +2307,7 @@ class PagoViewSet(FinanzasBaseViewSet):
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa and getattr(instance, "empresa_id", None) and instance.empresa_id != empresa.pk:
-                raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         with transaction.atomic():
             if instance.estatus == Pago.Estatus.APLICADO:
                 PagoService.cancelar_pago(instance, self.request.user)
@@ -2425,11 +2392,7 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa:
-                cta = getattr(serializer.instance, "cuenta_bancaria", None)
-                if cta and getattr(cta, "empresa_id", None) and cta.empresa_id != empresa.pk:
-                    raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, _attr_chain(serializer.instance, "cuenta_bancaria", "empresa_id"))
         raise ValidationError(
             "Los movimientos bancarios generados por cobros/pagos no se deben editar directamente."
         )
@@ -2438,11 +2401,7 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa:
-                cta = getattr(instance, "cuenta_bancaria", None)
-                if cta and getattr(cta, "empresa_id", None) and cta.empresa_id != empresa.pk:
-                    raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, _attr_chain(instance, "cuenta_bancaria", "empresa_id"))
         MovimientoBancarioService.revertir_movimiento(instance, user)
         instance.delete()
 
@@ -2504,11 +2463,7 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
     def perform_update(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa:
-                cta = getattr(serializer.instance, "cuenta_bancaria", None)
-                if cta and getattr(cta, "empresa_id", None) and cta.empresa_id != empresa.pk:
-                    raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, _attr_chain(serializer.instance, "cuenta_bancaria", "empresa_id"))
         if serializer.instance.estatus == ConciliacionBancaria.Estatus.CERRADA:
             raise ValidationError("No se puede editar una conciliación cerrada.")
         serializer.save()
@@ -2516,11 +2471,7 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa:
-                cta = getattr(instance, "cuenta_bancaria", None)
-                if cta and getattr(cta, "empresa_id", None) and cta.empresa_id != empresa.pk:
-                    raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, _attr_chain(instance, "cuenta_bancaria", "empresa_id"))
         if instance.estatus == ConciliacionBancaria.Estatus.CERRADA:
             raise ValidationError("No se puede eliminar una conciliación cerrada. Cancelela primero.")
         instance.delete()
@@ -2563,11 +2514,7 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
         conciliacion = self.get_object()
         user = request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa:
-                cta = getattr(conciliacion, "cuenta_bancaria", None)
-                if cta and getattr(cta, "empresa_id", None) and cta.empresa_id != empresa.pk:
-                    raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, _attr_chain(conciliacion, "cuenta_bancaria", "empresa_id"))
         with transaction.atomic():
             ConciliacionService.cerrar_conciliacion(conciliacion)
         return Response(ConciliacionBancariaSerializer(conciliacion).data)
@@ -2760,11 +2707,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
     def _actualizar(self, serializer):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa:
-                fact = getattr(serializer.instance, "factura", None)
-                if fact and getattr(fact, "empresa_id", None) and fact.empresa_id != empresa.pk:
-                    raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, _attr_chain(serializer.instance, "factura", "empresa_id"))
         exigir_factura_visible(user, serializer.validated_data.get("factura"))
         # La decisión "esta petición es la que emite" se toma con la fila de la
         # nota bloqueada. Leyendo el estatus previo del objeto cargado antes del
@@ -2819,11 +2762,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
     def perform_destroy(self, instance):
         user = self.request.user
         if not _puede_ver_todo(user):
-            empresa = getattr(user, "empresa", None)
-            if empresa:
-                fact = getattr(instance, "factura", None)
-                if fact and getattr(fact, "empresa_id", None) and fact.empresa_id != empresa.pk:
-                    raise PermissionDenied()
+            _exigir_de_la_empresa_del_usuario(user, _attr_chain(instance, "factura", "empresa_id"))
         # Mismo bloqueo y relectura que perform_update, y en el mismo orden
         # nota -> CxC. El estatus se leía del objeto cargado por get_object(),
         # fuera de toda transacción: una emisión concurrente podía aplicar el
