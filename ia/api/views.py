@@ -651,9 +651,11 @@ class AIAssistantAPIView(APIView):
                 return {"ok": False, "error": "No puedes crear superusuarios."}
             if serializer.validated_data.get("is_admin_empresa", False):
                 return {"ok": False, "error": "No puedes crear otros administradores de empresa."}
-            sucursal = serializer.validated_data.get("sucursal_default")
-            if sucursal and getattr(sucursal, "empresa_id", None) != getattr(request_user, "empresa_id", None):
-                return {"ok": False, "error": "La sucursal seleccionada no pertenece a tu empresa."}
+            # Igual que ``UsuarioViewSet`` (#306): el admin no concede ``is_staff`` (EC-844).
+            if serializer.validated_data.get("is_staff", False):
+                return {"ok": False, "error": "No puedes crear usuarios staff."}
+            # Sucursal por defecto, sucursales y departamentos ya se validaron
+            # contra la empresa en ``UsuarioSerializer.validate`` (EC-844).
 
         created_user = serializer.save()
         return {
