@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 from nucleo.permisos import permisos_efectivos
+from nucleo.scope import empresas_activas
 from seguridad.models import Rol, UsuarioRol
 from ..alcance import errores_de_alcance
 from ..models import Usuario
@@ -79,6 +80,17 @@ class UsuarioSerializer(serializers.ModelSerializer):
         cambia_empresa = (
             self.instance is not None and empresa_final != self.instance.empresa_id
         )
+
+        # Mover a alguien de empresa solo hacia una empresa activa, con el mismo
+        # criterio que ``cambiar-empresa`` (EC-843). Reenviar la empresa que ya
+        # tiene (el front la manda en cada edición) no cuenta, aunque esté
+        # inactiva; dejarlo sin empresa (``null``) sigue permitido.
+        if (
+            cambia_empresa
+            and empresa_final is not None
+            and not empresas_activas().filter(pk=empresa_final).exists()
+        ):
+            raise serializers.ValidationError({"empresa": "Empresa no válida."})
 
         def efectivo(campo, actual):
             if campo in data:

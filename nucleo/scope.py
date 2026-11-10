@@ -14,7 +14,8 @@ documentadas, p. ej. producción #361).
 
 def empresas_activas():
     """Empresas a las que se puede cambiar: las activas. Un solo criterio para lo
-    que acepta ``cambiar-empresa`` y lo que ofrece ``mis-empresas`` (EC-843).
+    que acepta ``cambiar-empresa``, lo que ofrece ``mis-empresas`` y a dónde
+    ``/api/v1/usuarios/`` mueve a otro usuario (EC-843).
 
     QuerySet perezoso: no consulta la BD hasta evaluarse.
     """

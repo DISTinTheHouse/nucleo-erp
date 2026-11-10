@@ -6,6 +6,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.exceptions import PermissionDenied
 from django.contrib.auth import authenticate
 from nucleo.permisos import permisos_efectivos
+from nucleo.scope import empresa_ids_lectura
 from ..models import Usuario
 from .serializers import UsuarioSerializer
 
@@ -100,9 +101,7 @@ class UsuarioViewSet(viewsets.ModelViewSet):
         base_qs = self.queryset.order_by('-created_at', '-id')
         # Solo los usuarios de la empresa activa, superusuario incluido (EC-843,
         # misma regla que EC-798): otra empresa da 404 y sin empresa, nada.
-        if getattr(user, 'empresa_id', None):
-            return base_qs.filter(empresa_id=user.empresa_id)
-        return base_qs.none()
+        return base_qs.filter(empresa_id__in=empresa_ids_lectura(user))
 
     def check_object_permissions(self, request, obj):
         super().check_object_permissions(request, obj)

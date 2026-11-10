@@ -29,3 +29,12 @@ class UsuarioAdmin(UserAdmin):
         ("Información Extra", {"fields": ("empresa", "sucursal_default", "email", "first_name", "last_name", "telefono")}),
     )
     filter_horizontal = ("empresas", "sucursales", "departamentos")
+
+    def get_readonly_fields(self, request, obj=None):
+        # La empresa activa propia solo cambia por ``cambiar-empresa`` (EC-843),
+        # que rehace el alcance por sucursal y lo audita. A otros usuarios se les
+        # sigue editando aquí.
+        campos = list(super().get_readonly_fields(request, obj))
+        if obj is not None and obj.pk == request.user.pk:
+            campos.append("empresa")
+        return campos
