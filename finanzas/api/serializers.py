@@ -225,8 +225,12 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         # #568: el cliente debe ser de la empresa de la CxC.
         cliente = attrs.get("cliente")
-        if self.instance is not None and cliente is not None and cliente.empresa_id != self.instance.empresa_id:
-            raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
+        if self.instance is not None and cliente is not None:
+            # La empresa de una CxC antigua (``empresa`` null) es la de su factura,
+            # como en ``get_queryset``; un cliente sin empresa no es de ninguna (EC-846).
+            empresa_id = self.instance.empresa_id or getattr(self.instance.factura, "empresa_id", None)
+            if empresa_id is None or cliente.empresa_id != empresa_id:
+                raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
         attrs = super().validate(attrs)
         if self.instance is not None and "total" in attrs and attrs["total"] != self.instance.total:
             raise serializers.ValidationError({"total": "El total de una CxC existente no se puede editar."})
@@ -828,9 +832,9 @@ class PolizaSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixi
             # Colgarlas de ``emp`` las dejaba muertas y permitía guardar una
             # sucursal de otra empresa en un update.
             emp_id = getattr(emp, "pk", emp) if emp else getattr(user_empresa, "pk", None)
-            if suc and emp_id and getattr(suc, "empresa_id", None) and suc.empresa_id != emp_id:
+            if suc and emp_id and suc.empresa_id != emp_id:
                 raise ValidationError({"sucursal": "Sucursal no pertenece a la empresa."})
-            if cc and emp_id and getattr(cc, "empresa_id", None) and cc.empresa_id != emp_id:
+            if cc and emp_id and cc.empresa_id != emp_id:
                 raise ValidationError({"centro_costo": "Centro de costo no pertenece a la empresa."})
         return attrs
 
@@ -890,13 +894,13 @@ class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnSe
                 raise ValidationError({"empresa": "Empresa no autorizada."})
             emp_id = getattr(emp, "pk", emp) if emp else getattr(user_empresa, "pk", None)
             prov = attrs.get("proveedor")
-            if prov and emp_id and getattr(prov, "empresa_id", None) and prov.empresa_id not in (None, emp_id):
+            if prov and emp_id and prov.empresa_id != emp_id:
                 raise ValidationError({"proveedor": "Proveedor no pertenece a la empresa."})
             suc = attrs.get("sucursal")
-            if suc and emp_id and getattr(suc, "empresa_id", None) and suc.empresa_id != emp_id:
+            if suc and emp_id and suc.empresa_id != emp_id:
                 raise ValidationError({"sucursal": "Sucursal no pertenece a la empresa."})
             oc = attrs.get("oc")
-            if oc and emp_id and getattr(oc, "empresa_id", None) and oc.empresa_id != emp_id:
+            if oc and emp_id and oc.empresa_id != emp_id:
                 raise ValidationError({"oc": "Orden de compra no pertenece a la empresa."})
             # Contra lo guardado si el cuerpo trae solo una de las dos (#897).
             if {"oc", "recepcion"} & attrs.keys():
@@ -998,7 +1002,7 @@ class CuentaBancariaSerializer(
                 raise ValidationError({"empresa": "Empresa no autorizada."})
             emp_id = emp_id or (getattr(emp, "pk", emp) if emp else getattr(user_empresa, "pk", None))
             banco = attrs.get("banco")
-            if banco and emp_id and getattr(banco, "empresa_id", None) and banco.empresa_id != emp_id:
+            if banco and emp_id and banco.empresa_id != emp_id:
                 raise ValidationError({"banco": "Banco no pertenece a la empresa."})
         moneda = attrs.get("moneda")
         if moneda is not None and emp_id and moneda.empresa_id and moneda.empresa_id != emp_id:
@@ -1031,10 +1035,10 @@ class CuentaPorPagarSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
                 raise ValidationError({"empresa": "Empresa no autorizada."})
             emp_id = getattr(emp, "pk", emp) if emp else getattr(user_empresa, "pk", None)
             prov = attrs.get("proveedor")
-            if prov and emp_id and getattr(prov, "empresa_id", None) and prov.empresa_id not in (None, emp_id):
+            if prov and emp_id and prov.empresa_id != emp_id:
                 raise ValidationError({"proveedor": "Proveedor no pertenece a la empresa."})
             fp = attrs.get("factura_proveedor")
-            if fp and emp_id and getattr(fp, "empresa_id", None) and fp.empresa_id != emp_id:
+            if fp and emp_id and fp.empresa_id != emp_id:
                 raise ValidationError({"factura_proveedor": "Factura de proveedor no pertenece a la empresa."})
         factura = attrs.get("factura_proveedor")
         if factura is not None:
@@ -1214,10 +1218,10 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
                 raise ValidationError({"empresa": "Empresa no autorizada."})
             emp_id = getattr(emp, "pk", emp) if emp else getattr(user_empresa, "pk", None)
             prov = attrs.get("proveedor")
-            if prov and emp_id and getattr(prov, "empresa_id", None) and prov.empresa_id not in (None, emp_id):
+            if prov and emp_id and prov.empresa_id != emp_id:
                 raise ValidationError({"proveedor": "Proveedor no pertenece a la empresa."})
             cta = attrs.get("cuenta_bancaria")
-            if cta and emp_id and getattr(cta, "empresa_id", None) and cta.empresa_id != emp_id:
+            if cta and emp_id and cta.empresa_id != emp_id:
                 raise ValidationError({"cuenta_bancaria": "Cuenta bancaria no pertenece a la empresa."})
         return attrs
 
@@ -1234,7 +1238,7 @@ class MovimientoBancarioSerializer(serializers.ModelSerializer):
         if req and hasattr(req, "user"):
             user_empresa = getattr(req.user, "empresa", None)
             cta = attrs.get("cuenta_bancaria")
-            if cta and user_empresa and getattr(cta, "empresa_id", None) and cta.empresa_id != getattr(user_empresa, "pk", None):
+            if cta and user_empresa and cta.empresa_id != getattr(user_empresa, "pk", None):
                 raise ValidationError({"cuenta_bancaria": "Cuenta bancaria no pertenece a la empresa."})
             if attrs.get("cobro") and cta and attrs["cobro"].cuenta_bancaria_id != getattr(cta, "pk", cta):
                 raise ValidationError({"cobro": "Cobro corresponde a otra cuenta bancaria."})
@@ -1306,7 +1310,7 @@ class NotaCreditoSerializer(CreateOnlyNestedLinesMixin, serializers.ModelSeriali
             user_empresa = getattr(req.user, "empresa", None)
             factura = attrs.get("factura")
             cliente = attrs.get("cliente")
-            if factura and user_empresa and getattr(factura, "empresa_id", None) and factura.empresa_id != getattr(user_empresa, "pk", None):
+            if factura and user_empresa and factura.empresa_id != getattr(user_empresa, "pk", None):
                 raise ValidationError({"factura": "Factura no pertenece a la empresa."})
             # Un PATCH con solo uno de los dos se compara contra el otro ya guardado.
             if self.instance is not None:

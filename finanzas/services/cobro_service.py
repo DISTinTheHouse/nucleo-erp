@@ -76,7 +76,9 @@ class CobroService:
                 raise ErrorDeNegocio(
                     {"cobro_detalles": f"La factura de la CxC {cxc.pk} está cancelada y no admite cobros."}
                 )
-            if det.cxc.empresa_id and cobro.empresa_id and det.cxc.empresa_id != cobro.empresa_id:
+            # Una CxC antigua sin empresa es de la de su factura (ya cargada); si ni
+            # así resuelve, no es de la del cobro (EC-846).
+            if (cxc.empresa_id or cxc.factura.empresa_id) != cobro.empresa_id:
                 raise ErrorDeNegocio(
                     {"cobro_detalles": "CxC no pertenece a la misma empresa que el cobro."}
                 )

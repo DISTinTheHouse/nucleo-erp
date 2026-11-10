@@ -1868,8 +1868,8 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
         _validate_fk_empresa(user, fp, "factura_proveedor", empresa)
         prov = serializer.validated_data.get("proveedor")
         if prov is not None and not _puede_ver_todo(user):
-            prov_emp_id = getattr(prov, "empresa_id", None)
-            if prov_emp_id not in (None, empresa.pk):
+            # Un proveedor sin empresa tampoco es de ésta (EC-846).
+            if prov.empresa_id != empresa.pk:
                 raise ValidationError({"proveedor": "Proveedor no pertenece a la empresa."})
         invoice = self._lock_invoice(fp)
         # Una CxP manual nace cuadrada: saldo = total y Pendiente. El serializer ya
@@ -2149,7 +2149,7 @@ class CobroViewSet(FinanzasBaseViewSet):
                 # ``CuentaPorCobrar.empresa`` es NULL-able: las filas antiguas se
                 # resuelven por su factura, igual que en ``get_queryset``.
                 cxc_emp = getattr(cxc, "empresa_id", None) or getattr(getattr(cxc, "factura", None), "empresa_id", None)
-                if cxc_emp and cxc_emp != cobro.empresa_id:
+                if cxc_emp != cobro.empresa_id:
                     raise ValidationError(
                         {"cobro_detalles": [f"La CxC {cxc.pk} no pertenece a la misma empresa que el cobro."]}
                     )
@@ -2306,8 +2306,7 @@ class PagoViewSet(FinanzasBaseViewSet):
             # ``estatus="Aplicado"``; en ``Borrador`` nadie lo cubría.
             cxp = d.get("cxp")
             if cxp is not None:
-                cxp_emp = getattr(cxp, "empresa_id", None)
-                if cxp_emp and cxp_emp != pago.empresa_id:
+                if cxp.empresa_id != pago.empresa_id:
                     raise ValidationError(
                         {"pago_detalles": [f"La CxP {cxp.pk} no pertenece a la misma empresa que el pago."]}
                     )
@@ -2410,13 +2409,13 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
         if cta is None:
             raise ValidationError({"cuenta_bancaria": "Requerida."})
         empresa = getattr(cta, "empresa", None)
-        if not superuser and empresa and getattr(user, "empresa", None):
-            if empresa.pk != user.empresa.pk:
-                raise PermissionDenied()
         if not superuser:
             user_emp = getattr(user, "empresa", None)
             if user_emp is None:
                 raise PermissionDenied("Usuario sin empresa.")
+            # Falla cerrado: una cuenta sin empresa tampoco es de ésta (EC-846).
+            if cta.empresa_id != user_emp.pk:
+                raise PermissionDenied()
         movimiento = serializer.save()
         MovimientoBancarioService.registrar_movimiento(
             movimiento, empresa_id=getattr(empresa, "pk", None), usuario=user
@@ -2498,7 +2497,7 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
             user_emp = getattr(user, "empresa", None)
             if user_emp is None:
                 raise PermissionDenied("Usuario sin empresa.")
-            if cta_emp and cta_emp.pk != user_emp.pk:
+            if getattr(cta_emp, "pk", None) != user_emp.pk:
                 raise ValidationError({"cuenta_bancaria": "Cuenta no pertenece a la empresa."})
         serializer.save()
 
@@ -2678,14 +2677,11 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
         if not superuser:
             if user_emp is None:
                 raise PermissionDenied("Usuario sin empresa.")
-            if factura:
-                fact_emp = getattr(factura, "empresa_id", None)
-                if fact_emp and fact_emp != user_emp.pk:
-                    raise ValidationError({"factura": "Factura no pertenece a la empresa."})
-            if cliente:
-                cli_emp = getattr(cliente, "empresa_id", None)
-                if cli_emp and cli_emp != user_emp.pk:
-                    raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
+            # Un FK sin empresa tampoco es de ésta (EC-846).
+            if factura and factura.empresa_id != user_emp.pk:
+                raise ValidationError({"factura": "Factura no pertenece a la empresa."})
+            if cliente and cliente.empresa_id != user_emp.pk:
+                raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
         exigir_factura_visible(user, factura)
         detalles_data = serializer.validated_data.pop("nota_credito_detalles", [])
         for detalle_data in detalles_data:
