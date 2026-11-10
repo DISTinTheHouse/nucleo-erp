@@ -462,6 +462,28 @@ class UsuarioViewSetAlcanceTests(_DosEmpresasMixin, TestCase):
             (self.ajena.pk, self.sucursal_ajena.pk, [self.sucursal_ajena.pk], [self.departamento_ajeno.pk]),
         )
 
+    def test_cambiar_empresa_sin_alcance_valida_el_que_ya_tiene(self):
+        """Mover al usuario de empresa sin mandar alcance falla si el que ya
+        tiene es de la empresa anterior: no se queda con sucursales ajenas."""
+        self.objetivo.sucursales.set([self.sucursal])
+        self.objetivo.departamentos.set([self.departamento])
+        antes = self._alcance()
+        response = self._patch({"empresa": self.ajena.pk}, self.superusuario)
+        self.assertEqual(response.status_code, 400, getattr(response, "data", None))
+        self.assertEqual(
+            set(response.data), {"sucursal_default", "sucursales", "departamentos"}
+        )
+        self.assertEqual(self._alcance(), antes)
+
+    def test_cambiar_empresa_reemplazando_parte_del_alcance(self):
+        """Lo que llega se valida tal cual; lo que no llega, con su valor actual."""
+        self.objetivo.sucursales.set([self.sucursal])
+        response = self._patch({
+            "empresa": self.ajena.pk, "sucursal_default": self.sucursal_ajena.pk,
+        }, self.superusuario)
+        self.assertEqual(response.status_code, 400, getattr(response, "data", None))
+        self.assertEqual(set(response.data), {"sucursales"})
+
     def test_empresa_nula_con_sucursales_falla(self):
         """``empresa: null`` deja al usuario sin empresa: ninguna sucursal es
         suya, aunque fuera de la empresa que tenía."""

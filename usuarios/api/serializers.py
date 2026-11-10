@@ -68,12 +68,23 @@ class UsuarioSerializer(serializers.ModelSerializer):
 
         # Sucursales, departamentos y sucursal por defecto, de la empresa del
         # usuario editado aunque llegue uno solo (EC-844). Antes solo se comparaba
-        # sucursal_default cuando venía junto con empresa.
+        # sucursal_default cuando venía junto con empresa. Si la empresa cambia,
+        # lo que no llega se valida con su valor actual: mover al usuario no lo
+        # deja con sucursales de la empresa anterior.
+        cambia_empresa = (
+            self.instance is not None and empresa_final != self.instance.empresa_id
+        )
+
+        def efectivo(campo, actual):
+            if campo in data:
+                return data[campo]
+            return actual() if cambia_empresa else None
+
         errores = errores_de_alcance(
             empresa_final,
-            sucursal_default=data.get('sucursal_default'),
-            sucursales=data.get('sucursales'),
-            departamentos=data.get('departamentos'),
+            sucursal_default=efectivo('sucursal_default', lambda: self.instance.sucursal_default),
+            sucursales=efectivo('sucursales', lambda: list(self.instance.sucursales.all())),
+            departamentos=efectivo('departamentos', lambda: list(self.instance.departamentos.all())),
         )
         if errores:
             raise serializers.ValidationError(errores)
