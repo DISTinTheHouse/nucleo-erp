@@ -10450,9 +10450,13 @@ class FkSinEmpresaEC846Tests(FinanzasBase):
             self._post(CUENTAS_POR_PAGAR_URL, {**datos, "factura_proveedor": self.fp_b.pk}), "factura_proveedor"
         )
         self._assert_400(self._post(CUENTAS_POR_PAGAR_URL, {**datos, "proveedor": self.prov_b.pk}), "proveedor")
+        # El proveedor huérfano es el de la factura: sólo la regla de empresa puede
+        # rechazarlo (no el cruce proveedor-factura de ``_validate_matches_invoice``).
+        FacturaProveedor.objects.filter(pk=self.fp_a.pk).update(proveedor=self.prov_huerfano)
         self._assert_400(
             self._post(CUENTAS_POR_PAGAR_URL, {**datos, "proveedor": self.prov_huerfano.pk}), "proveedor"
         )
+        FacturaProveedor.objects.filter(pk=self.fp_a.pk).update(proveedor=self.prov_a)
         self.assertFalse(CuentaPorPagar.objects.exists())
         resp = self._post(CUENTAS_POR_PAGAR_URL, datos)
         self.assertEqual(resp.status_code, 201, resp.data)
