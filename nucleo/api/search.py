@@ -240,6 +240,14 @@ class EntidadBuscable:
         return [self.fila(obj) for obj in objetos[:limite]], hay_mas
 
 
+def _solo_empresa_activa(qs, user):
+    """El buscador nunca mezcla empresas (#1034, EC-798): aunque los listados de
+    bordado/reflejante/corte o el catálogo den alcance global al superusuario,
+    aquí esos grupos se acotan a su empresa activa; sin empresa, nada."""
+    empresa_id = getattr(user, "empresa_id", None)
+    return qs.filter(empresa_id=empresa_id) if empresa_id else qs.none()
+
+
 def _texto(valor) -> str | None:
     """Normaliza a ``None`` los vacíos: varias de estas columnas son ``blank=True``."""
     if valor is None:
@@ -470,9 +478,9 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         # Mismo predicado que ``OrdenBordadoViewSet`` (``produccion.scope``):
         # empresa, ``activo=True`` y, para quien no es admin, sólo sus sucursales.
         # ``select_related("pedido")``: la fila lee folio y cliente del pedido.
-        alcance=lambda user: ordenes_bordado_visibles(
+        alcance=lambda user: _solo_empresa_activa(ordenes_bordado_visibles(
             ordenes_bordado_base().select_related("pedido"), user
-        ),
+        ), user),
         fila=_fila_orden_bordado,
         # Sólo por su propio folio. El folio del pedido y el cliente aparecen en
         # el subtítulo, pero NO se buscan: el pedido ya tiene su propio grupo.
@@ -505,9 +513,9 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         etiqueta="Órdenes de reflejante",
         # Misma plantilla que la orden de bordado. Alcance de
         # ``OrdenReflejanteViewSet`` (``produccion.scope``).
-        alcance=lambda user: ordenes_reflejante_visibles(
+        alcance=lambda user: _solo_empresa_activa(ordenes_reflejante_visibles(
             ordenes_reflejante_base().select_related("pedido"), user
-        ),
+        ), user),
         fila=_fila_orden_reflejante,
         # Sólo por su folio, como NOMBRE (subcadena): el formato real es
         # ``2026-OR-00006`` —año delante—, así que el prefijo no serviría.
@@ -529,9 +537,9 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         etiqueta="Órdenes de corte de manga",
         # Misma plantilla que la orden de bordado. Alcance de
         # ``OrdenesCorteMangaViewSet`` (``produccion.scope``).
-        alcance=lambda user: ordenes_corte_manga_visibles(
+        alcance=lambda user: _solo_empresa_activa(ordenes_corte_manga_visibles(
             ordenes_corte_manga_base().select_related("pedido"), user
-        ),
+        ), user),
         fila=_fila_orden_corte_manga,
         # Sólo por su folio, como NOMBRE (subcadena): el formato real es
         # ``2026-CM-00005`` —año delante y serie ``CM``, no ``OCM``—.
@@ -606,9 +614,9 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         # (``catalogo/api/views.py``). El ViewSet real NO filtra ``activo=True`` en
         # su queryset base; aquí sí se agrega explícito, a propósito: un catálogo
         # descontinuado no debe aparecer en un buscador de uso diario.
-        alcance=lambda user: _alcance_empresa_catalogo(
+        alcance=lambda user: _solo_empresa_activa(_alcance_empresa_catalogo(
             ProductoVariante.objects.filter(activo=True), user
-        ).select_related("producto"),
+        ), user).select_related("producto"),
         fila=_fila_producto,
         # ``sku`` real (``10808015XG``: modelo + color + talla) empieza por lo que
         # se teclea: va por prefijo.

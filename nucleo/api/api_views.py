@@ -29,7 +29,8 @@ from ..scope import empresas_activas
 class EmpresaViewSet(viewsets.ModelViewSet):
     """
     API endpoint para ver y editar empresas.
-    Permite crear empresas a usuarios autenticados y las vincula automáticamente.
+    Cualquier usuario autenticado puede leer; solo el superusuario crea, edita o
+    borra (``IsSuperUserOrReadOnly``) (#1046).
     """
     queryset = Empresa.objects.all().order_by('-created_at')
     serializer_class = EmpresaSerializer
@@ -116,13 +117,8 @@ class MonedaViewSet(viewsets.ModelViewSet):
         # 1. Monedas globales (empresa=None)
         q_global = models.Q(empresa__isnull=True)
 
-        if user.is_superuser:
-            empresa_id = self.request.query_params.get("empresa_id") or self.request.query_params.get("empresa")
-            if empresa_id:
-                return self.queryset.filter(q_global | models.Q(empresa_id=empresa_id))
-            return self.queryset
-
-        # 2. Monedas de la empresa del usuario
+        # 2. Monedas de la empresa ACTIVA, superusuario incluido (#1035, EC-798):
+        #    ``?empresa_id=`` ya no elige otra empresa.
         if user.empresa:
             q_empresa = models.Q(empresa=user.empresa)
             return self.queryset.filter(q_global | q_empresa)
@@ -454,13 +450,10 @@ class UserSucursalesAPIView(APIView):
         except (TypeError, ValueError):
             return Response({'error': 'Empresa ID inválido'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not user.is_superuser:
-            empresa_ids = []
-            if user.empresa_id:
-                empresa_ids.append(user.empresa_id)
-            empresa_ids += list(user.empresas.values_list('pk', flat=True))
-            if empresa_id not in set(empresa_ids):
-                return Response({'error': 'No autorizado'}, status=status.HTTP_403_FORBIDDEN)
+        # Solo la empresa activa, superusuario incluido (#1035, EC-798): pedir
+        # otra empresa (URL o ``?empresa_id=``) responde 403.
+        if empresa_id != user.empresa_id:
+            return Response({'error': 'No autorizado'}, status=status.HTTP_403_FORBIDDEN)
 
         # Filtrar sucursales
         # Si es superuser, todas las de la empresa.

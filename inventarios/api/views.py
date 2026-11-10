@@ -1716,18 +1716,17 @@ class MovimientoInventarioViewSet(viewsets.ModelViewSet):
         ).distinct()
 
     def perform_create(self, serializer):
+        # La empresa es SIEMPRE la activa, superusuario incluido (#1035): nunca la
+        # del body. Sin empresa activa, 400; la sucursal debe ser de esa empresa.
         user = self.request.user
-        if not user.is_superuser:
-            sucursal = serializer.validated_data.get('sucursal')
-            empresa = serializer.validated_data.get('empresa')
-
-            if sucursal and not user.sucursales.filter(pk=sucursal.pk).exists():
-                raise PermissionDenied("No tiene acceso a esta sucursal")
-            
-            if empresa:
-                if empresa.pk != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
-                    raise PermissionDenied("No tiene acceso a esta empresa")
-        serializer.save()
+        if not user.empresa_id:
+            raise ValidationError({"empresa": "El usuario no tiene empresa activa."})
+        sucursal = serializer.validated_data.get('sucursal')
+        if sucursal and sucursal.empresa_id != user.empresa_id:
+            raise ValidationError({"sucursal": "La sucursal no pertenece a la empresa activa."})
+        if not user.is_superuser and sucursal and not user.sucursales.filter(pk=sucursal.pk).exists():
+            raise PermissionDenied("No tiene acceso a esta sucursal")
+        serializer.save(empresa=user.empresa)
 
     def perform_destroy(self, instance):
         instance.soft_delete()
@@ -1784,18 +1783,17 @@ class AjusteInventarioViewSet(viewsets.ModelViewSet):
         ).distinct()
 
     def perform_create(self, serializer):
+        # La empresa es SIEMPRE la activa, superusuario incluido (#1035): nunca la
+        # del body. Sin empresa activa, 400; la sucursal debe ser de esa empresa.
         user = self.request.user
-        if not user.is_superuser:
-            sucursal = serializer.validated_data.get('sucursal')
-            empresa = serializer.validated_data.get('empresa')
-            
-            if sucursal and not user.sucursales.filter(pk=sucursal.pk).exists():
-                raise PermissionDenied("No tiene acceso a esta sucursal")
-            
-            if empresa:
-                if empresa.pk != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
-                    raise PermissionDenied("No tiene acceso a esta empresa")
-        serializer.save()
+        if not user.empresa_id:
+            raise ValidationError({"empresa": "El usuario no tiene empresa activa."})
+        sucursal = serializer.validated_data.get('sucursal')
+        if sucursal and sucursal.empresa_id != user.empresa_id:
+            raise ValidationError({"sucursal": "La sucursal no pertenece a la empresa activa."})
+        if not user.is_superuser and sucursal and not user.sucursales.filter(pk=sucursal.pk).exists():
+            raise PermissionDenied("No tiene acceso a esta sucursal")
+        serializer.save(empresa=user.empresa)
     
     def perform_destroy(self, instance):
         instance.soft_delete()

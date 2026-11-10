@@ -648,7 +648,12 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         user = request.user
         pedida = request.data.get('sucursal')
         if pedida in (None, ''):
-            return getattr(user, 'sucursal_default', None)
+            # Solo si es de la empresa de la OP (#1039): una ``sucursal_default``
+            # de otra empresa se ignora y se cae al 400 de "sin sucursal".
+            por_omision = getattr(user, 'sucursal_default', None)
+            if por_omision is not None and por_omision.empresa_id == getattr(empresa, 'pk', None):
+                return por_omision
+            return None
         error = ValidationError({'sucursal': 'Sucursal no válida.'})
         try:
             pedida = int(pedida)
@@ -1418,7 +1423,8 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
 
             preview_folio = None
             sucursal_default = getattr(user, "sucursal_default", None)
-            if sucursal_default is not None:
+            # Solo si es de la empresa activa (#1039).
+            if sucursal_default is not None and sucursal_default.empresa_id == empresa.pk:
                 try:
                     from produccion.utils.folios import preview_ob_folio
 
@@ -1816,7 +1822,8 @@ class OrdenReflejanteViewSet(
 
             preview_folio = None
             sucursal_default = getattr(user, "sucursal_default", None)
-            if sucursal_default is not None:
+            # Solo si es de la empresa activa (#1039).
+            if sucursal_default is not None and sucursal_default.empresa_id == empresa.pk:
                 try:
                     from produccion.utils.folios import preview_or_folio
 
@@ -2158,7 +2165,8 @@ class OrdenesCorteMangaViewSet(
 
             preview_folio = None
             sucursal_default = getattr(user, "sucursal_default", None)
-            if sucursal_default is not None:
+            # Solo si es de la empresa activa (#1039).
+            if sucursal_default is not None and sucursal_default.empresa_id == empresa.pk:
                 try:
                     from produccion.utils.folios import preview_ocm_folio
 

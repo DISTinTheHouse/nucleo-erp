@@ -38,3 +38,7 @@ postgres
 .agents/
 .claude/
 skills-lock.json
+
+# Logs locales y rotados (api.log.1, ...) (#1045)
+logs/
+*.log.*
