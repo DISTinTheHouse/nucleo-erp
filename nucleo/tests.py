@@ -1171,8 +1171,8 @@ class _GrupoPropioMixin:
 class FacturaBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
     """Facturas: visibilidad, alcance de fila y forma de la fila.
 
-    El alcance es el de ``FacturaViewSet`` (``_aplicar_scope_empresa``: empresa,
-    sin sub-alcance por sucursal ni vendedor) más ``activo=True``.
+    El alcance es el de ``FacturaViewSet``: empresa y, para quien no es admin, sólo
+    sus sucursales (#753, ``finanzas.scope.por_sucursal``), más ``activo=True``.
     """
 
     TIPO = "factura"
@@ -1233,14 +1233,17 @@ class FacturaBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
             sorted(self._ids(payload, "factura")), sorted([self.fac_a.pk, self.fac_b.pk])
         )
 
-    def test_no_hay_sub_alcance_por_sucursal(self):
-        """Igual que ``FacturaViewSet``: el alcance es la empresa, no la sucursal."""
+    def test_acota_por_sucursal_salvo_al_admin(self):
+        """EC-812: igual que ``FacturaViewSet`` desde #753, quien no es admin sólo ve
+        las facturas de sus sucursales; el admin de empresa, todas."""
         otra = Sucursal.objects.create(
             empresa=self.a["empresa"], codigo="AC3", nombre="acme-search 3"
         )
-        user = self._usuario_con("suc", ["R-CONTABILIDAD-FACTURACION"], sucursal=otra)
-        payload = self._buscar(user, "FAC-00027")
-        self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
+        ajeno = self._usuario_con("suc", ["R-CONTABILIDAD-FACTURACION"], sucursal=otra)
+        self.assertEqual(self._ids(self._buscar(ajeno, "FAC-00027"), "factura"), [])
+        propio = self._usuario_con("suc-a", ["R-CONTABILIDAD-FACTURACION"])
+        self.assertEqual(self._ids(self._buscar(propio, "FAC-00027"), "factura"), [self.fac_a.pk])
+        self.assertEqual(self._ids(self._buscar(self.a["admin"], "FAC-00027"), "factura"), [self.fac_a.pk])
 
     def test_factura_con_soft_delete_no_aparece(self):
         self.fac_a.soft_delete()
