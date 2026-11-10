@@ -1,8 +1,17 @@
+from types import SimpleNamespace
+
+import pyotp
+from auth_kit.mfa.handlers.base import MFAHandlerRegistry
+from auth_kit.mfa.models import MFAMethod
+from django.conf import settings
 from django.contrib.admin.sites import site
+from django.db import transaction
 from django.test import RequestFactory, TestCase
 from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
-from nucleo.models import Empresa, Sucursal
+from nucleo.models import Departamento, Empresa, Sucursal
+from seguridad.models import Rol, UsuarioRol
 from usuarios.models import Usuario
 from wms.models import RfidScan
 
@@ -86,3 +95,432 @@ class RfidScanAdminTests(TestCase):
         qs = site._registry[RfidScan].get_queryset(request)
 
         self.assertEqual(list(qs), [propia])
+
+
+# ---------------------------------------------------------------------------
+# EC-844: escalada de privilegios y cambio de empresa vía /api/auth/user/
+# ---------------------------------------------------------------------------
+
+PASSWORD = "Xq7!vLm2#Rt9"
+PASSWORD_NUEVA = "Nv8!Kq2#zLm4"
+
+
+class _DosEmpresasMixin:
+    """Empresa A (la del usuario) y empresa B (ajena), cada una con su sucursal y
+    departamento, para probar que nada de B se cuela en un usuario de A."""
+
+    @classmethod
+    def _crear_empresas(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        cls.departamento = Departamento.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="VTA", nombre="Ventas",
+        )
+        cls.ajena = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        cls.sucursal_ajena = Sucursal.objects.create(empresa=cls.ajena, codigo="GDL", nombre="Guadalajara")
+        cls.departamento_ajeno = Departamento.objects.create(
+            empresa=cls.ajena, sucursal=cls.sucursal_ajena, codigo="VTA", nombre="Ventas",
+        )
+
+
+class PerfilAuthUserTests(_DosEmpresasMixin, TestCase):
+    """``/api/auth/user/`` (``UserView`` de auth_kit) edita solo el perfil: nombre,
+    apellido, teléfono y avatar. Lo demás se ignora y la contraseña se rechaza."""
+
+    URL = "/api/auth/user/"
+
+    # Lo que devolvía el GET antes de EC-844 (sin los write-only ``password`` y
+    # ``roles``). NextAuth lee id, username, email, first_name, last_name,
+    # permisos, is_admin_empresa e is_superuser; el resto se conserva igual.
+    CAMPOS_GET = [
+        "id", "username", "email", "first_name", "last_name", "is_active", "estatus",
+        "empresa", "sucursal_default", "sucursales", "departamentos", "telefono",
+        "avatar_url", "is_admin_empresa", "is_superuser", "is_staff", "empresa_id",
+        "nombre_completo", "es_admin", "permisos", "roles_ids", "date_joined", "last_login",
+    ]
+
+    @classmethod
+    def setUpTestData(cls):
+        cls._crear_empresas()
+        # Rol de su propia empresa: el que ``validate()`` aceptaría tras la autopromoción.
+        cls.rol = Rol.objects.create(empresa=cls.empresa, codigo="ADM", nombre="Admin")
+
+    def setUp(self):
+        self.user = Usuario.objects.create(
+            username="operador", email="operador@acme.test", empresa=self.empresa,
+            sucursal_default=self.sucursal,
+        )
+        self.user.set_password(PASSWORD)
+        self.user.save()
+        self.user.sucursales.set([self.sucursal])
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _estado(self):
+        u = Usuario.objects.get(pk=self.user.pk)
+        return {
+            "is_superuser": u.is_superuser, "is_staff": u.is_staff,
+            "is_admin_empresa": u.is_admin_empresa, "empresa": u.empresa_id,
+            "sucursal_default": u.sucursal_default_id,
+            "sucursales": sorted(u.sucursales.values_list("pk", flat=True)),
+            "departamentos": sorted(u.departamentos.values_list("pk", flat=True)),
+            "estatus": u.estatus, "is_active": u.is_active, "email": u.email,
+            "username": u.username, "password": u.password,
+            "roles": sorted(UsuarioRol.objects.filter(usuario=u).values_list("rol_id", flat=True)),
+        }
+
+    def test_patch_de_campos_protegidos_no_cambia_la_bd(self):
+        cambios = {
+            "is_superuser": True,
+            "is_staff": True,
+            "is_admin_empresa": True,
+            "empresa": self.ajena.pk,
+            "sucursal_default": self.sucursal_ajena.pk,
+            "sucursales": [self.sucursal_ajena.pk],
+            "departamentos": [self.departamento_ajeno.pk],
+            "estatus": "bloqueado",
+            "email": "otro@globex.test",
+            "username": "otro",
+            "roles": [self.rol.pk],
+        }
+        antes = self._estado()
+        for campo, valor in cambios.items():
+            # Cada campo sobre el estado original: savepoint que se revierte y un
+            # usuario recién leído (``UserView`` edita el mismo objeto autenticado).
+            with self.subTest(campo=campo), transaction.atomic():
+                self.client.force_authenticate(user=Usuario.objects.get(pk=self.user.pk))
+                self.client.patch(self.URL, {campo: valor}, format="json")
+                self.assertEqual(self._estado(), antes)
+                transaction.set_rollback(True)
+
+    def test_promocion_en_dos_pasos_no_asigna_roles(self):
+        """Antes: un PATCH con ``is_admin_empresa`` y otro con ``roles``."""
+        self.client.patch(self.URL, {"is_admin_empresa": True}, format="json")
+        self.user.refresh_from_db()
+        self.client.force_authenticate(user=self.user)
+        self.client.patch(self.URL, {"roles": [self.rol.pk]}, format="json")
+        self.assertFalse(UsuarioRol.objects.filter(usuario=self.user).exists())
+
+    def test_put_no_escribe_campos_protegidos(self):
+        antes = self._estado()
+        response = self.client.put(self.URL, {
+            "first_name": "Ana", "email": self.user.email, "is_superuser": True,
+            "empresa": self.ajena.pk, "sucursal_default": self.sucursal_ajena.pk,
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self._estado(), antes)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, "Ana")
+
+    def test_password_se_rechaza(self):
+        antes = Usuario.objects.get(pk=self.user.pk).password
+        response = self.client.patch(self.URL, {"password": "1"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Usuario.objects.get(pk=self.user.pk).password, antes)
+
+    def test_los_cuatro_campos_editables_se_guardan(self):
+        response = self.client.patch(self.URL, {
+            "first_name": "Ana", "last_name": "López", "telefono": "8112345678",
+            "avatar_url": "https://example.com/a.png",
+        }, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertEqual(
+            (self.user.first_name, self.user.last_name, self.user.telefono, self.user.avatar_url),
+            ("Ana", "López", "8112345678", "https://example.com/a.png"),
+        )
+
+    def test_get_conserva_los_campos(self):
+        response = self.client.get(self.URL)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(list(response.data), self.CAMPOS_GET)
+        self.assertEqual(response.data["empresa"], self.empresa.pk)
+        self.assertEqual(response.data["empresa_id"], self.empresa.pk)
+        self.assertEqual(response.data["sucursales"], [self.sucursal.pk])
+        self.assertIs(response.data["is_superuser"], False)
+        self.assertIs(response.data["is_admin_empresa"], False)
+
+
+class CambioPasswordTests(TestCase):
+    """``/api/auth/password/change/`` exige la contraseña actual."""
+
+    URL = "/api/auth/password/change/"
+
+    def setUp(self):
+        self.user = Usuario.objects.create(username="operador", email="operador@acme.test")
+        self.user.set_password(PASSWORD)
+        self.user.save()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _post(self, **extra):
+        body = {"new_password1": PASSWORD_NUEVA, "new_password2": PASSWORD_NUEVA, **extra}
+        return self.client.post(self.URL, body, format="json")
+
+    def test_sin_password_actual_falla(self):
+        response = self._post()
+        self.assertEqual(response.status_code, 400)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(PASSWORD))
+
+    def test_password_actual_incorrecta_falla(self):
+        response = self._post(old_password="no-es-la-actual")
+        self.assertEqual(response.status_code, 400)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(PASSWORD))
+
+    def test_con_password_actual_cambia(self):
+        response = self._post(old_password=PASSWORD)
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(PASSWORD_NUEVA))
+
+
+class OrigenesPermitidosTests(TestCase):
+    """CORS y ``enforce_origin`` aceptan solo orígenes explícitos: un sitio
+    cualquiera en ``*.vercel.app`` no lee respuestas con la cookie ni escribe."""
+
+    PRODUCCION = "https://lazzar-erp.vercel.app"
+    DESARROLLO = "http://localhost:3000"
+    ATACANTE = "https://sitio-ajeno.vercel.app"
+    ESPERADOS = {
+        "https://lazzar-erp.vercel.app",
+        "http://localhost:3000", "https://localhost:3000",
+        "http://localhost:3001", "https://localhost:3001",
+        "http://localhost:3002", "https://localhost:3002",
+    }
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = Usuario.objects.create(username="operador", email="operador@acme.test")
+
+    def _cabeceras_cors(self, response):
+        return [h for h in response.headers if h.lower().startswith("access-control-")]
+
+    def _preflight(self, url, origen):
+        return self.client.options(
+            url, HTTP_ORIGIN=origen, HTTP_ACCESS_CONTROL_REQUEST_METHOD="PATCH",
+            HTTP_ACCESS_CONTROL_REQUEST_HEADERS="content-type",
+        )
+
+    def test_la_lista_es_exactamente_la_confirmada(self):
+        self.assertEqual(set(settings.CORS_ALLOWED_ORIGINS), self.ESPERADOS)
+        self.assertEqual(list(settings.CORS_ALLOWED_ORIGIN_REGEXES), [])
+        self.assertEqual(set(settings.CSRF_TRUSTED_ORIGINS), self.ESPERADOS)
+
+    def test_origen_vercel_ajeno_no_recibe_cabeceras_cors(self):
+        for url in ("/api/auth/token/refresh/", "/api/auth/user/"):
+            with self.subTest(url=url):
+                self.assertFalse(self._cabeceras_cors(self._preflight(url, self.ATACANTE)))
+
+    def test_refresh_con_cookie_desde_origen_ajeno_no_es_legible(self):
+        client = APIClient()
+        client.cookies["auth-refresh-jwt"] = str(RefreshToken.for_user(self.user))
+        response = client.post("/api/auth/token/refresh/", {}, format="json", HTTP_ORIGIN=self.ATACANTE)
+        self.assertNotIn("Access-Control-Allow-Origin", response.headers)
+
+    def test_origenes_listados_si_reciben_cabeceras(self):
+        for origen in (self.PRODUCCION, self.DESARROLLO):
+            for url in ("/api/auth/token/refresh/", "/api/auth/user/"):
+                with self.subTest(origen=origen, url=url):
+                    response = self._preflight(url, origen)
+                    self.assertEqual(response["Access-Control-Allow-Origin"], origen)
+                    self.assertEqual(response["Access-Control-Allow-Credentials"], "true")
+
+    def _patch_con_cookie(self, origen):
+        client = APIClient()
+        client.cookies["auth-jwt"] = str(AccessToken.for_user(self.user))
+        return client.patch("/api/auth/user/", {"first_name": "Ana"}, format="json", HTTP_ORIGIN=origen)
+
+    def test_enforce_origin_rechaza_vercel_ajeno(self):
+        response = self._patch_con_cookie(self.ATACANTE)
+        self.assertEqual(response.status_code, 403)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, "")
+
+    def test_enforce_origin_acepta_los_listados(self):
+        for origen in (self.PRODUCCION, self.DESARROLLO):
+            with self.subTest(origen=origen):
+                self.assertEqual(self._patch_con_cookie(origen).status_code, 200)
+
+
+class IaCrearUsuarioTests(_DosEmpresasMixin, TestCase):
+    """Herramienta ``create_usuario`` del asistente: un admin de empresa no concede
+    ``is_staff`` ni asigna sucursales o departamentos de otra empresa."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls._crear_empresas()
+        cls.admin = Usuario.objects.create(
+            username="admin", email="admin@acme.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+
+    def _crear(self, **extra):
+        from ia.api.views import AIAssistantAPIView
+
+        args = {
+            "username": "nuevo", "email": "nuevo@acme.test", "password": PASSWORD,
+            "sucursal_default": self.sucursal.pk, **extra,
+        }
+        return AIAssistantAPIView()._tool_create_usuario(SimpleNamespace(user=self.admin), args)
+
+    def _no_se_creo(self):
+        self.assertFalse(Usuario.objects.filter(email="nuevo@acme.test").exists())
+
+    def test_admin_no_concede_is_staff(self):
+        self.assertFalse(self._crear(is_staff=True)["ok"])
+        self._no_se_creo()
+
+    def test_admin_no_asigna_sucursales_ajenas(self):
+        self.assertFalse(self._crear(sucursales=[self.sucursal_ajena.pk])["ok"])
+        self._no_se_creo()
+
+    def test_admin_no_asigna_departamentos_ajenos(self):
+        self.assertFalse(self._crear(departamentos=[self.departamento_ajeno.pk])["ok"])
+        self._no_se_creo()
+
+    def test_alta_valida_dentro_de_la_empresa(self):
+        resultado = self._crear(sucursales=[self.sucursal.pk], departamentos=[self.departamento.pk])
+        self.assertTrue(resultado["ok"], resultado)
+        nuevo = Usuario.objects.get(email="nuevo@acme.test")
+        self.assertEqual(nuevo.empresa_id, self.empresa.pk)
+        self.assertFalse(nuevo.is_staff)
+
+
+class UsuarioViewSetAlcanceTests(_DosEmpresasMixin, TestCase):
+    """``/api/v1/usuarios/``: sucursales, departamentos y sucursal por defecto
+    deben ser de la empresa del usuario editado, aunque llegue uno solo."""
+
+    URL = "/api/v1/usuarios/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls._crear_empresas()
+        cls.admin = Usuario.objects.create(
+            username="admin", email="admin@acme.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.superusuario = Usuario.objects.create(
+            username="root", email="root@acme.test", empresa=cls.empresa, is_superuser=True,
+        )
+
+    def setUp(self):
+        self.objetivo = Usuario.objects.create(
+            username="operador", email="operador@acme.test", empresa=self.empresa,
+            sucursal_default=self.sucursal,
+        )
+
+    def _patch(self, body, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.patch(f"{self.URL}{self.objetivo.pk}/", body, format="json")
+
+    def _alcance(self):
+        u = Usuario.objects.get(pk=self.objetivo.pk)
+        return (
+            u.empresa_id, u.sucursal_default_id,
+            sorted(u.sucursales.values_list("pk", flat=True)),
+            sorted(u.departamentos.values_list("pk", flat=True)),
+        )
+
+    def test_rechaza_cada_campo_ajeno_aunque_llegue_solo(self):
+        cuerpos = {
+            "sucursales": {"sucursales": [self.sucursal_ajena.pk]},
+            "departamentos": {"departamentos": [self.departamento_ajeno.pk]},
+            "sucursal_default": {"sucursal_default": self.sucursal_ajena.pk},
+        }
+        antes = self._alcance()
+        for quien in (self.admin, self.superusuario):
+            for campo, body in cuerpos.items():
+                with self.subTest(usuario=quien.username, campo=campo):
+                    response = self._patch(body, quien)
+                    self.assertEqual(response.status_code, 400, getattr(response, "data", None))
+                    self.assertIn(campo, response.data)
+                    self.assertEqual(self._alcance(), antes)
+
+    def test_campos_de_la_empresa_se_guardan(self):
+        response = self._patch({
+            "sucursales": [self.sucursal.pk], "departamentos": [self.departamento.pk],
+            "sucursal_default": self.sucursal.pk,
+        }, self.admin)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(
+            self._alcance(),
+            (self.empresa.pk, self.sucursal.pk, [self.sucursal.pk], [self.departamento.pk]),
+        )
+
+    def test_superusuario_mueve_de_empresa_con_su_alcance(self):
+        response = self._patch({
+            "empresa": self.ajena.pk, "sucursal_default": self.sucursal_ajena.pk,
+            "sucursales": [self.sucursal_ajena.pk], "departamentos": [self.departamento_ajeno.pk],
+        }, self.superusuario)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(
+            self._alcance(),
+            (self.ajena.pk, self.sucursal_ajena.pk, [self.sucursal_ajena.pk], [self.departamento_ajeno.pk]),
+        )
+
+    def test_alta_de_admin_con_sucursal_ajena_falla(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        response = client.post(self.URL, {
+            "username": "nuevo", "email": "nuevo@acme.test", "password": PASSWORD,
+            "empresa": self.empresa.pk, "sucursal_default": self.sucursal.pk,
+            "sucursales": [self.sucursal_ajena.pk],
+        }, format="json")
+        self.assertEqual(response.status_code, 400, getattr(response, "data", None))
+        self.assertFalse(Usuario.objects.filter(email="nuevo@acme.test").exists())
+
+
+class MfaCodigoTests(TestCase):
+    """Quitar el método MFA activo o cambiar el primario exige un código válido."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = Usuario.objects.create(username="operador", email="operador@acme.test")
+
+    def setUp(self):
+        self.app = MFAMethod.objects.create(
+            user=self.user, name="app", secret=pyotp.random_base32(), is_primary=True, is_active=True,
+        )
+        self.email = MFAMethod.objects.create(
+            user=self.user, name="email", secret=pyotp.random_base32(), is_primary=False, is_active=True,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _codigo(self, metodo):
+        return MFAHandlerRegistry.get_handler(metodo).get_otp_code()
+
+    def test_borrar_metodo_activo_sin_codigo_falla(self):
+        response = self.client.post("/api/auth/mfa/delete/", {"method": "app"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(MFAMethod.objects.filter(pk=self.app.pk).exists())
+
+    def test_borrar_metodo_activo_con_codigo_incorrecto_falla(self):
+        response = self.client.post("/api/auth/mfa/delete/", {"method": "app", "code": "000000"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(MFAMethod.objects.filter(pk=self.app.pk).exists())
+
+    def test_borrar_metodo_activo_con_codigo_valido(self):
+        response = self.client.post(
+            "/api/auth/mfa/delete/", {"method": "email", "code": self._codigo(self.email)}, format="json",
+        )
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(MFAMethod.objects.filter(pk=self.email.pk).exists())
+
+    def test_cambiar_primario_sin_codigo_falla(self):
+        response = self.client.post("/api/auth/mfa/primary/", {"method": "email"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.app.refresh_from_db()
+        self.assertTrue(self.app.is_primary)
+
+    def test_cambiar_primario_con_codigo_del_primario(self):
+        response = self.client.post(
+            "/api/auth/mfa/primary/", {"method": "email", "primary_code": self._codigo(self.app)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.email.refresh_from_db()
+        self.assertTrue(self.email.is_primary)
