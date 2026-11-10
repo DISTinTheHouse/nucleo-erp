@@ -2351,7 +2351,6 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
         cta = serializer.validated_data.get("cuenta_bancaria")
         if cta is None:
             raise ValidationError({"cuenta_bancaria": "Requerida."})
-        empresa = getattr(cta, "empresa", None)
         if not superuser:
             user_emp = getattr(user, "empresa", None)
             if user_emp is None:
@@ -2361,7 +2360,7 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
                 raise PermissionDenied()
         movimiento = serializer.save()
         MovimientoBancarioService.registrar_movimiento(
-            movimiento, empresa_id=getattr(empresa, "pk", None), usuario=user
+            movimiento, empresa_id=cta.empresa_id, usuario=user
         )
 
     @transaction.atomic
@@ -2427,12 +2426,11 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
         cta = serializer.validated_data.get("cuenta_bancaria")
         if cta is None:
             raise ValidationError({"cuenta_bancaria": "Requerida."})
-        cta_emp = getattr(cta, "empresa", None)
         if not superuser:
             user_emp = getattr(user, "empresa", None)
             if user_emp is None:
                 raise PermissionDenied("Usuario sin empresa.")
-            if getattr(cta_emp, "pk", None) != user_emp.pk:
+            if cta.empresa_id != user_emp.pk:
                 raise ValidationError({"cuenta_bancaria": "Cuenta no pertenece a la empresa."})
         serializer.save()
 
