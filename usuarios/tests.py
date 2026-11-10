@@ -462,6 +462,15 @@ class UsuarioViewSetAlcanceTests(_DosEmpresasMixin, TestCase):
             (self.ajena.pk, self.sucursal_ajena.pk, [self.sucursal_ajena.pk], [self.departamento_ajeno.pk]),
         )
 
+    def test_empresa_nula_con_sucursales_falla(self):
+        """``empresa: null`` deja al usuario sin empresa: ninguna sucursal es
+        suya, aunque fuera de la empresa que tenía."""
+        antes = self._alcance()
+        response = self._patch({"empresa": None, "sucursales": [self.sucursal.pk]}, self.superusuario)
+        self.assertEqual(response.status_code, 400, getattr(response, "data", None))
+        self.assertIn("sucursales", response.data)
+        self.assertEqual(self._alcance(), antes)
+
     def test_patch_sin_alcance_no_consulta_empresa(self):
         """La empresa destino se compara por id: un PATCH sin campos de alcance
         no lee la fila de ``empresas`` del usuario editado."""

@@ -104,8 +104,10 @@ class UsuarioSerializer(serializers.ModelSerializer):
             and not getattr(request_user, 'is_superuser', False)
         ):
             return getattr(request_user, 'empresa_id', None)
-        empresa = data.get('empresa')
-        return empresa.pk if empresa else getattr(self.instance, 'empresa_id', None)
+        # La clave manda aunque traiga ``null``: el usuario queda sin empresa.
+        if 'empresa' in data:
+            return data['empresa'].pk if data['empresa'] is not None else None
+        return getattr(self.instance, 'empresa_id', None)
 
     def _set_roles(self, user, roles_ids):
         UsuarioRol.objects.filter(usuario=user).delete()
