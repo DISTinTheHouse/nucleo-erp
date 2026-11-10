@@ -2969,7 +2969,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
             # ya la rechaza antes; esto cubre cualquier otro camino.
             serie_folio = (
                 SerieFolio.objects.select_for_update()
-                .filter(pk=pedido.serie_folio_id, empresa_id=pedido.empresa_id)
+                # ``activo=True`` (#1037): una serie dada de baja no consume folios.
+                .filter(pk=pedido.serie_folio_id, empresa_id=pedido.empresa_id, activo=True)
                 .first()
             )
         else:

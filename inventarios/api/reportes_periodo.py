@@ -123,7 +123,13 @@ def almacenes_en_alcance(user, qs=None):
 
 
 def _almacenes_en_alcance(user, qs):
-    return qs if user.is_superuser else almacenes_en_alcance(user, qs)
+    # Superusuario: toda su empresa activa, sin sub-alcance por sucursal; nunca
+    # otras (#1035, EC-798). ``?empresa=`` ya no elige otra empresa.
+    if user.is_superuser:
+        from nucleo.scope import empresa_ids_lectura
+
+        return qs.filter(empresa_id__in=empresa_ids_lectura(user))
+    return almacenes_en_alcance(user, qs)
 
 
 def almacenes_del_reporte(user, query_params, almacen_id):

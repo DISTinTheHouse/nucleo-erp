@@ -897,7 +897,15 @@ class PedidoSerializer(serializers.ModelSerializer):
     def validate_serie_folio(self, serie_folio):
         # Rechazada aquí, antes de ``perform_create``: una serie ajena nunca llega
         # a ``_asignar_folio`` ni consume su consecutivo.
-        return _exigir_empresa_documento(self, "serie_folio", serie_folio)
+        serie_folio = _exigir_empresa_documento(self, "serie_folio", serie_folio)
+        # Inactiva (#1037): mismo 400 que una inexistente. Si el pedido ya la
+        # tenía (se desactivó después), no se obliga a cambiarla.
+        actual = getattr(self.instance, "serie_folio_id", None)
+        if serie_folio is not None and not serie_folio.activo and serie_folio.pk != actual:
+            raise serializers.ValidationError(
+                _error_pk_inexistente(self, "serie_folio", serie_folio), code="does_not_exist"
+            )
+        return serie_folio
 
     def validate_moneda(self, moneda):
         return _exigir_empresa_documento(self, "moneda", moneda, _moneda_de_la_empresa)

@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
@@ -320,7 +320,12 @@ class FacturaSerializer(serializers.ModelSerializer):
             request = self.context.get('request')
             empresa_id = getattr(getattr(request, 'user', None), 'empresa_id', None)
         fields['pedido'].queryset = Pedido.objects.filter(empresa_id=empresa_id)
-        fields['serie_folio'].queryset = SerieFolio.objects.filter(empresa_id=empresa_id)
+        # Solo series activas (#1037); la que ya tiene la factura se acepta
+        # aunque se haya desactivado después.
+        serie_actual = getattr(self.instance, 'serie_folio_id', None) if self.instance is not None and not hasattr(self.instance, '__iter__') else None
+        fields['serie_folio'].queryset = SerieFolio.objects.filter(empresa_id=empresa_id).filter(
+            Q(activo=True) | Q(pk=serie_actual)
+        )
         fields['factura_detalles'].child.fields['pedido_detalle_talla'].queryset = (
             PedidoDetalleTalla.objects.filter(pedido_detalle__pedido__empresa_id=empresa_id)
         )

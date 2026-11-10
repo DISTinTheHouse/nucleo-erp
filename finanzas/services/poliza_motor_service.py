@@ -157,7 +157,8 @@ class PolizaMotorService:
         if sucursal_id:
             return sucursal_id
         por_omision = getattr(usuario, "sucursal_default_id", None)
-        if por_omision:
+        # Solo si es de la empresa de la póliza (#1039); si no, la primera activa.
+        if por_omision and Sucursal.objects.filter(pk=por_omision, empresa_id=empresa_id).exists():
             return por_omision
         primera = (
             Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
