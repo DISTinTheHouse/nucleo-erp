@@ -146,6 +146,8 @@ Estos endpoints requieren que el usuario ya haya conectado Google con el flujo a
 
 Lista las empresas a las que el usuario tiene acceso explícito. Usar para el **Selector de Empresa**.
 
+Solo empresas **activas**, con el mismo criterio que acepta `cambiar-empresa` (EC-843): al superusuario todas las activas; a los demás, las activas de su M2M `empresas`. Su empresa activa sale siempre, aunque esté inactiva, para mostrar dónde está. Orden: `razon_social` y luego `id`.
+
 - **Endpoint**: `GET /api/v1/nucleo/mis-empresas/`
 - **Respuesta**:
   ```json
@@ -159,6 +161,18 @@ Lista las empresas a las que el usuario tiene acceso explícito. Usar para el **
     }
   ]
   ```
+
+### Cambiar Empresa Activa (EC-843)
+
+Todo el ERP lee y escribe solo en la empresa activa (`user.empresa`). **Solo el superusuario** la cambia, y solo la suya, a cualquier empresa activa. El M2M `empresas` no da acceso a este endpoint.
+
+- **Endpoint**: `POST /api/v1/nucleo/cambiar-empresa/`
+- **Body**: `{ "empresa": 55 }`
+- **Respuesta `200`**: el mismo payload que `GET /api/auth/user/` (con `empresa` y `empresa_id` ya actualizados). No hace falta volver a iniciar sesión: el JWT solo lleva el id del usuario y la siguiente petición ya opera en la empresa nueva.
+- **Efectos**: `sucursal_default` pasa a la primera sucursal activa de la empresa nueva por `codigo` (`null` si no tiene); `sucursales` y `departamentos` quedan vacíos (el superusuario no se acota por sucursal). Queda un `AuditoriaEvento` (`modulo="usuarios"`, `accion="CAMBIAR_EMPRESA"`) en la empresa nueva con el alcance anterior. No cambia el M2M `empresas`, roles, overrides ni `is_admin_empresa`.
+- **Misma empresa**: `200` con la misma respuesta, sin cambios, aunque esté inactiva. Se compara con la empresa guardada en la BD al momento del cambio (fila bloqueada), no con la que tenía la sesión al autenticar.
+- **Errores**: `403` si no es superusuario; `400 {"empresa": ["Empresa no válida."]}` en cualquier otro caso: no existe, está inactiva, el id no es válido, viene `null` o falta `empresa` (mismo cuerpo en todos).
+- **Único camino**: ni `/api/auth/user/`, ni `/api/v1/usuarios/`, ni el Web Core (`/core/usuarios/<id>/editar/`), ni el admin de Django dejan cambiar la empresa propia.
 
 ### Mis Sucursales
 
@@ -348,7 +362,7 @@ API completa para gestionar el personal de la empresa (cajeros, vendedores, gere
 
 **Permisos**:
 
-- **Superusuario**: Acceso total.
+- **Superusuario**: lista, ve, edita y elimina solo usuarios de **su empresa activa** (EC-843; otra empresa → `404`, sin empresa → lista vacía). Puede mover a uno de esos usuarios a otra empresa **activa** (a una inactiva → `400 {"empresa": "Empresa no válida."}`; reenviar la empresa que ya tiene el usuario vale aunque esté inactiva), pero no cambiar su propia `empresa` aquí (`403`): eso se hace con `POST /api/v1/nucleo/cambiar-empresa/`.
 - **Admin Empresa**: Puede crear, editar y eliminar usuarios que pertenezcan a **su misma empresa**. No puede conceder `is_superuser`, `is_admin_empresa` ni `is_staff`, ni al crear ni al editar → `403`. Reenviar el valor que el usuario ya tiene sí se permite.
 
 ### Endpoints

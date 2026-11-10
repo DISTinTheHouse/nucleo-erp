@@ -8,6 +8,21 @@ from ..models import (
 )
 from ..utils import validate_rfc
 
+
+class CambiarEmpresaSerializer(serializers.Serializer):
+    """Cuerpo de ``POST /api/v1/nucleo/cambiar-empresa/`` (EC-843).
+
+    Solo lee el id. Si es la empresa actual (no-op) o una empresa activa lo
+    decide la vista, una sola vez, sobre la fila del usuario ya bloqueada. Un
+    cuerpo inválido (sin ``empresa``, ``null``, texto, booleano) no es un error
+    de este serializer: la vista lo trata como cualquier empresa no válida, con
+    el mismo 400.
+    """
+
+    MENSAJE = "Empresa no válida."
+
+    empresa = serializers.IntegerField(required=False, allow_null=True)
+
 class SatRegimenFiscalSerializer(serializers.ModelSerializer):
     class Meta:
         model = SatRegimenFiscal

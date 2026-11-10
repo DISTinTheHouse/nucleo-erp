@@ -67,6 +67,13 @@ class UsuarioUpdateView(AuditLogMixin, SuccessMessageMixin, LoginRequiredMixin, 
     success_url = reverse_lazy('usuarios:usuario_list')
     success_message = "El usuario %(username)s fue editado correctamente."
 
+    def get_form_kwargs(self):
+        # El formulario necesita saber quién edita para no dejar que alguien
+        # cambie su propia empresa aquí (EC-843).
+        kwargs = super().get_form_kwargs()
+        kwargs['editor'] = self.request.user
+        return kwargs
+
 class UsuarioDeleteView(AuditLogMixin, LoginRequiredMixin, SuperuserRequiredMixin, DeleteView):
     model = Usuario
     template_name = 'usuarios/usuario_confirm_delete.html'

@@ -154,7 +154,15 @@ class UsuarioChangeForm(TailwindFormMixin, UserChangeForm):
         label="Roles Asignados (Definen permisos y acceso a departamentos)"
     )
 
-    def __init__(self, *args, **kwargs):
+    MENSAJE_EMPRESA_PROPIA = (
+        "Tu empresa activa se cambia en /api/v1/nucleo/cambiar-empresa/."
+    )
+
+    def __init__(self, *args, editor=None, **kwargs):
+        # ``editor``: quien edita (``request.user``). Si se edita a sí mismo no
+        # puede cambiar su ``empresa`` aquí (EC-843): solo por ``cambiar-empresa``,
+        # que además rehace su alcance por sucursal y lo audita.
+        self.editor = editor
         super().__init__(*args, **kwargs)
         self.fields['email'].required = True
         self.fields['sucursales'].widget = forms.CheckboxSelectMultiple()
@@ -214,6 +222,16 @@ class UsuarioChangeForm(TailwindFormMixin, UserChangeForm):
     def clean(self):
         cleaned_data = super().clean()
         empresa = cleaned_data.get('empresa')
+
+        # ``self.instance`` todavía tiene la empresa guardada: la del formulario
+        # se copia al modelo después de ``clean()``. Reenviar la misma sí vale.
+        if (
+            self.editor is not None
+            and self.instance.pk == self.editor.pk
+            and 'empresa' in cleaned_data
+            and getattr(empresa, 'pk', None) != self.instance.empresa_id
+        ):
+            self.add_error('empresa', self.MENSAJE_EMPRESA_PROPIA)
         sucursal_default = cleaned_data.get('sucursal_default')
         is_admin_empresa = cleaned_data.get('is_admin_empresa')
 
