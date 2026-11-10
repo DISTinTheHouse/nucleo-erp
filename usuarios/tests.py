@@ -13,6 +13,7 @@ from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from nucleo.models import Departamento, Empresa, Sucursal
 from seguridad.models import Rol, UsuarioRol
+from usuarios.api.serializers import UsuarioSerializer
 from usuarios.models import Usuario
 from wms.models import RfidScan
 
@@ -372,6 +373,18 @@ class IaCrearUsuarioTests(_DosEmpresasMixin, TestCase):
     def test_admin_no_concede_is_staff(self):
         self.assertFalse(self._crear(is_staff=True)["ok"])
         self._no_se_creo()
+
+    def test_admin_no_concede_ninguna_bandera_de_la_lista_compartida(self):
+        """Misma lista que ``UsuarioViewSet``: vive en ``UsuarioSerializer``."""
+        self.assertEqual(
+            UsuarioSerializer.BANDERAS_PRIVILEGIO, ("is_superuser", "is_admin_empresa", "is_staff"),
+        )
+        for bandera in UsuarioSerializer.BANDERAS_PRIVILEGIO:
+            with self.subTest(bandera=bandera):
+                resultado = self._crear(**{bandera: True})
+                self.assertFalse(resultado["ok"], resultado)
+                self.assertIn(f"`{bandera}`", resultado["error"])
+                self._no_se_creo()
 
     def test_admin_no_asigna_sucursales_ajenas(self):
         self.assertFalse(self._crear(sucursales=[self.sucursal_ajena.pk])["ok"])

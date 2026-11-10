@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 from nucleo.permisos import permisos_efectivos
 from seguridad.models import Rol, UsuarioRol
 from ..alcance import errores_de_alcance
@@ -12,7 +13,11 @@ class UsuarioSerializer(serializers.ModelSerializer):
     empresa_id = serializers.SerializerMethodField(read_only=True)
     nombre_completo = serializers.SerializerMethodField(read_only=True)
     es_admin = serializers.SerializerMethodField(read_only=True)
-    
+
+    # Banderas que un admin de empresa no concede, ni al crear ni al editar
+    # (#306). Una sola lista para ``/api/v1/usuarios/`` y el asistente (EC-844).
+    BANDERAS_PRIVILEGIO = ("is_superuser", "is_admin_empresa", "is_staff")
+
     class Meta:
         model = Usuario
         fields = [
@@ -102,18 +107,35 @@ class UsuarioSerializer(serializers.ModelSerializer):
             if roles_qs.count() != len(set(roles_ids)):
                 raise serializers.ValidationError({"roles": "Uno o más roles no existen o no pertenecen a la empresa."})
 
+        # Al final, como cuando vivía en ``perform_create``/``perform_update``:
+        # los 400 de validación siguen saliendo antes que este 403.
+        self._bloquear_concesion_de_privilegios(data, request_user)
         return data
+
+    @staticmethod
+    def _es_admin_de_empresa(request_user):
+        return (
+            request_user is not None
+            and getattr(request_user, 'is_admin_empresa', False)
+            and not getattr(request_user, 'is_superuser', False)
+        )
+
+    def _bloquear_concesion_de_privilegios(self, data, request_user):
+        """Un admin de empresa no concede banderas de privilegio, ni al crear ni
+        al editar. Reenviar el valor que el usuario ya tiene no cuenta. El
+        superusuario sí las concede (#306)."""
+        if not self._es_admin_de_empresa(request_user):
+            return
+        for bandera in self.BANDERAS_PRIVILEGIO:
+            if data.get(bandera) and not getattr(self.instance, bandera, False):
+                raise PermissionDenied(f"No puedes conceder `{bandera}`.")
 
     def _empresa_destino_id(self, data, request_user):
         """Id de la empresa en la que queda el usuario editado: la del admin de
         empresa (``UsuarioViewSet`` y el asistente la fuerzan al guardar); para
         el superusuario, la que llega o la que ya tenía. Por id, sin leer la
         fila de ``empresas``."""
-        if (
-            request_user is not None
-            and getattr(request_user, 'is_admin_empresa', False)
-            and not getattr(request_user, 'is_superuser', False)
-        ):
+        if self._es_admin_de_empresa(request_user):
             return getattr(request_user, 'empresa_id', None)
         # La clave manda aunque traiga ``null``: el usuario queda sin empresa.
         if 'empresa' in data:

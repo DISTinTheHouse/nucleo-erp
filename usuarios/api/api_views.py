@@ -127,15 +127,9 @@ class UsuarioViewSet(viewsets.ModelViewSet):
         if request.method not in permissions.SAFE_METHODS:
              raise PermissionDenied("No tienes permisos para realizar esta acción.")
 
-    BANDERAS_PRIVILEGIO = ("is_superuser", "is_admin_empresa", "is_staff")
-
-    def _bloquear_concesion_de_privilegios(self, serializer):
-        """Un admin de empresa no concede banderas de privilegio, ni al crear ni
-        al editar. Reenviar el valor que el usuario ya tiene no cuenta."""
-        instance = serializer.instance
-        for bandera in self.BANDERAS_PRIVILEGIO:
-            if serializer.validated_data.get(bandera) and not getattr(instance, bandera, False):
-                raise PermissionDenied(f"No puedes conceder `{bandera}`.")
+    # Las banderas de privilegio que un admin de empresa no concede (#306) se
+    # bloquean en ``UsuarioSerializer.validate``, el mismo camino que usa el
+    # asistente (EC-844).
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -147,10 +141,8 @@ class UsuarioViewSet(viewsets.ModelViewSet):
 
         # Caso Admin de Empresa
         if getattr(user, 'is_admin_empresa', False):
-            self._bloquear_concesion_de_privilegios(serializer)
-
-            # Sucursales y departamentos ya se validaron contra esta empresa en
-            # ``UsuarioSerializer.validate`` (EC-844).
+            # Banderas, sucursales y departamentos ya se validaron contra esta
+            # empresa en ``UsuarioSerializer.validate`` (EC-844).
             # Forzar asignación a la empresa del admin
             serializer.save(empresa=user.empresa)
         else:
@@ -166,8 +158,7 @@ class UsuarioViewSet(viewsets.ModelViewSet):
 
         # Caso Admin de Empresa
         if getattr(user, 'is_admin_empresa', False):
-            self._bloquear_concesion_de_privilegios(serializer)
-
+            # Banderas de privilegio: ``UsuarioSerializer.validate`` (EC-844).
             # Impedir cambiar la empresa del usuario
             if 'empresa' in serializer.validated_data and serializer.validated_data['empresa'] != user.empresa:
                  raise PermissionDenied("No puedes mover usuarios a otra empresa.")
