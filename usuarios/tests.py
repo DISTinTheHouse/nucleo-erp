@@ -5,8 +5,9 @@ from auth_kit.mfa.handlers.base import MFAHandlerRegistry
 from auth_kit.mfa.models import MFAMethod
 from django.conf import settings
 from django.contrib.admin.sites import site
-from django.db import transaction
+from django.db import connection, transaction
 from django.test import RequestFactory, TestCase
+from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
@@ -459,6 +460,19 @@ class UsuarioViewSetAlcanceTests(_DosEmpresasMixin, TestCase):
         self.assertEqual(
             self._alcance(),
             (self.ajena.pk, self.sucursal_ajena.pk, [self.sucursal_ajena.pk], [self.departamento_ajeno.pk]),
+        )
+
+    def test_patch_sin_alcance_no_consulta_empresa(self):
+        """La empresa destino se compara por id: un PATCH sin campos de alcance
+        no lee la fila de ``empresas`` del usuario editado."""
+        client = APIClient()
+        client.force_authenticate(user=self.superusuario)
+        objetivo = Usuario.objects.get(pk=self.objetivo.pk)  # sin la empresa en caché
+        with CaptureQueriesContext(connection) as ctx:
+            response = client.patch(f"{self.URL}{objetivo.pk}/", {"first_name": "Ana"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(
+            [q["sql"] for q in ctx.captured_queries if 'FROM "empresas"' in q["sql"]]
         )
 
     def test_alta_de_admin_con_sucursal_ajena_falla(self):

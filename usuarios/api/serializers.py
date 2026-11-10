@@ -64,7 +64,7 @@ class UsuarioSerializer(serializers.ModelSerializer):
         request_user = getattr(request, 'user', None)
 
         roles_ids = data.get('roles')
-        empresa_final = self._empresa_destino(data, request_user)
+        empresa_final = self._empresa_destino_id(data, request_user)
 
         # Sucursales, departamentos y sucursal por defecto, de la empresa del
         # usuario editado aunque llegue uno solo (EC-844). Antes solo se comparaba
@@ -87,23 +87,25 @@ class UsuarioSerializer(serializers.ModelSerializer):
             if not empresa_final:
                 raise serializers.ValidationError({"roles": "No se puede validar roles sin empresa."})
 
-            roles_qs = Rol.objects.filter(id__in=roles_ids, empresa=empresa_final)
+            roles_qs = Rol.objects.filter(id__in=roles_ids, empresa_id=empresa_final)
             if roles_qs.count() != len(set(roles_ids)):
                 raise serializers.ValidationError({"roles": "Uno o más roles no existen o no pertenecen a la empresa."})
 
         return data
 
-    def _empresa_destino(self, data, request_user):
-        """Empresa en la que queda el usuario editado: la del admin de empresa
-        (``UsuarioViewSet`` y el asistente la fuerzan al guardar); para el
-        superusuario, la que llega o la que ya tenía."""
+    def _empresa_destino_id(self, data, request_user):
+        """Id de la empresa en la que queda el usuario editado: la del admin de
+        empresa (``UsuarioViewSet`` y el asistente la fuerzan al guardar); para
+        el superusuario, la que llega o la que ya tenía. Por id, sin leer la
+        fila de ``empresas``."""
         if (
             request_user is not None
             and getattr(request_user, 'is_admin_empresa', False)
             and not getattr(request_user, 'is_superuser', False)
         ):
-            return getattr(request_user, 'empresa', None)
-        return data.get('empresa') or getattr(self.instance, 'empresa', None)
+            return getattr(request_user, 'empresa_id', None)
+        empresa = data.get('empresa')
+        return empresa.pk if empresa else getattr(self.instance, 'empresa_id', None)
 
     def _set_roles(self, user, roles_ids):
         UsuarioRol.objects.filter(usuario=user).delete()

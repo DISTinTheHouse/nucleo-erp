@@ -12,14 +12,14 @@ MENSAJES = {
 }
 
 
-def errores_de_alcance(empresa, *, sucursal_default=None, sucursales=None, departamentos=None):
-    """``{campo: mensaje}`` con lo que no pertenece a ``empresa``; vacío si todo cuadra.
+def errores_de_alcance(empresa_id, *, sucursal_default=None, sucursales=None, departamentos=None):
+    """``{campo: mensaje}`` con lo que no pertenece a la empresa ``empresa_id``;
+    vacío si todo cuadra.
 
     Solo revisa lo que llega (``None`` = no se envió). Sin empresa, cualquier
     sucursal o departamento es ajeno. Compara ``empresa_id`` de las instancias
     ya resueltas por el serializer, sin consultas extra.
     """
-    empresa_id = getattr(empresa, "pk", None)
 
     def ajenos(objetos):
         return any(obj.empresa_id != empresa_id or empresa_id is None for obj in objetos)
