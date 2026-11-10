@@ -100,8 +100,8 @@ Como la cookie usa `SameSite=None`, cualquier página podría disparar requests 
 `ERP/settings.py:328-343`:
 
 - `CORS_ALLOW_ALL_ORIGINS=False`, `CORS_ALLOW_CREDENTIALS=True` (obligatorio para cookies cross-site).
-- `CORS_ALLOWED_ORIGINS` por env var (default solo `localhost:3000`, `:3001` y `:3002`, http y https).
-- `CORS_ALLOWED_ORIGIN_REGEXES`: cualquier `*.onrender.com` y `*.vercel.app` — **incluye previews de Vercel**, no solo producción. Amplio a propósito para no bloquear PRs de Next.js, pero es superficie extra.
+- `CORS_ALLOWED_ORIGINS` y `CSRF_TRUSTED_ORIGINS` son una lista explícita en código (`FRONTEND_ORIGINS`, EC-844): `https://lazzar-erp.vercel.app` más `localhost:3000`, `:3001` y `:3002` (http y https). No se leen de env vars.
+- `CORS_ALLOWED_ORIGIN_REGEXES = []`. Antes aceptaba cualquier `*.onrender.com` y `*.vercel.app`; como cualquiera publica ahí, un sitio ajeno leía el `access` de `/api/auth/token/refresh/` con la cookie de la víctima. Los previews de Vercel del front ya no se autentican contra el backend.
 - `CORS_URLS_REGEX = r'^/api/.*$'` — CORS solo aplica a `/api/`, no a las vistas HTML del Core (`/`, `/QA/`, etc.), que son same-origin por diseño.
 
 ---

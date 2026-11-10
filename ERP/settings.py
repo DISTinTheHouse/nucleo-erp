@@ -342,23 +342,35 @@ SPECTACULAR_SETTINGS = {
 # =========================
 # CORS HEADERS
 # =========================
+# Orígenes del frontend, explícitos y en código (EC-844). Antes había regex
+# ``*.vercel.app`` y ``*.onrender.com``: cualquiera publica ahí un sitio, y con
+# la cookie ``SameSite=None`` ese sitio leía ``/api/auth/token/refresh/`` (el
+# ``access`` va en el body) y pasaba ``enforce_origin``. Los previews de Vercel
+# del front ya no se autentican contra este backend; es deliberado.
+FRONTEND_ORIGINS_PRODUCCION = [
+    'https://lazzar-erp.vercel.app',
+]
+FRONTEND_ORIGINS_DESARROLLO = [
+    'http://localhost:3000', 'https://localhost:3000',
+    'http://localhost:3001', 'https://localhost:3001',
+    'http://localhost:3002', 'https://localhost:3002',
+]
+FRONTEND_ORIGINS = FRONTEND_ORIGINS_PRODUCCION + FRONTEND_ORIGINS_DESARROLLO
+
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = config('CORS_ALLOW_CREDENTIALS', default=True, cast=bool)
-CORS_ALLOWED_ORIGINS = [o.strip() for o in config('CORS_ALLOWED_ORIGINS', default='http://localhost:3000,https://localhost:3000,http://localhost:3001,https://localhost:3001,http://localhost:3002,https://localhost:3002').split(',') if o.strip()]
-CORS_ALLOWED_ORIGIN_REGEXES = [
-    r'^https://.*\.onrender\.com$',
-    r'^https://.*\.vercel\.app$',
-]
+# ``nucleo.authentication.OriginEnforcedJWTCookieAuthentication`` valida las
+# escrituras por cookie contra esta misma lista.
+CORS_ALLOWED_ORIGINS = list(FRONTEND_ORIGINS)
+CORS_ALLOWED_ORIGIN_REGEXES = []
 CORS_URLS_REGEX = r'^/api/.*$'
 # Las descargas de la API mandan el nombre del archivo en Content-Disposition;
 # sin exponerlo, el navegador se lo oculta al front, que vive en otro origen (EC-824).
 CORS_EXPOSE_HEADERS = ["Content-Disposition"]
 
-CSRF_TRUSTED_ORIGINS = [o.strip() for o in config('CSRF_TRUSTED_ORIGINS', default='https://*.onrender.com,https://*.vercel.app,https://localhost:3000,http://localhost:3000,https://localhost:3001,http://localhost:3001,https://localhost:3002,http://localhost:3002').split(',') if o.strip()]
-if IS_VERCEL:
-    vercel_url = os.environ.get('VERCEL_URL')
-    if vercel_url:
-        CSRF_TRUSTED_ORIGINS.append(f"https://{vercel_url}")
+# Mismos orígenes. Las páginas del propio backend (admin, Core, Swagger) son
+# same-origin y Django las acepta sin listarlas.
+CSRF_TRUSTED_ORIGINS = list(FRONTEND_ORIGINS)
 
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o-mini')
