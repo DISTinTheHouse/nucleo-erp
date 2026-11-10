@@ -180,10 +180,13 @@ class PerfilUsuarioSerializer(UsuarioSerializer):
     ``UserView`` de auth_kit edita ``request.user`` sin más permiso que estar
     autenticado, así que aquí solo se escriben nombre, apellido, teléfono y
     avatar (EC-844). La respuesta conserva los campos de ``UsuarioSerializer``
-    (NextAuth lee id, username, email, nombre, permisos y banderas). Banderas,
-    empresa, alcance, roles, estatus, email y username se ignoran; la contraseña
-    se rechaza: solo cambia por ``/api/auth/password/change/``, que pide la actual.
+    (NextAuth lee id, username, email, nombre, permisos y banderas). Cualquier
+    otra clave se rechaza con 400 y no se guarda nada, en lugar de ignorarla con
+    200; la contraseña solo cambia por ``/api/auth/password/change/``, que pide
+    la actual.
     """
+
+    CAMPOS_EDITABLES = ("first_name", "last_name", "telefono", "avatar_url")
 
     password = None
     roles = None
@@ -196,8 +199,12 @@ class PerfilUsuarioSerializer(UsuarioSerializer):
         extra_kwargs = {}
 
     def validate(self, data):
-        if "password" in self.initial_data:
-            raise serializers.ValidationError({
-                "password": "La contraseña se cambia en /api/auth/password/change/ con la actual."
-            })
+        errores = {}
+        for campo in self.initial_data:
+            if campo == "password":
+                errores[campo] = "La contraseña se cambia en /api/auth/password/change/ con la actual."
+            elif campo not in self.CAMPOS_EDITABLES:
+                errores[campo] = "Este campo no se edita desde el perfil."
+        if errores:
+            raise serializers.ValidationError(errores)
         return data

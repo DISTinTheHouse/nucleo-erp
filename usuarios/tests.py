@@ -191,9 +191,21 @@ class PerfilAuthUserTests(_DosEmpresasMixin, TestCase):
             # usuario recién leído (``UserView`` edita el mismo objeto autenticado).
             with self.subTest(campo=campo), transaction.atomic():
                 self.client.force_authenticate(user=Usuario.objects.get(pk=self.user.pk))
-                self.client.patch(self.URL, {campo: valor}, format="json")
+                response = self.client.patch(self.URL, {campo: valor}, format="json")
+                self.assertEqual(response.status_code, 400, response.data)
+                self.assertIn(campo, response.data)
                 self.assertEqual(self._estado(), antes)
                 transaction.set_rollback(True)
+
+    def test_patch_mixto_se_rechaza_entero(self):
+        """Un campo editable junto a uno protegido: 400 y no se guarda ninguno."""
+        antes = self._estado()
+        response = self.client.patch(self.URL, {"first_name": "Ana", "is_superuser": True}, format="json")
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(set(response.data), {"is_superuser"})
+        self.assertEqual(self._estado(), antes)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.first_name, "")
 
     def test_promocion_en_dos_pasos_no_asigna_roles(self):
         """Antes: un PATCH con ``is_admin_empresa`` y otro con ``roles``."""
@@ -203,16 +215,23 @@ class PerfilAuthUserTests(_DosEmpresasMixin, TestCase):
         self.client.patch(self.URL, {"roles": [self.rol.pk]}, format="json")
         self.assertFalse(UsuarioRol.objects.filter(usuario=self.user).exists())
 
-    def test_put_no_escribe_campos_protegidos(self):
+    def test_put_con_campos_protegidos_se_rechaza(self):
         antes = self._estado()
         response = self.client.put(self.URL, {
             "first_name": "Ana", "email": self.user.email, "is_superuser": True,
             "empresa": self.ajena.pk, "sucursal_default": self.sucursal_ajena.pk,
         }, format="json")
-        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(set(response.data), {"email", "is_superuser", "empresa", "sucursal_default"})
         self.assertEqual(self._estado(), antes)
         self.user.refresh_from_db()
-        self.assertEqual(self.user.first_name, "Ana")
+        self.assertEqual(self.user.first_name, "")
+
+    def test_put_solo_con_campos_editables(self):
+        response = self.client.put(self.URL, {"first_name": "Ana", "last_name": "López"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.user.refresh_from_db()
+        self.assertEqual((self.user.first_name, self.user.last_name), ("Ana", "López"))
 
     def test_password_se_rechaza(self):
         antes = Usuario.objects.get(pk=self.user.pk).password
