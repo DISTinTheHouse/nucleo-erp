@@ -21,6 +21,7 @@ from .serializers import (
     CambiarEmpresaSerializer,
 )
 from seguridad.api.api_views import IsSuperUserOrReadOnly
+from ..scope import empresas_activas
 
 # --- VIEWSETS (Movidios desde views.py para limpiar arquitectura) ---
 
@@ -296,16 +297,17 @@ class UserEmpresasAPIView(APIView):
         """
         Retorna las empresas a las que el usuario tiene acceso.
         Incluye la empresa activa (FK) y las empresas permitidas (M2M).
+
+        Solo empresas activas, con el mismo criterio que acepta
+        ``cambiar-empresa`` (``empresas_activas``, EC-843); la empresa activa del
+        usuario sale siempre, aunque esté inactiva, para que el front muestre
+        dónde está.
         """
         user = request.user
-        if user.is_superuser:
-            empresas = Empresa.objects.all()
-        else:
-            # Combinar FK y M2M
-            empresas = Empresa.objects.filter(
-                models.Q(pk=user.empresa_id) | 
-                models.Q(pk__in=user.empresas.values('pk'))
-            ).distinct()
+        activas = empresas_activas()
+        if not user.is_superuser:
+            activas = activas.filter(pk__in=user.empresas.values('pk'))
+        empresas = (activas | Empresa.objects.filter(pk=user.empresa_id)).distinct()
         
         # Usamos el serializer existente o construimos data simple
         data = []

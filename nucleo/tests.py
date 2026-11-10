@@ -2231,3 +2231,81 @@ class CambiarEmpresaTests(TestCase):
     def test_solo_post(self):
         resp = self._cliente(self.root).get(self.URL)
         self.assertEqual(resp.status_code, 405)
+
+
+class MisEmpresasActivasTests(TestCase):
+    """``GET /api/v1/nucleo/mis-empresas/`` ofrece solo empresas a las que se
+    puede cambiar (activas, mismo criterio que ``cambiar-empresa``) más la
+    empresa activa del usuario aunque esté inactiva (EC-843)."""
+
+    URL = "/api/v1/nucleo/mis-empresas/"
+    CAMBIAR = "/api/v1/nucleo/cambiar-empresa/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.a = Empresa.objects.create(codigo="acme", razon_social="ACME SA")
+        cls.b = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
+        cls.baja = Empresa.objects.create(codigo="baja", razon_social="BAJA SA", activo=False)
+        cls.baja_actual = Empresa.objects.create(codigo="cerrada", razon_social="CERRADA SA", activo=False)
+
+    def _ids(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        ids = [e["id"] for e in resp.data]
+        self.assertEqual(len(ids), len(set(ids)), "sin duplicados")
+        return set(ids)
+
+    def _todas_las_que_acepta_cambiar_empresa(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        aceptadas = set()
+        for empresa in Empresa.objects.all():
+            resp = client.post(self.CAMBIAR, {"empresa": empresa.pk}, format="json")
+            if resp.status_code == 200:
+                aceptadas.add(empresa.pk)
+            # Regresar a la empresa original sin pasar por el endpoint.
+            Usuario.objects.filter(pk=user.pk).update(empresa=user.empresa)
+        return aceptadas
+
+    def test_superusuario_no_recibe_empresas_inactivas(self):
+        root = Usuario.objects.create(
+            username="root", email="root@acme.test", empresa=self.a, is_superuser=True,
+        )
+        ids = self._ids(root)
+        self.assertTrue({self.a.pk, self.b.pk} <= ids)
+        self.assertNotIn(self.baja.pk, ids)
+        self.assertNotIn(self.baja_actual.pk, ids)
+
+    def test_superusuario_ve_exactamente_lo_que_acepta_cambiar_empresa(self):
+        root = Usuario.objects.create(
+            username="root", email="root@acme.test", empresa=self.a, is_superuser=True,
+        )
+        self.assertEqual(self._ids(root), self._todas_las_que_acepta_cambiar_empresa(root))
+
+    def test_la_empresa_actual_sale_aunque_este_inactiva(self):
+        root = Usuario.objects.create(
+            username="root", email="root@cerrada.test", empresa=self.baja_actual, is_superuser=True,
+        )
+        ids = self._ids(root)
+        self.assertIn(self.baja_actual.pk, ids)
+        self.assertNotIn(self.baja.pk, ids)
+        # cambiar-empresa no acepta la inactiva; mis-empresas = lo que acepta + la actual.
+        self.assertEqual(ids, self._todas_las_que_acepta_cambiar_empresa(root) | {self.baja_actual.pk})
+
+    def test_m2m_excluye_inactivas_y_conserva_la_actual(self):
+        user = Usuario.objects.create(
+            username="multi", email="multi@cerrada.test", empresa=self.baja_actual,
+        )
+        user.empresas.set([self.a, self.baja, self.baja_actual])
+        self.assertEqual(self._ids(user), {self.a.pk, self.baja_actual.pk})
+
+    def test_m2m_sin_empresa_actual_solo_activas(self):
+        user = Usuario.objects.create(username="libre", email="libre@acme.test")
+        user.empresas.set([self.b, self.baja])
+        self.assertEqual(self._ids(user), {self.b.pk})
+
+    def test_sin_m2m_solo_su_empresa(self):
+        user = Usuario.objects.create(username="op", email="op@acme.test", empresa=self.a)
+        self.assertEqual(self._ids(user), {self.a.pk})

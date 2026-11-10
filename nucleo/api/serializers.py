@@ -6,6 +6,7 @@ from ..models import (
     SerieFolio,
     Impuesto, UnidadMedida
 )
+from ..scope import empresas_activas
 from ..utils import validate_rfc
 
 
@@ -19,7 +20,7 @@ class CambiarEmpresaSerializer(serializers.Serializer):
     MENSAJE = "Empresa no válida."
 
     empresa = serializers.PrimaryKeyRelatedField(
-        queryset=Empresa.objects.filter(activo=True),
+        queryset=empresas_activas(),
         error_messages={"does_not_exist": MENSAJE, "incorrect_type": MENSAJE},
     )
 

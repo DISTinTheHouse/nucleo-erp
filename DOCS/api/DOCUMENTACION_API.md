@@ -146,6 +146,8 @@ Estos endpoints requieren que el usuario ya haya conectado Google con el flujo a
 
 Lista las empresas a las que el usuario tiene acceso explícito. Usar para el **Selector de Empresa**.
 
+Solo empresas **activas**, con el mismo criterio que acepta `cambiar-empresa` (EC-843): al superusuario todas las activas; a los demás, las activas de su M2M `empresas`. Su empresa activa sale siempre, aunque esté inactiva, para mostrar dónde está.
+
 - **Endpoint**: `GET /api/v1/nucleo/mis-empresas/`
 - **Respuesta**:
   ```json

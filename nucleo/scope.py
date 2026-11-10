@@ -12,6 +12,17 @@ documentadas, p. ej. producción #361).
 """
 
 
+def empresas_activas():
+    """Empresas a las que se puede cambiar: las activas. Un solo criterio para lo
+    que acepta ``cambiar-empresa`` y lo que ofrece ``mis-empresas`` (EC-843).
+
+    QuerySet perezoso: no consulta la BD hasta evaluarse.
+    """
+    from nucleo.models import Empresa
+
+    return Empresa.objects.filter(activo=True)
+
+
 def empresa_ids_lectura(user):
     """Empresas cuyos datos puede ver/escribir el usuario: solo la activa.
 
