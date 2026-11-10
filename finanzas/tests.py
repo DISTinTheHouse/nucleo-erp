@@ -11,6 +11,7 @@ import inspect
 import time
 from datetime import date, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from django.apps import apps as django_apps
@@ -23,6 +24,8 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from drf_spectacular.generators import SchemaGenerator
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.test import APIClient
 from rest_framework.viewsets import ViewSetMixin
 
@@ -10310,3 +10313,303 @@ class CxcDetallePolizasTests(LecturaJerarquicaBase):
         resp = self._client(self._usuario_con("pol-fact", ["R-CONTABILIDAD-CXC"])).get(self.url)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["factura"]["id"], self.registros["a"]["facturas"])
+
+
+CUENTAS_CONTABLES_URL = "/api/v1/finanzas/cuentas-contables/"
+CUENTAS_BANCARIAS_URL = "/api/v1/finanzas/cuentas-bancarias/"
+CUENTAS_POR_PAGAR_URL = "/api/v1/finanzas/cuentas-por-pagar/"
+
+
+class FkSinEmpresaEC846Tests(FinanzasBase):
+    """EC-846: los FK de encabezado se validan contra la empresa activa y fallan
+    cerrado. Uno de otra empresa o SIN empresa (``Cliente``/``Proveedor`` huérfanos)
+    responde 400; sólo la ``Moneda`` global (empresa null) es válida para todas."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.cliente_huerfano = Cliente.objects.create(empresa=None, nombre="Cliente sin empresa")
+
+    def setUp(self):
+        (
+            self.prov_a, _, self.oc_a, self.oc_det_a, self.rec_a, self.rec_det_a, self.fp_a,
+        ) = self._crear_oc_recepcion_y_factura_proveedor(self.a["empresa"], self.a["sucursal"], self.a["usuario"])
+        (
+            self.prov_b, _, self.oc_b, _, self.rec_b, _, self.fp_b,
+        ) = self._crear_oc_recepcion_y_factura_proveedor(self.b["empresa"], self.b["sucursal"], self.b["usuario"])
+        self.prov_huerfano = Proveedor.objects.create(
+            empresa=None, nombre="Proveedor sin empresa", moneda=self.moneda,
+            sat_regimen_fiscal=self.sat_regimen_fiscal, sat_forma_pago=self.sat_forma_pago,
+            sat_metodo_pago=self.sat_metodo_pago, codigo="PNULL", razon_social="Sin empresa SA",
+            telefono="8100000000", contacto_principal="Nadie", rfc="XAXX010101000",
+            email="huerfano@test.mx",
+        )
+        self.cta_a = self._crear_cuenta_bancaria(self.a["empresa"])
+        self.cta_b = self._crear_cuenta_bancaria(self.b["empresa"])
+
+    def _post(self, url, data, user=None):
+        return self._client(user or self.a["usuario"]).post(url, data, format="json")
+
+    def _assert_400(self, resp, campo):
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn(campo, resp.data)
+
+    # -- Cuenta contable: cuenta_padre (alta y edición) -------------------------
+
+    def test_cuenta_contable_padre(self):
+        padre_a = CuentaContable.objects.create(empresa=self.a["empresa"], codigo="1100", nombre="Activo")
+        padre_b = CuentaContable.objects.create(empresa=self.b["empresa"], codigo="1100", nombre="Activo")
+        datos = {"codigo": "1101", "nombre": "Caja", "tipo": "Activo"}
+
+        self._assert_400(self._post(CUENTAS_CONTABLES_URL, {**datos, "cuenta_padre": padre_b.pk}), "cuenta_padre")
+        resp = self._post(CUENTAS_CONTABLES_URL, {**datos, "cuenta_padre": padre_a.pk})
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        resp = self._client(self.a["usuario"]).patch(
+            f"{CUENTAS_CONTABLES_URL}{resp.data['id']}/", {"cuenta_padre": padre_b.pk}, format="json"
+        )
+        self._assert_400(resp, "cuenta_padre")
+
+    # -- Póliza: sucursal y centro_costo ----------------------------------------
+
+    def test_poliza_sucursal_y_centro_de_costo(self):
+        cargo, abono, centro = self._crear_cuentas_contables(self.a["empresa"])
+        centro_b = CentroCosto.objects.create(empresa=self.b["empresa"], codigo="CC09", nombre="B")
+
+        def poliza(**encabezado):
+            payload = {
+                "sucursal": self.a["sucursal"].pk, "centro_costo": centro.pk,
+                "tipo": Poliza.PolizaTipo.DIARIO.value,
+                "poliza_detalles": [
+                    {"cuenta_contable": cargo.pk, "cargo": "10.00", "abono": "0.00", "orden": 1},
+                    {"cuenta_contable": abono.pk, "cargo": "0.00", "abono": "10.00", "orden": 2},
+                ],
+            }
+            payload.update(encabezado)
+            return self._post(POLIZAS_URL, payload)
+
+        self._assert_400(poliza(sucursal=self.b["sucursal"].pk), "sucursal")
+        self._assert_400(poliza(centro_costo=centro_b.pk), "centro_costo")
+        self.assertFalse(Poliza.objects.exists())
+        resp = poliza()
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    # -- Factura de proveedor: proveedor, oc y recepcion ------------------------
+
+    def _factura_proveedor(self, **encabezado):
+        payload = {
+            "sucursal": self.a["sucursal"].pk, "proveedor": self.prov_a.pk, "oc": self.oc_a.pk,
+            "recepcion": self.rec_a.pk, "moneda": self.moneda.pk,
+            "factura_proveedor_detalles": [{
+                "oc_detalle": self.oc_det_a.pk, "recepcion_detalle": self.rec_det_a.pk,
+                "producto": self.oc_det_a.producto_id, "cantidad": "1.00", "precio_unitario": "50.00",
+                "impuesto": "0", "descuento": "0",
+            }],
+        }
+        payload.update(encabezado)
+        return self._post(FACTURAS_PROVEEDOR_URL, payload)
+
+    def test_factura_proveedor_fks_del_encabezado(self):
+        antes = FacturaProveedor.objects.count()
+        self._assert_400(self._factura_proveedor(proveedor=self.prov_b.pk), "proveedor")
+        self._assert_400(self._factura_proveedor(proveedor=self.prov_huerfano.pk), "proveedor")
+        self._assert_400(self._factura_proveedor(oc=self.oc_b.pk), "oc")
+        self._assert_400(self._factura_proveedor(recepcion=self.rec_b.pk), "recepcion")
+        self.assertEqual(FacturaProveedor.objects.count(), antes)
+        resp = self._factura_proveedor()
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    # -- Cuenta bancaria: banco y moneda (la global sí vale) --------------------
+
+    def _cuenta_bancaria(self, **campos):
+        payload = {"banco": self.cta_a.banco_id, "moneda": self.moneda.pk, "alias": "Nueva"}
+        payload.update(campos)
+        return self._post(CUENTAS_BANCARIAS_URL, payload)
+
+    def test_cuenta_bancaria_banco_y_moneda(self):
+        privada_a = Moneda.objects.create(codigo_iso="USD", nombre="Dólar A", empresa=self.a["empresa"])
+        privada_b = Moneda.objects.create(codigo_iso="USD", nombre="Dólar B", empresa=self.b["empresa"])
+
+        self._assert_400(self._cuenta_bancaria(banco=self.cta_b.banco_id), "banco")
+        self._assert_400(self._cuenta_bancaria(moneda=privada_b.pk), "moneda")
+        self.assertIsNone(self.moneda.empresa_id)  # ``self.moneda`` es la global.
+        resp = self._cuenta_bancaria()
+        self.assertEqual(resp.status_code, 201, resp.data)
+        resp = self._cuenta_bancaria(moneda=privada_a.pk, alias="USD")
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    # -- CxP: factura_proveedor y proveedor ------------------------------------
+
+    def test_cxp_factura_proveedor_y_proveedor(self):
+        FacturaProveedor.objects.filter(pk=self.fp_a.pk).update(
+            estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA, total=Decimal("300.00"),
+        )
+        datos = {"proveedor": self.prov_a.pk, "factura_proveedor": self.fp_a.pk, "total": "300.00"}
+
+        self._assert_400(
+            self._post(CUENTAS_POR_PAGAR_URL, {**datos, "factura_proveedor": self.fp_b.pk}), "factura_proveedor"
+        )
+        self._assert_400(self._post(CUENTAS_POR_PAGAR_URL, {**datos, "proveedor": self.prov_b.pk}), "proveedor")
+        self._assert_400(
+            self._post(CUENTAS_POR_PAGAR_URL, {**datos, "proveedor": self.prov_huerfano.pk}), "proveedor"
+        )
+        self.assertFalse(CuentaPorPagar.objects.exists())
+        resp = self._post(CUENTAS_POR_PAGAR_URL, datos)
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    # -- Cobro: cliente y cuenta_bancaria ---------------------------------------
+
+    def _cobro(self, user=None, **encabezado):
+        if not hasattr(self, "cxc_a"):
+            self.cxc_a = self._cxc(self.a["empresa"])
+        payload = {
+            "cliente": self.a["cliente"].pk, "cuenta_bancaria": self.cta_a.pk, "total_cobrado": "10.00",
+            "cobro_detalles": [{"cxc": self.cxc_a.pk, "importe_aplicado": "10.00"}],
+        }
+        payload.update(encabezado)
+        return self._post(COBROS_URL, payload, user=user)
+
+    def test_cobro_cliente_y_cuenta_bancaria(self):
+        self._assert_400(self._cobro(cliente=self.b["cliente"].pk), "cliente")
+        self._assert_400(self._cobro(cliente=self.cliente_huerfano.pk), "cliente")
+        self._assert_400(self._cobro(cuenta_bancaria=self.cta_b.pk), "cuenta_bancaria")
+        self.assertFalse(Cobro.objects.exists())
+        resp = self._cobro()
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    # -- Pago: proveedor y cuenta_bancaria --------------------------------------
+
+    def _pago(self, user=None, **encabezado):
+        if not hasattr(self, "cxp_a"):
+            FacturaProveedor.objects.filter(pk=self.fp_a.pk).update(
+                estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA, total=Decimal("100.00"),
+            )
+            self.cxp_a = CuentaPorPagar.objects.create(
+                empresa=self.a["empresa"], proveedor=self.prov_a, factura_proveedor=self.fp_a,
+                total=Decimal("100.00"), saldo=Decimal("100.00"),
+            )
+        payload = {
+            "proveedor": self.prov_a.pk, "cuenta_bancaria": self.cta_a.pk, "total_pagado": "10.00",
+            "pago_detalles": [{"cxp": self.cxp_a.pk, "importe_aplicado": "10.00"}],
+        }
+        payload.update(encabezado)
+        return self._post(PAGOS_URL, payload, user=user)
+
+    def test_pago_proveedor_y_cuenta_bancaria(self):
+        self._assert_400(self._pago(proveedor=self.prov_b.pk), "proveedor")
+        self._assert_400(self._pago(proveedor=self.prov_huerfano.pk), "proveedor")
+        self._assert_400(self._pago(cuenta_bancaria=self.cta_b.pk), "cuenta_bancaria")
+        self.assertFalse(Pago.objects.exists())
+        resp = self._pago()
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_superusuario_con_empresa_activa_valida_igual(self):
+        root = Usuario.objects.create_superuser(
+            username="root-ec846@test.mx", email="root-ec846@test.mx", password="x",
+            empresa=self.a["empresa"],
+        )
+        self._assert_400(self._pago(user=root, proveedor=self.prov_huerfano.pk), "proveedor")
+        self._assert_400(self._pago(user=root, proveedor=self.prov_b.pk), "proveedor")
+        self._assert_400(self._cobro(user=root, cliente=self.cliente_huerfano.pk), "cliente")
+        self._assert_400(self._cuenta_bancaria_como(root, banco=self.cta_b.banco_id), "banco")
+        resp = self._pago(user=root)
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(Pago.objects.get().empresa_id, self.a["empresa"].pk)
+
+    def _cuenta_bancaria_como(self, user, **campos):
+        payload = {"banco": self.cta_a.banco_id, "moneda": self.moneda.pk, "alias": "Root"}
+        payload.update(campos)
+        return self._post(CUENTAS_BANCARIAS_URL, payload, user=user)
+
+    # -- Nota de crédito: factura y cliente -------------------------------------
+
+    def _factura(self, tenant, cliente=None):
+        return Factura.objects.create(
+            empresa=tenant["empresa"], sucursal=tenant["sucursal"], cliente=cliente or tenant["cliente"],
+            moneda=self.moneda, total=Decimal("116.00"),
+        )
+
+    def _nota(self, factura, cliente):
+        return self._post(NOTAS_CREDITO_URL, {
+            "factura": factura.pk, "cliente": cliente.pk,
+            "subtotal": "100.00", "impuestos": "16.00", "total": "116.00",
+        })
+
+    def test_nota_de_credito_factura_y_cliente(self):
+        self._assert_400(self._nota(self._factura(self.b), self.b["cliente"]), "factura")
+        # Factura heredada de un cliente sin empresa: el cliente ya no pasa.
+        factura_huerfana = self._factura(self.a, cliente=self.cliente_huerfano)
+        self._assert_400(self._nota(factura_huerfana, self.cliente_huerfano), "cliente")
+        self.assertFalse(NotaCredito.objects.exists())
+        resp = self._nota(self._factura(self.a), self.a["cliente"])
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    # -- CxC: cliente en la edición ----------------------------------------------
+
+    def _cxc(self, empresa):
+        return CuentaPorCobrar.objects.create(
+            empresa=empresa, cliente=self.a["cliente"], factura=self._factura(self.a),
+            total=Decimal("116.00"), saldo=Decimal("116.00"),
+        )
+
+    def test_cxc_patch_cliente(self):
+        cxc = self._cxc(self.a["empresa"])
+        url = f"{CXC_URL}{cxc.pk}/"
+        client = self._client(self.a["usuario"])
+        self._assert_400(client.patch(url, {"cliente": self.b["cliente"].pk}, format="json"), "cliente")
+        self._assert_400(client.patch(url, {"cliente": self.cliente_huerfano.pk}, format="json"), "cliente")
+        cxc.refresh_from_db()
+        self.assertEqual(cxc.cliente_id, self.a["cliente"].pk)
+        resp = client.patch(url, {"cliente": self.a["cliente"].pk}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_cxc_antigua_sin_empresa_se_valida_contra_su_factura(self):
+        cxc = self._cxc(None)
+        url = f"{CXC_URL}{cxc.pk}/"
+        client = self._client(self.a["usuario"])
+        self._assert_400(client.patch(url, {"cliente": self.cliente_huerfano.pk}, format="json"), "cliente")
+        resp = client.patch(url, {"cliente": self.a["cliente"].pk}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_cxc_sigue_sin_alta_manual(self):
+        resp = self._post(CXC_URL, {"cliente": self.a["cliente"].pk, "total": "1.00"})
+        self.assertEqual(resp.status_code, 405, resp.data)
+
+
+class FkEmpresaHelpersEC846Tests(SimpleTestCase):
+    """Los guards fallan cerrado aunque ningún llamador de hoy llegue con nulos."""
+
+    def setUp(self):
+        self.empresa = SimpleNamespace(pk=1)
+        self.user = SimpleNamespace(empresa=self.empresa, is_superuser=False)
+
+    def test_validate_fk_empresa(self):
+        validar = finanzas_views._validate_fk_empresa
+        validar(self.user, SimpleNamespace(empresa_id=1), "cliente", self.empresa)
+        validar(self.user, None, "cliente", self.empresa)
+        for ajena in (2, None):
+            with self.subTest(empresa_id=ajena), self.assertRaises(DRFValidationError) as ctx:
+                validar(self.user, SimpleNamespace(empresa_id=ajena), "cliente", self.empresa)
+            self.assertIn("cliente", ctx.exception.detail)
+        # Sólo con ``permite_global`` vale un null (la Moneda global); otra empresa nunca.
+        validar(self.user, SimpleNamespace(empresa_id=None), "moneda", self.empresa, permite_global=True)
+        with self.assertRaises(DRFValidationError):
+            validar(self.user, SimpleNamespace(empresa_id=2), "moneda", self.empresa, permite_global=True)
+        # Sin empresa contra la cual validar ya no pasa en silencio.
+        with self.assertRaises(PermissionDenied):
+            validar(self.user, SimpleNamespace(empresa_id=1), "cliente", None)
+
+    def test_exigir_de_la_empresa_del_usuario(self):
+        exigir = finanzas_views._exigir_de_la_empresa_del_usuario
+        exigir(self.user, 1)
+        for user, empresa_id in ((self.user, 2), (self.user, None), (SimpleNamespace(empresa=None), 1)):
+            with self.subTest(empresa_id=empresa_id), self.assertRaises(PermissionDenied):
+                exigir(user, empresa_id)
+
+    def test_linea_sin_empresa_resoluble_se_rechaza(self):
+        validar = finanzas_views._validate_related_parent_empresa
+        validar(SimpleNamespace(empresa_id=1), "producto", self.empresa)
+        validar(SimpleNamespace(factura=SimpleNamespace(empresa_id=1)), "factura_detalle", self.empresa)
+        for linea in (SimpleNamespace(empresa_id=2), SimpleNamespace(empresa_id=None), SimpleNamespace()):
+            with self.subTest(linea=linea), self.assertRaises(DRFValidationError):
+                validar(linea, "producto", self.empresa)
