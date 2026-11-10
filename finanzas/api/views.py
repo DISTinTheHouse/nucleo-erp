@@ -2798,10 +2798,10 @@ class DashboardFinancieroViewSet(FinanzasBaseSimpleViewSet):
 
     def list(self, request):
         qp = request.query_params
-        # La empresa activa, superusuario incluido (EC-798); ``?empresa_id=`` no se lee (EC-849).
+        # La empresa activa, superusuario incluido (EC-798); ``?empresa_id=`` no se lee.
+        # Sin empresa, 200 con la forma de siempre en cero (EC-849), igual que el resumen
+        # de cobros: el servicio no consulta nada para ``None``.
         empresa = getattr(request.user, "empresa", None)
-        if empresa is None:
-            raise PermissionDenied("Usuario sin empresa.")
         fecha_inicio = qp.get("fecha_inicio") or qp.get("fecha_desde")
         fecha_fin = qp.get("fecha_fin") or qp.get("fecha_hasta")
         moneda = qp.get("moneda") or qp.get("moneda_id")

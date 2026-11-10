@@ -10213,13 +10213,50 @@ class CobrosResumenTests(LecturaJerarquicaBase):
         admin.save()
         self.assertEqual(self._resumen(admin).json()["por_moneda"][0]["monto_total"], "130.01")
 
-    def test_superusuario_usa_su_empresa_activa(self):
-        # EC-798: sin empresa no ve nada y ``?empresa_id=`` no le abre otra.
-        root = Usuario.objects.create(username="ec746-root@x.test", email="ec746-root@x.test", is_superuser=True)
-        self.assertNotEqual(self._resumen(root, f"?empresa_id={self.b['empresa'].pk}").status_code, 200)
+    DASHBOARD_URL = "/api/v1/finanzas/dashboard/"
+
+    def test_sin_empresa_200_vacio_en_el_resumen_y_el_dashboard(self):
+        # EC-849: sin empresa activa (superusuario incluido) la forma de siempre en cero,
+        # nunca el agregado de todas las empresas; ``?empresa_id=`` tampoco abre una.
+        root = Usuario.objects.create(username="ec849-root@x.test", email="ec849-root@x.test", is_superuser=True)
+        periodo = {"fecha_inicio": self.hoy.replace(day=1).isoformat(), "fecha_fin": self.hoy.isoformat()}
+        en_cero = {"cantidad": 0, "monto": "0.00"}
+        dashboard_vacio = {
+            "periodo": periodo,
+            "cuentas_por_cobrar": {
+                "total_documentos": 0, "saldo_total": "0.00", "vencida": en_cero,
+                "por_vencer_7_dias": en_cero, "top_clientes": [],
+            },
+            "cuentas_por_pagar": {
+                "total_documentos": 0, "saldo_total": "0.00", "vencida": en_cero, "top_proveedores": [],
+            },
+            "cobros_periodo": {"cantidad": 0, "monto_total": "0.00", "por_dia": {}},
+            "pagos_periodo": {"cantidad": 0, "monto_total": "0.00", "por_dia": {}},
+            "bancos": {"saldos_por_moneda": {}, "cuentas": []},
+            "alertas_mora": {"total": 0, "leve": 0, "moderada": 0, "grave": 0, "critica": 0},
+        }
+        # Un usuario con el módulo al que se le quitó la empresa, igual.
+        sin_empresa = self._usuario_con("sin-empresa", ["R-CONTABILIDAD"])
+        sin_empresa.empresa = None
+        sin_empresa.save()
+        for user, query in (
+            (root, ""), (root, f"?empresa_id={self.a['empresa'].pk}"), (root, f"?empresa={self.b['empresa'].pk}"),
+            (sin_empresa, ""), (sin_empresa, f"?empresa_id={self.a['empresa'].pk}"),
+        ):
+            client = self._client(user)
+            with self.subTest(user=user.username, query=query):
+                resumen = client.get(f"{self.URL}{query}")
+                self.assertEqual(resumen.status_code, 200)
+                self.assertEqual(resumen.json(), {"periodo": periodo, "por_moneda": []})
+                dashboard = client.get(f"{self.DASHBOARD_URL}{query}")
+                self.assertEqual(dashboard.status_code, 200)
+                self.assertEqual(dashboard.json(), dashboard_vacio)
+        # Con empresa activa ve la suya.
         root.empresa = self.a["empresa"]
         root.save()
         self.assertEqual(self._resumen(root).json()["por_moneda"][0]["monto_total"], "50.01")
+        dashboard = self._client(root).get(self.DASHBOARD_URL).json()
+        self.assertEqual(dashboard["cobros_periodo"]["monto_total"], "50.01")
 
     def test_empresa_id_no_numerico_o_inexistente_es_400_tambien_en_el_dashboard(self):
         root = Usuario.objects.create(username="ec746-root2@x.test", email="ec746-root2@x.test", is_superuser=True)

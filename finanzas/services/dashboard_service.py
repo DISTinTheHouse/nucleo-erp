@@ -23,6 +23,9 @@ def _quantize(v):
 class DashboardFinancieroService:
     @staticmethod
     def obtener_resumen(*, empresa, fecha_inicio=None, fecha_fin=None, moneda_id=None):
+        """Resumen financiero de ``empresa``. Sin empresa (``None``) devuelve la misma
+        forma con todo en cero y listas vacías (EC-849), nunca el de todas las empresas:
+        cada consulta queda en ``.none()`` y no toca la base."""
         hoy = timezone.localdate()
         if fecha_inicio is None:
             fecha_inicio = hoy.replace(day=1)
@@ -37,6 +40,8 @@ class DashboardFinancieroService:
             cxc_qs = cxc_qs.filter(
                 Q(empresa=empresa) | Q(factura__empresa=empresa)
             ).distinct()
+        else:
+            cxc_qs = cxc_qs.none()
         if moneda_id:
             cxc_qs = cxc_qs.filter(factura__moneda_id=moneda_id)
 
@@ -63,6 +68,8 @@ class DashboardFinancieroService:
         )
         if empresa:
             cxp_qs = cxp_qs.filter(empresa=empresa)
+        else:
+            cxp_qs = cxp_qs.none()
         if moneda_id:
             cxp_qs = cxp_qs.filter(factura_proveedor__moneda_id=moneda_id)
 
@@ -83,6 +90,8 @@ class DashboardFinancieroService:
         )
         if empresa:
             cobros_periodo = cobros_periodo.filter(empresa=empresa)
+        else:
+            cobros_periodo = cobros_periodo.none()
         if moneda_id:
             cobros_periodo = cobros_periodo.filter(cuenta_bancaria__moneda_id=moneda_id)
         total_cobros = _quantize(
@@ -97,6 +106,8 @@ class DashboardFinancieroService:
         )
         if empresa:
             pagos_periodo = pagos_periodo.filter(empresa=empresa)
+        else:
+            pagos_periodo = pagos_periodo.none()
         if moneda_id:
             pagos_periodo = pagos_periodo.filter(cuenta_bancaria__moneda_id=moneda_id)
         total_pagos = _quantize(
@@ -114,6 +125,8 @@ class DashboardFinancieroService:
         cuentas_qs = CuentaBancaria.objects.filter(activo=True)
         if empresa:
             cuentas_qs = cuentas_qs.filter(empresa=empresa)
+        else:
+            cuentas_qs = cuentas_qs.none()
         if moneda_id:
             cuentas_qs = cuentas_qs.filter(moneda_id=moneda_id)
         cuentas = list(
@@ -176,6 +189,8 @@ class DashboardFinancieroService:
         alertas_qs = AlertaMora.objects.all()
         if empresa:
             alertas_qs = alertas_qs.filter(empresa=empresa)
+        else:
+            alertas_qs = alertas_qs.none()
         alertas_stats = {
             "total": alertas_qs.count(),
             "leve": alertas_qs.filter(nivel=AlertaMora.Nivel.LEVE).count(),
