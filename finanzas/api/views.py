@@ -228,14 +228,25 @@ def _resolve_empresa(user, validated_data=None, *, required=True, allow_user_emp
     return data_emp if data_emp is not None else user_emp
 
 
-def _validate_fk_empresa(user, related_obj, field_name, user_emp):
-    """Valida que un FK pertenezca a user_emp. Para superuser no valida."""
+def _validate_fk_empresa(user, related_obj, field_name, user_emp, *, permite_global=False):
+    """Valida que un FK pertenezca a ``user_emp``. Falla cerrado (EC-846).
+
+    Un FK sin empresa (``empresa_id`` null) se rechaza igual que uno de otra
+    empresa: antes se dejaba pasar y un Cliente/Proveedor huérfano podía ligarse
+    a cualquier documento. ``permite_global=True`` acepta el null sólo donde es
+    diseño: la ``Moneda`` global del sistema (catálogo híbrido, igual que en
+    compras). Sin ``user_emp`` no hay contra qué validar: 403, nunca un pase en
+    silencio (todos los llamadores la resuelven antes con ``_resolve_empresa``,
+    que ya da 403 sin empresa).
+    """
     if _puede_ver_todo(user):
         return
-    if related_obj is None or user_emp is None:
+    if related_obj is None:
         return
+    if user_emp is None:
+        raise PermissionDenied("Usuario sin empresa asignada.")
     obj_emp = getattr(related_obj, "empresa_id", None)
-    if obj_emp is None:
+    if obj_emp is None and permite_global:
         return
     if obj_emp != user_emp.pk:
         raise ValidationError(
@@ -270,12 +281,16 @@ def _empresa_id_relacionada(obj):
 
 
 def _validate_related_parent_empresa(related_obj, field_name, parent_empresa):
-    """Línea hija debe pertenecer a la empresa del documento padre. Corre siempre, incluso superuser."""
+    """Línea hija debe pertenecer a la empresa del documento padre. Corre siempre, incluso superuser.
+
+    Una línea cuya empresa no se puede resolver se rechaza (EC-846): todas las
+    relaciones que llegan aquí tienen empresa NOT NULL directa o vía su padre.
+    """
     if related_obj is None or parent_empresa is None:
         return
     related_empresa_id = _empresa_id_relacionada(related_obj)
     parent_empresa_id = getattr(parent_empresa, "pk", parent_empresa)
-    if related_empresa_id is not None and related_empresa_id != parent_empresa_id:
+    if related_empresa_id != parent_empresa_id:
         raise ValidationError(
             {field_name: [f"{field_name.replace('_', ' ').capitalize()} no pertenece a la misma empresa del documento."]}
         )
@@ -1757,7 +1772,8 @@ class CuentaBancariaViewSet(FinanzasBaseViewSet):
         banco = serializer.validated_data.get("banco")
         _validate_fk_empresa(user, banco, "banco", empresa)
         moneda = serializer.validated_data.get("moneda")
-        _validate_fk_empresa(user, moneda, "moneda", empresa)
+        # La moneda global (sin empresa) es catálogo del sistema: vale para todas.
+        _validate_fk_empresa(user, moneda, "moneda", empresa, permite_global=True)
         serializer.save(empresa=empresa)
 
     def perform_update(self, serializer):
