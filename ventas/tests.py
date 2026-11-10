@@ -2034,6 +2034,18 @@ def pedido_programar_url(pedido_id):
     return f"/api/v1/ventas/pedidos/{pedido_id}/programar/"
 
 
+def _error_de_renglon(errores, indice):
+    """Error del renglón ``indice`` de un ``ListSerializer`` (EC-812).
+
+    DRF 3.18 (``requirements.txt``) los devuelve como dict por índice
+    (``LIST_SERIALIZER_ERRORS_AS_DICT``, que en JSON queda con llaves de texto);
+    3.16 como lista con un dict por renglón.
+    """
+    if isinstance(errores, dict):
+        return errores.get(str(indice), errores.get(indice, {}))
+    return errores[indice]
+
+
 class PedidoProgramarTests(TestCase):
     """``PATCH /pedidos/{id}/programar/``: escribe sólo ``programacion_conf``."""
 
@@ -2644,7 +2656,7 @@ class PedidoProgramarTests(TestCase):
                     {"programaciones": [{"destino": destino, "cantidad": 1}]},
                 )
                 self.assertEqual(response.status_code, 400)
-                self.assertIn("destino", response.json()["programaciones"][0])
+                self.assertIn("destino", _error_de_renglon(response.json()["programaciones"], 0))
         self.assertEqual(self._programacion_db(), {})
 
     def test_rechaza_cantidad_cero_o_negativa(self):
@@ -2655,7 +2667,7 @@ class PedidoProgramarTests(TestCase):
                     {"programaciones": [{"destino": "BORDADO", "cantidad": cantidad}]},
                 )
                 self.assertEqual(response.status_code, 400)
-                self.assertIn("cantidad", response.json()["programaciones"][0])
+                self.assertIn("cantidad", _error_de_renglon(response.json()["programaciones"], 0))
         self.assertEqual(self._programacion_db(), {})
 
     def test_rechaza_suma_mayor_al_total_de_piezas(self):
