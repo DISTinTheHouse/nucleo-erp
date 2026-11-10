@@ -97,7 +97,7 @@ Como la cookie usa `SameSite=None`, cualquier página podría disparar requests 
 
 ## 2. CORS
 
-`ERP/settings.py:328-343`:
+`ERP/settings.py:349-379`:
 
 - `CORS_ALLOW_ALL_ORIGINS=False`, `CORS_ALLOW_CREDENTIALS=True` (obligatorio para cookies cross-site).
 - `CORS_ALLOWED_ORIGINS` y `CSRF_TRUSTED_ORIGINS` son una lista explícita en código (`FRONTEND_ORIGINS`, EC-844): `https://lazzar-erp.vercel.app` más `localhost:3000`, `:3001` y `:3002` (http y https). No se leen de env vars.
