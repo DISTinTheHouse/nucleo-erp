@@ -13,8 +13,11 @@ from ..utils import validate_rfc
 class CambiarEmpresaSerializer(serializers.Serializer):
     """Cuerpo de ``POST /api/v1/nucleo/cambiar-empresa/`` (EC-843).
 
-    Solo empresas activas. Un id inexistente, uno inactivo o uno con tipo
-    inválido responden el mismo mensaje: el 400 no revela qué empresas existen.
+    Solo empresas activas, más la empresa activa del usuario aunque esté
+    inactiva: pedir la que ya tiene es siempre un no-op (lo resuelve la vista).
+    Un id inexistente, uno inactivo o uno con tipo inválido responden el mismo
+    mensaje: el 400 no revela qué empresas existen. Requiere ``request`` en el
+    contexto; sin usuario o sin empresa activa solo valen las activas.
     """
 
     MENSAJE = "Empresa no válida."
@@ -23,6 +26,15 @@ class CambiarEmpresaSerializer(serializers.Serializer):
         queryset=empresas_activas(),
         error_messages={"does_not_exist": MENSAJE, "incorrect_type": MENSAJE},
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get("request")
+        actual_id = getattr(getattr(request, "user", None), "empresa_id", None)
+        if actual_id is not None:
+            self.fields["empresa"].queryset = (
+                empresas_activas() | Empresa.objects.filter(pk=actual_id)
+            )
 
 class SatRegimenFiscalSerializer(serializers.ModelSerializer):
     class Meta:

@@ -2309,3 +2309,69 @@ class MisEmpresasActivasTests(TestCase):
     def test_sin_m2m_solo_su_empresa(self):
         user = Usuario.objects.create(username="op", email="op@acme.test", empresa=self.a)
         self.assertEqual(self._ids(user), {self.a.pk})
+
+
+class CambiarEmpresaNoOpTests(TestCase):
+    """EC-843: pedir la empresa activa actual es siempre un no-op, aunque esté
+    inactiva; todo lo demás conserva el mismo 400."""
+
+    URL = "/api/v1/nucleo/cambiar-empresa/"
+    ERROR = '{"empresa":["Empresa no válida."]}'.encode()
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.cerrada = Empresa.objects.create(codigo="cerrada", razon_social="CERRADA SA", activo=False)
+        cls.suc = Sucursal.objects.create(empresa=cls.cerrada, codigo="S1", nombre="Sucursal 1")
+        cls.otra_inactiva = Empresa.objects.create(codigo="baja", razon_social="BAJA SA", activo=False)
+
+    def _cliente(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _eventos(self):
+        from auditoria.models import AuditoriaEvento
+
+        return AuditoriaEvento.objects.filter(accion="CAMBIAR_EMPRESA")
+
+    def test_empresa_actual_inactiva_es_no_op(self):
+        root = Usuario.objects.create(
+            username="root", email="root@cerrada.test", empresa=self.cerrada,
+            sucursal_default=self.suc, is_superuser=True,
+        )
+        root.sucursales.set([self.suc])
+        client = self._cliente(root)
+
+        resp = client.post(self.URL, {"empresa": self.cerrada.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        root.refresh_from_db()
+        self.assertEqual(
+            (root.empresa_id, root.sucursal_default_id, list(root.sucursales.values_list("pk", flat=True))),
+            (self.cerrada.pk, self.suc.pk, [self.suc.pk]),
+        )
+        self.assertEqual(resp.data, client.get("/api/auth/user/").data)
+        self.assertFalse(self._eventos().exists())
+
+    def test_otra_empresa_inactiva_sigue_siendo_400(self):
+        root = Usuario.objects.create(
+            username="root", email="root@cerrada.test", empresa=self.cerrada, is_superuser=True,
+        )
+        resp = self._cliente(root).post(self.URL, {"empresa": self.otra_inactiva.pk}, format="json")
+        self.assertEqual((resp.status_code, resp.content), (400, self.ERROR))
+        root.refresh_from_db()
+        self.assertEqual(root.empresa_id, self.cerrada.pk)
+
+    def test_sin_empresa_valores_invalidos_mismo_400(self):
+        root = Usuario.objects.create(username="root", email="root@nada.test", is_superuser=True)
+        client = self._cliente(root)
+        for valor in (self.otra_inactiva.pk, 999_999_999, "abc", True, 2**70):
+            with self.subTest(empresa=valor):
+                resp = client.post(self.URL, {"empresa": valor}, format="json")
+                self.assertEqual((resp.status_code, resp.content), (400, self.ERROR))
+        # ``null`` no llega al no-op aunque el usuario tampoco tenga empresa.
+        resp = client.post(self.URL, {"empresa": None}, format="json")
+        self.assertEqual(resp.status_code, 400)
+        root.refresh_from_db()
+        self.assertIsNone(root.empresa_id)
+        self.assertFalse(self._eventos().exists())

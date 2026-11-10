@@ -362,7 +362,7 @@ class CambiarEmpresaAPIView(APIView):
         from nucleo.middleware import ip_auditoria
         from usuarios.models import Usuario
 
-        entrada = CambiarEmpresaSerializer(data=request.data)
+        entrada = CambiarEmpresaSerializer(data=request.data, context={"request": request})
         entrada.is_valid(raise_exception=True)
         empresa = entrada.validated_data["empresa"]
 
