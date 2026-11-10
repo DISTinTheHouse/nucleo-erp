@@ -106,7 +106,7 @@ from finanzas.services.poliza_service import PolizaService
 from finanzas.services.reporte_contable_service import LIMITE_OMISION, ReporteContableService
 from finanzas.scope import cobros_por_sucursal, exigir_factura_visible, por_sucursal, sucursales_visibles
 from finanzas.utils.folios import generate_factura_folio
-from nucleo.models import Empresa, Moneda, Sucursal
+from nucleo.models import Moneda, Sucursal
 
 PERMISO_CANCELAR_FACTURA = 'E-FIN-FACTURAS'
 from ventas.models import Pedido, PedidoDetalleTalla
@@ -163,28 +163,6 @@ def _aplicar_scope_empresa(qs, user, lookup="empresa"):
     if empresa is None:
         return qs.none()
     return qs.filter(**{lookup: empresa})
-
-
-def _empresa_del_superusuario(user, qp, mensaje_sin_empresa):
-    """Empresa que consulta un superusuario en un resumen de lectura (dashboard, resumen
-    de cobros): la de ``?empresa_id=`` (o ``?empresa=``) o, sin él, la suya. Un id que no
-    es un entero o no existe → 400 "Empresa no encontrada." (antes, uno no numérico daba
-    500); sin id ni empresa propia → 400 con ``mensaje_sin_empresa``.
-    """
-    empresa_id = qp.get("empresa") or qp.get("empresa_id")
-    if empresa_id:
-        try:
-            pk = int(empresa_id)
-        except (TypeError, ValueError):
-            pk = None
-        empresa = Empresa.objects.filter(pk=pk).first() if pk is not None else None
-        if empresa is None:
-            raise ValidationError({"empresa": "Empresa no encontrada."})
-        return empresa
-    empresa = getattr(user, "empresa", None)
-    if empresa is None:
-        raise ValidationError({"empresa": mensaje_sin_empresa})
-    return empresa
 
 
 def _resolve_empresa(user, validated_data=None, *, required=True, allow_user_empresa_fallback=True):
@@ -2005,9 +1983,8 @@ class CobroViewSet(FinanzasBaseViewSet):
         filas de ``Moneda`` con el mismo código (global y privada) se suman, y entonces
         ``moneda_id`` es ``None``. Por código equivale a la SUMA del dashboard con
         ``?moneda_id=`` sobre cada moneda de ese código. Ignora los filtros del listado.
-        Tres consultas como máximo, sin importar cuántos cobros haya: la empresa (sólo el
-        superusuario con ``?empresa_id=``), las monedas y el agregado, además de las de
-        permisos.
+        Dos consultas como máximo, sin importar cuántos cobros haya: las monedas y el
+        agregado, además de las de permisos.
         """
         user = request.user
         qp = request.query_params
@@ -2017,16 +1994,10 @@ class CobroViewSet(FinanzasBaseViewSet):
         if fecha_inicio > fecha_fin:  # mismo mensaje que reportes-contables/
             raise ValidationError({"fecha_fin": "No puede ser anterior a fecha_inicio."})
 
-        # La empresa, como el dashboard: el superusuario elige con ``?empresa_id=`` o
-        # usa la suya; sin ninguna, 400. Los demás, la suya (sin empresa no ven nada).
+        # La empresa activa del usuario, superusuario incluido (EC-798); ``?empresa_id=``
+        # no se lee (EC-849). Sin empresa no ve nada: monedas y cobros quedan vacíos.
         cobros = self._cobros_visibles()
-        if _puede_ver_todo(user):
-            empresa = _empresa_del_superusuario(
-                user, qp, "Superusuario debe especificar ?empresa_id=X para el resumen de cobros."
-            )
-            cobros = cobros.filter(empresa=empresa)
-        else:
-            empresa = getattr(user, "empresa", None)
+        empresa = getattr(user, "empresa", None)
 
         # Código -> ids de ``Moneda`` de las cuentas de la empresa con ese código.
         monedas_por_codigo = {}
@@ -2812,21 +2783,12 @@ class AlertaMoraViewSet(FinanzasBaseReadOnlyViewSet):
 
     @action(detail=False, methods=["post"], url_path="generar")
     def generar(self, request):
-        user = request.user
-        superuser = _puede_ver_todo(user)
-        qp = request.query_params
-        empresa = None
-        if superuser:
-            empresa_id = request.data.get("empresa") or request.data.get("empresa_id") or qp.get("empresa") or qp.get("empresa_id")
-            if empresa_id:
-                from nucleo.models import Empresa
-                empresa = Empresa.objects.filter(pk=empresa_id).first()
-                if empresa is None:
-                    raise ValidationError({"empresa": "Empresa no encontrada."})
-        else:
-            empresa = getattr(user, "empresa", None)
-            if empresa is None:
-                raise PermissionDenied()
+        # Sólo para la empresa activa, superusuario incluido (EC-798); ni el body ni el
+        # query eligen otra (EC-849). Sin empresa, 403: ``generar_alertas(None)``
+        # recorrería todas las empresas.
+        empresa = getattr(request.user, "empresa", None)
+        if empresa is None:
+            raise PermissionDenied()
         total = AlertaMoraService.generar_alertas(empresa=empresa)
         return Response({"alertas_generadas": total})
 
@@ -2835,17 +2797,11 @@ class DashboardFinancieroViewSet(FinanzasBaseSimpleViewSet):
     http_method_names = ["get"]
 
     def list(self, request):
-        user = request.user
-        superuser = _puede_ver_todo(user)
         qp = request.query_params
-        if superuser:
-            empresa = _empresa_del_superusuario(
-                user, qp, "Superusuario debe especificar ?empresa_id=X para filtrar el dashboard."
-            )
-        else:
-            empresa = getattr(user, "empresa", None)
-            if empresa is None:
-                raise PermissionDenied("Usuario sin empresa.")
+        # La empresa activa, superusuario incluido (EC-798); ``?empresa_id=`` no se lee (EC-849).
+        empresa = getattr(request.user, "empresa", None)
+        if empresa is None:
+            raise PermissionDenied("Usuario sin empresa.")
         fecha_inicio = qp.get("fecha_inicio") or qp.get("fecha_desde")
         fecha_fin = qp.get("fecha_fin") or qp.get("fecha_hasta")
         moneda = qp.get("moneda") or qp.get("moneda_id")
@@ -2864,15 +2820,8 @@ class ReporteContableViewSet(FinanzasBaseSimpleViewSet):
     http_method_names = ["get"]
 
     def _empresa(self, request):
-        user, qp = request.user, request.query_params
-        if _puede_ver_todo(user):
-            empresa_id = qp.get("empresa") or qp.get("empresa_id")
-            if not empresa_id:
-                raise ValidationError({"empresa": "Superusuario debe especificar ?empresa=ID."})
-            if not Empresa.objects.filter(pk=empresa_id).exists():
-                raise ValidationError({"empresa": "Empresa no encontrada."})
-            return int(empresa_id)
-        empresa = getattr(user, "empresa", None)
+        # La empresa activa, superusuario incluido (EC-798); ``?empresa=`` no se lee (EC-849).
+        empresa = getattr(request.user, "empresa", None)
         if empresa is None:
             raise PermissionDenied("Usuario sin empresa.")
         return empresa.pk
