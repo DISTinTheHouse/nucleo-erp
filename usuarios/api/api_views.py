@@ -101,7 +101,14 @@ class UsuarioViewSet(viewsets.ModelViewSet):
         base_qs = self.queryset.order_by('-created_at', '-id')
         # Solo los usuarios de la empresa activa, superusuario incluido (EC-843,
         # misma regla que EC-798): otra empresa da 404 y sin empresa, nada.
-        return base_qs.filter(empresa_id__in=empresa_ids_lectura(user))
+        qs = base_qs.filter(empresa_id__in=empresa_ids_lectura(user))
+        if self.action in ('list', 'retrieve'):
+            # Número fijo de consultas: el serializador lee todo de la precarga (#1043).
+            qs = qs.prefetch_related(
+                'sucursales', 'departamentos', 'overrides_permisos__permiso',
+                'asignaciones_roles__rol__permisos',
+            )
+        return qs
 
     def check_object_permissions(self, request, obj):
         super().check_object_permissions(request, obj)
@@ -135,7 +142,9 @@ class UsuarioViewSet(viewsets.ModelViewSet):
         
         # Caso Superusuario
         if user.is_superuser:
-            serializer.save()
+            # Siempre en su empresa activa (#1042); el serializador ya validó
+            # sucursales y roles contra ella.
+            serializer.save(empresa=user.empresa)
             return
 
         # Caso Admin de Empresa

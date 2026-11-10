@@ -132,6 +132,28 @@ def permisos_efectivos(user) -> PermisosEfectivos:
     return PermisosEfectivos(todo=False, claves=frozenset(concedidos - denegados))
 
 
+def permisos_efectivos_precargados(user) -> PermisosEfectivos:
+    """Misma regla que ``permisos_efectivos`` leyendo ``overrides_permisos`` y
+    ``asignaciones_roles__rol__permisos`` ya precargados con ``prefetch_related``
+    (0 consultas por usuario). Para listados; sin precarga hace las mismas
+    consultas que la versión normal por cada usuario."""
+    if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
+        return PermisosEfectivos(todo=True, claves=frozenset())
+
+    concedidos = set()
+    denegados = set()
+    for ov in user.overrides_permisos.all():
+        if ov.tipo == UsuarioPermiso.TIPO_DENY:
+            denegados.add(ov.permiso.clave)
+        elif ov.tipo == UsuarioPermiso.TIPO_GRANT:
+            concedidos.add(ov.permiso.clave)
+    for asignacion in user.asignaciones_roles.all():
+        if asignacion.rol.estatus == Rol.Estatus.ACTIVO:
+            concedidos.update(p.clave for p in asignacion.rol.permisos.all() if p.clave is not None)
+
+    return PermisosEfectivos(todo=False, claves=frozenset(concedidos - denegados))
+
+
 # ---------------------------------------------------------------------------
 # Lecturas protegidas por código (#1020)
 # ---------------------------------------------------------------------------
