@@ -124,3 +124,32 @@ class UsuarioSerializer(serializers.ModelSerializer):
         if roles_ids is not None:
             self._set_roles(user, roles_ids)
         return user
+
+
+class PerfilUsuarioSerializer(UsuarioSerializer):
+    """Perfil propio en ``/api/auth/user/`` (``AUTH_KIT['USER_SERIALIZER']``).
+
+    ``UserView`` de auth_kit edita ``request.user`` sin más permiso que estar
+    autenticado, así que aquí solo se escriben nombre, apellido, teléfono y
+    avatar (EC-844). La respuesta conserva los campos de ``UsuarioSerializer``
+    (NextAuth lee id, username, email, nombre, permisos y banderas). Banderas,
+    empresa, alcance, roles, estatus, email y username se ignoran; la contraseña
+    se rechaza: solo cambia por ``/api/auth/password/change/``, que pide la actual.
+    """
+
+    password = None
+    roles = None
+
+    class Meta(UsuarioSerializer.Meta):
+        fields = [f for f in UsuarioSerializer.Meta.fields if f not in ("password", "roles")]
+        read_only_fields = [
+            f for f in fields if f not in ("first_name", "last_name", "telefono", "avatar_url")
+        ]
+        extra_kwargs = {}
+
+    def validate(self, data):
+        if "password" in self.initial_data:
+            raise serializers.ValidationError({
+                "password": "La contraseña se cambia en /api/auth/password/change/ con la actual."
+            })
+        return data

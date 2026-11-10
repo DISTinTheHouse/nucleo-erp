@@ -87,7 +87,8 @@ INSTALLED_APPS = [
 
 AUTH_KIT = {
     'USE_MFA': True,
-    'USER_SERIALIZER': 'usuarios.api.serializers.UsuarioSerializer',
+    # Perfil propio: solo nombre, apellido, teléfono y avatar (EC-844).
+    'USER_SERIALIZER': 'usuarios.api.serializers.PerfilUsuarioSerializer',
     'AUTH_COOKIE_SECURE': config('AUTH_COOKIE_SECURE', default=(IS_VERCEL or ENVIRONMENT.lower() == 'production'), cast=bool),
     'AUTH_COOKIE_SAMESITE': config('AUTH_COOKIE_SAMESITE', default='None'),
 }
