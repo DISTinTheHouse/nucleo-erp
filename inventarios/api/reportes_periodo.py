@@ -24,6 +24,7 @@ from rest_framework.exceptions import ValidationError
 from auditoria.models import AuditoriaEvento
 from catalogo.models import Producto, ProductoVariante
 from inventarios.models import Almacen, Existencia, MovimientoInventarioDetalle
+from inventarios.services.costeo import costos_promedio_al
 from nucleo.kpis import entero_estricto, vacio
 
 TIPOS_MOVIMIENTO = ("ENTRADA", "SALIDA", "AJUSTE", "TRANSFERENCIA")
@@ -373,48 +374,14 @@ def reporte_existencias(user, query_params, almacen_id=_SIN_LEER):
         .filter(pk__in=variante_ids)
     }
 
-    cost_map = {}
-    if keys:
-        movement_cost_qs = (
-            MovimientoInventarioDetalle.objects.filter(
-                movimiento_inventario__fecha_movimiento__lte=final_dt,
-                costo_unitario__gt=0,
-            )
-            .filter(
-                models.Q(ubicacion_origen__almacen_id__in=allowed_almacen_ids)
-                | models.Q(ubicacion_destino__almacen_id__in=allowed_almacen_ids)
-                | models.Q(movimiento_inventario__recepcion__almacen_id__in=allowed_almacen_ids)
-                | models.Q(movimiento_inventario__ajuste_inventario__almacen_id__in=allowed_almacen_ids)
-                | models.Q(movimiento_inventario__transferencia__almacen_origen_id__in=allowed_almacen_ids)
-                | models.Q(movimiento_inventario__transferencia__almacen_destino_id__in=allowed_almacen_ids)
-            )
-            .order_by("-movimiento_inventario__fecha_movimiento", "-id")
-        )
-        if producto_variante_id:
-            movement_cost_qs = movement_cost_qs.filter(producto_variante_id=producto_variante_id)
-        if producto_id:
-            movement_cost_qs = movement_cost_qs.filter(producto_id=producto_id)
-
-        # Del más reciente al más antiguo: el primer costo de cada llave gana.
-        # Solo bajan escalares (sin instanciar modelos) y por bloques, porque
-        # una llave sin movimiento costeado obliga a recorrer todo el historial.
-        filas_costo = movement_cost_qs.values_list(
-            "producto_id",
-            "producto_variante_id",
-            "costo_unitario",
-            *_CAMPOS_ALMACEN_ORIGEN,
-            *_CAMPOS_ALMACEN_DESTINO,
-        )
-        n_origen = len(_CAMPOS_ALMACEN_ORIGEN)
-        for producto_key_id, variante_key_id, costo, *almacenes_fila in filas_costo.iterator(chunk_size=2000):
-            origen_id = _primero(almacenes_fila[:n_origen])
-            destino_id = _primero(almacenes_fila[n_origen:])
-            for costo_almacen_id in {origen_id, destino_id}:
-                key = (costo_almacen_id, producto_key_id, variante_key_id)
-                if costo_almacen_id and key in keys and key not in cost_map:
-                    cost_map[key] = to_decimal(costo)
-            if len(cost_map) >= len(keys):
-                break
+    # Costo oficial = promedio ponderado (#809) al cierre del periodo (EC-815).
+    # Antes: el ``costo_unitario`` del último movimiento, casi siempre 0, y un
+    # recorrido de todo el historial cuando a una llave le faltaba costo.
+    empresa_de_almacen = {aid: row["empresa_id"] for aid, row in almacen_map.items()}
+    cost_map = costos_promedio_al(
+        {(empresa_de_almacen.get(k[0]), k[1], k[2]) for k in keys}, final_dt,
+    )
+    cost_map = {k: cost_map.get((empresa_de_almacen.get(k[0]), k[1], k[2]), Decimal("0")) for k in keys}
 
     detalle_rows = []
     resumen_por_almacen = defaultdict(_totales_en_cero)

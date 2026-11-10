@@ -4367,10 +4367,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 "disponible": False,
                 "motivo": "No existe fecha de embarque en ningún lado (logistica.Envio y wms.Despacho no tienen campos de fecha).",
             },
-            "pedidos_en_riesgo": {
-                "disponible": False,
-                "motivo": "El pedido no tiene fecha compromiso (solo una clasificación A-F en días) y no hay proyección de avance de OP.",
-            },
+            "pedidos_en_riesgo": self._kpi_pedidos_en_riesgo(base),
         }
         # Mismo contrato que los ``kpis/`` de compras (#841, #860): sin permiso se
         # omiten ``valor`` y el ``gran_total`` del drill-down; los conteos quedan.
@@ -4420,6 +4417,49 @@ class PedidoViewSet(viewsets.ModelViewSet):
             "disponible": True,
             "total": total,
             "por_moneda": por_moneda,
+            "drill_down": drill_down,
+            "drill_down_total": total,
+            "drill_down_truncado": total > len(drill_down),
+        }
+
+
+    # Pedidos críticos (EC-818): ``fecha_confirmacion`` es la fecha compromiso.
+    DIAS_POR_VENCER = 7
+
+    def _kpi_pedidos_en_riesgo(self, base):
+        """Pedidos en firme (AUTORIZADA/EN PROCESO) con fecha compromiso vencida o que
+        vence en los próximos ``DIAS_POR_VENCER`` días. Una consulta para los conteos y
+        otra para el drill-down. El pedido no registra la entrega: uno ya entregado
+        sigue contando mientras siga EN PROCESO."""
+        ahora = timezone.now()
+        limite = ahora + timedelta(days=self.DIAS_POR_VENCER)
+        criticos = base.filter(
+            estatus__in=self.ESTATUS_PEDIDO_ACTIVOS, fecha_confirmacion__isnull=False, fecha_confirmacion__lt=limite,
+        )
+        conteos = criticos.aggregate(
+            vencidos=Count("id", filter=Q(fecha_confirmacion__lt=ahora)),
+            por_vencer=Count("id", filter=Q(fecha_confirmacion__gte=ahora)),
+        )
+        total = conteos["vencidos"] + conteos["por_vencer"]
+        drill_down = list(
+            criticos.order_by("fecha_confirmacion", "id").values(
+                "id", "folio", "estatus", "cliente_nombre", "fecha_confirmacion"
+            )[:20]
+        )
+        estatus_labels = dict(Pedido.CHOICES_ESTATUS)
+        for fila in drill_down:
+            fila["estatus_label"] = estatus_labels.get(fila["estatus"], str(fila["estatus"]))
+            fila["vencido"] = fila["fecha_confirmacion"] < ahora
+        return {
+            "disponible": True,
+            "criterio": (
+                f"Pedido autorizado o en proceso con fecha compromiso vencida o que vence en "
+                f"los próximos {self.DIAS_POR_VENCER} días."
+            ),
+            "total": total,
+            "vencidos": conteos["vencidos"],
+            "por_vencer": conteos["por_vencer"],
+            "dias_por_vencer": self.DIAS_POR_VENCER,
             "drill_down": drill_down,
             "drill_down_total": total,
             "drill_down_truncado": total > len(drill_down),

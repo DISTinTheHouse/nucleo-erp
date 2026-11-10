@@ -106,6 +106,49 @@ def costos_vigentes(empresa_id, claves):
     return {c: (costos[c].costo_promedio if c in costos else CERO) for c in claves}
 
 
+def costos_promedio_al(llaves, fecha):
+    """``{(empresa_id, producto_id, producto_variante_id): costo}`` vigente en ``fecha``.
+
+    Costo promedio ponderado (#809) tal como estaba en ``fecha`` (EC-815): el
+    ``costo_nuevo`` del último cambio hasta ``fecha``; si el primer cambio es
+    posterior, su ``costo_anterior``; sin historial, el ``costo_promedio`` actual.
+    Tres consultas fijas, sin importar cuántas llaves.
+    """
+    por_empresa = defaultdict(set)
+    for empresa_id, producto_id, variante_id in llaves:
+        k = clave(producto_id, variante_id)
+        if empresa_id and k:
+            por_empresa[empresa_id].add(k)
+    if not por_empresa:
+        return {}
+    q = Q(pk__in=[])
+    for empresa_id, claves in por_empresa.items():
+        q |= _filtro(claves) & Q(empresa_id=empresa_id)
+    costos = list(CostoInventario.objects.filter(q).only(
+        "id", "empresa_id", "producto_id", "producto_variante_id", "variante_produccion_id", "costo_promedio",
+    ))
+    ids = [c.pk for c in costos]
+    hasta = dict(
+        HistorialCostoInventario.objects.filter(costo_inventario_id__in=ids, fecha__lte=fecha)
+        .order_by("costo_inventario_id", "-fecha", "-id").distinct("costo_inventario_id")
+        .values_list("costo_inventario_id", "costo_nuevo")
+    )
+    despues = dict(
+        HistorialCostoInventario.objects.filter(costo_inventario_id__in=ids, fecha__gt=fecha)
+        .exclude(costo_inventario_id__in=list(hasta))
+        .order_by("costo_inventario_id", "fecha", "id").distinct("costo_inventario_id")
+        .values_list("costo_inventario_id", "costo_anterior")
+    ) if len(hasta) < len(ids) else {}
+    por_clave = {
+        (c.empresa_id, _clave_de(c)): hasta.get(c.pk, despues.get(c.pk, c.costo_promedio)) or CERO
+        for c in costos
+    }
+    return {
+        (empresa_id, producto_id, variante_id): por_clave.get((empresa_id, clave(producto_id, variante_id)), CERO)
+        for empresa_id, producto_id, variante_id in llaves
+    }
+
+
 def costear(empresa_id, renglones, origen):
     """``renglones``: ``[(detalle, delta, costo_entrada_o_None), ...]``. Llamar dentro
     de la transacción del flujo. Guarda ``costo_unitario`` en cada detalle."""
