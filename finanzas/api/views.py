@@ -557,27 +557,6 @@ class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
         qs = _aplicar_ordering(qs, qp, ["-fecha_emision", "-id"])
         return qs
 
-    def perform_create(self, serializer):
-        user = self.request.user
-        superuser = _puede_ver_todo(user)
-        empresa = getattr(user, "empresa", None)
-        if not superuser and empresa is None:
-            raise PermissionDenied("Usuario sin empresa.")
-        factura = serializer.validated_data.get("factura")
-        if not superuser:
-            if factura and getattr(factura, "empresa_id", None) and factura.empresa_id != empresa.pk:
-                raise ValidationError({"factura": "Factura no pertenece a la empresa."})
-            cliente = serializer.validated_data.get("cliente")
-            if cliente and getattr(cliente, "empresa_id", None) and cliente.empresa_id != empresa.pk:
-                raise ValidationError({"cliente": "Cliente no pertenece a la empresa."})
-        emp = serializer.validated_data.get("empresa") or (empresa if not superuser else serializer.validated_data.get("empresa"))
-        if not superuser:
-            serializer.save(empresa=emp or empresa)
-        else:
-            if emp is None:
-                raise ValidationError({"empresa": "Superusuario debe especificar empresa."})
-            serializer.save(empresa=emp)
-
 
 class FacturaViewSet(FinanzasBaseViewSet):
     # EC-746. Incluye ``desglose``, que trae la cobranza (CxC) y las notas de crédito
