@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
-from nucleo.permisos import permisos_efectivos
+from nucleo.permisos import permisos_efectivos_precargados
 from nucleo.scope import empresas_activas
 from seguridad.models import Rol, UsuarioRol
 from ..alcance import errores_de_alcance
@@ -37,9 +37,8 @@ class UsuarioSerializer(serializers.ModelSerializer):
         }
 
     def get_roles_ids(self, obj):
-        return list(
-            UsuarioRol.objects.filter(usuario=obj).values_list('rol_id', flat=True)
-        )
+        # ``asignaciones_roles`` viene precargado en el listado (#1043).
+        return [a.rol_id for a in obj.asignaciones_roles.all()]
 
     def get_empresa_id(self, obj):
         return getattr(obj, "empresa_id", None)
@@ -60,7 +59,7 @@ class UsuarioSerializer(serializers.ModelSerializer):
         # ``.claves()`` conserva el contrato publicado: lista vacía para
         # superusuario y admin de empresa, a quienes el frontend trata como que lo
         # tienen todo.
-        return permisos_efectivos(obj).claves()
+        return permisos_efectivos_precargados(obj).claves()
 
     def validate(self, data):
         """
@@ -70,6 +69,15 @@ class UsuarioSerializer(serializers.ModelSerializer):
         request_user = getattr(request, 'user', None)
 
         roles_ids = data.get('roles')
+
+        # El superusuario opera solo en su empresa activa (EC-798): no crea
+        # usuarios sin ella (#1042) ni deja a otro usuario sin empresa, porque
+        # desaparecería de su lista y no habría cómo devolvérsela (#1048).
+        if self.instance is None and getattr(request_user, 'is_superuser', False)                 and not getattr(request_user, 'empresa_id', None):
+            raise serializers.ValidationError({"empresa": "Elige una empresa activa antes de crear usuarios."})
+        if self.instance is not None and 'empresa' in data and data['empresa'] is None                 and not self._es_admin_de_empresa(request_user):
+            raise serializers.ValidationError({"empresa": "No se puede dejar al usuario sin empresa."})
+
         empresa_final = self._empresa_destino_id(data, request_user)
 
         # Sucursales, departamentos y sucursal por defecto, de la empresa del
@@ -148,6 +156,9 @@ class UsuarioSerializer(serializers.ModelSerializer):
         el superusuario, la que llega o la que ya tenía. Por id, sin leer la
         fila de ``empresas``."""
         if self._es_admin_de_empresa(request_user):
+            return getattr(request_user, 'empresa_id', None)
+        # Alta por el superusuario: siempre en su empresa activa (#1042).
+        if self.instance is None and request_user is not None and getattr(request_user, 'is_superuser', False):
             return getattr(request_user, 'empresa_id', None)
         # La clave manda aunque traiga ``null``: el usuario queda sin empresa.
         if 'empresa' in data:
