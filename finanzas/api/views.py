@@ -1825,10 +1825,7 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
         fp = serializer.validated_data.get("factura_proveedor")
         _validate_fk_empresa(user, fp, "factura_proveedor", empresa)
         prov = serializer.validated_data.get("proveedor")
-        if prov is not None and not _puede_ver_todo(user):
-            # Un proveedor sin empresa tampoco es de ésta (EC-846).
-            if prov.empresa_id != empresa.pk:
-                raise ValidationError({"proveedor": "Proveedor no pertenece a la empresa."})
+        _validate_fk_empresa(user, prov, "proveedor", empresa)
         invoice = self._lock_invoice(fp)
         # Una CxP manual nace cuadrada: saldo = total y Pendiente. El serializer ya
         # no acepta saldo/estatus al crear.
