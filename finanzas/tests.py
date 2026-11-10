@@ -8223,6 +8223,56 @@ class F7AlertasDeMoraTests(FinanzasBase):
         self.assertIsNone(CuentaPorCobrar.objects.get().fecha_vencimiento)
 
 
+class AlertasMoraGenerarEmpresaTests(FinanzasBase):
+    """EC-849: ``POST alertas-mora/generar/`` genera sólo para la empresa activa; la
+    empresa del body o del query (``empresa`` / ``empresa_id``) ya no se lee."""
+
+    URL = "/api/v1/finanzas/alertas-mora/generar/"
+
+    def _cxc_vencida(self, tenant):
+        factura = Factura.objects.create(
+            empresa=tenant["empresa"], sucursal=tenant["sucursal"], cliente=tenant["cliente"], moneda=self.moneda,
+        )
+        return CuentaPorCobrar.objects.create(
+            empresa=tenant["empresa"], cliente=tenant["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+            fecha_vencimiento=timezone.localdate() - timedelta(days=45),
+        )
+
+    def test_empresa_de_otra_en_body_o_query_genera_solo_para_la_propia(self):
+        cxc_a, cxc_b = self._cxc_vencida(self.a), self._cxc_vencida(self.b)
+        b = self.b["empresa"].pk
+        root = Usuario.objects.create(
+            username="root-ec849-mora", email="root-mora@ec849.test", is_superuser=True, empresa=self.a["empresa"],
+        )
+        admin = Usuario.objects.create(
+            username="admin-ec849-mora", email="admin-mora@ec849.test", is_admin_empresa=True,
+            empresa=self.a["empresa"],
+        )
+        casos = (
+            ("", {"empresa": b}), ("", {"empresa_id": b}),
+            (f"?empresa={b}", {}), (f"?empresa_id={b}", {}),
+        )
+        for user in (root, admin):
+            for query, body in casos:
+                AlertaMora.objects.all().delete()
+                with self.subTest(user=user.username, query=query, body=body):
+                    resp = self._client(user).post(f"{self.URL}{query}", body, format="json")
+                    self.assertEqual(resp.status_code, 200, resp.data)
+                    self.assertEqual(resp.data, {"alertas_generadas": 1})
+                    self.assertTrue(AlertaMora.objects.filter(cuenta_por_cobrar=cxc_a).exists())
+                    self.assertFalse(AlertaMora.objects.filter(cuenta_por_cobrar=cxc_b).exists())
+                    self.assertFalse(AlertaMora.objects.filter(empresa=self.b["empresa"]).exists())
+
+    def test_sin_empresa_sigue_siendo_403(self):
+        # ``generar_alertas(None)`` recorrería todas las empresas: sin empresa no se genera nada.
+        self._cxc_vencida(self.a)
+        root = Usuario.objects.create(username="root-ec849-sin", email="root-sin@ec849.test", is_superuser=True)
+        resp = self._client(root).post(f"{self.URL}?empresa_id={self.a['empresa'].pk}", {}, format="json")
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(AlertaMora.objects.exists())
+
+
 class F5CancelarFacturaTests(MotorPolizasBase):
     """``POST /facturas/{id}/cancelar/``: factura y CxC canceladas, contrapóliza del día."""
 
@@ -8687,6 +8737,45 @@ class F9ReportesContablesTests(MotorPolizasBase):
         # EC-798: ``?empresa=`` no le abre otra empresa al superusuario.
         self.assertNotEqual(sin_empresa.status_code, 200)
         self.assertEqual(len(con_empresa.data["renglones"]), 3)
+
+    def test_empresa_de_otra_en_el_query_se_ignora(self):
+        # EC-849: ``?empresa=`` / ``?empresa_id=`` ya no se leen; el superusuario y el
+        # admin de A, aun pidiendo B, reciben sólo lo de A.
+        self._factura_en(date(2026, 3, 5), "F-1")
+        b = self.b["empresa"]
+        cuenta_b = CuentaContable.objects.create(
+            empresa=b, codigo="9999", nombre="Cuenta de B", tipo=CuentaContable.CuentaTipo.ACTIVO,
+        )
+        poliza_b = Poliza.objects.create(
+            empresa=b, sucursal=self.b["sucursal"], fecha=date(2026, 3, 10),
+            estatus=Poliza.PolizaStatus.CONTABILIZADA,
+        )
+        PolizaDetalle.objects.create(
+            poliza=poliza_b, cuenta_contable=cuenta_b, cargo=Decimal("999.00"), abono=Decimal("0.00"), orden=1,
+        )
+        # B sí ve su póliza: el dato existe y no es que el reporte esté vacío.
+        self.assertEqual(
+            self._get("libro-diario", user=self.b["usuario"], **self.PERIODO).data["total_cargos"], "999.00",
+        )
+        root = Usuario.objects.create(
+            username="root-ec849", email="root@ec849.test", is_superuser=True, empresa=self.empresa,
+        )
+        admin = Usuario.objects.create(
+            username="admin-ec849", email="admin@ec849.test", is_admin_empresa=True, empresa=self.empresa,
+        )
+        for user in (root, admin):
+            propio = {
+                ruta: self._get(ruta, user=user, **self.PERIODO).data for ruta in ("libro-diario", "balanza")
+            }
+            self.assertEqual(len(propio["libro-diario"]["renglones"]), 3)
+            self.assertEqual(propio["libro-diario"]["total_cargos"], "116.00")
+            self.assertNotIn("9999", {c["codigo"] for c in propio["balanza"]["cuentas"]})
+            for param in ({"empresa": b.pk}, {"empresa_id": b.pk}):
+                for ruta in ("libro-diario", "balanza"):
+                    with self.subTest(user=user.username, ruta=ruta, param=param):
+                        resp = self._get(ruta, user=user, **param, **self.PERIODO)
+                        self.assertEqual(resp.status_code, 200)
+                        self.assertEqual(resp.data, propio[ruta])
 
     def test_rastro_de_un_documento_trae_su_poliza_y_la_contrapoliza(self):
         poliza, factura = self._factura_en(date(2026, 3, 5), "F-1")
