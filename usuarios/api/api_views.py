@@ -98,10 +98,10 @@ class UsuarioViewSet(viewsets.ModelViewSet):
         user = self.request.user
         # Listado más reciente primero; ``-id`` como desempate estable.
         base_qs = self.queryset.order_by('-created_at', '-id')
-        if user.is_superuser:
-            return base_qs
-        if hasattr(user, 'empresa') and user.empresa:
-            return base_qs.filter(empresa=user.empresa)
+        # Solo los usuarios de la empresa activa, superusuario incluido (EC-843,
+        # misma regla que EC-798): otra empresa da 404 y sin empresa, nada.
+        if getattr(user, 'empresa_id', None):
+            return base_qs.filter(empresa_id=user.empresa_id)
         return base_qs.none()
 
     def check_object_permissions(self, request, obj):
@@ -153,6 +153,17 @@ class UsuarioViewSet(viewsets.ModelViewSet):
         
         # Caso Superusuario
         if user.is_superuser:
+            # Puede mover a un usuario de su empresa a otra, pero no a sí mismo:
+            # su empresa activa solo cambia por ``cambiar-empresa`` (EC-843), que
+            # además rehace su alcance por sucursal.
+            if (
+                serializer.instance.pk == user.pk
+                and 'empresa' in serializer.validated_data
+                and getattr(serializer.validated_data['empresa'], 'pk', None) != serializer.instance.empresa_id
+            ):
+                raise PermissionDenied(
+                    "Tu empresa activa se cambia en /api/v1/nucleo/cambiar-empresa/."
+                )
             serializer.save()
             return
 

@@ -550,6 +550,99 @@ class UsuarioViewSetAlcanceTests(_DosEmpresasMixin, TestCase):
         self.assertFalse(Usuario.objects.filter(email="nuevo@acme.test").exists())
 
 
+class SuperusuarioEmpresaActivaTests(_DosEmpresasMixin, TestCase):
+    """EC-843: en ``/api/v1/usuarios/`` el superusuario solo ve y edita usuarios
+    de su empresa activa, como en el resto del ERP (EC-798). Puede mover a uno de
+    ellos a otra empresa, pero su propia empresa solo cambia por
+    ``/api/v1/nucleo/cambiar-empresa/``."""
+
+    URL = "/api/v1/usuarios/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls._crear_empresas()
+        cls.ajeno = Usuario.objects.create(
+            username="ajeno", email="ajeno@globex.test", empresa=cls.ajena,
+            sucursal_default=cls.sucursal_ajena,
+        )
+
+    def setUp(self):
+        self.root = Usuario.objects.create(
+            username="root", email="root@acme.test", empresa=self.empresa,
+            sucursal_default=self.sucursal, is_superuser=True,
+        )
+        self.objetivo = Usuario.objects.create(
+            username="operador", email="operador@acme.test", empresa=self.empresa,
+            sucursal_default=self.sucursal,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.root)
+
+    def _alcance(self, user):
+        u = Usuario.objects.get(pk=user.pk)
+        return (
+            u.empresa_id, u.sucursal_default_id,
+            sorted(u.sucursales.values_list("pk", flat=True)),
+            sorted(u.departamentos.values_list("pk", flat=True)),
+        )
+
+    def test_lista_solo_su_empresa_activa(self):
+        response = self.client.get(self.URL)
+        self.assertEqual(response.status_code, 200)
+        ids = {u["id"] for u in response.data}
+        self.assertEqual(ids, {self.root.pk, self.objetivo.pk})
+
+    def test_usuario_de_otra_empresa_da_404(self):
+        url = f"{self.URL}{self.ajeno.pk}/"
+        antes = self._alcance(self.ajeno)
+        self.assertEqual(self.client.get(url).status_code, 404)
+        self.assertEqual(self.client.patch(url, {"first_name": "X"}, format="json").status_code, 404)
+        self.assertEqual(self.client.put(url, {"first_name": "X"}, format="json").status_code, 404)
+        self.assertEqual(self.client.delete(url).status_code, 404)
+        self.assertTrue(Usuario.objects.filter(pk=self.ajeno.pk, first_name="").exists())
+        self.assertEqual(self._alcance(self.ajeno), antes)
+
+    def test_sin_empresa_activa_no_ve_a_nadie(self):
+        Usuario.objects.filter(pk=self.root.pk).update(empresa=None, sucursal_default=None)
+        self.root.refresh_from_db()
+        self.client.force_authenticate(user=self.root)
+        self.assertEqual(self.client.get(self.URL).data, [])
+        self.assertEqual(self.client.get(f"{self.URL}{self.objetivo.pk}/").status_code, 404)
+
+    def test_mueve_a_un_usuario_de_su_empresa_y_deja_de_verlo(self):
+        response = self.client.patch(f"{self.URL}{self.objetivo.pk}/", {
+            "empresa": self.ajena.pk, "sucursal_default": self.sucursal_ajena.pk,
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self._alcance(self.objetivo), (self.ajena.pk, self.sucursal_ajena.pk, [], []))
+        self.assertEqual(self.client.get(f"{self.URL}{self.objetivo.pk}/").status_code, 404)
+
+    def test_no_cambia_su_propia_empresa_aqui(self):
+        """Ni con el alcance de la empresa destino ni dejándose sin empresa: 403
+        y nada cambia. Las reglas de alcance (400) se revisan antes, como el
+        resto de validaciones de ``UsuarioSerializer``."""
+        antes = self._alcance(self.root)
+        cuerpos = (
+            {"empresa": self.ajena.pk, "sucursal_default": self.sucursal_ajena.pk},
+            {"empresa": None, "sucursal_default": None},
+        )
+        for body in cuerpos:
+            with self.subTest(body=body):
+                response = self.client.patch(f"{self.URL}{self.root.pk}/", body, format="json")
+                self.assertEqual(response.status_code, 403, response.data)
+                self.assertIn("cambiar-empresa", str(response.data["detail"]))
+                self.assertEqual(self._alcance(self.root), antes)
+
+    def test_editarse_sin_cambiar_de_empresa_sigue_funcionando(self):
+        """El front edita con PUT/PATCH reenviando la empresa que ya tiene."""
+        response = self.client.patch(f"{self.URL}{self.root.pk}/", {
+            "empresa": self.empresa.pk, "first_name": "Root",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.root.refresh_from_db()
+        self.assertEqual((self.root.empresa_id, self.root.first_name), (self.empresa.pk, "Root"))
+
+
 class MfaCodigoTests(TestCase):
     """Quitar el método MFA activo o cambiar el primario exige un código válido."""
 
