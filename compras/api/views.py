@@ -545,15 +545,41 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             return m
         return Moneda.objects.filter(empresa__isnull=True, activo=True).order_by("codigo_iso").first()
 
-    def _validar_almacen_oc(self, empresa, almacen_id, sucursal_id):
-        # El almacén destino debe ser activo, de la empresa y de la sucursal de la OC.
-        if not almacen_id:
-            return
-        almacen = Almacen.objects.filter(pk=almacen_id, empresa_id=getattr(empresa, "pk", None), estatus="ACTIVO").first()
+    def _validar_almacen_oc(self, empresa, almacen_id, sucursal_id, actual_id=None):
+        """Almacén destino de la OC (EC-797): devuelve el id a guardar (``None`` limpia).
+
+        - ``null``/vacío limpia; cualquier otro valor debe ser un id existente (``0``
+          o basura → 400, nunca un IntegrityError).
+        - De la empresa y de la sucursal de la OC, con la MISMA regla que la recepción
+          (``RecepcionViewSet.onboarding``): un almacén sin sucursal no sirve.
+        - Activo sólo si cambia: reenviar el que ya tiene, aunque se haya desactivado,
+          no bloquea editar el resto de la OC.
+        """
+        if almacen_id is None or almacen_id == "":
+            return None
+        try:
+            almacen_id = int(almacen_id)
+        except (TypeError, ValueError):
+            almacen_id = 0
+        almacen = (
+            Almacen.objects.filter(pk=almacen_id, empresa_id=getattr(empresa, "pk", None))
+            .only("id_almacen", "sucursal_id", "estatus").first() if almacen_id > 0 else None
+        )
         if almacen is None:
-            raise ValidationError({"almacen": "El almacén no existe, está inactivo o no pertenece a la empresa de la orden."})
-        if almacen.sucursal_id and str(almacen.sucursal_id) != str(sucursal_id):
+            raise ValidationError({"almacen": "El almacén no existe o no pertenece a la empresa de la orden."})
+        if almacen.pk != actual_id and almacen.estatus != "ACTIVO":
+            raise ValidationError({"almacen": "El almacén está inactivo."})
+        if almacen.sucursal_id is None or str(almacen.sucursal_id) != str(sucursal_id):
             raise ValidationError({"almacen": "El almacén no pertenece a la sucursal de la orden."})
+        return almacen.pk
+
+    @staticmethod
+    def _almacen_de_otra_sucursal(oc, sucursal_id):
+        """La OC cambia de sucursal sin mandar ``almacen``: el suyo ya no aplica (EC-797)."""
+        if not oc.almacen_id:
+            return False
+        suc_almacen = Almacen.objects.filter(pk=oc.almacen_id).values_list("sucursal_id", flat=True).first()
+        return str(suc_almacen) != str(sucursal_id)
 
     @staticmethod
     def _aplicar_tipo_cambio(oc, header):
@@ -933,6 +959,10 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             fecha_vencimiento = header.get("fecha_vencimiento")
             porcentaje_iva = header.get("porcentaje_iva")
 
+            if not sucursal_id and oc.pk:
+                # Editar una OC existente sin ``sucursal``: la suya, no la por defecto
+                # del usuario (EC-797).
+                sucursal_id = oc.sucursal_id
             if not sucursal_id:
                 suc = self._get_default_sucursal(user, empresa)
                 if not suc:
@@ -964,7 +994,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 raise ValidationError({"sucursal": "No tienes asignada esta sucursal."})
             has_almacen = "almacen" in header
             if has_almacen:
-                self._validar_almacen_oc(empresa, header.get("almacen"), sucursal_id)
+                almacen_id = self._validar_almacen_oc(
+                    empresa, header.get("almacen"), sucursal_id, actual_id=oc.almacen_id if oc.pk else None,
+                )
             self._validar_renglones_empresa(empresa, detalle, header.get("tipo_compra") or oc.tipo_compra, oc)
             pedidos_ids = self._validar_pedidos_empresa(empresa, header)
 
@@ -973,8 +1005,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             if not oc.pk or has_sucursal:
                 oc.sucursal_id = sucursal_id
             if has_almacen:
-                oc.almacen_id = header.get("almacen")
-            elif oc.pk and has_sucursal and oc.almacen_id and str(oc.almacen.sucursal_id or sucursal_id) != str(sucursal_id):
+                oc.almacen_id = almacen_id
+            elif oc.pk and has_sucursal and self._almacen_de_otra_sucursal(oc, sucursal_id):
                 oc.almacen_id = None
             if not oc.pk or has_proveedor:
                 oc.proveedor_id = proveedor_id
@@ -1161,7 +1193,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             )
             has_almacen = "almacen" in header
             if has_almacen:
-                self._validar_almacen_oc(oc.empresa, header.get("almacen"), sucursal_id if (has_sucursal and sucursal_id) else oc.sucursal_id)
+                almacen_id = self._validar_almacen_oc(
+                    oc.empresa, header.get("almacen"),
+                    sucursal_id if (has_sucursal and sucursal_id) else oc.sucursal_id,
+                    actual_id=oc.almacen_id,
+                )
             self._validar_renglones_empresa(oc.empresa, detalle, header.get("tipo_compra") or oc.tipo_compra, oc)
             pedidos_ids = self._validar_pedidos_empresa(oc.empresa, header)
             # El folio sale de la serie del tipo de compra: con folio ya asignado
@@ -1176,10 +1212,15 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 )
 
             oc.usuario = user
+            cambia_sucursal = bool(has_sucursal and sucursal_id and str(sucursal_id) != str(oc.sucursal_id))
             if has_sucursal and sucursal_id:
                 oc.sucursal_id = sucursal_id
             if has_almacen:
-                oc.almacen_id = header.get("almacen")
+                oc.almacen_id = almacen_id
+            elif cambia_sucursal and self._almacen_de_otra_sucursal(oc, sucursal_id):
+                # Igual que el onboarding (EC-797): sin ``almacen`` en el body, el de
+                # otra sucursal no se queda.
+                oc.almacen_id = None
             if has_proveedor:
                 oc.proveedor_id = proveedor_id
             if has_moneda and moneda_id:

@@ -380,22 +380,21 @@ class ClienteViewSet(viewsets.ModelViewSet):
             "por_moneda": monedas,
         }
 
-    # Pedidos que cuentan como actividad comercial (#367): POR AUTORIZAR (2),
-    # AUTORIZADA (3) y EN PROCESO (4); no BORRADOR (1) ni CANCELADO (5).
-    ESTATUS_PEDIDO_ACTIVIDAD = (2, 3, 4)
+    # Actividad comercial = venta real (EC-835): la misma regla que
+    # ``fecha_ultima_compra`` de Mesa de Control (``ventas.scope.pedidos_venta_real``).
     VENTANA_ACTIVIDAD_DIAS = 90
 
     def _kpi_clientes_activos(self, clientes_qs):
         from django.db.models import Exists, OuterRef
 
         from ventas.models import Pedido
+        from ventas.scope import pedidos_venta_real
 
         desde = timezone.now() - timedelta(days=self.VENTANA_ACTIVIDAD_DIAS)
         # Una sola definición de "activo" para los conteos Y las listas (#371).
-        pedidos = Pedido.objects.filter(
-            cliente=OuterRef("pk"), empresa=OuterRef("empresa"), activo=True,
-            estatus__in=self.ESTATUS_PEDIDO_ACTIVIDAD, created_at__gte=desde,
-        )
+        pedidos = pedidos_venta_real(Pedido.objects.filter(
+            cliente=OuterRef("pk"), empresa=OuterRef("empresa"), activo=True, created_at__gte=desde,
+        ))
         activos_qs = clientes_qs.filter(Exists(pedidos))
         inactivos_qs = clientes_qs.exclude(Exists(pedidos))
         activos = activos_qs.count()
@@ -412,7 +411,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
         drill_inactivos = _filas(inactivos_qs, ("nombre", "id"))
         return {
             "disponible": True,
-            "criterio": "Activo = al menos un pedido Por autorizar, Autorizado o En proceso en la ventana.",
+            "criterio": "Activo = al menos una venta real en la ventana: pedido Autorizado o En proceso, sin muestras ni pedidos de error.",
             "total": total,
             "activos": activos,
             "inactivos": inactivos,
