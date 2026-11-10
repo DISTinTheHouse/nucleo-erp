@@ -20,9 +20,28 @@ def _quantize(v):
     return (Decimal("0") if v is None else Decimal(str(v))).quantize(Decimal("0.01"))
 
 
+def _de_la_empresa(qs, empresa, *campos):
+    """``qs`` acotado a ``empresa`` por cualquiera de ``campos`` (por omisión
+    ``empresa``); sin empresa, ``qs.none()``: nunca el de todas las empresas (EC-849).
+    Toda consulta del dashboard pasa por aquí."""
+    if not empresa:
+        return qs.none()
+    campos = campos or ("empresa",)
+    condicion = Q()
+    for campo in campos:
+        condicion |= Q(**{campo: empresa})
+    qs = qs.filter(condicion)
+    # Con varios caminos (empresa directa o la de la factura) se conserva el
+    # ``distinct()`` que ya tenía la consulta de CxC.
+    return qs.distinct() if len(campos) > 1 else qs
+
+
 class DashboardFinancieroService:
     @staticmethod
     def obtener_resumen(*, empresa, fecha_inicio=None, fecha_fin=None, moneda_id=None):
+        """Resumen financiero de ``empresa``. Sin empresa (``None``) devuelve la misma
+        forma con todo en cero y listas vacías (EC-849), nunca el de todas las empresas:
+        cada consulta queda en ``.none()`` y no toca la base."""
         hoy = timezone.localdate()
         if fecha_inicio is None:
             fecha_inicio = hoy.replace(day=1)
@@ -33,10 +52,7 @@ class DashboardFinancieroService:
         cxc_qs = CuentaPorCobrar.objects.exclude(
             estatus__in=[CuentaPorCobrar.EstatusCxC.CANCELADA]
         )
-        if empresa:
-            cxc_qs = cxc_qs.filter(
-                Q(empresa=empresa) | Q(factura__empresa=empresa)
-            ).distinct()
+        cxc_qs = _de_la_empresa(cxc_qs, empresa, "empresa", "factura__empresa")
         if moneda_id:
             cxc_qs = cxc_qs.filter(factura__moneda_id=moneda_id)
 
@@ -61,8 +77,7 @@ class DashboardFinancieroService:
         cxp_qs = CuentaPorPagar.objects.exclude(
             estatus__in=[CuentaPorPagar.EstatusCxP.CANCELADA]
         )
-        if empresa:
-            cxp_qs = cxp_qs.filter(empresa=empresa)
+        cxp_qs = _de_la_empresa(cxp_qs, empresa)
         if moneda_id:
             cxp_qs = cxp_qs.filter(factura_proveedor__moneda_id=moneda_id)
 
@@ -81,8 +96,7 @@ class DashboardFinancieroService:
             fecha_cobro__lte=fecha_fin,
             estatus=Cobro.Estatus.APLICADO,
         )
-        if empresa:
-            cobros_periodo = cobros_periodo.filter(empresa=empresa)
+        cobros_periodo = _de_la_empresa(cobros_periodo, empresa)
         if moneda_id:
             cobros_periodo = cobros_periodo.filter(cuenta_bancaria__moneda_id=moneda_id)
         total_cobros = _quantize(
@@ -95,8 +109,7 @@ class DashboardFinancieroService:
             fecha_pago__lte=fecha_fin,
             estatus=Pago.Estatus.APLICADO,
         )
-        if empresa:
-            pagos_periodo = pagos_periodo.filter(empresa=empresa)
+        pagos_periodo = _de_la_empresa(pagos_periodo, empresa)
         if moneda_id:
             pagos_periodo = pagos_periodo.filter(cuenta_bancaria__moneda_id=moneda_id)
         total_pagos = _quantize(
@@ -112,8 +125,7 @@ class DashboardFinancieroService:
             pagos_por_dia[str(p["fecha_pago"])] += _quantize(p["s"])
 
         cuentas_qs = CuentaBancaria.objects.filter(activo=True)
-        if empresa:
-            cuentas_qs = cuentas_qs.filter(empresa=empresa)
+        cuentas_qs = _de_la_empresa(cuentas_qs, empresa)
         if moneda_id:
             cuentas_qs = cuentas_qs.filter(moneda_id=moneda_id)
         cuentas = list(
@@ -174,8 +186,7 @@ class DashboardFinancieroService:
             )
 
         alertas_qs = AlertaMora.objects.all()
-        if empresa:
-            alertas_qs = alertas_qs.filter(empresa=empresa)
+        alertas_qs = _de_la_empresa(alertas_qs, empresa)
         alertas_stats = {
             "total": alertas_qs.count(),
             "leve": alertas_qs.filter(nivel=AlertaMora.Nivel.LEVE).count(),

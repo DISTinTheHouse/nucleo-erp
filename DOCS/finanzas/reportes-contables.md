@@ -3,7 +3,7 @@
 Sobre las pólizas. Base: `/api/v1/finanzas/reportes-contables/`. Todos son `GET` y piden `fecha_inicio` y `fecha_fin` (`AAAA-MM-DD`).
 
 - Cuentan las pólizas **Contabilizadas** y las **Canceladas** (la contrapóliza las neutraliza). Los Borradores no cuentan.
-- Cada empresa ve lo suyo. El superusuario debe mandar `?empresa=ID`.
+- Cada usuario ve sólo su empresa activa, superusuario incluido; `empresa` / `empresa_id` del query ya no se leen (EC-849). Sin empresa → `403`.
 - Los importes son texto con 2 decimales. No hay conversión de moneda.
 
 | Reporte | Ruta | Qué trae |

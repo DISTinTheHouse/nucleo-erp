@@ -74,8 +74,8 @@ El módulo `/api/v1/finanzas/*` unifica el blindaje multi-tenant a través de 5 
 
 **Endpoints agregados** (Dashboard / Generar alertas mora):
 
-- `GET /api/v1/finanzas/dashboard-financiero/` → Super/admin acepta query param `?empresa_id=X` para filtrar por una empresa concreta; si no envía → requiere `user.empresa` o pide explícito (`ValidationError`).
-- `POST /api/v1/finanzas/alertas-mora/generar/` → Super/admin envía `empresa_id` por body o query param; si lo omite → genera alertas para **TODAS** las empresas del sistema (param `None` a `AlertaMoraService`).
+- `GET /api/v1/finanzas/dashboard/` → siempre la empresa activa del usuario (`user.empresa`), superusuario incluido; `empresa_id` / `empresa` ya no se leen (EC-849). Sin empresa → `200` con la forma de siempre en cero y listas vacías (antes `403`); `DashboardFinancieroService` con `empresa=None` no consulta nada, nunca agrega todas las empresas.
+- `POST /api/v1/finanzas/alertas-mora/generar/` → sólo para la empresa activa del usuario, superusuario incluido; `empresa_id` / `empresa` del body o del query ya no se leen (EC-849). Sin empresa → `403` y no se genera nada: nunca recorre todas las empresas (nunca llama a `AlertaMoraService.generar_alertas` con `None`).
 
 **Persistencia / Migraciones relacionadas al hardening**:
 
