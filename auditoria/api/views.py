@@ -53,12 +53,21 @@ class PaginacionBitacora(CursorPagination):
     page_size_query_param = "limit"
     ordering = "-id"
 
+    def get_page_size(self, request):
+        valor = request.query_params.get(self.page_size_query_param)
+        if valor in (None, ""):
+            return self.page_size
+        if not (valor.isascii() and valor.isdecimal()) or int(valor) < 1:
+            raise ValidationError({"limit": "Debe ser un entero positivo."})
+        return min(int(valor), self.max_page_size)
+
 
 def _entero(params, nombre):
     valor = params.get(nombre)
     if valor in (None, ""):
         return None
-    if not str(valor).isdigit():
+    valor = str(valor)
+    if not (valor.isascii() and valor.isdecimal()) or len(valor) > 9:
         raise ValidationError({nombre: "Debe ser un número entero."})
     return int(valor)
 
