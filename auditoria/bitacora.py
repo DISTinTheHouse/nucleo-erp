@@ -43,6 +43,7 @@ DOCUMENTOS = {
     "produccion.OrdenesBordado": Doc("orden_bordado", "folio_bordado", "estatus_bordado", None, [("pedido", "pedido_id")]),
     "produccion.OrdenesReflejante": Doc("orden_reflejante", "folio_reflejante", "estatus_reflejante", None, [("pedido", "pedido_id")]),
     "produccion.OrdenesCorteManga": Doc("orden_corte_manga", "folio_ocm", "estatus_corte", None, [("pedido", "pedido_id")]),
+    "produccion.SalidaMaquila": Doc("salida_maquila", "folio", "estatus", "total", [("orden_produccion", "op_id")]),
     "wms.Picking": Doc("picking", "folio", "estado", None, [("pedido", "pedido_id")]),
     "wms.Packing": Doc("packing", "folio", "estado", None, [("pedido", "pedido_id")]),
     "wms.Transferencia": Doc("transferencia", "folio", "status"),

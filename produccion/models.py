@@ -108,6 +108,24 @@ class OrdenProduccion(models.Model):
     def __str__(self):
         return str(self.op_id)
 
+class OrdenProduccionPedido(models.Model):
+    """Pedidos que cubre una OP (varios pedidos en una sola OP). ``OrdenProduccion.pedido``
+    sigue siendo el pedido principal y siempre está aquí también."""
+
+    op = models.ForeignKey(OrdenProduccion, on_delete=models.CASCADE, related_name='op_pedidos')
+    pedido = models.ForeignKey(Pedido, on_delete=models.PROTECT, related_name='op_pedidos')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'orden_produccion_pedidos'
+        verbose_name = 'Pedido de orden de producción'
+        verbose_name_plural = 'Pedidos de orden de producción'
+        constraints = [models.UniqueConstraint(fields=['op', 'pedido'], name='uq_op_pedido')]
+
+    def __str__(self):
+        return f"{self.op_id}-{self.pedido_id}"
+
+
 class OrdenProduccionDetalle(models.Model):
     op_detalle_id = models.AutoField(primary_key=True)
     op = models.ForeignKey(OrdenProduccion, on_delete=models.CASCADE, related_name='orden_produccion_detalle')
@@ -761,3 +779,63 @@ class CorteMangaAvances(StatusLifecycleModel):
 
     def __str__(self):
         return str(self.id)
+
+
+class SalidaMaquila(models.Model):
+    """SM: salida de prendas a un centro de confección externo (maquilero).
+
+    Documento con folio SM, ligado a la OP y al maquilero, con cantidad y precio
+    de maquila por renglón. NO mueve inventario: la materia prima ya la consumió
+    la OP al crearse; la SM registra qué se mandó, a quién y a qué precio hasta
+    que WMS recibe la producción y pasa calidad (``cerrar``).
+    """
+
+    class Estatus(models.TextChoices):
+        ENVIADA = "ENVIADA", "Enviada"
+        RECIBIDA = "RECIBIDA", "Recibida"
+        CANCELADA = "CANCELADA", "Cancelada"
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="salidas_maquila")
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="salidas_maquila")
+    op = models.ForeignKey(OrdenProduccion, on_delete=models.PROTECT, related_name="salidas_maquila")
+    centro_confeccion = models.ForeignKey(
+        "terceros.Proveedor", on_delete=models.PROTECT, related_name="salidas_maquila"
+    )
+    folio = models.CharField(max_length=50)
+    estatus = models.CharField(max_length=12, choices=Estatus.choices, default=Estatus.ENVIADA)
+    fecha_envio = models.DateField()
+    fecha_compromiso = models.DateField(null=True, blank=True)
+    fecha_recepcion = models.DateTimeField(null=True, blank=True)
+    total_piezas = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    observaciones = models.TextField(blank=True, default="")
+    usuario = models.ForeignKey("usuarios.Usuario", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    activo = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "salidas_maquila"
+        verbose_name = "Salida a maquila"
+        verbose_name_plural = "Salidas a maquila"
+        constraints = [models.UniqueConstraint(fields=["empresa", "folio"], name="uq_sm_empresa_folio")]
+        indexes = [models.Index(fields=["empresa", "-id"], name="sm_empresa_id")]
+
+    def __str__(self):
+        return self.folio
+
+
+class SalidaMaquilaDetalle(models.Model):
+    salida = models.ForeignKey(SalidaMaquila, on_delete=models.CASCADE, related_name="detalles")
+    op_detalle = models.ForeignKey(
+        OrdenProduccionDetalle, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    descripcion = models.CharField(max_length=255)
+    cantidad = models.DecimalField(max_digits=14, decimal_places=2)
+    precio_unitario = models.DecimalField(max_digits=14, decimal_places=4, default=0)
+    importe = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+
+    class Meta:
+        db_table = "salidas_maquila_detalle"
+        verbose_name = "Renglón de salida a maquila"
+        verbose_name_plural = "Renglones de salida a maquila"

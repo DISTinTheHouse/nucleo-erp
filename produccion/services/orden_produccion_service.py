@@ -285,6 +285,7 @@ class OrdenProduccionService:
         # La OP se crea solo si el BOM es consistente y existe inventario
         # suficiente para descontar automáticamente los insumos requeridos.
         op_rows = validated_data.pop("orden_produccion_detalle")
+        pedidos = validated_data.pop("pedidos_ids", None)
         empresa = validated_data["empresa"]
         sucursal = validated_data["sucursal"]
         plan = OrdenProduccionService._build_consumption_plan(op_rows, empresa)
@@ -299,6 +300,8 @@ class OrdenProduccionService:
         for row in op_rows:
             bulk_data.append(OrdenProduccionDetalle(op=op, **row))
         OrdenProduccionDetalle.objects.bulk_create(bulk_data)
+        from produccion.api.serializers import ligar_pedidos_op
+        ligar_pedidos_op(op, pedidos)
 
         consumos = OrdenProduccionService._discount_existencias(plan, empresa, sucursal)
         consumo = OrdenProduccionService._registrar_consumo(op, consumos)
