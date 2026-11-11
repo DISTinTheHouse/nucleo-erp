@@ -1,0 +1,196 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Flujo de Producción",
+    "output": "DOCS/arquitectura/flujo-produccion.html",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "planeacion",
+      "label": "Planeación"
+    },
+    {
+      "id": "compras",
+      "label": "Compras + inventario"
+    },
+    {
+      "id": "op",
+      "label": "Orden de producción (OP)"
+    },
+    {
+      "id": "procesos",
+      "label": "Bordado · reflejante · corte"
+    }
+  ],
+  "mainPath": [
+    "pedido",
+    "preorden",
+    "op",
+    "ruta",
+    "recepcion",
+    "existencia"
+  ],
+  "nodes": [
+    {
+      "id": "pedido",
+      "lane": "planeacion",
+      "col": 0,
+      "type": "frontend",
+      "label": "Pedido",
+      "sublabel": "confirmado"
+    },
+    {
+      "id": "preorden",
+      "lane": "planeacion",
+      "col": 1,
+      "type": "backend",
+      "label": "Pre-orden",
+      "sublabel": "BOM por SKU de talla"
+    },
+    {
+      "id": "oc",
+      "lane": "compras",
+      "col": 2,
+      "type": "external",
+      "label": "OC borrador",
+      "sublabel": "solo faltantes"
+    },
+    {
+      "id": "op",
+      "lane": "op",
+      "col": 2,
+      "type": "backend",
+      "label": "OP",
+      "sublabel": "consume MP al crear",
+      "tag": "atómica"
+    },
+    {
+      "id": "ruta",
+      "lane": "op",
+      "col": 3,
+      "type": "backend",
+      "label": "Ruta crítica",
+      "sublabel": "maquilero + hitos"
+    },
+    {
+      "id": "recepcion",
+      "lane": "compras",
+      "col": 4,
+      "type": "security",
+      "label": "Recepción OP",
+      "sublabel": "pasa por calidad"
+    },
+    {
+      "id": "existencia",
+      "lane": "compras",
+      "col": 5,
+      "type": "database",
+      "label": "Existencia PT",
+      "sublabel": "producto terminado"
+    },
+    {
+      "id": "programacion",
+      "lane": "procesos",
+      "col": 0,
+      "type": "frontend",
+      "label": "Programación",
+      "sublabel": "matriz prenda/proceso"
+    },
+    {
+      "id": "orden",
+      "lane": "procesos",
+      "col": 1,
+      "type": "backend",
+      "label": "OB / OR / OCM",
+      "sublabel": "SKU por talla"
+    },
+    {
+      "id": "avances",
+      "lane": "procesos",
+      "col": 2,
+      "type": "backend",
+      "label": "Avances",
+      "sublabel": "estatus automático"
+    },
+    {
+      "id": "detenida",
+      "lane": "procesos",
+      "col": 4,
+      "type": "security",
+      "label": "Detenida",
+      "sublabel": "guarda estatus_previo"
+    }
+  ],
+  "edges": [
+    {
+      "from": "pedido",
+      "to": "preorden"
+    },
+    {
+      "from": "preorden",
+      "to": "oc",
+      "label": "faltantes"
+    },
+    {
+      "from": "preorden",
+      "to": "op",
+      "label": "lista para producir",
+      "variant": "emphasis"
+    },
+    {
+      "from": "oc",
+      "to": "preorden",
+      "label": "recibida: recalcula",
+      "variant": "dashed",
+      "role": "return"
+    },
+    {
+      "from": "op",
+      "to": "ruta"
+    },
+    {
+      "from": "ruta",
+      "to": "recepcion",
+      "label": "termina"
+    },
+    {
+      "from": "recepcion",
+      "to": "existencia",
+      "label": "liberado"
+    },
+    {
+      "from": "pedido",
+      "to": "programacion",
+      "label": "servicios"
+    },
+    {
+      "from": "programacion",
+      "to": "orden"
+    },
+    {
+      "from": "orden",
+      "to": "avances"
+    },
+    {
+      "from": "avances",
+      "to": "ruta",
+      "label": "listo"
+    },
+    {
+      "from": "avances",
+      "to": "detenida",
+      "label": "falla",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "from": "detenida",
+      "to": "orden",
+      "label": "reanudar",
+      "variant": "dashed",
+      "role": "return"
+    }
+  ]
+}
