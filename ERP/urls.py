@@ -45,6 +45,7 @@ urlpatterns = [
     path('api/v1/ai/', include('ia.api.urls')),
     path('api/v1/hr/', include('hr.api.urls')),
     path('api/v1/wms/', include('wms.api.urls')),
+    path('api/v1/planeacion/', include('planeacion.api.urls')),
     path('api/v1/auditoria/', include('auditoria.api.urls')),
     # Lector FX (IoT Connector) sin token; ver wms/services/rfid_scan_service.py
     path('api/receive-scan/', receive_scan_sin_token, name='rfid_receive_scan'),

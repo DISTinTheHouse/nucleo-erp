@@ -72,6 +72,7 @@ INSTALLED_APPS = [
     'compras',
     'produccion',
     'wms',
+    'planeacion',
     'logistica',
     'finanzas',
     'hr',
