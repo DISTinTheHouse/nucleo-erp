@@ -12,7 +12,8 @@ Por artículo (variante, o producto con ``agrupar=producto``) junta en memoria:
 
 Sobre eso calcula venta semanal, cobertura, clase ABC (Pareto por piezas del
 periodo: A hasta 80 %, B hasta 95 %, C el resto y lo que no se vendió), resurtido
-sugerido y un ``estado`` para decidir. Consultas fijas (5) sin importar cuántos
+sugerido, un ``estado`` para decidir y cuánto se puede fabricar con la materia
+prima en existencia según el BOM (``planeacion.services.capacidad``). Consultas fijas (7) sin importar cuántos
 artículos haya: todo va agrupado en la base y se cruza en Python.
 """
 
@@ -27,6 +28,7 @@ from django.utils import timezone
 
 from catalogo.models import ProductoVariante
 from inventarios.models import Existencia
+from planeacion.services import capacidad
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle
 from ventas.models import TIPO_PEDIDO_VENTA, Pedido, PedidoDetalleTalla
 
@@ -45,7 +47,7 @@ ESTADOS = (RESURTIR, SOBREINVENTARIO, LENTO, SIN_VENTA, OK)
 ORDENAMIENTOS = {
     "vendido_periodo", "venta_semanal", "tendencia_pct", "existencia", "en_proceso", "disponible",
     "cobertura_semanas", "resurtido_sugerido", "dias_sin_venta", "ultima_venta", "importe_vendido",
-    "nombre", "sku", "clase_abc",
+    "nombre", "sku", "clase_abc", "fabricable_con_existencia",
 }
 CERO = Decimal("0")
 
@@ -191,6 +193,25 @@ def calcular(empresa, p):
             "importe_vendido": f["importe"],
         })
 
+    # 5-6) Capacidad de fabricación con la materia prima en existencia (BOM activo).
+    boms = capacidad.materiales(empresa, ids_variante)
+    con_bom_por_producto = defaultdict(int)
+    for v in universo:
+        if v["id"] in boms:
+            con_bom_por_producto[v["producto_id"]] += 1
+    for r in filas_out:
+        if por_producto:
+            r.update(capacidad.resumen_variante(None))
+            r["tiene_bom"] = con_bom_por_producto[r["producto_id"]] > 0
+            r["variantes_con_bom"] = con_bom_por_producto[r["producto_id"]]
+            r["puede_fabricar_resurtido"] = None
+            continue
+        r.update(capacidad.resumen_variante(boms.get(r["variante_id"])))
+        r["puede_fabricar_resurtido"] = (
+            r["fabricable_con_existencia"] >= r["resurtido_sugerido"]
+            if r["resurtido_sugerido"] > 0 and r["fabricable_con_existencia"] is not None else None
+        )
+
     # Clase ABC sobre todo el universo filtrado (antes de clase/estado/paginación).
     total = sum((r["vendido_periodo"] for r in filas_out), CERO)
     acumulado = CERO
@@ -233,6 +254,9 @@ def calcular(empresa, p):
         "por_clase": {c: sum(1 for r in filas_out if r["clase_abc"] == c) for c in "ABC"},
         "por_estado": {e: sum(1 for r in filas_out if r["estado"] == e) for e in ESTADOS},
         "candidatos_descontinuar": sum(1 for r in filas_out if r["candidato_descontinuar"]),
+        "con_bom": sum(1 for r in filas_out if r["tiene_bom"]),
+        "resurtir_sin_bom": sum(1 for r in filas_out if r["resurtido_sugerido"] > 0 and not r["tiene_bom"]),
+        "resurtir_sin_material": sum(1 for r in filas_out if r["puede_fabricar_resurtido"] is False),
     }
     ant = resumen["vendido_periodo_anterior"]
     resumen["tendencia_pct"] = round((total - ant) / ant * 100, 1) if ant > 0 else None
@@ -244,6 +268,13 @@ def calcular(empresa, p):
         filas_out = [r for r in filas_out if r["estado"] == p["estado"]]
     if p.get("solo_candidatos"):
         filas_out = [r for r in filas_out if r["candidato_descontinuar"]]
+    fab = p.get("fabricacion")
+    if fab == "SIN_BOM":
+        filas_out = [r for r in filas_out if not r["tiene_bom"]]
+    elif fab == "ALCANZA":
+        filas_out = [r for r in filas_out if r["puede_fabricar_resurtido"] is True]
+    elif fab == "NO_ALCANZA":
+        filas_out = [r for r in filas_out if r["puede_fabricar_resurtido"] is False]
 
     campo = p["ordering"].lstrip("-")
     desc = p["ordering"].startswith("-")
@@ -260,4 +291,5 @@ def calcular(empresa, p):
         },
         "resumen": resumen,
         "filas": filas_out,
+        "boms": boms,
     }
