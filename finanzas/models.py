@@ -625,6 +625,9 @@ class Cobro(models.Model):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.PROTECT, related_name="cobros")
     cliente = models.ForeignKey('terceros.Cliente', on_delete=models.PROTECT, related_name="cobros")
     cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.PROTECT, related_name="cobros")
+    # Sucursal del cobro (#1063): la manda el cliente o sale de la factura de la
+    # primera línea. Nula solo en filas previas a la migración que no la tenían.
+    sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.PROTECT, related_name="cobros", null=True, blank=True)
 
     fecha_cobro = models.DateField(default=timezone.localdate)
     metodo_pago = models.CharField(max_length=30, choices=MetodoPago.choices, default=MetodoPago.EFECTIVO)
@@ -694,6 +697,9 @@ class Pago(models.Model):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.PROTECT, related_name="pagos")
     proveedor = models.ForeignKey('terceros.Proveedor', on_delete=models.PROTECT, related_name="pagos")
     cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.PROTECT, related_name="pagos")
+    # Sucursal del pago (#1063): la manda el cliente o sale de la factura de
+    # proveedor de la primera línea.
+    sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.PROTECT, related_name="pagos", null=True, blank=True)
     fecha_pago = models.DateField(default=timezone.localdate)
     metodo_pago = models.CharField(max_length=30, choices=MetodoPago.choices, default=MetodoPago.TRANSFERENCIA)
     referencia_operacion = models.CharField(max_length=100, null=True, blank=True)

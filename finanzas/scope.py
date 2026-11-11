@@ -40,3 +40,29 @@ def exigir_factura_visible(user, factura):
     ids = sucursales_visibles(user)
     if factura is not None and ids is not None and factura.sucursal_id not in ids:
         raise ValidationError({"factura": "Factura no encontrada."})
+
+
+def resolver_sucursal_documento(user, empresa, sucursal, sucursales_lineas):
+    """Sucursal de un cobro o pago al crearlo (#1063). Siempre queda una.
+
+    - La enviada: debe ser de la empresa y, para no admins, de sus sucursales.
+    - Si no viene: la de la primera línea (factura de la CxC o de la CxP).
+    - Si no hay líneas: la ``sucursal_default`` del usuario, si es de la empresa.
+    """
+    from nucleo.models import Sucursal
+
+    empresa_id = getattr(empresa, "pk", empresa)
+    if sucursal is None:
+        candidatos = [s for s in sucursales_lineas if s] + [getattr(user, "sucursal_default_id", None)]
+        sucursal = next(
+            (s for s in (Sucursal.objects.filter(pk=c, empresa_id=empresa_id).first() for c in candidatos if c) if s),
+            None,
+        )
+        if sucursal is None:
+            raise ValidationError({"sucursal": "Indica la sucursal."})
+    if sucursal.empresa_id != empresa_id:
+        raise ValidationError({"sucursal": "La sucursal no pertenece a la empresa."})
+    ids = sucursales_visibles(user)
+    if ids is not None and sucursal.pk not in ids:
+        raise ValidationError({"sucursal": "No tienes acceso a esa sucursal."})
+    return sucursal

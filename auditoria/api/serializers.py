@@ -6,15 +6,22 @@ from ..models import BitacoraDocumento
 class BitacoraDocumentoSerializer(serializers.ModelSerializer):
     usuario_nombre = serializers.SerializerMethodField()
     accion_display = serializers.CharField(source="get_accion_display", read_only=True)
+    total = serializers.SerializerMethodField()
 
     class Meta:
         model = BitacoraDocumento
         fields = [
             "id", "created_at", "tipo_documento", "documento_id", "folio",
-            "accion", "accion_display", "estatus_anterior", "estatus_nuevo",
+            "accion", "accion_display", "estatus_anterior", "estatus_nuevo", "estatus_codigo",
             "total", "moneda_id", "sucursal_id", "origen_tipo", "origen_id",
             "usuario_id", "usuario_nombre",
         ]
+
+    def get_total(self, obj):
+        # Sin permiso de importes (EC-784), ``null`` (#1063).
+        if not self.context.get("ver_importes", False) or obj.total is None:
+            return None
+        return str(obj.total)
 
     def get_usuario_nombre(self, obj):
         u = obj.usuario

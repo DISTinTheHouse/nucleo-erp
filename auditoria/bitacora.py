@@ -5,10 +5,14 @@ leyendo solo atributos ya cargados) y 1 INSERT únicamente cuando hay algo que
 registrar: alta, cambio de estatus, baja, restauración o borrado. Un ``save()``
 que no cambia el estatus no escribe nada.
 
-Límite conocido: ``QuerySet.update()`` y ``bulk_create`` no disparan señales,
-así que esos cambios no quedan en la bitácora.
+Límites conocidos:
+- ``QuerySet.update()`` y ``bulk_create`` no disparan señales: esos cambios no
+  quedan en la bitácora.
+- ``wms.Picking``, ``Packing`` y ``Transferencia`` no tienen ``activo``: nunca
+  registran baja ni restauración, solo cambios de estatus.
 """
 import logging
+import re
 
 from django.apps import apps
 from django.db import transaction
@@ -16,32 +20,80 @@ from django.db.models.signals import post_delete, post_init, post_save
 
 logger = logging.getLogger(__name__)
 
-# modelo -> (tipo, campo folio, campo estatus, campo total, origen (tipo, campo))
+
+class Doc:
+    """Cómo leer un documento: tipo, campos de folio/estatus/total y sus orígenes.
+
+    ``origenes`` es una lista de ``(tipo, campo)``; se usa el primero con valor
+    (p. ej. un movimiento de inventario puede venir de pedido, recepción, OP...).
+    """
+
+    __slots__ = ("tipo", "folio", "estatus", "total", "origenes")
+
+    def __init__(self, tipo, folio=None, estatus=None, total=None, origenes=()):
+        self.tipo, self.folio, self.estatus, self.total, self.origenes = tipo, folio, estatus, total, origenes
+
+
 DOCUMENTOS = {
-    "ventas.Pedido": ("pedido", "folio", "estatus", "gran_total", None),
-    "compras.OrdenCompra": ("orden_compra", "folio", "estatus", "gran_total", ("pedido", "pedido_id")),
-    "compras.Recepcion": ("recepcion", "folio", "estatus", None, ("orden_compra", "orden_compra_id")),
-    "produccion.OrdenProduccion": ("orden_produccion", "folio_op", "estatus_op", None, ("pedido", "pedido_id")),
-    "produccion.OrdenesBordado": ("orden_bordado", "folio_bordado", "estatus_bordado", None, ("pedido", "pedido_id")),
-    "produccion.OrdenesReflejante": ("orden_reflejante", "folio_reflejante", "estatus_reflejante", None, ("pedido", "pedido_id")),
-    "produccion.OrdenesCorteManga": ("orden_corte_manga", "folio_ocm", "estatus_corte", None, ("pedido", "pedido_id")),
-    "wms.Picking": ("picking", "folio", "estado", None, ("pedido", "pedido_id")),
-    "wms.Packing": ("packing", "folio", "estado", None, ("pedido", "pedido_id")),
-    "wms.Transferencia": ("transferencia", "folio", "status", None, None),
-    "finanzas.Factura": ("factura", "folio", "estatus", "total", ("pedido", "pedido_id")),
-    "finanzas.FacturaProveedor": ("factura_proveedor", "folio", "estatus", "total", None),
-    "finanzas.Cobro": ("cobro", "folio", "estatus", "total_cobrado", None),
-    "finanzas.Pago": ("pago", None, "estatus", "total_pagado", None),
-    "finanzas.Poliza": ("poliza", "folio", "estatus", None, None),
-    "inventarios.MovimientoInventario": ("movimiento_inventario", None, "tipo_movimiento", None, ("pedido", "pedido_id")),
-    "inventarios.AjusteInventario": ("ajuste_inventario", None, None, None, None),
+    "ventas.Pedido": Doc("pedido", "folio", "estatus", "gran_total"),
+    "compras.OrdenCompra": Doc("orden_compra", "folio", "estatus", "gran_total", [("pedido", "pedido_id")]),
+    "compras.Recepcion": Doc("recepcion", "folio", "estatus", None,
+                             [("orden_compra", "orden_compra_id"), ("orden_produccion", "op_id")]),
+    "produccion.OrdenProduccion": Doc("orden_produccion", "folio_op", "estatus_op", None, [("pedido", "pedido_id")]),
+    "produccion.OrdenesBordado": Doc("orden_bordado", "folio_bordado", "estatus_bordado", None, [("pedido", "pedido_id")]),
+    "produccion.OrdenesReflejante": Doc("orden_reflejante", "folio_reflejante", "estatus_reflejante", None, [("pedido", "pedido_id")]),
+    "produccion.OrdenesCorteManga": Doc("orden_corte_manga", "folio_ocm", "estatus_corte", None, [("pedido", "pedido_id")]),
+    "wms.Picking": Doc("picking", "folio", "estado", None, [("pedido", "pedido_id")]),
+    "wms.Packing": Doc("packing", "folio", "estado", None, [("pedido", "pedido_id")]),
+    "wms.Transferencia": Doc("transferencia", "folio", "status"),
+    "finanzas.Factura": Doc("factura", "folio", "estatus", "total", [("pedido", "pedido_id")]),
+    "finanzas.FacturaProveedor": Doc("factura_proveedor", "folio", "estatus", "total",
+                                     [("recepcion", "recepcion_id"), ("orden_compra", "oc_id")]),
+    "finanzas.Cobro": Doc("cobro", "folio", "estatus", "total_cobrado"),
+    "finanzas.Pago": Doc("pago", "referencia", "estatus", "total_pagado"),
+    "finanzas.Poliza": Doc("poliza", "folio", "estatus"),
+    "inventarios.MovimientoInventario": Doc(
+        "movimiento_inventario", None, "tipo_movimiento", None,
+        [("pedido", "pedido_id"), ("recepcion", "recepcion_id"), ("transferencia", "transferencia_id"),
+         ("orden_produccion", "op_id"), ("factura", "factura_id")],
+    ),
+    "inventarios.AjusteInventario": Doc("ajuste_inventario"),
 }
+
+#: tipo -> etiqueta del modelo, para validar ``?tipo=`` y buscar el documento.
+TIPOS = {doc.tipo: label for label, doc in DOCUMENTOS.items()}
 
 _PREVIO = "_bitacora_previo"
 
+# Etiquetas uniformes (#1065): formato oración y con acentos.
+_ACENTOS = {
+    "preparacion": "preparación", "produccion": "producción", "revision": "revisión",
+    "autorizacion": "autorización", "recepcion": "recepción", "cancelacion": "cancelación",
+    "liberacion": "liberación", "confeccion": "confección", "transito": "tránsito",
+    "aplicacion": "aplicación", "inspeccion": "inspección", "devolucion": "devolución",
+    "validacion": "validación", "facturacion": "facturación", "programacion": "programación",
+    "fabricacion": "fabricación", "planeacion": "planeación", "asignacion": "asignación",
+}
 
-def _valor(obj, campo):
-    return getattr(obj, campo, None) if campo else None
+
+def etiqueta_uniforme(texto):
+    """``"POR AUTORIZAR"`` → ``"Por autorizar"``; ``"Preparacion"`` → ``"Preparación"``;
+    quita sufijos ``(legacy)`` y guiones bajos."""
+    if texto is None:
+        return ""
+    texto = re.sub(r"\s*\(legacy\)\s*$", "", str(texto), flags=re.I).replace("_", " ").strip()
+    if not texto:
+        return ""
+    palabras = [_ACENTOS.get(p.lower(), p.lower()) for p in texto.split()]
+    frase = " ".join(palabras)
+    return frase[:1].upper() + frase[1:]
+
+
+def _etiqueta(modelo, doc, valor):
+    if valor is None or valor == "" or not doc.estatus:
+        return ""
+    opciones = dict(modelo._meta.get_field(doc.estatus).flatchoices or ())
+    return etiqueta_uniforme(opciones.get(valor, valor))
 
 
 def _usuario_id():
@@ -57,72 +109,73 @@ def _usuario_id():
         return None
 
 
-def _etiqueta(obj, conf, valor):
-    """Etiqueta legible del estatus (``choices``) o el valor tal cual."""
-    if valor is None or valor == "" or not conf[2]:
-        return valor
-    opciones = dict(type(obj)._meta.get_field(conf[2]).flatchoices or ())
-    return opciones.get(valor, valor)
+def _origen(obj, doc):
+    for tipo, campo in doc.origenes:
+        valor = getattr(obj, campo, None)
+        if valor:
+            return tipo, valor
+    return "", None
 
 
-def _registrar(obj, conf, accion, anterior="", nuevo=""):
+def _registrar(obj, doc, accion, anterior=None, nuevo=None):
     from .models import BitacoraDocumento
 
-    tipo, f_folio, _f_est, f_total, origen = conf
     empresa_id = getattr(obj, "empresa_id", None)
     if not empresa_id:
         return
-    origen_id = getattr(obj, origen[1], None) if origen else None
+    modelo = type(obj)
+    origen_tipo, origen_id = _origen(obj, doc)
     try:
         with transaction.atomic():  # savepoint: un fallo aquí no tumba el documento
             BitacoraDocumento.objects.create(
                 empresa_id=empresa_id,
                 sucursal_id=getattr(obj, "sucursal_id", None),
-                tipo_documento=tipo,
+                tipo_documento=doc.tipo,
                 documento_id=str(obj.pk),
-                folio=str(_valor(obj, f_folio) or "")[:60],
+                folio=str((getattr(obj, doc.folio, None) if doc.folio else None) or "")[:60],
                 accion=accion,
-                estatus_anterior=str(_etiqueta(obj, conf, anterior) or "")[:40],
-                estatus_nuevo=str(_etiqueta(obj, conf, nuevo) or "")[:40],
-                total=_valor(obj, f_total),
+                estatus_anterior=_etiqueta(modelo, doc, anterior)[:40],
+                estatus_nuevo=_etiqueta(modelo, doc, nuevo)[:40],
+                estatus_codigo="" if nuevo is None else str(nuevo)[:40],
+                total=getattr(obj, doc.total, None) if doc.total else None,
                 moneda_id=getattr(obj, "moneda_id", None),
-                origen_tipo=origen[0] if origen_id else "",
+                origen_tipo=origen_tipo,
                 origen_id=origen_id,
                 usuario_id=_usuario_id(),
             )
     except Exception:
-        logger.exception("No se pudo registrar %s %s en la bitácora", tipo, obj.pk)
+        logger.exception("No se pudo registrar %s %s en la bitácora", doc.tipo, obj.pk)
 
 
 def _al_iniciar(sender, instance, **kwargs):
-    conf = DOCUMENTOS[sender._meta.label]
+    doc = DOCUMENTOS[sender._meta.label]
     cargados = instance.__dict__  # sin consultas diferidas
-    setattr(instance, _PREVIO, (cargados.get(conf[2]) if conf[2] else None, cargados.get("activo")))
+    setattr(instance, _PREVIO, (cargados.get(doc.estatus) if doc.estatus else None, cargados.get("activo")))
 
 
 def _al_guardar(sender, instance, created, raw=False, **kwargs):
     if raw:
         return
-    conf = DOCUMENTOS[sender._meta.label]
+    doc = DOCUMENTOS[sender._meta.label]
     est_prev, activo_prev = getattr(instance, _PREVIO, (None, None))
-    est = instance.__dict__.get(conf[2]) if conf[2] else None
+    est = instance.__dict__.get(doc.estatus) if doc.estatus else None
     activo = instance.__dict__.get("activo")
     if created:
-        _registrar(instance, conf, "crear", nuevo=est)
+        _registrar(instance, doc, "crear", nuevo=est)
     else:
-        if conf[2] and est_prev is not None and est != est_prev:
-            _registrar(instance, conf, "estatus", est_prev, est)
+        if doc.estatus and est_prev is not None and est != est_prev:
+            _registrar(instance, doc, "estatus", est_prev, est)
         if activo_prev is True and activo is False:
-            _registrar(instance, conf, "baja", est, est)
+            _registrar(instance, doc, "baja", est, est)
         elif activo_prev is False and activo is True:
-            _registrar(instance, conf, "restaurar", est, est)
+            _registrar(instance, doc, "restaurar", est, est)
     setattr(instance, _PREVIO, (est, activo))
 
 
 def _al_borrar(sender, instance, **kwargs):
-    conf = DOCUMENTOS[sender._meta.label]
-    est = instance.__dict__.get(conf[2]) if conf[2] else None
-    _registrar(instance, conf, "eliminar", est, "")
+    doc = DOCUMENTOS[sender._meta.label]
+    est = instance.__dict__.get(doc.estatus) if doc.estatus else None
+    _registrar(instance, doc, "eliminar", est, None)
 
 
 def conectar():

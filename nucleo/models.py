@@ -117,6 +117,18 @@ class Empresa(StatusLifecycleModel):
     logo_url = models.URLField(blank=True, null=True)
     config_json = models.JSONField(default=dict, blank=True)
 
+    # Domicilio fiscal (#1053). No es el lugar de expedición del CFDI (ése es el
+    # CP de la sucursal). API: /api/v1/nucleo/empresa-actual/domicilio-fiscal/.
+    fiscal_calle = models.CharField(max_length=255, blank=True, default="")
+    fiscal_numero_exterior = models.CharField(max_length=30, blank=True, default="")
+    fiscal_numero_interior = models.CharField(max_length=30, blank=True, default="")
+    fiscal_colonia = models.CharField(max_length=120, blank=True, default="")
+    fiscal_localidad = models.CharField(max_length=120, blank=True, default="")
+    fiscal_municipio = models.CharField(max_length=120, blank=True, default="")
+    fiscal_estado = models.CharField(max_length=120, blank=True, default="")
+    fiscal_pais = models.CharField(max_length=3, blank=True, default="MEX")
+    fiscal_codigo_postal = models.CharField(max_length=5, blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(blank=True, null=True)

@@ -61,6 +61,8 @@ class BitacoraDocumento(models.Model):
     accion = models.CharField(max_length=12, choices=Accion.choices)
     estatus_anterior = models.CharField(max_length=40, blank=True, default="")
     estatus_nuevo = models.CharField(max_length=40, blank=True, default="")
+    # Código crudo del estatus nuevo (las etiquetas de arriba son legibles, #1065).
+    estatus_codigo = models.CharField(max_length=40, blank=True, default="")
     total = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
     moneda_id = models.IntegerField(null=True, blank=True)
     origen_tipo = models.CharField(max_length=30, blank=True, default="")
