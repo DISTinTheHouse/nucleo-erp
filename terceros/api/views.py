@@ -13,7 +13,7 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, F, OuterRef, Q, Subquery, Sum
+from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.shortcuts import get_object_or_404
@@ -21,7 +21,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import (
-    ClienteMesaControlSerializer,
+    ClienteConUltimaCompraSerializer,
     ClienteSerializer,
     DireccionClienteSerializer,
     ProveedorSerializer,
@@ -48,7 +48,9 @@ logger = logging.getLogger(__name__)
 
 class ClienteViewSetMesaControl(viewsets.ModelViewSet):
     queryset = clientes_base()
-    serializer_class = ClienteMesaControlSerializer
+    # El mismo serializer que el listado/detalle de ``clientes``: una sola forma
+    # (y un solo componente en el schema OpenAPI, EC-853).
+    serializer_class = ClienteConUltimaCompraSerializer
     http_method_names = ['get']
 
     def get_queryset(self):
@@ -59,25 +61,13 @@ class ClienteViewSetMesaControl(viewsets.ModelViewSet):
         # scope por ``vendedores`` ni la política de superusuario.
         # ``vendedores`` en una sola consulta, igual que ``ClienteViewSet``: sin
         # el prefetch era una consulta por cliente.
-        # ``fecha_ultima_compra``: ``created_at`` del pedido más reciente del
-        # cliente que es venta real (``pedidos_venta_real``: sin MUESTRA, PEDIDO DE
-        # ERROR, BORRADOR, POR AUTORIZAR ni CANCELADO; EC-830), activo y de su
-        # empresa, como subquery en la misma consulta. Import local por el ciclo
+        # ``fecha_ultima_compra``: ``ventas.scope.anotar_fecha_ultima_compra``, la
+        # única definición de la subquery (EC-853). Import local por el ciclo
         # ``ventas`` -> ``terceros``.
-        from ventas.models import Pedido
-        from ventas.scope import pedidos_venta_real
+        from ventas.scope import anotar_fecha_ultima_compra
 
-        ultimo_pedido = (
-            pedidos_venta_real(
-                Pedido.objects.filter(cliente_id=OuterRef("pk"), empresa_id=OuterRef("empresa_id"), activo=True)
-            )
-            .order_by("-created_at")
-            .values("created_at")[:1]
-        )
-        return (
-            clientes_visibles(super().get_queryset(), self.request.user)
-            .prefetch_related("vendedores")
-            .annotate(ultimo_pedido_at=Subquery(ultimo_pedido))
+        return anotar_fecha_ultima_compra(
+            clientes_visibles(super().get_queryset(), self.request.user).prefetch_related("vendedores")
         )
 
 class ClienteViewSet(viewsets.ModelViewSet):
@@ -91,21 +81,37 @@ class ClienteViewSet(viewsets.ModelViewSet):
     queryset = clientes_base()
     serializer_class = ClienteSerializer
     # Modo servidor como ``ProveedorViewSet`` (EC-757): sin ``?limit=`` regresa la
-    # lista completa; ``?search=`` busca por nombre, razón social, RFC, clave o correo.
+    # lista completa; ``?search=`` busca por nombre, razón social, RFC, clave, correo
+    # o teléfono (``telefono``, tal cual se guardó; EC-853).
     pagination_class = PaginacionOpcionalLimitOffset
     filter_backends = [
         *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
         OrdenamientoNullsAlFinal,
     ]
-    search_fields = ["nombre", "razon_social", "rfc", "clave", "correo"]
-    # Sólo campos de ``Cliente``: ``fecha_alta``, ``fecha_ultima_compra`` y
-    # ``updated_at`` venían de la lista de proveedores y no existen aquí; al estar
-    # en la lista blanca llegaban al ``order_by`` y respondían 500 (EC-826).
-    # NULL al final en ambas direcciones (``created_at`` y ``clave`` son NULL-able).
+    search_fields = ["nombre", "razon_social", "rfc", "clave", "correo", "telefono"]
+    # Campos de ``Cliente`` más la anotación ``fecha_ultima_compra`` (EC-853). Los
+    # que no existían (``fecha_alta``, ``updated_at``) respondían 500 (EC-826).
+    # NULL al final en ambas direcciones (``created_at``, ``clave`` y la anotación
+    # son NULL-able).
     ordering_fields = [
         "id", "clave", "nombre", "razon_social", "rfc", "correo", "telefono", "ciudad", "estado",
-        "giro_empresarial", "dias_credito", "created_at",
+        "giro_empresarial", "dias_credito", "created_at", "fecha_ultima_compra",
     ]
+    # Listado y detalle llevan ``fecha_ultima_compra`` (EC-853); alta, edición y
+    # las demás acciones conservan ``ClienteSerializer`` y su respuesta.
+    ACCIONES_CON_ULTIMA_COMPRA = ("list", "retrieve")
+
+    def _con_ultima_compra(self):
+        """Única decisión de si esta acción anota ``fecha_ultima_compra`` y la
+        serializa: ``get_queryset`` y ``get_serializer_class`` la consultan las dos,
+        así que no pueden separarse (un serializer sin anotación truena, ver
+        ``ClienteConUltimaCompraSerializer``)."""
+        return self.action in self.ACCIONES_CON_ULTIMA_COMPRA
+
+    def get_serializer_class(self):
+        if self._con_ultima_compra():
+            return ClienteConUltimaCompraSerializer
+        return super().get_serializer_class()
 
     def get_queryset(self):
         # El predicado de aislamiento vive en ``terceros.scope`` para que el
@@ -113,11 +119,19 @@ class ClienteViewSet(viewsets.ModelViewSet):
         # una copia que pueda separarse de él. ``vendedores`` (M2M del serializer)
         # en una sola consulta, no una por cliente. Orden por defecto: nombre, con
         # ``id`` como desempate estable (antes era indefinido, EC-757).
-        return (
+        qs = (
             clientes_visibles(super().get_queryset(), self.request.user)
             .prefetch_related("vendedores")
             .order_by("nombre", "id")
         )
+        if self._con_ultima_compra():
+            # Misma subquery que Mesa de Control (una sola definición). Sólo
+            # anota: no cambia qué clientes se listan. Import local por el ciclo
+            # ``ventas`` -> ``terceros``.
+            from ventas.scope import anotar_fecha_ultima_compra
+
+            qs = anotar_fecha_ultima_compra(qs)
+        return qs
 
     def retrieve(self, request, *args, **kwargs):
         # Sólo el detalle (no el listado) lleva ``resumen_comercial``: es la
@@ -385,16 +399,14 @@ class ClienteViewSet(viewsets.ModelViewSet):
     VENTANA_ACTIVIDAD_DIAS = 90
 
     def _kpi_clientes_activos(self, clientes_qs):
-        from django.db.models import Exists, OuterRef
+        from django.db.models import Exists
 
-        from ventas.models import Pedido
-        from ventas.scope import pedidos_venta_real
+        from ventas.scope import pedidos_venta_real_del_cliente
 
         desde = timezone.now() - timedelta(days=self.VENTANA_ACTIVIDAD_DIAS)
-        # Una sola definición de "activo" para los conteos Y las listas (#371).
-        pedidos = pedidos_venta_real(Pedido.objects.filter(
-            cliente=OuterRef("pk"), empresa=OuterRef("empresa"), activo=True, created_at__gte=desde,
-        ))
+        # Una sola definición de "activo" para los conteos Y las listas (#371). Las
+        # compras del cliente son las mismas de ``fecha_ultima_compra`` (EC-853).
+        pedidos = pedidos_venta_real_del_cliente().filter(created_at__gte=desde)
         activos_qs = clientes_qs.filter(Exists(pedidos))
         inactivos_qs = clientes_qs.exclude(Exists(pedidos))
         activos = activos_qs.count()
