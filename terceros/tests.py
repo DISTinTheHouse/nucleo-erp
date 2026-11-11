@@ -2384,6 +2384,41 @@ class ClienteListadoFechaUltimaCompraTests(ClienteMesaControlFechaUltimaCompraTe
         self.assertEqual(self._fechas()[cliente.pk], self._local(self.VENTA))
         self.assertNotIn(cliente.pk, self._fechas(self.admin_otra))
 
+    def test_serializer_sin_anotacion_truena_en_vez_de_responder_null(self):
+        from django.core.exceptions import ImproperlyConfigured
+
+        from terceros.api.serializers import ClienteConUltimaCompraSerializer
+        from ventas.scope import anotar_fecha_ultima_compra
+
+        cliente = self._cliente("Sin anotar")
+        with self.assertRaises(ImproperlyConfigured):
+            ClienteConUltimaCompraSerializer(Cliente.objects.get(pk=cliente.pk)).data
+        anotado = anotar_fecha_ultima_compra(Cliente.objects.filter(pk=cliente.pk)).get()
+        self.assertIsNone(ClienteConUltimaCompraSerializer(anotado).data["fecha_ultima_compra"])
+
+    def test_anotacion_y_serializer_salen_de_la_misma_decision(self):
+        """Para cada acción de ``ClienteViewSet``: anota ``fecha_ultima_compra`` si y
+        sólo si usa ``ClienteConUltimaCompraSerializer`` (sólo listado y detalle)."""
+        from rest_framework.request import Request
+        from rest_framework.test import APIRequestFactory
+
+        from terceros.api.serializers import ClienteConUltimaCompraSerializer
+        from terceros.api.views import ClienteViewSet
+
+        acciones = (
+            "list", "retrieve", "create", "update", "partial_update", "destroy",
+            "en_facturama", "importar_csf", "kpis", "verificar_rfc", "metadata",
+        )
+        for accion in acciones:
+            with self.subTest(accion=accion):
+                request = Request(APIRequestFactory().get(self.URL))
+                request.user = self.admin
+                vista = ClienteViewSet(action=accion, request=request, format_kwarg=None, kwargs={})
+                anotada = "fecha_ultima_compra" in vista.get_queryset().query.annotations
+                usa = vista.get_serializer_class() is ClienteConUltimaCompraSerializer
+                self.assertEqual(anotada, usa)
+                self.assertEqual(usa, accion in ("list", "retrieve"))
+
     def test_igual_a_mesa_de_control_para_cada_cliente(self):
         from ventas.models import Pedido
 

@@ -101,8 +101,15 @@ class ClienteViewSet(viewsets.ModelViewSet):
     # las demás acciones conservan ``ClienteSerializer`` y su respuesta.
     ACCIONES_CON_ULTIMA_COMPRA = ("list", "retrieve")
 
+    def _con_ultima_compra(self):
+        """Única decisión de si esta acción anota ``fecha_ultima_compra`` y la
+        serializa: ``get_queryset`` y ``get_serializer_class`` la consultan las dos,
+        así que no pueden separarse (un serializer sin anotación truena, ver
+        ``ClienteConUltimaCompraSerializer``)."""
+        return self.action in self.ACCIONES_CON_ULTIMA_COMPRA
+
     def get_serializer_class(self):
-        if self.action in self.ACCIONES_CON_ULTIMA_COMPRA:
+        if self._con_ultima_compra():
             return ClienteConUltimaCompraSerializer
         return super().get_serializer_class()
 
@@ -117,7 +124,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
             .prefetch_related("vendedores")
             .order_by("nombre", "id")
         )
-        if self.action in self.ACCIONES_CON_ULTIMA_COMPRA:
+        if self._con_ultima_compra():
             # Misma subquery que Mesa de Control (una sola definición). Sólo
             # anota: no cambia qué clientes se listan. Import local por el ciclo
             # ``ventas`` -> ``terceros``.

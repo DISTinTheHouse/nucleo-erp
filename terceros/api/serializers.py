@@ -1,4 +1,5 @@
 from drf_spectacular.utils import extend_schema_field
+from django.core.exceptions import ImproperlyConfigured
 from django.utils import timezone
 from rest_framework import serializers
 from terceros.models import Proveedor, Cliente, DireccionCliente
@@ -216,11 +217,20 @@ class ClienteConUltimaCompraSerializer(ClienteSerializer):
     AUTORIZAR ni CANCELADO); ``None`` si nunca ha comprado. Sólo para lecturas
     sobre un queryset anotado: listado/detalle de ``clientes`` (EC-853) y Mesa de
     Control. Alta y edición siguen con ``ClienteSerializer``.
+
+    Una instancia sin la anotación es un error de programación, no un cliente sin
+    compras: truena con ``ImproperlyConfigured`` en vez de responder ``null``.
     """
 
     fecha_ultima_compra = serializers.SerializerMethodField()
 
     @extend_schema_field(serializers.DateField(allow_null=True))
     def get_fecha_ultima_compra(self, obj):
-        ultimo = getattr(obj, "fecha_ultima_compra", None)
+        try:
+            ultimo = obj.fecha_ultima_compra
+        except AttributeError:
+            raise ImproperlyConfigured(
+                "ClienteConUltimaCompraSerializer necesita un queryset anotado con "
+                "ventas.scope.anotar_fecha_ultima_compra."
+            ) from None
         return timezone.localtime(ultimo).date().isoformat() if ultimo else None
