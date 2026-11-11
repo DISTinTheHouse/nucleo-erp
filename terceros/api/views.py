@@ -13,7 +13,7 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, F, OuterRef, Q, Subquery, Sum
+from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.shortcuts import get_object_or_404
@@ -59,25 +59,13 @@ class ClienteViewSetMesaControl(viewsets.ModelViewSet):
         # scope por ``vendedores`` ni la política de superusuario.
         # ``vendedores`` en una sola consulta, igual que ``ClienteViewSet``: sin
         # el prefetch era una consulta por cliente.
-        # ``fecha_ultima_compra``: ``created_at`` del pedido más reciente del
-        # cliente que es venta real (``pedidos_venta_real``: sin MUESTRA, PEDIDO DE
-        # ERROR, BORRADOR, POR AUTORIZAR ni CANCELADO; EC-830), activo y de su
-        # empresa, como subquery en la misma consulta. Import local por el ciclo
+        # ``fecha_ultima_compra``: ``ventas.scope.anotar_fecha_ultima_compra``, la
+        # única definición de la subquery (EC-853). Import local por el ciclo
         # ``ventas`` -> ``terceros``.
-        from ventas.models import Pedido
-        from ventas.scope import pedidos_venta_real
+        from ventas.scope import anotar_fecha_ultima_compra
 
-        ultimo_pedido = (
-            pedidos_venta_real(
-                Pedido.objects.filter(cliente_id=OuterRef("pk"), empresa_id=OuterRef("empresa_id"), activo=True)
-            )
-            .order_by("-created_at")
-            .values("created_at")[:1]
-        )
-        return (
-            clientes_visibles(super().get_queryset(), self.request.user)
-            .prefetch_related("vendedores")
-            .annotate(ultimo_pedido_at=Subquery(ultimo_pedido))
+        return anotar_fecha_ultima_compra(
+            clientes_visibles(super().get_queryset(), self.request.user).prefetch_related("vendedores")
         )
 
 class ClienteViewSet(viewsets.ModelViewSet):

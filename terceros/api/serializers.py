@@ -207,17 +207,24 @@ class DireccionClienteSerializer(serializers.ModelSerializer):
         }
 
 
-class ClienteMesaControlSerializer(ClienteSerializer):
-    """``ClienteSerializer`` + ``fecha_ultima_compra`` para Mesa de Control.
+class ClienteConUltimaCompraSerializer(ClienteSerializer):
+    """``ClienteSerializer`` + ``fecha_ultima_compra`` (fecha local o ``None``).
 
-    La fecha sale de ``ultimo_pedido_at``, que anota ``ClienteViewSetMesaControl``
-    (pedido más reciente activo de su empresa que es venta real: sin MUESTRA,
-    PEDIDO DE ERROR, BORRADOR, POR AUTORIZAR ni CANCELADO, ver
-    ``ventas.scope.pedidos_venta_real``); ``None`` si nunca ha comprado.
+    La fecha sale de la anotación ``fecha_ultima_compra`` (datetime) de
+    ``ventas.scope.anotar_fecha_ultima_compra``: pedido más reciente activo de su
+    empresa que es venta real (sin MUESTRA, PEDIDO DE ERROR, BORRADOR, POR
+    AUTORIZAR ni CANCELADO); ``None`` si nunca ha comprado. Sólo para lecturas
+    sobre un queryset anotado: listado/detalle de ``clientes`` (EC-853) y Mesa de
+    Control. Alta y edición siguen con ``ClienteSerializer``.
     """
 
     fecha_ultima_compra = serializers.SerializerMethodField()
 
+    @extend_schema_field(serializers.DateField(allow_null=True))
     def get_fecha_ultima_compra(self, obj):
-        ultimo = getattr(obj, "ultimo_pedido_at", None)
+        ultimo = getattr(obj, "fecha_ultima_compra", None)
         return timezone.localtime(ultimo).date().isoformat() if ultimo else None
+
+
+class ClienteMesaControlSerializer(ClienteConUltimaCompraSerializer):
+    """Clientes de Mesa de Control: la misma forma que el listado de ``clientes``."""
