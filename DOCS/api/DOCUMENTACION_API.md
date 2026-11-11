@@ -8035,7 +8035,7 @@ Sirve a la junta semanal de planeación: qué producto terminado se vende más, 
 
 - **Alcance:** siempre la empresa activa del usuario, también para el superusuario. Si el usuario no tiene empresa, responde `400`.
 - **Importes:** `importe_vendido` solo llega con permiso de importes de pedido (contabilidad de ventas o de compras); sin él llega `null`, y ordenar por ese campo responde `400`.
-- **Velocidad:** 5 consultas fijas, sin importar cuántos artículos haya.
+- **Velocidad:** 7 consultas fijas, sin importar cuántos artículos haya (3 con `variante`).
 
 **Origen de los datos**
 
@@ -8082,6 +8082,26 @@ Un valor inválido responde `400` con el campo.
 - `candidato_descontinuar`: `SIN_VENTA`, o `LENTO`/`SOBREINVENTARIO` con tendencia negativa.
 - `serie_semanal`: piezas por semana del periodo, de la más antigua a la actual (para sparkline).
 
+**Capacidad de fabricación (por variante, con su BOM activo)**
+
+- `tiene_bom`: la variante tiene un BOM activo con insumos activos.
+- `fabricable_con_existencia`: cuántas piezas alcanzan con la materia prima en existencia de la empresa; lo define el insumo que menos alcanza.
+- `limitante`: ese insumo (`componente_id`, `componente_nombre`).
+- `puede_fabricar_resurtido`: si `fabricable_con_existencia` ≥ `resurtido_sugerido`. Es `null` si no hay resurtido o no hay BOM.
+- `bom_con_alertas`: algún renglón del BOM pide una unidad distinta a la del inventario del insumo (p. ej. `cm` contra `m`), o tiene cantidad 0.
+
+Reglas del cálculo, las mismas que el consumo real de la OP:
+- Por pieza se requiere `cantidad × (1 + desperdicio/100)`.
+- Cuentan todos los insumos activos del BOM.
+- No convierte unidades.
+- Cada SKU se calcula solo: dos SKUs que comparten tela no pueden fabricar los dos su máximo a la vez. Para el total usa `necesidades-materia-prima/`.
+
+Con `agrupar=producto`, estos campos llegan `null`, salvo `tiene_bom` y `variantes_con_bom`.
+
+Filtro extra: `fabricacion=SIN_BOM|ALCANZA|NO_ALCANZA`. `ALCANZA` y `NO_ALCANZA` se refieren al resurtido sugerido. Se puede ordenar por `fabricable_con_existencia`.
+
+`resumen` suma `con_bom`, `resurtir_sin_bom` y `resurtir_sin_material`.
+
 **Respuesta**
 
 ```json
@@ -8109,3 +8129,42 @@ Un valor inválido responde `400` con el campo.
 ```
 
 `resumen` es de todo el universo filtrado (no de la página). Con `agrupar=producto`, `variante_id`/`sku`/`color`/`talla` llegan `null`, `variantes` dice cuántas suma, y `pedidos`/`clientes` son la suma por variante (aproximada).
+
+### Necesidades de materia prima
+
+`GET /api/v1/planeacion/necesidades-materia-prima/`
+
+Mismo alcance y mismos parámetros que el tablero. Tiene dos modos.
+
+**1. Consolidado del resurtido (sin `variante`)**
+
+Toma las filas del tablero con los mismos filtros y `resurtido_sugerido` > 0, y suma por insumo lo que se necesita para fabricarlas (`agrupar` se ignora).
+
+```json
+{
+  "parametros": {"...": "..."},
+  "resumen": {"variantes_a_resurtir": 3, "piezas_a_resurtir": 1703, "variantes_sin_bom": 1,
+              "componentes": 12, "componentes_con_faltante": 4, "componentes_unidad_inconsistente": 1},
+  "componentes": [{
+    "componente_id": 14479, "componente_nombre": "CAMBRIDGE CHOCOLATE", "unidad_inventario": "m",
+    "unidades_bom": ["m"], "unidad_inconsistente": false,
+    "requerido": 1520.0, "existencia": 980.0, "faltante": 540.0, "alcanza": false, "variantes": 2
+  }],
+  "variantes_sin_bom": [{"variante_id": 3117, "sku": "QA-D3-CFG-01", "producto_nombre": "CHALECO BOLIVIA CABALLERO", "resurtido_sugerido": 1}]
+}
+```
+
+Los componentes van ordenados por faltante, de mayor a menor (primero los que no alcanzan). `faltante` es lo que hay que comprar. Las variantes sin BOM no se pueden calcular.
+
+**2. Un SKU (`variante=<id>&cantidad=<piezas>`, `cantidad` default 1)**
+
+Desglose del BOM de esa variante:
+- Lo que hay de cada insumo, para cuántas piezas alcanza, y lo requerido y faltante para `cantidad`.
+- `fabricable_con_existencia`, `limitante` y `puede_fabricar`.
+- Responde `404` si la variante no es de la empresa.
+- Sin BOM, devuelve `tiene_bom: false` y `materiales: []`.
+
+Cada renglón de `materiales` trae: `componente_id`, `componente_nombre`, `unidad_bom`, `unidad_inventario`, `unidad_inconsistente`, `obligatorio`, `por_pieza`, `existencia`, `alcanza_para`, `requerido`, `faltante`.
+
+`cantidad` sin `variante` responde `400`.
+
