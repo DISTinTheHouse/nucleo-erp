@@ -2456,19 +2456,31 @@ class ClienteListadoFechaUltimaCompraTests(ClienteMesaControlFechaUltimaCompraTe
                 self.assertEqual(self._ids(ordering=termino), esperado)
                 self.assertEqual(self._ids(ordering=termino, limit=50), esperado)
 
-    def test_ordering_lleva_nulls_last_en_el_sql(self):
-        from django.db import connection
-        from django.test.utils import CaptureQueriesContext
+    def test_ordering_ordena_por_la_anotacion_con_nulls_last(self):
+        """El ``ORDER BY`` que arma ``OrdenamientoNullsAlFinal`` es sobre la anotación
+        ``fecha_ultima_compra`` (no otra columna), con ``NULLS LAST`` y el ``id`` de
+        desempate en la misma dirección. Se revisa la expresión del queryset, no el
+        texto del SQL (Django la cita por posición en el ``SELECT``)."""
+        from django.db.models import F, OrderBy
+        from rest_framework.request import Request
+        from rest_framework.test import APIRequestFactory
 
-        self._clientes_para_ordenar()
-        for termino, direccion in (("fecha_ultima_compra", "ASC"), ("-fecha_ultima_compra", "DESC")):
+        from nucleo.listados import OrdenamientoNullsAlFinal
+        from terceros.api.views import ClienteViewSet
+
+        for termino, descendente in (("fecha_ultima_compra", False), ("-fecha_ultima_compra", True)):
             with self.subTest(ordering=termino):
-                with CaptureQueriesContext(connection) as consultas:
-                    self._ids(ordering=termino, limit=50)
-                sql = next(q["sql"] for q in consultas.captured_queries
-                           if 'FROM "clientes"' in q["sql"] and "LIMIT" in q["sql"])
-                # La anotación va en el SELECT; el ORDER BY la cita por posición.
-                self.assertRegex(sql, rf'ORDER BY \d+ {direccion} NULLS LAST, "clientes"\."id" {direccion} LIMIT')
+                request = Request(APIRequestFactory().get(self.URL, {"ordering": termino}))
+                request.user = self.admin
+                vista = ClienteViewSet(action="list", request=request, format_kwarg=None, kwargs={})
+                qs = OrdenamientoNullsAlFinal().filter_queryset(request, vista.get_queryset(), vista)
+                primero, desempate = qs.query.order_by
+                self.assertIsInstance(primero, OrderBy)
+                self.assertEqual(primero.expression, F("fecha_ultima_compra"))
+                self.assertIn("fecha_ultima_compra", qs.query.annotations)
+                self.assertEqual(primero.descending, descendente)
+                self.assertTrue(primero.nulls_last)
+                self.assertEqual(desempate, "-id" if descendente else "id")
 
     def test_paginas_concatenadas_igualan_la_lista_completa(self):
         self._clientes_para_ordenar()
