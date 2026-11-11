@@ -25,10 +25,9 @@ SIN_LINEA = "SIN_LINEA"
 
 
 def _alcance_empresa(qs, user):
-    # Aislamiento multi-tenant: superusuario ve todo, el resto sólo su empresa y
-    # quien no tiene empresa no ve nada. Detalle ajeno -> 404, listado -> 200 [].
-    if getattr(user, "is_superuser", False):
-        return qs
+    # Aislamiento multi-tenant: todos, superusuario incluido, ven sólo su empresa
+    # activa (#1060); quien no tiene empresa no ve nada. Detalle ajeno -> 404,
+    # listado -> 200 [].
     empresa = getattr(user, "empresa", None)
     if empresa:
         return qs.filter(empresa=empresa)
@@ -246,8 +245,9 @@ class ProductoViewSet(viewsets.ModelViewSet):
         user = self.request.user
         empresa = getattr(user, "empresa", None)
         extra = {}
-        if not getattr(user, "is_superuser", False) and empresa:
-            extra["empresa"] = empresa
+        if not empresa:
+            raise ValidationError({"empresa": "No tienes una empresa activa."})
+        extra["empresa"] = empresa
 
         categoria = serializer.validated_data.get("categoria_producto")
         if categoria is not None:
@@ -267,9 +267,8 @@ class ProductoViewSet(viewsets.ModelViewSet):
 
         user = request.user
         empresa = getattr(user, "empresa", None)
-        is_superuser = getattr(user, "is_superuser", False)
         # Sin empresa (y sin ser superusuario) se rechaza, no se salta la guarda.
-        if not is_superuser and (empresa is None or categoria.empresa_id != empresa.pk):
+        if (empresa is None or categoria.empresa_id != empresa.pk):
             raise ValidationError({"categoria_producto": "No pertenece a tu empresa."})
         return categoria
 
@@ -287,7 +286,6 @@ class ProductoViewSet(viewsets.ModelViewSet):
         # codigo y unidad_medida se infieren de la categoria, no se piden.
         user = request.user
         empresa = getattr(user, "empresa", None)
-        is_superuser = getattr(user, "is_superuser", False)
 
         serializer = ProductoOnboardingSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -295,7 +293,7 @@ class ProductoViewSet(viewsets.ModelViewSet):
         categoria = serializer.validated_data['categoria_producto']
         # Sin empresa (y sin ser superusuario) se rechaza: antes la guarda
         # ``empresa and ...`` se saltaba y el producto caía en la empresa ajena.
-        if not is_superuser and (empresa is None or categoria.empresa_id != empresa.pk):
+        if (empresa is None or categoria.empresa_id != empresa.pk):
             raise ValidationError({"categoria_producto": "No pertenece a tu empresa."})
 
         with transaction.atomic():
@@ -357,7 +355,6 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
         # El SKU se calcula en el server: codigo_producto-codigo_color-talla.nombre.
         user = request.user
         empresa = getattr(user, "empresa", None)
-        is_superuser = getattr(user, "is_superuser", False)
 
         serializer = ProductoVarianteOnboardingSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -368,7 +365,7 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
 
         # Sin empresa (y sin ser superusuario) se rechaza: antes la guarda
         # ``empresa and ...`` se saltaba y la variante caía en la empresa ajena.
-        if not is_superuser and (empresa is None or producto.empresa_id != empresa.pk):
+        if (empresa is None or producto.empresa_id != empresa.pk):
             raise ValidationError({"producto": "No pertenece a tu empresa."})
 
         if not producto.codigo:
