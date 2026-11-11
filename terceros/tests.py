@@ -2584,8 +2584,15 @@ class ClienteBusquedaTelefonoTests(TestCase):
                 self.assertEqual(self._ids(search="1234", **params), {self.con_espacios.pk, self.corrido.pk})
                 self.assertEqual(self._ids(search="5600", **params), {self.corrido.pk})
 
-    def test_sin_normalizar_el_formato(self):
+    def test_busca_por_palabras_con_and_sin_normalizar(self):
+        """``SearchFilter`` de DRF parte ``?search=`` en palabras y exige TODAS (AND),
+        cada una como subcadena de algún campo; no normaliza el teléfono."""
         self.assertEqual(self._ids(search="1234 5678"), {self.con_espacios.pk})
+        # Orden invertido: también coincide, porque son palabras, no una frase.
+        self.assertEqual(self._ids(search="5678 1234"), {self.con_espacios.pk})
+        # Una palabra que no está en el teléfono descarta la fila (AND).
+        self.assertEqual(self._ids(search="1234 9999"), set())
+        # Sin normalizar: los dígitos corridos no coinciden con "81 1234 5678".
         self.assertEqual(self._ids(search="12345678"), set())
 
     def test_no_amplia_el_alcance(self):
