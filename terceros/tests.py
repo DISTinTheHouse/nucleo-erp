@@ -2299,10 +2299,15 @@ class ClienteMesaControlFechaUltimaCompraTests(TestCase):
         self.assertEqual(self._fechas()[cliente.pk], self._local(self.VENTA))
 
     def test_pedido_de_otra_empresa_no_cuenta_ni_se_ve(self):
+        from ventas.models import Pedido
+
         cliente = self._cliente()
         self._pedido(cliente, self.VENTA)
-        # Pedido de OTRA empresa que apunta a este cliente: no es su compra.
-        self._pedido(cliente, self.POSTERIOR, empresa=self.otra, sucursal=self.sucursal_otra)
+        # Pedido de OTRA empresa que apunta a este cliente: no es su compra. Se
+        # siembra con ``update()``: desde #1024 ``Pedido.save()`` ya no deja crearlo,
+        # pero las filas anteriores a esa barrera pueden existir.
+        ajeno = self._pedido(cliente, self.POSTERIOR)
+        Pedido.objects.filter(pk=ajeno.pk).update(empresa=self.otra, sucursal=self.sucursal_otra)
         self.assertEqual(self._fechas()[cliente.pk], self._local(self.VENTA))
         # El admin de la otra empresa ni siquiera ve al cliente.
         self.assertNotIn(cliente.pk, self._fechas(self.admin_otra))
@@ -2369,20 +2374,6 @@ class ClienteListadoFechaUltimaCompraTests(ClienteMesaControlFechaUltimaCompraTe
 
     def _ids(self, **params):
         return [fila["id"] for fila in self._filas(**params)]
-
-    def test_pedido_de_otra_empresa_no_cuenta_ni_se_ve(self):
-        """Como el caso de Mesa de Control, pero con el pedido ajeno sembrado por
-        ``update()``: desde #1024 ``Pedido.save()`` ya no deja crearlo, aunque las
-        filas anteriores a esa barrera pueden existir (el caso heredado falla igual
-        en ``main`` por eso)."""
-        from ventas.models import Pedido
-
-        cliente = self._cliente()
-        self._pedido(cliente, self.VENTA)
-        ajeno = self._pedido(cliente, self.POSTERIOR)
-        Pedido.objects.filter(pk=ajeno.pk).update(empresa=self.otra, sucursal=self.sucursal_otra)
-        self.assertEqual(self._fechas()[cliente.pk], self._local(self.VENTA))
-        self.assertNotIn(cliente.pk, self._fechas(self.admin_otra))
 
     def test_serializer_sin_anotacion_truena_en_vez_de_responder_null(self):
         from django.core.exceptions import ImproperlyConfigured
