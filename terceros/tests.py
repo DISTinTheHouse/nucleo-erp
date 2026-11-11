@@ -2329,3 +2329,63 @@ class ClienteMesaControlFechaUltimaCompraTests(TestCase):
             self._pedido(otro, self.VENTA)
             self._pedido(otro, self.POSTERIOR, estatus=Pedido.ESTATUS_BORRADOR)
         self.assertEqual(_consultas(), pocas)
+
+
+def _lectura_clientes(usuario):
+    """``R-CRM-CLIENTES`` para ``usuario`` en su empresa: el listado de clientes la
+    exige (#1020) a quien no es superusuario ni admin de empresa."""
+    from seguridad.models import Permiso, UsuarioPermiso
+
+    permiso, _ = Permiso.objects.get_or_create(clave="R-CRM-CLIENTES", defaults={"nombre": "Clientes"})
+    UsuarioPermiso.objects.create(
+        usuario=usuario, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=usuario.empresa,
+    )
+
+
+class ClienteBusquedaTelefonoTests(TestCase):
+    """``?search=`` del listado de clientes también busca en ``telefono`` (EC-853),
+    tal cual se guardó (sin normalizar), y nunca amplía el alcance."""
+
+    URL = "/api/v1/terceros/clientes/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="ec853", razon_social="EC853 SA")
+        cls.otra = Empresa.objects.create(codigo="ec853-otra", razon_social="Otra EC853 SA")
+        cls.admin = Usuario.objects.create(
+            username="admin-ec853", email="admin@ec853.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(username="v-ec853b", email="vb@ec853.test", empresa=cls.empresa)
+        _lectura_clientes(cls.vendedor)
+        cls.con_espacios = Cliente.objects.create(empresa=cls.empresa, nombre="Uno", telefono="81 1234 5678")
+        cls.con_espacios.vendedores.add(cls.vendedor)
+        cls.corrido = Cliente.objects.create(empresa=cls.empresa, nombre="Dos", telefono="8112345600")
+        cls.sin_telefono = Cliente.objects.create(empresa=cls.empresa, nombre="Tres", telefono="")
+        cls.ajeno = Cliente.objects.create(empresa=cls.otra, nombre="Ajeno", telefono="8112349999")
+
+    def _ids(self, usuario=None, **params):
+        api = APIClient()
+        api.force_authenticate(user=usuario or self.admin)
+        resp = api.get(self.URL, params)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        filas = resp.data["results"] if "limit" in params else resp.data
+        return {fila["id"] for fila in filas}
+
+    def test_busca_por_parte_del_telefono(self):
+        for params in ({}, {"limit": 50}):
+            with self.subTest(**params):
+                self.assertEqual(self._ids(search="1234", **params), {self.con_espacios.pk, self.corrido.pk})
+                self.assertEqual(self._ids(search="5600", **params), {self.corrido.pk})
+
+    def test_sin_normalizar_el_formato(self):
+        self.assertEqual(self._ids(search="1234 5678"), {self.con_espacios.pk})
+        self.assertEqual(self._ids(search="12345678"), set())
+
+    def test_no_amplia_el_alcance(self):
+        self.assertNotIn(self.ajeno.pk, self._ids(search="8112349999"))
+        self.assertEqual(self._ids(search="8112349999"), set())
+        self.assertEqual(self._ids(self.vendedor, search="1234"), {self.con_espacios.pk})
+        self.assertEqual(self._ids(self.vendedor, search="5600"), set())
+
+    def test_los_demas_campos_siguen_buscando(self):
+        self.assertEqual(self._ids(search="Dos"), {self.corrido.pk})

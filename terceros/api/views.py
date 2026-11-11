@@ -79,13 +79,14 @@ class ClienteViewSet(viewsets.ModelViewSet):
     queryset = clientes_base()
     serializer_class = ClienteSerializer
     # Modo servidor como ``ProveedorViewSet`` (EC-757): sin ``?limit=`` regresa la
-    # lista completa; ``?search=`` busca por nombre, razón social, RFC, clave o correo.
+    # lista completa; ``?search=`` busca por nombre, razón social, RFC, clave, correo
+    # o teléfono (``telefono``, tal cual se guardó; EC-853).
     pagination_class = PaginacionOpcionalLimitOffset
     filter_backends = [
         *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
         OrdenamientoNullsAlFinal,
     ]
-    search_fields = ["nombre", "razon_social", "rfc", "clave", "correo"]
+    search_fields = ["nombre", "razon_social", "rfc", "clave", "correo", "telefono"]
     # Sólo campos de ``Cliente``: ``fecha_alta``, ``fecha_ultima_compra`` y
     # ``updated_at`` venían de la lista de proveedores y no existen aquí; al estar
     # en la lista blanca llegaban al ``order_by`` y respondían 500 (EC-826).
