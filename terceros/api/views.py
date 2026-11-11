@@ -22,7 +22,6 @@ from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_sche
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import (
     ClienteConUltimaCompraSerializer,
-    ClienteMesaControlSerializer,
     ClienteSerializer,
     DireccionClienteSerializer,
     ProveedorSerializer,
@@ -49,7 +48,9 @@ logger = logging.getLogger(__name__)
 
 class ClienteViewSetMesaControl(viewsets.ModelViewSet):
     queryset = clientes_base()
-    serializer_class = ClienteMesaControlSerializer
+    # El mismo serializer que el listado/detalle de ``clientes``: una sola forma
+    # (y un solo componente en el schema OpenAPI, EC-853).
+    serializer_class = ClienteConUltimaCompraSerializer
     http_method_names = ['get']
 
     def get_queryset(self):

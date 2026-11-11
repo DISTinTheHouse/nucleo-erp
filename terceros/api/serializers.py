@@ -224,7 +224,3 @@ class ClienteConUltimaCompraSerializer(ClienteSerializer):
     def get_fecha_ultima_compra(self, obj):
         ultimo = getattr(obj, "fecha_ultima_compra", None)
         return timezone.localtime(ultimo).date().isoformat() if ultimo else None
-
-
-class ClienteMesaControlSerializer(ClienteConUltimaCompraSerializer):
-    """Clientes de Mesa de Control: la misma forma que el listado de ``clientes``."""

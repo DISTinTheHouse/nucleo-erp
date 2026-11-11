@@ -1075,7 +1075,7 @@ class ClienteKpisTests(TestCase):
         self.assertEqual(con_bloque - sin_bloque, 1)
 
     def test_created_at_no_sale_en_listado_detalle_ni_mesa_de_control(self):
-        """EC-817 solo lo usa en ``kpis/``; ``ClienteMesaControlSerializer`` hereda el Meta."""
+        """EC-817 solo lo usa en ``kpis/``; ``ClienteConUltimaCompraSerializer`` (Mesa de Control) hereda el Meta."""
         client = APIClient()
         client.force_authenticate(user=self.admin_empresa)
 
