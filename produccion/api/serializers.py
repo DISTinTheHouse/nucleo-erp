@@ -486,13 +486,17 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
     fecha_vence = serializers.SerializerMethodField()
     cantidad_total = serializers.FloatField(read_only=True, default=0.0)
     ruta_critica = serializers.SerializerMethodField()
+    pedidos = serializers.SerializerMethodField()
+
+    def get_pedidos(self, obj):
+        return pedidos_de_op(obj)
 
     class Meta:
         model = OrdenProduccion
         fields = [
             "op_id", "folio_op", "estatus_op", "estatus_op_display",
             "prioridad", "fecha_inicio", "fecha_fin", "fecha_entrega_estimada", "activo",
-            "pedido", "pedido_folio", "sucursal",
+            "pedido", "pedido_folio", "pedidos", "sucursal",
             "centro_confeccion", "fecha_pedido", "fecha_vence", "cantidad_total", "ruta_critica",
         ]
 
@@ -512,6 +516,29 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
 
     def get_ruta_critica(self, obj):
         return estado_ruta_critica(getattr(obj, "ruta_critica", None))
+
+def pedidos_de_op(op):
+    """``[{id, folio}]`` de los pedidos de la OP, principal primero. Lee la
+    precarga ``op_pedidos__pedido`` si existe (listado sin consultas por fila)."""
+    filas = sorted(op.op_pedidos.all(), key=lambda r: (r.pedido_id != op.pedido_id, r.pk))
+    return [{"id": r.pedido_id, "folio": r.pedido.folio} for r in filas]
+
+
+def ligar_pedidos_op(op, pedidos=None):
+    """Liga la OP a su pedido principal y, si se pasan, deja exactamente ``pedidos``
+    (+ principal). Con ``pedidos=None`` solo asegura el principal."""
+    from produccion.models import OrdenProduccionPedido
+    existentes = set(OrdenProduccionPedido.objects.filter(op=op).values_list('pedido_id', flat=True))
+    ids = set(existentes) if pedidos is None else {p.pk for p in pedidos}
+    if op.pedido_id:
+        ids.add(op.pedido_id)
+    sobran = existentes - ids
+    if sobran:
+        OrdenProduccionPedido.objects.filter(op=op, pedido_id__in=sobran).delete()
+    nuevos = ids - existentes
+    if nuevos:
+        OrdenProduccionPedido.objects.bulk_create([OrdenProduccionPedido(op=op, pedido_id=i) for i in nuevos])
+
 
 class OrdenProduccionSerializer(serializers.ModelSerializer):
     orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
@@ -537,12 +564,41 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         if not usuario: return None
         return usuario.get_full_name().strip() or usuario.email
 
+    # Varios pedidos en una OP: ids de entrada; ``pedidos`` es la lectura.
+    pedidos_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), write_only=True, required=False, allow_empty=True,
+    )
+    pedidos = serializers.SerializerMethodField()
+
+    def get_pedidos(self, obj):
+        return pedidos_de_op(obj)
+
+    def validate_pedidos_ids(self, ids):
+        ids = list(dict.fromkeys(ids))
+        request = self.context.get('request')
+        empresa_id = getattr(getattr(request, 'user', None), 'empresa_id', None)
+        encontrados = {p.pk: p for p in Pedido.objects.filter(pk__in=ids, empresa_id=empresa_id)}
+        ligados = (
+            set(self.instance.op_pedidos.values_list('pedido_id', flat=True)) if self.instance is not None else set()
+        )
+        pedidos = []
+        for pk in ids:
+            if pk not in encontrados:
+                raise serializers.ValidationError(f'Pedido {pk} no encontrado.')
+            pedidos.append(self._validar_pedido(encontrados[pk], ya_ligado=pk in ligados))
+        return pedidos
+
     def validate_pedido(self, pedido):
         # Reglas de ``pedido`` aquí y no en la vista: aplican igual a POST, PUT y
         # PATCH. ``get_queryset`` del viewset acota la OP a la empresa del
         # usuario, así que comparar contra ella equivale a comparar contra la OP.
         if pedido is None:
             return pedido
+        return self._validar_pedido(pedido, ya_ligado=(
+            self.instance is not None and self.instance.pedido_id == pedido.pk
+        ))
+
+    def _validar_pedido(self, pedido, ya_ligado=False):
         request = self.context.get('request')
         empresa_id = getattr(getattr(request, 'user', None), 'empresa_id', None)
         if pedido.empresa_id != empresa_id:
@@ -550,7 +606,7 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 self.fields['pedido'].error_messages['does_not_exist'].format(pk_value=pedido.pk)
             )
-        if self.instance is not None and self.instance.pedido_id == pedido.pk:
+        if ya_ligado:
             return pedido
 
         from produccion.api.views import _detalles_especiales_qs
@@ -591,12 +647,22 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         # ``pedido`` en la OP no se exige nada más: rechazar o no esa
         # combinación es una decisión de negocio pendiente.
         pedido = attrs['pedido'] if 'pedido' in attrs else getattr(self.instance, 'pedido', None)
+        # Varios pedidos: sin principal explícito, el principal es el primero.
+        if pedido is None and attrs.get('pedidos_ids'):
+            pedido = attrs['pedido'] = attrs['pedidos_ids'][0]
+        if 'pedidos_ids' in attrs:
+            permitidos = {p.pk for p in attrs['pedidos_ids']}
+        elif self.instance is not None:
+            permitidos = set(self.instance.op_pedidos.values_list('pedido_id', flat=True))
+        else:
+            permitidos = set()
         if pedido is not None:
+            permitidos.add(pedido.pk)
             errores = {}
             errores_renglones = [
-                {'pedido_detalle': ['El renglón no pertenece al pedido de la orden de producción.']}
+                {'pedido_detalle': ['El renglón no pertenece a los pedidos de la orden de producción.']}
                 if renglon.get('pedido_detalle') is not None
-                and renglon['pedido_detalle'].pedido_id != pedido.pk
+                and renglon['pedido_detalle'].pedido_id not in permitidos
                 else {}
                 for renglon in attrs.get('orden_produccion_detalle', [])
             ]
@@ -607,10 +673,9 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
             # crear la OP sin pedido y ligarla después para evadirla.
             if (
                 self.instance is not None
-                and self.instance.pedido_id != pedido.pk
                 and self.instance.orden_produccion_detalle
                 .filter(pedido_detalle__isnull=False)
-                .exclude(pedido_detalle__pedido=pedido)
+                .exclude(pedido_detalle__pedido_id__in=permitidos)
                 .exists()
             ):
                 errores['pedido'] = [
@@ -620,6 +685,13 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(errores)
 
         return attrs
+
+    def update(self, instance, validated_data):
+        pedidos = validated_data.pop('pedidos_ids', None)
+        instance = super().update(instance, validated_data)
+        if pedidos is not None or 'pedido' in validated_data:
+            ligar_pedidos_op(instance, pedidos)
+        return instance
 
     class Meta:
         model = OrdenProduccion
@@ -2759,6 +2831,10 @@ def resumen_pre_orden_pedido(pedido):
     }
 
 
+#: Horas desde la confirmación sin pre-orden ni OP para marcar un pedido especial atrasado.
+HORAS_ALERTA_PEDIDO_ESPECIAL = 24
+
+
 class PedidoEspecialListSerializer(serializers.ModelSerializer):
     """Listado ligero: solo lo necesario para que produccion elija cual abrir."""
 
@@ -2771,9 +2847,30 @@ class PedidoEspecialListSerializer(serializers.ModelSerializer):
             "tallas_total", "tallas_con_sku", "tallas_en_catalogo",
             "fecha_compromiso", "prendas_total", "piezas_total", "servicios",
             "ordenes_produccion", "pre_orden", "ordenes_servicio",
+            "horas_en_produccion", "sin_avance", "atrasado",
         ]
 
     pre_orden = serializers.SerializerMethodField()
+    # Alerta de 24 h: horas desde que se creó el pedido,
+    # si aún no tiene pre-orden (BOM) ni OP, y si ya pasó el límite.
+    horas_en_produccion = serializers.SerializerMethodField()
+    sin_avance = serializers.SerializerMethodField()
+    atrasado = serializers.SerializerMethodField()
+
+    def get_horas_en_produccion(self, obj):
+        from django.utils import timezone
+        # ``fecha_confirmacion`` es la fecha comprometida (puede ser futura): se
+        # cuenta desde que se creó el pedido.
+        if not obj.created_at:
+            return None
+        return int((timezone.now() - obj.created_at).total_seconds() // 3600)
+
+    def get_sin_avance(self, obj):
+        return not getattr(obj, "pre_orden_json", None) and not (getattr(obj, "ops_json", None) or [])
+
+    def get_atrasado(self, obj):
+        horas = self.get_horas_en_produccion(obj)
+        return horas is not None and horas >= HORAS_ALERTA_PEDIDO_ESPECIAL and self.get_sin_avance(obj)
     ordenes_servicio = serializers.SerializerMethodField()
 
     def get_pre_orden(self, obj):

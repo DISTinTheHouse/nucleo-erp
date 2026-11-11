@@ -1,3 +1,4 @@
+from produccion.api.salidas_maquila import SalidaMaquilaViewSet
 from django.urls import path, include
 from rest_framework import routers
 from produccion.api.views import (
@@ -36,6 +37,7 @@ router.register(r'corte-manga-avances', CorteMangaAvancesViewSet)
 router.register(r'pedidos-especiales', PedidoEspecialViewSet, basename='pedido-especial')
 router.register(r'variantes-produccion', VarianteProduccionViewSet, basename='variante-produccion')
 router.register(r'pre-ordenes', PreOrdenProduccionViewSet, basename='pre-orden-produccion')
+router.register(r'salidas-maquila', SalidaMaquilaViewSet, basename='salida-maquila')
 
 urlpatterns = [
     path('', include(router.urls)),

@@ -43,6 +43,7 @@ from produccion.models import (
     BomDetalle,
     OrdenProduccion,
     OrdenProduccionDetalle,
+    OrdenProduccionPedido,
     OrdenProduccionRutaCritica,
     ConsumoProduccion,
     ProductoTerminadoEntradas,
@@ -545,6 +546,8 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             queryset = queryset.select_related(
                 "empresa", "sucursal", "pedido", "usuario_asignado"
             ).prefetch_related(
+                Prefetch("op_pedidos", queryset=OrdenProduccionPedido.objects.select_related("pedido").only(
+                    "id", "op_id", "pedido_id", "pedido__folio")),
                 Prefetch(
                     "orden_produccion_detalle",
                     queryset=OrdenProduccionDetalle.objects.select_related(
@@ -569,6 +572,8 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             )
             queryset = self._filtrar_listado(
                 queryset.select_related("pedido", "centro_confeccion", "ruta_critica")
+                .prefetch_related(Prefetch("op_pedidos", queryset=OrdenProduccionPedido.objects.select_related(
+                    "pedido").only("id", "op_id", "pedido_id", "pedido__folio")))
                 .annotate(cantidad_total=Coalesce(
                     Subquery(cantidad_total, output_field=DecimalField(max_digits=14, decimal_places=2)),
                     Value(Decimal("0")),
@@ -589,6 +594,11 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         sucursal = entero_param(self.request, "sucursal")
         if sucursal is not None:
             queryset = queryset.filter(sucursal_id=sucursal)
+        pedido = entero_param(self.request, "pedido")
+        if pedido is not None:  # cualquiera de sus pedidos, no solo el principal
+            queryset = queryset.filter(
+                Exists(OrdenProduccionPedido.objects.filter(op_id=OuterRef("pk"), pedido_id=pedido))
+            )
         desde, hasta = rango_fechas(self.request)
         if desde:
             queryset = queryset.filter(fecha_entrega_estimada__gte=desde)
@@ -2409,7 +2419,10 @@ def _resumen_pedido_especial():
         .annotate(t=Sum("cantidad")).values("t")[:1]
     )
     ops = (
-        OrdenProduccion.objects.filter(pedido_id=OuterRef("pk"), activo=True)
+        OrdenProduccion.objects.filter(
+            Exists(OrdenProduccionPedido.objects.filter(op_id=OuterRef("pk"), pedido_id=OuterRef(OuterRef("pk")))),
+            activo=True,
+        )
         .order_by("op_id")
         .values(json=JSONObject(op_id="op_id", folio_op="folio_op", estatus_op="estatus_op"))
     )
