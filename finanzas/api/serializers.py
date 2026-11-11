@@ -4,6 +4,7 @@ from django.db.models import Q, Sum
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
+from nucleo.models import Sucursal
 from terceros.models import Cliente
 from finanzas.models import (
     AlertaMora,
@@ -1157,12 +1158,15 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
         fields["cliente"].queryset = Cliente.objects.filter(empresa_id=empresa_id, activo=True)
         fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id, activo=True).select_related("moneda")
+        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id)
         cxcs = CuentaPorCobrar.objects.filter(CuentaPorCobrar.q_de_la_empresa(empresa_id))
         user = getattr(self.context.get("request"), "user", None)
         fields["cobro_detalles"].child.fields["cxc"].queryset = por_sucursal(cxcs, user, "factura__sucursal") if user else cxcs
         return fields
 
     def validate(self, attrs):
+        if self.instance is not None:
+            attrs.pop("sucursal", None)  # #1063: la sucursal se fija al crear
         req = self.context.get("request")
         if req and hasattr(req, "user"):
             user_empresa = getattr(req.user, "empresa", None)
@@ -1212,6 +1216,8 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
         fields = "__all__"
 
     def validate(self, attrs):
+        if self.instance is not None:
+            attrs.pop("sucursal", None)  # #1063: la sucursal se fija al crear
         req = self.context.get("request")
         if req and hasattr(req, "user"):
             user_empresa = getattr(req.user, "empresa", None)

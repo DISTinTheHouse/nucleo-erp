@@ -1,3 +1,4 @@
+from .api.domicilio_fiscal import DomicilioFiscalAPIView
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .api.api_views import (
@@ -43,6 +44,7 @@ urlpatterns = [
     path('api/v1/nucleo/mis-empresas/', UserEmpresasAPIView.as_view(), name='api_mis_empresas'),
     path('api/v1/nucleo/cambiar-empresa/', CambiarEmpresaAPIView.as_view(), name='api_cambiar_empresa'),
     path('api/v1/nucleo/mis-sucursales/', UserSucursalesAPIView.as_view(), name='api_mis_sucursales'),
+    path('api/v1/nucleo/empresa-actual/domicilio-fiscal/', DomicilioFiscalAPIView.as_view(), name='api_domicilio_fiscal'),
     path('api/v1/nucleo/sat/catalogos/', SatCatalogosAPIView.as_view(), name='api_sat_catalogos'),
     # Buscador global del header. Se declara aquí, con el resto de APIView de
     # nucleo, aunque su ruta NO lleve el segmento de app: es transversal (cruza

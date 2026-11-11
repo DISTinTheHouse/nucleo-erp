@@ -104,7 +104,7 @@ from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
 from finanzas.services.reporte_contable_service import LIMITE_OMISION, ReporteContableService
-from finanzas.scope import cobros_por_sucursal, exigir_factura_visible, por_sucursal, sucursales_visibles
+from finanzas.scope import cobros_por_sucursal, exigir_factura_visible, por_sucursal, resolver_sucursal_documento, sucursales_visibles
 from finanzas.utils.folios import generate_factura_folio
 from nucleo.kpis import entero_estricto
 from nucleo.models import Moneda, Sucursal
@@ -1982,7 +1982,11 @@ class CobroViewSet(FinanzasBaseViewSet):
         cta = serializer.validated_data.get("cuenta_bancaria")
         _validate_fk_empresa(user, cta, "cuenta_bancaria", empresa)
         detalles_data = serializer.validated_data.pop("cobro_detalles", [])
-        cobro = serializer.save(empresa=empresa)
+        sucursal = resolver_sucursal_documento(
+            user, empresa, serializer.validated_data.pop("sucursal", None),
+            [getattr(getattr(d.get("cxc"), "factura", None), "sucursal_id", None) for d in detalles_data],
+        )
+        cobro = serializer.save(empresa=empresa, sucursal=sucursal)
         self._guardar_detalles(cobro, detalles_data)
         if cobro.estatus == Cobro.Estatus.APLICADO:
             CobroService.aplicar_cobro(cobro, user)
@@ -2139,7 +2143,11 @@ class PagoViewSet(FinanzasBaseViewSet):
         cta = serializer.validated_data.get("cuenta_bancaria")
         _validate_fk_empresa(user, cta, "cuenta_bancaria", empresa)
         detalles_data = serializer.validated_data.pop("pago_detalles", [])
-        pago = serializer.save(empresa=empresa)
+        sucursal = resolver_sucursal_documento(
+            user, empresa, serializer.validated_data.pop("sucursal", None),
+            [getattr(getattr(d.get("cxp"), "factura_proveedor", None), "sucursal_id", None) for d in detalles_data],
+        )
+        pago = serializer.save(empresa=empresa, sucursal=sucursal)
         for d in detalles_data:
             # El campo real de ``PagoDetalle`` es ``cxp``: leer
             # ``cuenta_por_pagar`` devolvía siempre ``None``. Se compara contra la
