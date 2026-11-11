@@ -25,14 +25,15 @@ def por_sucursal(qs, user, campo):
 
 
 def cobros_por_sucursal(qs, user):
-    """Un cobro se ve si todas sus líneas son de facturas visibles (sin líneas, también)."""
+    """Un cobro se ve si su ``sucursal`` es visible y todas sus líneas son de facturas
+    visibles (#1078: antes uno sin líneas lo veían todas las sucursales)."""
     ids = sucursales_visibles(user)
     if ids is None:
         return qs
     from finanzas.models import CobroDetalle
 
     ajenas = CobroDetalle.objects.filter(cobro=OuterRef("pk")).exclude(cxc__factura__sucursal_id__in=ids)
-    return qs.exclude(Exists(ajenas))
+    return qs.filter(sucursal_id__in=ids).exclude(Exists(ajenas))
 
 
 def exigir_factura_visible(user, factura):

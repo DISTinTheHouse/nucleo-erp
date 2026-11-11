@@ -3593,7 +3593,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 ("picking", pedido.pickings.exclude(estado=Picking.Estado.CANCELADO)),
                 ("packing", pedido.packings.exclude(estado=EstadoWms.CANCELADO)),
                 ("factura", pedido.facturas.filter(activo=True).exclude(estatus=Factura.FacturaStatus.CANCELADA)),
-                ("orden de producción", OrdenProduccion.objects.filter(pedido=pedido, activo=True).exclude(estatus_op=OrdenProduccion.EstatusOrdenProduccion.CANCELADO)),
+                ("orden de producción", OrdenProduccion.objects.filter(Q(pedido=pedido) | Q(op_pedidos__pedido=pedido), activo=True).exclude(estatus_op=OrdenProduccion.EstatusOrdenProduccion.CANCELADO)),
                 ("orden de bordado", OrdenesBordado.objects.filter(pedido=pedido, activo=True).exclude(estatus_bordado=OrdenesBordado.EstatusBordado.CANCELADO_LEGACY)),
                 ("orden de reflejante", OrdenesReflejante.objects.filter(pedido=pedido, activo=True).exclude(estatus_reflejante=OrdenesReflejante.EstatusReflejante.CANCELADO)),
                 ("orden de corte de manga", OrdenesCorteManga.objects.filter(pedido=pedido, activo=True).exclude(estatus_corte=OrdenesCorteManga.EstatusCorte.CANCELADO)),

@@ -5,7 +5,7 @@ from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
 from nucleo.models import Sucursal
-from terceros.models import Cliente
+from terceros.models import Cliente, Proveedor
 from finanzas.models import (
     AlertaMora,
     Banco,
@@ -1214,6 +1214,20 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
     class Meta:
         model = Pago
         fields = "__all__"
+
+    def get_fields(self):
+        # #1077: sucursal, proveedor y cuenta de otra empresa responden igual que
+        # un id inexistente (mismo patrón que cobros, #570).
+        fields = super().get_fields()
+        if self.instance is not None and not hasattr(self.instance, "__iter__"):
+            empresa_id = self.instance.empresa_id
+        else:
+            request = self.context.get("request")
+            empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
+        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id)
+        fields["proveedor"].queryset = Proveedor.objects.filter(empresa_id=empresa_id)
+        fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id).select_related("moneda")
+        return fields
 
     def validate(self, attrs):
         if self.instance is not None:

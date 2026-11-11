@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from ..models import Empresa
+from ..paises import PAISES_ISO3
 
 CAMPOS = (
     "calle", "numero_exterior", "numero_interior", "colonia", "localidad",
@@ -40,7 +41,10 @@ class DomicilioFiscalSerializer(serializers.Serializer):
         return value
 
     def validate_pais(self, value):
-        return (value or "").strip().upper()
+        value = (value or "").strip().upper()
+        if value and value not in PAISES_ISO3:
+            raise serializers.ValidationError("País inválido: usa la clave ISO de 3 letras (p. ej. MEX, USA).")
+        return value
 
 
 def _empresa(user):
