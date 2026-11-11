@@ -47,6 +47,19 @@ logger = logging.getLogger(__name__)
 
 
 class ClienteViewSetMesaControl(viewsets.ModelViewSet):
+    # #1071: mismos códigos R-* que el listado y detalle de ``clientes`` (#1020).
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = {"list": CODIGOS_CLIENTES, "retrieve": CODIGOS_CLIENTES}
+    # Orden con lista blanca, como ``ClienteViewSet``: ``?ordering=vendedores``
+    # (M2M) duplicaba filas.
+    filter_backends = [
+        *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
+        OrdenamientoNullsAlFinal,
+    ]
+    ordering_fields = [
+        "id", "clave", "nombre", "razon_social", "rfc", "correo", "telefono", "ciudad", "estado",
+        "giro_empresarial", "dias_credito", "created_at", "fecha_ultima_compra",
+    ]
     queryset = clientes_base()
     # El mismo serializer que el listado/detalle de ``clientes``: una sola forma
     # (y un solo componente en el schema OpenAPI, EC-853).

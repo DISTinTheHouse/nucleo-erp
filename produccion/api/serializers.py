@@ -687,6 +687,15 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         return attrs
 
     def update(self, instance, validated_data):
+        # #1090: una OP terminada o cancelada ya no cambia de pedidos.
+        E = OrdenProduccion.EstatusOrdenProduccion
+        cambia_pedido = 'pedido' in validated_data and validated_data['pedido'] != instance.pedido
+        if instance.estatus_op in (E.COMPLETADO, E.CANCELADO) and (
+            validated_data.get('pedidos_ids') is not None or cambia_pedido
+        ):
+            raise serializers.ValidationError(
+                {'pedidos_ids': f'La OP está {instance.get_estatus_op_display().lower()}: ya no se pueden cambiar sus pedidos.'}
+            )
         pedidos = validated_data.pop('pedidos_ids', None)
         instance = super().update(instance, validated_data)
         if pedidos is not None or 'pedido' in validated_data:

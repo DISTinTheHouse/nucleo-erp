@@ -21,6 +21,8 @@ from datetime import date
 
 from django.apps import apps
 from django.db.models import Q
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
@@ -33,7 +35,7 @@ from ventas.services.pedido_field_filter_service import CLAVES_IMPORTES_PEDIDO
 
 from ..bitacora import TIPOS
 from ..models import BitacoraDocumento
-from .serializers import BitacoraDocumentoSerializer
+from .serializers import BitacoraDocumentoSerializer, LineaTiempoSerializer
 
 CODIGOS_BITACORA = ("R-CORE", "R-CORE-REPORTES")
 MAX_LINEA_TIEMPO = 500
@@ -104,6 +106,26 @@ def _alcance(user):
     return qs
 
 
+def _param(nombre, tipo, descripcion, enum=None, requerido=False):
+    return OpenApiParameter(nombre, tipo, OpenApiParameter.QUERY, required=requerido, description=descripcion, enum=enum)
+
+
+_TIPOS_ENUM = sorted(TIPOS)
+_FILTROS_LISTADO = [
+    _param("tipo", OpenApiTypes.STR, "Tipo de documento.", _TIPOS_ENUM),
+    _param("documento_id", OpenApiTypes.INT, "Id del documento."),
+    _param("accion", OpenApiTypes.STR, "Acción.", list(BitacoraDocumento.Accion.values)),
+    _param("usuario", OpenApiTypes.INT, "Id del usuario."),
+    _param("sucursal", OpenApiTypes.INT, "Id de la sucursal."),
+    _param("origen_tipo", OpenApiTypes.STR, "Tipo del documento origen.", _TIPOS_ENUM),
+    _param("origen_id", OpenApiTypes.INT, "Id del documento origen."),
+    _param("folio", OpenApiTypes.STR, "Folio (contiene)."),
+    _param("fecha_desde", OpenApiTypes.DATE, "Desde (YYYY-MM-DD)."),
+    _param("fecha_hasta", OpenApiTypes.DATE, "Hasta (YYYY-MM-DD)."),
+]
+
+
+@extend_schema_view(list=extend_schema(parameters=_FILTROS_LISTADO))
 class BitacoraDocumentoViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = BitacoraDocumentoSerializer
     permission_classes = [permissions.IsAuthenticated, LecturaBitacora]
@@ -147,7 +169,14 @@ class BitacoraDocumentoViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(created_at__date__lte=hasta)
         return qs
 
-    @action(detail=False, methods=["get"], url_path="linea-tiempo")
+    @extend_schema(
+        parameters=[
+            _param("tipo", OpenApiTypes.STR, "Tipo de documento.", _TIPOS_ENUM, requerido=True),
+            _param("documento_id", OpenApiTypes.INT, "Id del documento.", requerido=True),
+        ],
+        responses=LineaTiempoSerializer,
+    )
+    @action(detail=False, methods=["get"], url_path="linea-tiempo", pagination_class=None)
     def linea_tiempo(self, request):
         p = request.query_params
         tipo = _tipo(p, requerido=True)

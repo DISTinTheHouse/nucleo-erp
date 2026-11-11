@@ -80,6 +80,10 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
         if not (maquilero.activo and maquilero.es_maquilero):
             raise ValidationError({"centro_confeccion": "El proveedor no está activo como maquilero."})
         attrs["centro_confeccion"] = maquilero
+        envio = attrs.get("fecha_envio") or timezone.localdate()
+        compromiso = attrs.get("fecha_compromiso")
+        if compromiso and compromiso < envio:
+            raise ValidationError({"fecha_compromiso": "No puede ser anterior a la fecha de envío."})
         for d in attrs.get("detalles", []):
             if d.get("op_detalle") is not None and d["op_detalle"].op_id != op.pk:
                 raise ValidationError({"detalles": "Un renglón no pertenece a la OP."})
