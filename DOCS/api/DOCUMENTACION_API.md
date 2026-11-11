@@ -8022,3 +8022,90 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 | `403 Forbidden`   | Usuario sin empresa o cross-empresa en @action | `{ "detail": "No autorizado." }`                                                |
 | `404 Not Found`   | Registro no existe / otra empresa              | `{ "detail": "Not found." }`                                                    |
 | `409 Conflict`    | DELETE con dependencias FK que lo protegen     | `{ "detail": "No se puede eliminar: dependencias en Contratos, Asistencias." }` |
+
+---
+
+## 📈 13. Planeación
+
+### Tablero de rotación
+
+`GET /api/v1/planeacion/tablero-rotacion/`
+
+Sirve a la junta semanal de planeación: qué producto terminado se vende más, cuál casi no se vende (candidatos a descontinuar) y cuánto resurtir. No incluye muestras ni pedidos especiales.
+
+- **Alcance:** siempre la empresa activa del usuario, también para el superusuario. Si el usuario no tiene empresa, responde `400`.
+- **Importes:** `importe_vendido` solo llega con permiso de importes de pedido (contabilidad de ventas o de compras); sin él llega `null`, y ordenar por ese campo responde `400`.
+- **Velocidad:** 5 consultas fijas, sin importar cuántos artículos haya.
+
+**Origen de los datos**
+
+| Dato | De dónde sale |
+|---|---|
+| Universo | Variantes activas de productos activos con tipo `PT` (producto terminado) |
+| Venta | Piezas de pedidos de **venta** autorizados o en proceso (sin muestras, errores ni cancelados). Fecha = confirmación del pedido, o su alta si no tiene |
+| Importe | Piezas × precio de la talla (o del renglón), en la moneda del pedido |
+| Existencia | Suma de existencias en los almacenes de la empresa |
+| En proceso | Piezas ordenadas en OPs abiertas (pendiente, preparación, en producción, revisión, detenida) |
+
+**Parámetros** (todos opcionales; un valor vacío cuenta como si no viniera)
+
+| Parámetro | Default | Uso |
+|---|---|---|
+| `semanas` | 12 | Periodo de análisis (1–104). La tendencia lo compara con las `semanas` anteriores |
+| `semanas_objetivo` | 8 | Semanas de inventario que se quieren cubrir (1–52) |
+| `dias_sin_venta` | 90 | A partir de cuántos días sin venta un artículo es `SIN_VENTA` (1–730) |
+| `agrupar` | `variante` | `variante` (SKU) o `producto` (modelo, suma sus variantes) |
+| `producto`, `categoria`, `sucursal` | — | Filtros por id (`sucursal` filtra la venta) |
+| `buscar` | — | Texto en SKU, nombre de producto o variante |
+| `clase` | — | `A`, `B` o `C` |
+| `estado` | — | `RESURTIR`, `SOBREINVENTARIO`, `LENTO`, `SIN_VENTA`, `OK` |
+| `solo_candidatos` | `false` | Solo candidatos a descontinuar |
+| `ordering` | `-vendido_periodo` | `vendido_periodo`, `venta_semanal`, `tendencia_pct`, `existencia`, `en_proceso`, `disponible`, `cobertura_semanas`, `resurtido_sugerido`, `dias_sin_venta`, `ultima_venta`, `importe_vendido`, `nombre`, `sku`, `clase_abc`; con `-` es descendente. Los nulos van al final |
+| `page`, `page_size` | 1, 50 | Paginación (`page_size` máx. 500) |
+
+Un valor inválido responde `400` con el campo.
+
+**Cálculos por fila**
+
+- `venta_semanal` = `vendido_periodo` / `semanas`.
+- `disponible` = `existencia` + `en_proceso`.
+- `cobertura_semanas` = `disponible` / `venta_semanal` (`null` si no hubo venta).
+- `tendencia_pct` = cambio contra el periodo anterior (`null` si antes no se vendió).
+- `resurtido_sugerido` = `venta_semanal` × `semanas_objetivo` − `disponible`, redondeado hacia arriba; mínimo 0.
+- `clase_abc`: Pareto por piezas del periodo. **A** hasta el 80 % acumulado, **B** hasta el 95 %, **C** el resto, incluido lo que no se vendió. Se calcula sobre todo el universo filtrado por `producto`/`categoria`/`buscar`, antes de `clase`/`estado`/paginación.
+- `estado` (en este orden de prioridad):
+  1. `SIN_VENTA`: nunca vendido o sin venta en `dias_sin_venta`.
+  2. `RESURTIR`: `resurtido_sugerido` > 0.
+  3. `SOBREINVENTARIO`: cobertura mayor al doble de `semanas_objetivo`.
+  4. `LENTO`: clase C con venta.
+  5. `OK`: el resto.
+- `candidato_descontinuar`: `SIN_VENTA`, o `LENTO`/`SOBREINVENTARIO` con tendencia negativa.
+- `serie_semanal`: piezas por semana del periodo, de la más antigua a la actual (para sparkline).
+
+**Respuesta**
+
+```json
+{
+  "parametros": {"semanas": 12, "semanas_objetivo": 8, "dias_sin_venta": 90, "agrupar": "variante", "desde": "2026-08-19", "hasta": "2026-11-11"},
+  "resumen": {
+    "articulos": 3187, "vendido_periodo": 5758, "vendido_periodo_anterior": 4535, "tendencia_pct": 27.0,
+    "existencia": 6211646, "en_proceso": 314, "resurtido_sugerido": 1, "importe_vendido": 2478663.74,
+    "por_clase": {"A": 38, "B": 63, "C": 3086},
+    "por_estado": {"RESURTIR": 1, "SOBREINVENTARIO": 266, "LENTO": 8, "SIN_VENTA": 2911, "OK": 1},
+    "candidatos_descontinuar": 2932
+  },
+  "count": 3187, "page": 1, "page_size": 50,
+  "results": [{
+    "producto_id": 8515, "producto_nombre": "CHAMARRA ALASKA UNISEX", "categoria_id": 146, "categoria_nombre": "Chamarra",
+    "variante_id": 1185, "sku": "30038002XC", "color": "NEGRO", "talla": "2XCH", "variantes": 1,
+    "vendido_periodo": 315, "vendido_periodo_anterior": 33, "tendencia_pct": 854.5, "venta_semanal": 26.25,
+    "serie_semanal": [15, 0, 0, 0, 0, 0, 0, 0, 300, 0, 0, 0],
+    "pedidos": 2, "clientes": 2, "ultima_venta": "2026-10-15", "dias_sin_venta": 27,
+    "existencia": 1652, "en_proceso": 0, "disponible": 1652, "cobertura_semanas": 62.9,
+    "resurtido_sugerido": 0, "importe_vendido": 81900.00,
+    "clase_abc": "A", "participacion_pct": 5.47, "estado": "SOBREINVENTARIO", "candidato_descontinuar": false
+  }]
+}
+```
+
+`resumen` es de todo el universo filtrado (no de la página). Con `agrupar=producto`, `variante_id`/`sku`/`color`/`talla` llegan `null`, `variantes` dice cuántas suma, y `pedidos`/`clientes` son la suma por variante (aproximada).
