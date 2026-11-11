@@ -391,16 +391,14 @@ class ClienteViewSet(viewsets.ModelViewSet):
     VENTANA_ACTIVIDAD_DIAS = 90
 
     def _kpi_clientes_activos(self, clientes_qs):
-        from django.db.models import Exists, OuterRef
+        from django.db.models import Exists
 
-        from ventas.models import Pedido
-        from ventas.scope import pedidos_venta_real
+        from ventas.scope import pedidos_venta_real_del_cliente
 
         desde = timezone.now() - timedelta(days=self.VENTANA_ACTIVIDAD_DIAS)
-        # Una sola definición de "activo" para los conteos Y las listas (#371).
-        pedidos = pedidos_venta_real(Pedido.objects.filter(
-            cliente=OuterRef("pk"), empresa=OuterRef("empresa"), activo=True, created_at__gte=desde,
-        ))
+        # Una sola definición de "activo" para los conteos Y las listas (#371). Las
+        # compras del cliente son las mismas de ``fecha_ultima_compra`` (EC-853).
+        pedidos = pedidos_venta_real_del_cliente().filter(created_at__gte=desde)
         activos_qs = clientes_qs.filter(Exists(pedidos))
         inactivos_qs = clientes_qs.exclude(Exists(pedidos))
         activos = activos_qs.count()

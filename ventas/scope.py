@@ -48,23 +48,36 @@ def pedidos_venta_real(qs):
     )
 
 
+def pedidos_venta_real_del_cliente():
+    """Pedidos que son compra del cliente de la fila externa, para un ``Subquery`` o
+    ``Exists`` sobre ``terceros.Cliente``: activos, de la empresa del cliente y venta
+    real (``pedidos_venta_real``). Correlacionado por ``OuterRef("pk")`` y
+    ``OuterRef("empresa_id")``.
+
+    Única definición para ``fecha_ultima_compra`` (``anotar_fecha_ultima_compra``) y
+    para ``clientes_activos`` de ``clientes/kpis/``, que encima acota la ventana
+    (EC-835/EC-853).
+    """
+    return pedidos_venta_real(
+        Pedido.objects.filter(cliente_id=OuterRef("pk"), empresa_id=OuterRef("empresa_id"), activo=True)
+    )
+
+
 def anotar_fecha_ultima_compra(clientes_qs):
     """Anota ``fecha_ultima_compra`` en un queryset de ``terceros.Cliente``: el
     ``created_at`` (datetime) del pedido más reciente del cliente que es venta real
-    (``pedidos_venta_real``), activo y de la empresa del cliente; ``None`` si nunca
-    ha comprado. Subquery correlacionada: misma consulta, sin N+1 (EC-744/EC-830).
+    (``pedidos_venta_real_del_cliente``); ``None`` si nunca ha comprado. Subquery
+    correlacionada: misma consulta, sin N+1 (EC-744/EC-830).
 
     Única definición para ``clientes-mesa-control`` y ``clientes`` (EC-853): las dos
     columnas no pueden separarse. No filtra filas: el alcance sigue siendo el de
     ``clientes_visibles``; la fecha local la arma el serializer.
+
+    La anotación es el momento exacto de la compra, no la fecha: ``?ordering=`` por
+    ella ordena por ese momento (dentro del mismo día, la compra más reciente
+    primero con ``-``) e ``id`` sólo desempata momentos idénticos.
     """
-    ultimo_pedido = (
-        pedidos_venta_real(
-            Pedido.objects.filter(cliente_id=OuterRef("pk"), empresa_id=OuterRef("empresa_id"), activo=True)
-        )
-        .order_by("-created_at")
-        .values("created_at")[:1]
-    )
+    ultimo_pedido = pedidos_venta_real_del_cliente().order_by("-created_at").values("created_at")[:1]
     return clientes_qs.annotate(fecha_ultima_compra=Subquery(ultimo_pedido))
 
 
