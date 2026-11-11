@@ -2236,14 +2236,18 @@ class ClienteMesaControlFechaUltimaCompraTests(TestCase):
         Pedido.objects.filter(pk=pedido.pk).update(created_at=creado)
         return pedido
 
-    def _fechas(self, usuario=None):
+    def _filas(self, url=None, usuario=None, **params):
+        """Filas de ``url`` (por defecto ``URL``) con ``params``; con ``limit``, las
+        de ``results``."""
         client = APIClient()
         client.force_authenticate(user=usuario or self.admin)
-        resp = client.get(self.URL)
+        resp = client.get(url or self.URL, params)
         self.assertEqual(resp.status_code, 200, resp.data)
         data = resp.json()
-        filas = data["results"] if isinstance(data, dict) and "results" in data else data
-        return {fila["id"]: fila["fecha_ultima_compra"] for fila in filas}
+        return data["results"] if isinstance(data, dict) and "results" in data else data
+
+    def _fechas(self, usuario=None, url=None, **params):
+        return {fila["id"]: fila["fecha_ultima_compra"] for fila in self._filas(url, usuario, **params)}
 
     @staticmethod
     def _local(momento):
@@ -2365,12 +2369,6 @@ class ClienteListadoFechaUltimaCompraTests(ClienteMesaControlFechaUltimaCompraTe
         client = APIClient()
         client.force_authenticate(user=usuario or self.admin)
         return client
-
-    def _filas(self, url=None, usuario=None, **params):
-        resp = self._api(usuario).get(url or self.URL, params)
-        self.assertEqual(resp.status_code, 200, resp.data)
-        data = resp.json()
-        return data["results"] if "limit" in params else data
 
     def _ids(self, **params):
         return [fila["id"] for fila in self._filas(**params)]
