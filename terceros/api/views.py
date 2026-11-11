@@ -21,6 +21,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view
 from terceros.models import Proveedor, Cliente, DireccionCliente
 from terceros.api.serializers import (
+    ClienteConUltimaCompraSerializer,
     ClienteMesaControlSerializer,
     ClienteSerializer,
     DireccionClienteSerializer,
@@ -87,14 +88,22 @@ class ClienteViewSet(viewsets.ModelViewSet):
         OrdenamientoNullsAlFinal,
     ]
     search_fields = ["nombre", "razon_social", "rfc", "clave", "correo", "telefono"]
-    # Sólo campos de ``Cliente``: ``fecha_alta``, ``fecha_ultima_compra`` y
-    # ``updated_at`` venían de la lista de proveedores y no existen aquí; al estar
-    # en la lista blanca llegaban al ``order_by`` y respondían 500 (EC-826).
-    # NULL al final en ambas direcciones (``created_at`` y ``clave`` son NULL-able).
+    # Campos de ``Cliente`` más la anotación ``fecha_ultima_compra`` (EC-853). Los
+    # que no existían (``fecha_alta``, ``updated_at``) respondían 500 (EC-826).
+    # NULL al final en ambas direcciones (``created_at``, ``clave`` y la anotación
+    # son NULL-able).
     ordering_fields = [
         "id", "clave", "nombre", "razon_social", "rfc", "correo", "telefono", "ciudad", "estado",
-        "giro_empresarial", "dias_credito", "created_at",
+        "giro_empresarial", "dias_credito", "created_at", "fecha_ultima_compra",
     ]
+    # Listado y detalle llevan ``fecha_ultima_compra`` (EC-853); alta, edición y
+    # las demás acciones conservan ``ClienteSerializer`` y su respuesta.
+    ACCIONES_CON_ULTIMA_COMPRA = ("list", "retrieve")
+
+    def get_serializer_class(self):
+        if self.action in self.ACCIONES_CON_ULTIMA_COMPRA:
+            return ClienteConUltimaCompraSerializer
+        return super().get_serializer_class()
 
     def get_queryset(self):
         # El predicado de aislamiento vive en ``terceros.scope`` para que el
@@ -102,11 +111,19 @@ class ClienteViewSet(viewsets.ModelViewSet):
         # una copia que pueda separarse de él. ``vendedores`` (M2M del serializer)
         # en una sola consulta, no una por cliente. Orden por defecto: nombre, con
         # ``id`` como desempate estable (antes era indefinido, EC-757).
-        return (
+        qs = (
             clientes_visibles(super().get_queryset(), self.request.user)
             .prefetch_related("vendedores")
             .order_by("nombre", "id")
         )
+        if self.action in self.ACCIONES_CON_ULTIMA_COMPRA:
+            # Misma subquery que Mesa de Control (una sola definición). Sólo
+            # anota: no cambia qué clientes se listan. Import local por el ciclo
+            # ``ventas`` -> ``terceros``.
+            from ventas.scope import anotar_fecha_ultima_compra
+
+            qs = anotar_fecha_ultima_compra(qs)
+        return qs
 
     def retrieve(self, request, *args, **kwargs):
         # Sólo el detalle (no el listado) lleva ``resumen_comercial``: es la

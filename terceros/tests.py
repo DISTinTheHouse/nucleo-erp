@@ -2049,14 +2049,15 @@ class ResumenComercialImportesPorPerfilTests(ImportesPedidoFixture, TestCase):
 
 
 class ClienteListadoOrderingTests(TestCase):
-    """``?ordering=`` del listado de clientes (EC-826): sólo campos de ``Cliente``
-    (los de proveedores que no existen aquí respondían 500), NULL al final en
+    """``?ordering=`` del listado de clientes (EC-826): campos de ``Cliente`` y la
+    anotación ``fecha_ultima_compra`` (EC-853; los de proveedores que no existen
+    aquí respondían 500), NULL al final en
     ambas direcciones y ``nombre, id`` por defecto. Siempre dentro del alcance."""
 
     URL = "/api/v1/terceros/clientes/"
     CAMPOS = [
         "id", "clave", "nombre", "razon_social", "rfc", "correo", "telefono", "ciudad", "estado",
-        "giro_empresarial", "dias_credito", "created_at",
+        "giro_empresarial", "dias_credito", "created_at", "fecha_ultima_compra",
     ]
 
     @classmethod
@@ -2116,7 +2117,9 @@ class ClienteListadoOrderingTests(TestCase):
                     self.assertCountEqual(ids, self.ids_empresa)
 
     def test_campos_retirados_ya_no_responden_500_y_quedan_en_el_orden_por_defecto(self):
-        for campo in ("fecha_alta", "fecha_ultima_compra", "updated_at"):
+        # ``fecha_ultima_compra`` volvió como anotación (EC-853): ver
+        # ``ClienteListadoFechaUltimaCompraTests``.
+        for campo in ("fecha_alta", "updated_at"):
             for termino in (campo, f"-{campo}"):
                 with self.subTest(ordering=termino):
                     self.assertEqual(self._ids(ordering=termino), self._orden_por_defecto())
@@ -2340,6 +2343,174 @@ def _lectura_clientes(usuario):
     UsuarioPermiso.objects.create(
         usuario=usuario, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=usuario.empresa,
     )
+
+
+class ClienteListadoFechaUltimaCompraTests(ClienteMesaControlFechaUltimaCompraTests):
+    """``fecha_ultima_compra`` del listado y el detalle de ``clientes`` (EC-853): la
+    misma anotación que Mesa de Control (``ventas.scope.anotar_fecha_ultima_compra``),
+    así que hereda todos sus casos (excluidos, inactivos, otra empresa, hora local,
+    consultas constantes) contra ``/clientes/``. Encima: igualdad con Mesa de
+    Control, detalle, ``?ordering=`` con NULL al final y paginado, alcance del
+    vendedor, y alta/edición/Contabilidad sin el campo."""
+
+    URL = "/api/v1/terceros/clientes/"
+    URL_MESA = "/api/v1/terceros/clientes-mesa-control/"
+
+    def _api(self, usuario=None):
+        client = APIClient()
+        client.force_authenticate(user=usuario or self.admin)
+        return client
+
+    def _filas(self, url=None, usuario=None, **params):
+        resp = self._api(usuario).get(url or self.URL, params)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        data = resp.json()
+        return data["results"] if "limit" in params else data
+
+    def _ids(self, **params):
+        return [fila["id"] for fila in self._filas(**params)]
+
+    def test_pedido_de_otra_empresa_no_cuenta_ni_se_ve(self):
+        """Como el caso de Mesa de Control, pero con el pedido ajeno sembrado por
+        ``update()``: desde #1024 ``Pedido.save()`` ya no deja crearlo, aunque las
+        filas anteriores a esa barrera pueden existir (el caso heredado falla igual
+        en ``main`` por eso)."""
+        from ventas.models import Pedido
+
+        cliente = self._cliente()
+        self._pedido(cliente, self.VENTA)
+        ajeno = self._pedido(cliente, self.POSTERIOR)
+        Pedido.objects.filter(pk=ajeno.pk).update(empresa=self.otra, sucursal=self.sucursal_otra)
+        self.assertEqual(self._fechas()[cliente.pk], self._local(self.VENTA))
+        self.assertNotIn(cliente.pk, self._fechas(self.admin_otra))
+
+    def test_igual_a_mesa_de_control_para_cada_cliente(self):
+        from ventas.models import Pedido
+
+        con_venta = self._cliente("Con venta")
+        self._pedido(con_venta, self.VENTA)
+        self._pedido(con_venta, self.POSTERIOR, estatus=Pedido.ESTATUS_BORRADOR)
+        posterior = self._cliente("Posterior")
+        self._pedido(posterior, self.POSTERIOR, estatus=Pedido.ESTATUS_EN_PROCESO)
+        self._cliente("Sin pedidos")
+        listado = {f["id"]: f["fecha_ultima_compra"] for f in self._filas()}
+        mesa = {f["id"]: f["fecha_ultima_compra"] for f in self._filas(self.URL_MESA)}
+        self.assertEqual(len(listado), 3)
+        self.assertEqual(listado, mesa)
+        self.assertEqual(listado[posterior.pk], self._local(self.POSTERIOR))
+
+    def test_detalle_trae_la_misma_fecha(self):
+        con_venta = self._cliente("Con venta")
+        self._pedido(con_venta, self.VENTA)
+        sin_pedidos = self._cliente("Sin pedidos")
+        for cliente, esperado in ((con_venta, self._local(self.VENTA)), (sin_pedidos, None)):
+            with self.subTest(cliente=cliente.nombre):
+                resp = self._api().get(f"{self.URL}{cliente.pk}/")
+                self.assertEqual(resp.status_code, 200, resp.data)
+                self.assertEqual(resp.data["fecha_ultima_compra"], esperado)
+                self.assertIn("resumen_comercial", resp.data)
+
+    def _clientes_para_ordenar(self):
+        # Dos con compra (fechas distintas) y dos sin compra, creados intercalados
+        # para que el desempate por ``id`` no coincida con el orden por fecha.
+        sin_a = self._cliente("Sin A")
+        reciente = self._cliente("Reciente")
+        self._pedido(reciente, self.POSTERIOR)
+        sin_b = self._cliente("Sin B")
+        antigua = self._cliente("Antigua")
+        self._pedido(antigua, self.VENTA)
+        return sin_a, reciente, sin_b, antigua
+
+    def test_ordering_deja_los_null_al_final_en_ambas_direcciones(self):
+        sin_a, reciente, sin_b, antigua = self._clientes_para_ordenar()
+        casos = {
+            "fecha_ultima_compra": [antigua.pk, reciente.pk, sin_a.pk, sin_b.pk],
+            "-fecha_ultima_compra": [reciente.pk, antigua.pk, sin_b.pk, sin_a.pk],
+        }
+        for termino, esperado in casos.items():
+            with self.subTest(ordering=termino):
+                self.assertEqual(self._ids(ordering=termino), esperado)
+                self.assertEqual(self._ids(ordering=termino, limit=50), esperado)
+
+    def test_ordering_lleva_nulls_last_en_el_sql(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._clientes_para_ordenar()
+        for termino, direccion in (("fecha_ultima_compra", "ASC"), ("-fecha_ultima_compra", "DESC")):
+            with self.subTest(ordering=termino):
+                with CaptureQueriesContext(connection) as consultas:
+                    self._ids(ordering=termino, limit=50)
+                sql = next(q["sql"] for q in consultas.captured_queries
+                           if 'FROM "clientes"' in q["sql"] and "LIMIT" in q["sql"])
+                # La anotación va en el SELECT; el ORDER BY la cita por posición.
+                self.assertRegex(sql, rf'ORDER BY \d+ {direccion} NULLS LAST, "clientes"\."id" {direccion} LIMIT')
+
+    def test_paginas_concatenadas_igualan_la_lista_completa(self):
+        self._clientes_para_ordenar()
+        for termino in ("fecha_ultima_compra", "-fecha_ultima_compra"):
+            with self.subTest(ordering=termino):
+                completo = self._ids(ordering=termino)
+                paginas = []
+                for offset in range(0, len(completo), 3):
+                    paginas += self._ids(ordering=termino, limit=3, offset=offset)
+                self.assertEqual(paginas, completo)
+
+    def test_consultas_no_crecen_con_las_filas_paginando(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        def _consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                self._filas(ordering="-fecha_ultima_compra", limit=50)
+            return len(ctx)
+
+        self._pedido(self._cliente("Primero"), self.VENTA)
+        self._filas(limit=50)  # calienta lo que se cachea por proceso
+        pocas = _consultas()
+        for i in range(5):
+            self._pedido(self._cliente(f"Más {i}"), self.POSTERIOR)
+        self.assertEqual(_consultas(), pocas)
+
+    def test_vendedor_solo_ve_sus_clientes_con_la_fecha_de_la_empresa(self):
+        """La anotación no cambia el alcance; la fecha es la del cliente en su
+        empresa (la misma que ve Mesa de Control), no sólo la de sus pedidos."""
+        vendedor = Usuario.objects.create(username="v-ec853", email="v@ec853.test", empresa=self.empresa)
+        _lectura_clientes(vendedor)
+        suyo = self._cliente("Suyo")
+        suyo.vendedores.add(vendedor)
+        self._pedido(suyo, self.VENTA)
+        ajeno = self._cliente("No asignado")
+        self._pedido(ajeno, self.POSTERIOR)
+        filas = self._filas(usuario=vendedor, ordering="-fecha_ultima_compra")
+        self.assertEqual(
+            [(f["id"], f["fecha_ultima_compra"]) for f in filas], [(suyo.pk, self._local(self.VENTA))]
+        )
+
+    def test_alta_y_edicion_responden_sin_fecha_ultima_compra(self):
+        from terceros.api.serializers import ClienteSerializer
+
+        campos = {n for n, f in ClienteSerializer().fields.items() if not f.write_only}
+        self.assertNotIn("fecha_ultima_compra", campos)
+        api = self._api()
+        alta = api.post(self.URL, {"nombre": "Alta EC853"}, format="json")
+        self.assertEqual(alta.status_code, 201, alta.data)
+        self.assertEqual(set(alta.data) - {"facturama_sincronizado"}, campos)
+        cliente = Cliente.objects.get(pk=alta.data["id"])
+        self._pedido(cliente, self.VENTA)
+        edicion = api.patch(f"{self.URL}{cliente.pk}/", {"nombre": "Editado EC853"}, format="json")
+        self.assertEqual(edicion.status_code, 200, edicion.data)
+        self.assertEqual(set(edicion.data), campos)
+
+    def test_contabilidad_no_cambia(self):
+        self._pedido(self._cliente("Con venta"), self.VENTA)
+        resp = self._api().get("/api/v1/finanzas/clientes-contabilidad/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        data = resp.json()
+        filas = data["results"] if isinstance(data, dict) and "results" in data else data
+        self.assertTrue(filas)
+        for fila in filas:
+            self.assertNotIn("fecha_ultima_compra", fila)
 
 
 class ClienteBusquedaTelefonoTests(TestCase):
