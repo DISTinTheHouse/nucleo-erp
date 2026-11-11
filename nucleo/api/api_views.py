@@ -19,8 +19,9 @@ from .serializers import (
     SatClaveProdServSerializer, SatClaveUnidadSerializer,
     UnidadMedidaSerializer, ImpuestoSerializer,
     EmpresaSerializer, SucursalSerializer, DepartamentoSerializer, MonedaSerializer, SerieFolioSerializer,
-    CambiarEmpresaSerializer,
+    CambiarEmpresaSerializer, UserEmpresaSerializer,
 )
+from drf_spectacular.utils import extend_schema
 from seguridad.api.api_views import IsSuperUserOrReadOnly
 from ..scope import empresas_activas
 
@@ -36,6 +37,17 @@ class EmpresaViewSet(viewsets.ModelViewSet):
     serializer_class = EmpresaSerializer
     lookup_field = 'codigo'
     permission_classes = [IsSuperUserOrReadOnly]
+
+    def get_queryset(self):
+        # Superusuario: todas (administra el catálogo de empresas). Resto: solo
+        # su empresa activa; sin empresa, nada. Otra empresa -> 404 (#1058).
+        user = self.request.user
+        qs = super().get_queryset()
+        if user.is_superuser:
+            return qs
+        if user.empresa_id:
+            return qs.filter(pk=user.empresa_id)
+        return qs.none()
 
     def perform_create(self, serializer):
         # Al crear una empresa, vincular al usuario creador
@@ -68,17 +80,22 @@ class SucursalViewSet(viewsets.ModelViewSet):
         # Listado más reciente primero (requisito de producto para las vistas de
         # lista del frontend); el ``-id`` es solo desempate estable.
         base_qs = self.queryset.order_by('-created_at', '-id_sucursal')
-        if user.is_superuser:
-            return base_qs
+        # Superusuario incluido: solo su empresa activa (#1059).
         if hasattr(user, 'empresa') and user.empresa:
             # Filtrar por empresa del usuario
             qs = base_qs.filter(empresa=user.empresa)
             # Y filtrar por sucursales asignadas al usuario (si no es admin empresa)
-            if not getattr(user, 'is_admin_empresa', False):
+            if not user.is_superuser and not getattr(user, 'is_admin_empresa', False):
                  qs = qs.filter(id_sucursal__in=user.sucursales.values_list('id_sucursal', flat=True))
             return qs
         return base_qs.none()
-    
+
+    def perform_create(self, serializer):
+        # La empresa sale del servidor, nunca del body (#1059).
+        if not self.request.user.empresa_id:
+            raise ValidationError({'empresa': 'No tienes una empresa activa.'})
+        serializer.save(empresa=self.request.user.empresa)
+
     def perform_destroy(self, instance): 
         instance.soft_delete()
 
@@ -93,8 +110,7 @@ class DepartamentoViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.is_superuser:
-            return self.queryset
+        # Superusuario incluido: solo su empresa activa (#1059).
         if hasattr(user, 'empresa') and user.empresa:
             return self.queryset.filter(empresa=user.empresa)
         return self.queryset.none()
@@ -127,11 +143,10 @@ class MonedaViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         user = self.request.user
-        if not user.is_superuser:
-            # Forzar empresa del usuario si no es superuser
-            serializer.save(empresa=user.empresa)
-        else:
-            serializer.save()
+        # Moneda privada de la empresa activa, superusuario incluido (#1059).
+        if not user.empresa_id:
+            raise ValidationError({'empresa': 'No tienes una empresa activa.'})
+        serializer.save(empresa=user.empresa)
 
     def perform_destroy(self, instance):
         instance.soft_delete()
@@ -150,9 +165,6 @@ class SerieFolioViewSet(viewsets.ModelViewSet):
         user = self.request.user
         # Listado más reciente primero; ``-id`` como desempate estable.
         base_qs = self.queryset.order_by('-created_at', '-id_serie_folio')
-        if user.is_superuser:
-            return base_qs
-
         if user.empresa:
             # Solo mostrar series de la empresa del usuario
             return base_qs.filter(empresa=user.empresa)
@@ -161,11 +173,10 @@ class SerieFolioViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         user = self.request.user
-        # Asegurar que se crea para la empresa del usuario si no es superuser
-        if not user.is_superuser and user.empresa:
-             serializer.save(empresa=user.empresa)
-        else:
-             serializer.save()
+        # Siempre la empresa activa, superusuario incluido (#1059).
+        if not user.empresa_id:
+            raise ValidationError({'empresa': 'No tienes una empresa activa.'})
+        serializer.save(empresa=user.empresa)
     
     def perform_destroy(self, instance):
         instance.soft_delete()
@@ -290,6 +301,7 @@ class SatCatalogosAPIView(APIView):
 class UserEmpresasAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(responses=UserEmpresaSerializer(many=True))
     def get(self, request):
         """
         Retorna las empresas a las que el usuario tiene acceso.

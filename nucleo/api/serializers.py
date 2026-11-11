@@ -79,7 +79,7 @@ class MonedaSerializer(serializers.ModelSerializer):
             return data # Dejar que la validación estándar de required lo maneje
             
         user = request.user
-        empresa = user.empresa if not user.is_superuser else None
+        empresa = user.empresa
         
         # Validar unicidad (Global o Local)
         # 1. Si existe como global
@@ -88,13 +88,10 @@ class MonedaSerializer(serializers.ModelSerializer):
              if not user.is_superuser:
                  raise serializers.ValidationError(f"La moneda {codigo_iso} ya existe en el catálogo global.")
              
-             # Si es superuser y está intentando crear otra global igual
-             if user.is_superuser and not data.get('empresa'):
-                 # Chequear si estamos actualizando la misma instancia
-                 if self.instance and self.instance.codigo_iso == codigo_iso:
-                     pass
-                 else:
-                     raise serializers.ValidationError(f"La moneda global {codigo_iso} ya existe.")
+             # Superusuario: las altas son privadas de su empresa activa (#1059),
+             # así que tampoco puede duplicar una global.
+             if not (self.instance and self.instance.codigo_iso == codigo_iso):
+                 raise serializers.ValidationError(f"La moneda {codigo_iso} ya existe en el catálogo global.")
 
         # 2. Si existe localmente para esta empresa
         if empresa:
@@ -106,10 +103,21 @@ class MonedaSerializer(serializers.ModelSerializer):
                  
         return data
 
+class UserEmpresaSerializer(serializers.Serializer):
+    """Forma de cada elemento de ``mis-empresas`` (solo documentación OpenAPI)."""
+    id = serializers.IntegerField()
+    codigo = serializers.CharField()
+    razon_social = serializers.CharField()
+    nombre_comercial = serializers.CharField(allow_null=True)
+    rfc = serializers.CharField(allow_null=True)
+    logo = serializers.CharField(allow_null=True)
+
+
 class SucursalSerializer(serializers.ModelSerializer):
     class Meta:
         model = Sucursal
         fields = '__all__'
+        read_only_fields = ['empresa']  # la fija el servidor (#1059)
 
 class DepartamentoSerializer(serializers.ModelSerializer):
     class Meta:
@@ -158,7 +166,7 @@ class SerieFolioSerializer(serializers.ModelSerializer):
         empresa = None
         if self.instance:
             empresa = self.instance.empresa
-        elif user and not user.is_superuser and user.empresa:
+        elif user and user.empresa:
             empresa = user.empresa
             
         # Si es superuser y no hay instancia, podría faltar empresa si no se pasa... 
