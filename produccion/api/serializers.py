@@ -2842,6 +2842,8 @@ class PedidoEspecialListSerializer(serializers.ModelSerializer):
         model = Pedido
         fields = [
             "id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion",
+            # El listado incluye pedidos dados de baja (EC-873): ``activo`` los distingue.
+            "activo",
             # Anotados en ``PedidoEspecialViewSet.get_queryset`` (subconsultas):
             # tallas con cantidad > 0 de las líneas de muestra.
             "tallas_total", "tallas_con_sku", "tallas_en_catalogo",
@@ -2869,6 +2871,10 @@ class PedidoEspecialListSerializer(serializers.ModelSerializer):
         return not getattr(obj, "pre_orden_json", None) and not (getattr(obj, "ops_json", None) or [])
 
     def get_atrasado(self, obj):
+        # Un pedido dado de baja o cancelado sigue en el listado pero nunca está
+        # atrasado (EC-873).
+        if not obj.activo or obj.estatus == Pedido.ESTATUS_CANCELADO:
+            return False
         horas = self.get_horas_en_produccion(obj)
         return horas is not None and horas >= HORAS_ALERTA_PEDIDO_ESPECIAL and self.get_sin_avance(obj)
     ordenes_servicio = serializers.SerializerMethodField()
@@ -3001,7 +3007,7 @@ class PedidoEspecialDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Pedido
-        fields = ["id", "folio", "estatus", "cliente_nombre", "clasificacion", "fecha_confirmacion", "detalles", "pre_orden", "ordenes_servicio"]
+        fields = ["id", "folio", "estatus", "activo", "cliente_nombre", "clasificacion", "fecha_confirmacion", "detalles", "pre_orden", "ordenes_servicio"]
 
     def get_pre_orden(self, obj):
         return resumen_pre_orden_pedido(obj)
