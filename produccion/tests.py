@@ -7952,3 +7952,41 @@ class ClienteEnDetallesDeOrdenesTests(_DetallesOrdenesEC880Base):
              {"id": self.pedido_vivo.pk, "folio": self.pedido_vivo.folio}],
         )
 
+
+class FechasEnDetallesOcmYOpTests(_DetallesOrdenesEC880Base):
+    """``fecha_pedido``/``fecha_vence`` en el detalle de la OCM y de la OP, con
+    los mismos valores que sus listados."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        confirmacion = timezone.make_aware(timezone.datetime(2026, 10, 1, 12, 0))
+        Pedido.objects.filter(pk=cls.pedido_foto.pk).update(clasificacion="B", fecha_confirmacion=confirmacion)
+
+    def _fechas(self, data):
+        return data["fecha_pedido"], data["fecha_vence"]
+
+    def test_ocm_detalle_igual_al_listado(self):
+        orden = self.ordenes[("ocm", "foto")]
+        detalle = self.client.get(f"/api/v1/produccion/orden-corte-manga/{orden.pk}/").json()
+        fila = next(f for f in self.client.get("/api/v1/produccion/orden-corte-manga/").json() if f["id"] == orden.pk)
+        self.assertEqual(self._fechas(detalle), self._fechas(fila))
+        # Clasificación B: 8 días máximos desde la confirmación.
+        self.assertEqual(detalle["fecha_vence"], "2026-10-09")
+        self.assertEqual(detalle["fecha_pedido"], str(timezone.localdate(self.pedido_foto.created_at)))
+
+    def test_ocm_sin_clasificacion_vence_null(self):
+        orden = self.ordenes[("ocm", "vivo")]
+        detalle = self.client.get(f"/api/v1/produccion/orden-corte-manga/{orden.pk}/").json()
+        self.assertIsNone(detalle["fecha_vence"])
+        self.assertIsNotNone(detalle["fecha_pedido"])
+
+    def test_op_detalle_igual_al_listado(self):
+        detalle = self._detalle_op()
+        fila = next(f for f in self.client.get("/api/v1/produccion/orden-produccion/").json() if f["op_id"] == self.op.pk)
+        self.assertEqual(self._fechas(detalle), self._fechas(fila))
+        self.assertEqual(detalle["fecha_vence"], "2026-10-09")
+
+    def test_op_sin_pedido_fechas_null(self):
+        op = OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op="OP-880-SF")
+        self.assertEqual(self._fechas(self._detalle_op(op)), (None, None))

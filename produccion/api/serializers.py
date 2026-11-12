@@ -471,6 +471,20 @@ def estado_ruta_critica(ruta):
     }
 
 
+def fecha_pedido_de(pedido):
+    """Alta del pedido (día local): ``fecha_pedido`` de los listados y detalles
+    de OP/OB/OR/OCM. ``None`` sin pedido."""
+    from django.utils import timezone
+    return timezone.localdate(pedido.created_at) if pedido and pedido.created_at else None
+
+
+def fecha_vence_de(pedido):
+    """La ``fecha_compromiso`` de pedidos especiales: ``fecha_vence`` de los
+    listados y detalles de OP/OB/OR/OCM. ``None`` sin pedido o sin clasificación."""
+    from ventas.services.clasificacion_service import rango_fecha_entrega
+    return rango_fecha_entrega(pedido)[1] if pedido else None
+
+
 class OrdenProduccionListSerializer(serializers.ModelSerializer):
     """Serializer minimalista para el LISTADO de OP.
 
@@ -505,14 +519,11 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
         return {"id": p.pk, "nombre": p.nombre} if p else None
 
     def get_fecha_pedido(self, obj):
-        from django.utils import timezone
-        pedido = obj.pedido
-        return timezone.localdate(pedido.created_at) if pedido and pedido.created_at else None
+        return fecha_pedido_de(obj.pedido)
 
     def get_fecha_vence(self, obj):
         # La misma ``fecha_compromiso`` del listado de pedidos especiales.
-        from ventas.services.clasificacion_service import rango_fecha_entrega
-        return rango_fecha_entrega(obj.pedido)[1] if obj.pedido else None
+        return fecha_vence_de(obj.pedido)
 
     def get_ruta_critica(self, obj):
         return estado_ruta_critica(getattr(obj, "ruta_critica", None))
@@ -566,10 +577,19 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
     sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True)
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True, allow_null=True)
     usuario_nombre = serializers.SerializerMethodField()
+    # EC-880: mismas fechas y semántica que el listado de OP (del pedido principal).
+    fecha_pedido = serializers.SerializerMethodField()
+    fecha_vence = serializers.SerializerMethodField()
 
     def get_pedido_vinculado(self, obj):
         from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
         return armar_pedido_vinculado(obj)
+
+    def get_fecha_pedido(self, obj):
+        return fecha_pedido_de(obj.pedido)
+
+    def get_fecha_vence(self, obj):
+        return fecha_vence_de(obj.pedido)
 
     def get_usuario_nombre(self, obj):
         usuario = obj.usuario_asignado
@@ -1158,13 +1178,10 @@ class _FechasPedidoListadoMixin(serializers.Serializer):
     fecha_vence = serializers.SerializerMethodField()
 
     def get_fecha_pedido(self, obj):
-        from django.utils import timezone
-        pedido = obj.pedido
-        return timezone.localdate(pedido.created_at) if pedido and pedido.created_at else None
+        return fecha_pedido_de(obj.pedido)
 
     def get_fecha_vence(self, obj):
-        from ventas.services.clasificacion_service import rango_fecha_entrega
-        return rango_fecha_entrega(obj.pedido)[1] if obj.pedido else None
+        return fecha_vence_de(obj.pedido)
 
 
 def _num(obj, attr):
@@ -2722,14 +2739,17 @@ class OrdenCorteMangaHermanaSerializer(serializers.Serializer):
     fecha_inicio = serializers.DateTimeField(read_only=True)
 
 
-class OrdenesCorteMangaRetrieveSerializer(OrdenesCorteMangaSerializer):
+class OrdenesCorteMangaRetrieveSerializer(_FechasPedidoListadoMixin, OrdenesCorteMangaSerializer):
     """Orden de corte de manga para el detalle.
 
     Hereda del serializer base —no del de listado— para conservar el renglón
     completo (``OrdenCorteMangaDetalleSerializer`` con
     ``corte_manga_config``/``ubicaciones``/``foto``/``notas``). Añade
     ``pedido_vinculado`` sólo en el detalle, igual que
-    ``OrdenReflejanteRetrieveSerializer``/``OrdenBordadoRetrieveSerializer``.
+    ``OrdenReflejanteRetrieveSerializer``/``OrdenBordadoRetrieveSerializer``, y
+    ``fecha_pedido``/``fecha_vence`` (EC-880) con el mismo mixin que el listado;
+    no ``_ResumenAvancePiezasListadoMixin``: el detalle trae su propio
+    ``resumen_avance``.
     """
 
     detalles = OrdenCorteMangaDetalleRetrieveSerializer(many=True, read_only=True)
