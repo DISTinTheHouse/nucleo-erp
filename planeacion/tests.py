@@ -264,6 +264,20 @@ class FechaVentaTests(PlaneacionBaseTestCase):
         self.assertEqual(fila["dias_sin_venta"], 120)
         self.assertTrue(fila["candidato_descontinuar"])
 
+    def test_sin_alta_usa_la_confirmacion_pasada_y_descarta_la_futura(self):
+        """``created_at`` admite NULL: solo entonces la fecha de venta es
+        ``fecha_confirmacion``, y una futura sigue sin contar."""
+        hoy = timezone.localdate()
+        pasada = self._variante(self.a, "A-NULL-PASADA")
+        futura = self._variante(self.a, "A-NULL-FUTURA")
+        self._venta(self.a, pasada, 6, None, fecha_confirmacion=_local(hoy - timedelta(days=10)))
+        self._venta(self.a, futura, 4, None, fecha_confirmacion=timezone.now() + timedelta(days=20))
+        data = self._get(self.a["admin"]).json()
+        f_pasada, f_futura = self._fila(data, pasada), self._fila(data, futura)
+        self.assertEqual((_n(f_pasada["vendido_periodo"]), sum(f_pasada["serie_semanal"])), (6, 6))
+        self.assertEqual(f_pasada["dias_sin_venta"], 10)
+        self.assertEqual((_n(f_futura["vendido_periodo"]), f_futura["ultima_venta"]), (0, None))
+
     def test_necesidades_usa_el_mismo_calculo(self):
         """El resurtido de ``necesidades-materia-prima`` sale de la venta por alta: una
         confirmación futura no la saca del periodo ni la duplica."""

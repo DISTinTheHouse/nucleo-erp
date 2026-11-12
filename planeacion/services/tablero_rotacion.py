@@ -4,8 +4,9 @@ Por artículo (variante, o producto con ``agrupar=producto``) junta en memoria:
 
 - **Venta**: piezas de pedidos de VENTA autorizados o en proceso (no muestras, ni
   pedidos de error, ni cancelados). Fecha de la venta = alta del pedido
-  (``created_at``), nunca ``fecha_confirmacion``: esa es la fecha compromiso que
-  captura mesa de control y puede ser futura (EC-875). Periodo = los últimos
+  (``created_at``), no ``fecha_confirmacion``: esa es la fecha compromiso que
+  captura mesa de control y puede ser futura (EC-875); solo sirve de respaldo si el
+  pedido no tiene alta. Periodo = los últimos
   ``semanas × 7`` días locales completos, hoy incluido (empieza a medianoche, igual
   que las cubetas de ``serie_semanal``); periodo anterior = las ``semanas`` previas,
   para la tendencia. Nada posterior a ahora cuenta como venta.
@@ -130,10 +131,13 @@ def calcular(empresa, p):
     )
     if p.get("sucursal"):
         ventas = ventas.filter(pedido_detalle__pedido__sucursal_id=p["sucursal"])
-    # Fecha de venta = alta del pedido (EC-875). El tope en ``ahora`` es defensivo:
-    # ``created_at`` es ``auto_now_add``, pero una venta futura descuadraría la
-    # serie y dejaría ``dias_sin_venta`` negativo.
-    ventas = ventas.annotate(fecha=F("pedido_detalle__pedido__created_at")).filter(fecha__lte=ahora)
+    # Fecha de venta = alta del pedido (EC-875); ``created_at`` admite NULL y solo
+    # entonces se usa ``fecha_confirmacion``. El tope en ``ahora`` descarta una
+    # confirmación futura alcanzada por ese respaldo: descuadraría la serie y dejaría
+    # ``dias_sin_venta`` negativo.
+    ventas = ventas.annotate(
+        fecha=Coalesce("pedido_detalle__pedido__created_at", "pedido_detalle__pedido__fecha_confirmacion"),
+    ).filter(fecha__lte=ahora)
     producto_de = {v["id"]: v["producto_id"] for v in universo}
     en_periodo = Q(fecha__gte=inicio)
     # 2a) Totales e indicadores por variante (toda la historia para la última venta).
