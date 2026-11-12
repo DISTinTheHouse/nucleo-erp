@@ -32,9 +32,10 @@ CIEN = Decimal("100")
 CUATRO_DECIMALES = Decimal("0.0001")
 
 
-def materiales(empresa, ids_variante, sucursal=None):
+def materiales(empresa, ids_variante, sucursales=None):
     """``{variante_id: {"bom_id", "materiales": [...]}}`` para las variantes con BOM
-    activo con insumos activos. ``ids_variante``: lista o subconsulta de ids."""
+    activo con insumos activos. ``ids_variante``: lista o subconsulta de ids.
+    ``sucursales``: ids de sucursal a considerar para la existencia (``None`` = toda la empresa)."""
     renglones = list(
         BomDetalle.objects.filter(
             activo=True, componente__isnull=False,
@@ -51,8 +52,8 @@ def materiales(empresa, ids_variante, sucursal=None):
         qs = Existencia.objects.filter(almacen__empresa=empresa).annotate(
             comp=Coalesce("producto_id", "producto_variante__producto_id"),
         ).filter(comp__in=componentes)
-        if sucursal:
-            qs = qs.filter(almacen__sucursal_id=sucursal)
+        if sucursales is not None:
+            qs = qs.filter(almacen__sucursal_id__in=sucursales)
         for r in qs.values("comp").annotate(total=Sum("cantidad")):
             existencia[r["comp"]] += r["total"] or CERO
 

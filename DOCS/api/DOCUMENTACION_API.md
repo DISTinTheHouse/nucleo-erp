@@ -8035,7 +8035,10 @@ Sirve a la junta semanal de planeación: qué producto terminado se vende más, 
 
 - **Permiso:** exige `R-PRODUCCION` (el mismo código de la regla `/manufacturing` del frontend); sin él responde `403`. Superusuario y admin de empresa pasan siempre; sólo cuentan los roles y overrides de la empresa activa y un override DENY gana al rol (EC-875).
 - **Alcance:** siempre la empresa activa del usuario, también para el superusuario. El permiso se revisa antes que la empresa: sin empresa activa no cuenta ningún rol (todos son de una empresa), así que un usuario normal sin empresa recibe `403`. Solo llegan al `400` ("Tu usuario no tiene una empresa activa.") quienes pasan el permiso sin rol: superusuario, admin de empresa o un override GRANT global de `R-PRODUCCION`.
-- **Importes:** `importe_vendido` solo llega con permiso de importes de pedido (contabilidad de ventas o de compras); sin él llega `null`, y ordenar por ese campo responde `400`.
+- **Sucursales:** admin de empresa y superusuario ven toda la empresa; el resto, solo sus sucursales permitidas. Con `sucursal`, venta, existencia, en proceso y capacidad usan el mismo alcance (una sucursal ajena a la empresa o fuera de alcance responde `400`).
+- **Importes:** `importe_por_moneda` (`{"MXN": …, "USD": …}`, por fila y en `resumen`) nunca suma monedas distintas. `importe_vendido` por fila es el total solo si todo es de una moneda, si no `null`; ya no viene en `resumen`. Todo requiere permiso de importes de pedido (contabilidad de ventas o de compras); sin él llega `null`, y ordenar por `importe_vendido` responde `400`.
+- **Orden:** total y estable (desempate por nombre, SKU y ids), también para los nulos, así la paginación no repite ni salta filas.
+- **Validación:** con `agrupar=producto`, `fabricacion=ALCANZA|NO_ALCANZA` y `ordering=fabricable_con_existencia` responden `400`. `necesidades-materia-prima` no acepta `ordering`, `page` ni `page_size`.
 - **Velocidad:** consultas fijas, sin importar cuántos artículos haya. Medido con un usuario normal con `R-PRODUCCION` (sin contar la autenticación): **11** en el tablero y en el consolidado de necesidades = 7 del cálculo (universo, venta agrupada, serie semanal, existencias, OPs abiertas, BOM e insumos) + 2 del permiso (overrides y roles) + 1 de las claves de departamento para los importes + 1 de la empresa activa. Con `variante`: **7** = 3 del cálculo + las mismas 4. Superusuario y admin de empresa no consultan permisos ni claves: 8 y 4.
 
 **Origen de los datos**
@@ -8056,7 +8059,7 @@ Sirve a la junta semanal de planeación: qué producto terminado se vende más, 
 | `semanas_objetivo` | 8 | Semanas de inventario que se quieren cubrir (1–52) |
 | `dias_sin_venta` | 90 | A partir de cuántos días sin venta un artículo es `SIN_VENTA` (1–730) |
 | `agrupar` | `variante` | `variante` (SKU) o `producto` (modelo, suma sus variantes) |
-| `producto`, `categoria`, `sucursal` | — | Filtros por id (`sucursal` filtra la venta) |
+| `producto`, `categoria`, `sucursal` | — | Filtros por id (`sucursal` acota venta, existencia, en proceso y capacidad) |
 | `buscar` | — | Texto en SKU, nombre de producto o variante |
 | `clase` | — | `A`, `B` o `C` |
 | `estado` | — | `RESURTIR`, `SOBREINVENTARIO`, `LENTO`, `SIN_VENTA`, `OK` |

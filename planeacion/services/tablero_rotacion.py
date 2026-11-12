@@ -10,7 +10,7 @@ Por artículo (variante, o producto con ``agrupar=producto``) junta en memoria:
   ``semanas × 7`` días locales completos, hoy incluido (empieza a medianoche, igual
   que las cubetas de ``serie_semanal``); periodo anterior = las ``semanas`` previas,
   para la tendencia. Nada posterior a ahora cuenta como venta.
-- **Existencia**: suma de ``Existencia`` en los almacenes de la empresa.
+- **Existencia**: suma de ``Existencia`` en los almacenes de la empresa (o del ``ambito``).
 - **En proceso**: piezas ordenadas en OPs abiertas (pendiente, preparación, en
   producción, revisión o detenida).
 
@@ -65,12 +65,15 @@ def _medianoche_local(dia):
 
 
 def _fila_vacia():
-    return {"vendido": CERO, "anterior": CERO, "importe": CERO, "serie": None, "ultima": None,
+    return {"vendido": CERO, "anterior": CERO, "importe": defaultdict(lambda: CERO), "serie": None, "ultima": None,
             "pedidos": 0, "clientes": 0, "existencia": CERO, "en_proceso": CERO}
 
 
-def calcular(empresa, p):
-    """``p``: parámetros ya validados (ver ``TableroRotacionParamsSerializer``)."""
+def calcular(empresa, p, ambito=None):
+    """``p``: parámetros ya validados (ver ``TableroRotacionParamsSerializer``).
+
+    ``ambito``: ids de sucursal que acotan venta, existencia, en proceso y capacidad por igual
+    (``?sucursal=`` o las sucursales permitidas del usuario); ``None`` = toda la empresa."""
     semanas, objetivo = p["semanas"], p["semanas_objetivo"]
     por_producto = p["agrupar"] == "producto"
     hoy = timezone.localdate()
@@ -93,7 +96,7 @@ def calcular(empresa, p):
     if p.get("buscar"):
         b = p["buscar"]
         variantes = variantes.filter(Q(sku__icontains=b) | Q(producto__nombre__icontains=b) | Q(nombre__icontains=b))
-    universo = list(variantes.values(
+    universo = list(variantes.order_by("id").values(
         "id", "sku", "nombre", "producto_id", "producto__nombre", "producto__categoria_producto_id",
         "producto__categoria_producto__nombre", "color__nombre", "talla__nombre",
     ))
@@ -129,8 +132,8 @@ def calcular(empresa, p):
         pedido_detalle__pedido__activo=True,
         variante_id__in=ids_variante,
     )
-    if p.get("sucursal"):
-        ventas = ventas.filter(pedido_detalle__pedido__sucursal_id=p["sucursal"])
+    if ambito is not None:
+        ventas = ventas.filter(pedido_detalle__pedido__sucursal_id__in=ambito)
     # Fecha de venta = alta del pedido (EC-875); ``created_at`` admite NULL y solo
     # entonces se usa ``fecha_confirmacion``. El tope en ``ahora`` descarta una
     # confirmación futura alcanzada por ese respaldo: descuadraría la serie y dejaría
@@ -144,9 +147,6 @@ def calcular(empresa, p):
     for r in ventas.values("variante_id").annotate(
         vendido=Sum("cantidad", filter=en_periodo),
         anterior=Sum("cantidad", filter=Q(fecha__gte=inicio_anterior, fecha__lt=inicio)),
-        importe=Sum(
-            F("cantidad") * Coalesce("precio_unitario", "pedido_detalle__precio_unitario"), filter=en_periodo,
-        ),
         ultima=Max("fecha"),
         pedidos=Count("pedido_detalle__pedido", distinct=True, filter=en_periodo),
         clientes=Count("pedido_detalle__pedido__cliente", distinct=True, filter=en_periodo),
@@ -154,11 +154,17 @@ def calcular(empresa, p):
         f = filas[clave(r["variante_id"], producto_de[r["variante_id"]])]
         f["vendido"] += _num(r["vendido"])
         f["anterior"] += _num(r["anterior"])
-        f["importe"] += _num(r["importe"])
         f["pedidos"] += r["pedidos"]  # con agrupar=producto es suma por variante (aprox.)
         f["clientes"] += r["clientes"]
         if r["ultima"] and (f["ultima"] is None or r["ultima"] > f["ultima"]):
             f["ultima"] = r["ultima"]
+    # 2a-bis) Importe por moneda del pedido: nunca se suman monedas distintas.
+    for r in ventas.filter(en_periodo).values("variante_id", "pedido_detalle__pedido__moneda__codigo_iso").annotate(
+        importe=Sum(F("cantidad") * Coalesce("precio_unitario", "pedido_detalle__precio_unitario")),
+    ):
+        f = filas[clave(r["variante_id"], producto_de[r["variante_id"]])]
+        iso = r["pedido_detalle__pedido__moneda__codigo_iso"] or "S/M"
+        f["importe"][iso] += _num(r["importe"])
     # 2b) Serie semanal del periodo (índice 0 = semana más antigua).
     for r in ventas.filter(en_periodo).annotate(dia=TruncDate("fecha")).values("variante_id", "dia").annotate(
         piezas=Sum("cantidad"),
@@ -170,18 +176,22 @@ def calcular(empresa, p):
         if 0 <= hace < semanas:
             f["serie"][semanas - 1 - hace] += int(r["piezas"] or 0)
 
-    # 3) Existencia en los almacenes de la empresa.
-    for r in Existencia.objects.filter(almacen__empresa=empresa, producto_variante_id__in=ids_variante).values(
-        "producto_variante_id",
-    ).annotate(total=Sum("cantidad")):
+    # 3) Existencia en los almacenes de la empresa (o del ámbito).
+    existencias = Existencia.objects.filter(almacen__empresa=empresa, producto_variante_id__in=ids_variante)
+    if ambito is not None:
+        existencias = existencias.filter(almacen__sucursal_id__in=ambito)
+    for r in existencias.values("producto_variante_id").annotate(total=Sum("cantidad")):
         pv = r["producto_variante_id"]
         filas[clave(pv, producto_de[pv])]["existencia"] += _num(r["total"])
 
     # 4) En proceso: piezas en OPs abiertas.
-    for r in OrdenProduccionDetalle.objects.filter(
+    en_proceso = OrdenProduccionDetalle.objects.filter(
         op__empresa=empresa, op__activo=True, op__estatus_op__in=ESTATUS_OP_ABIERTA,
         producto_variante_id__in=ids_variante,
-    ).values("producto_variante_id").annotate(total=Sum("cantidad")):
+    )
+    if ambito is not None:
+        en_proceso = en_proceso.filter(op__sucursal_id__in=ambito)
+    for r in en_proceso.values("producto_variante_id").annotate(total=Sum("cantidad")):
         pv = r["producto_variante_id"]
         filas[clave(pv, producto_de[pv])]["en_proceso"] += _num(r["total"])
 
@@ -206,11 +216,14 @@ def calcular(empresa, p):
             "existencia": f["existencia"], "en_proceso": f["en_proceso"], "disponible": disponible,
             "cobertura_semanas": round(cobertura, 1) if cobertura is not None else None,
             "resurtido_sugerido": resurtido,
-            "importe_vendido": f["importe"],
+            "importe_por_moneda": {m: v for m, v in sorted(f["importe"].items())},
+            # Total solo si todo es de una moneda; con varias, ``null`` (ver ``importe_por_moneda``).
+            "importe_vendido": next(iter(f["importe"].values())) if len(f["importe"]) == 1 else (
+                CERO if not f["importe"] else None),
         })
 
     # 5-6) Capacidad de fabricación con la materia prima en existencia (BOM activo).
-    boms = capacidad.materiales(empresa, ids_variante)
+    boms = capacidad.materiales(empresa, ids_variante, ambito)
     con_bom_por_producto = defaultdict(int)
     for v in universo:
         if v["id"] in boms:
@@ -259,6 +272,11 @@ def calcular(empresa, p):
             r["estado"] in (LENTO, SOBREINVENTARIO) and r["tendencia_pct"] is not None and r["tendencia_pct"] < 0
         )
 
+    importe_por_moneda = defaultdict(lambda: CERO)
+    for r in filas_out:
+        for m, v in r["importe_por_moneda"].items():
+            importe_por_moneda[m] += v
+    importe_por_moneda = {m: v for m, v in sorted(importe_por_moneda.items())}
     resumen = {
         "articulos": len(filas_out),
         "vendido_periodo": total,
@@ -266,7 +284,7 @@ def calcular(empresa, p):
         "existencia": sum((r["existencia"] for r in filas_out), CERO),
         "en_proceso": sum((r["en_proceso"] for r in filas_out), CERO),
         "resurtido_sugerido": sum(r["resurtido_sugerido"] for r in filas_out),
-        "importe_vendido": sum((r["importe_vendido"] for r in filas_out), CERO),
+        "importe_por_moneda": importe_por_moneda,
         "por_clase": {c: sum(1 for r in filas_out if r["clase_abc"] == c) for c in "ABC"},
         "por_estado": {e: sum(1 for r in filas_out if r["estado"] == e) for e in ESTADOS},
         "candidatos_descontinuar": sum(1 for r in filas_out if r["candidato_descontinuar"]),
@@ -297,7 +315,12 @@ def calcular(empresa, p):
     campo_real = "producto_nombre" if campo == "nombre" else campo
     con_valor = [r for r in filas_out if r[campo_real] is not None]
     sin_valor = [r for r in filas_out if r[campo_real] is None]
-    con_valor.sort(key=lambda r: (r[campo_real], r["producto_nombre"] or "", r["sku"] or ""), reverse=desc)
+    # Orden total (producto_id, variante_id al final) para que la paginación sea estable.
+    def desempate(r):
+        return (r["producto_nombre"] or "", r["sku"] or "", r["producto_id"], r["variante_id"] or 0)
+
+    con_valor.sort(key=lambda r: (r[campo_real], *desempate(r)), reverse=desc)
+    sin_valor.sort(key=desempate)
     filas_out = con_valor + sin_valor  # los nulos siempre al final
 
     return {

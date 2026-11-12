@@ -4,13 +4,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from catalogo.models import ProductoVariante
+from finanzas.scope import sucursales_visibles
+from nucleo.models import Sucursal
 from nucleo.permisos import CODIGOS_PLANEACION, RequiereCodigo
 from planeacion.services import capacidad
 from planeacion.services import tablero_rotacion as tablero
 from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
 
 
-class TableroRotacionParamsSerializer(serializers.Serializer):
+class FiltrosPlaneacionSerializer(serializers.Serializer):
+    """Filtros comunes del tablero y de las necesidades de materia prima."""
+
     semanas = serializers.IntegerField(min_value=1, max_value=104, default=12)
     semanas_objetivo = serializers.IntegerField(min_value=1, max_value=52, default=8)
     dias_sin_venta = serializers.IntegerField(min_value=1, max_value=730, default=90)
@@ -23,6 +27,17 @@ class TableroRotacionParamsSerializer(serializers.Serializer):
     estado = serializers.ChoiceField(choices=tablero.ESTADOS, required=False)
     solo_candidatos = serializers.BooleanField(required=False, default=False)
     fabricacion = serializers.ChoiceField(choices=("SIN_BOM", "ALCANZA", "NO_ALCANZA"), required=False)
+
+    def validate_sucursal(self, value):
+        ambito = self.context.get("sucursales_visibles")
+        if not Sucursal.objects.filter(pk=value, empresa=self.context["empresa"]).exists() or (
+            ambito is not None and value not in ambito
+        ):
+            raise serializers.ValidationError("Sucursal no encontrada.")
+        return value
+
+
+class TableroRotacionParamsSerializer(FiltrosPlaneacionSerializer):
     ordering = serializers.CharField(required=False, default="-vendido_periodo")
     page = serializers.IntegerField(min_value=1, default=1)
     page_size = serializers.IntegerField(min_value=1, max_value=500, default=50)
@@ -34,6 +49,26 @@ class TableroRotacionParamsSerializer(serializers.Serializer):
             raise serializers.ValidationError("No tienes permiso para ver importes.")
         return value
 
+    def validate(self, attrs):
+        # Con agrupar=producto no hay capacidad por variante: estos filtros/orden no aplicarían.
+        if attrs["agrupar"] == "producto":
+            if attrs.get("fabricacion") in ("ALCANZA", "NO_ALCANZA"):
+                raise serializers.ValidationError(
+                    {"fabricacion": "ALCANZA y NO_ALCANZA solo aplican con agrupar=variante."})
+            if attrs["ordering"].lstrip("-") == "fabricable_con_existencia":
+                raise serializers.ValidationError(
+                    {"ordering": "fabricable_con_existencia solo aplica con agrupar=variante."})
+        return attrs
+
+
+def _ambito(user, p):
+    """Ids de sucursal que acotan el cálculo: ``?sucursal=`` o, sin él, las visibles del
+    usuario (``None`` = toda la empresa: superuser y admin de empresa)."""
+    if p.get("sucursal"):
+        return [p["sucursal"]]
+    visibles = sucursales_visibles(user)
+    return None if visibles is None else list(visibles)
+
 
 def _params(request, serializer_class):
     """``(empresa, params, ver_importes)``; si el usuario no tiene empresa,
@@ -44,7 +79,9 @@ def _params(request, serializer_class):
     ver_importes = puede_ver_contabilidad(request.user)
     # Vacíos = como si no vinieran (mismo criterio que finanzas, EC-760).
     datos = {k: v for k, v in request.query_params.items() if v != ""}
-    params = serializer_class(data=datos, context={"ver_importes": ver_importes})
+    params = serializer_class(data=datos, context={
+        "ver_importes": ver_importes, "empresa": empresa, "sucursales_visibles": sucursales_visibles(request.user),
+    })
     params.is_valid(raise_exception=True)
     return empresa, params.validated_data, ver_importes
 
@@ -62,13 +99,14 @@ class TableroRotacionView(APIView):
         empresa, p, ver_importes = _params(request, TableroRotacionParamsSerializer)
         if empresa is None:
             return ver_importes  # la respuesta 400
-        resultado = tablero.calcular(empresa, p)
+        resultado = tablero.calcular(empresa, p, _ambito(request.user, p))
         resultado.pop("boms")
         filas = resultado.pop("filas")
         if not ver_importes:
-            resultado["resumen"]["importe_vendido"] = None
+            resultado["resumen"]["importe_por_moneda"] = None
             for r in filas:
                 r["importe_vendido"] = None
+                r["importe_por_moneda"] = None
         inicio = (p["page"] - 1) * p["page_size"]
         return Response({
             **resultado,
@@ -79,7 +117,7 @@ class TableroRotacionView(APIView):
         })
 
 
-class NecesidadesParamsSerializer(TableroRotacionParamsSerializer):
+class NecesidadesParamsSerializer(FiltrosPlaneacionSerializer):
     variante = serializers.IntegerField(min_value=1, required=False)
     cantidad = serializers.IntegerField(min_value=1, max_value=1_000_000, required=False)
 
@@ -107,10 +145,10 @@ class NecesidadesMateriaPrimaView(APIView):
         if empresa is None:
             return error
         if p.get("variante"):
-            return self._una_variante(empresa, p["variante"], p.get("cantidad", 1))
+            return self._una_variante(empresa, p["variante"], p.get("cantidad", 1), _ambito(request.user, p))
 
-        p = {**p, "agrupar": "variante"}
-        resultado = tablero.calcular(empresa, p)
+        p = {**p, "agrupar": "variante", "ordering": "-vendido_periodo"}
+        resultado = tablero.calcular(empresa, p, _ambito(request.user, p))
         filas = [r for r in resultado["filas"] if r["resurtido_sugerido"] > 0]
         cantidades = {r["variante_id"]: r["resurtido_sugerido"] for r in filas}
         componentes, sin_bom = capacidad.necesidades(resultado["boms"], cantidades)
@@ -134,14 +172,14 @@ class NecesidadesMateriaPrimaView(APIView):
         })
 
     @staticmethod
-    def _una_variante(empresa, variante_id, cantidad):
+    def _una_variante(empresa, variante_id, cantidad, ambito):
         v = (
             ProductoVariante.objects.filter(pk=variante_id, empresa=empresa)
             .values("id", "sku", "producto_id", "producto__nombre").first()
         )
         if v is None:
             return Response({"detail": "No encontrado."}, status=404)
-        bom = capacidad.materiales(empresa, [variante_id]).get(variante_id)
+        bom = capacidad.materiales(empresa, [variante_id], ambito).get(variante_id)
         base = {"variante_id": v["id"], "sku": v["sku"], "producto_id": v["producto_id"],
                 "producto_nombre": v["producto__nombre"], "cantidad": cantidad}
         if bom is None:
