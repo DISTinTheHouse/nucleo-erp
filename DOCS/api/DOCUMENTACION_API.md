@@ -8033,6 +8033,7 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 
 Sirve a la junta semanal de planeación: qué producto terminado se vende más, cuál casi no se vende (candidatos a descontinuar) y cuánto resurtir. No incluye muestras ni pedidos especiales.
 
+- **Permiso:** exige `R-PRODUCCION` (el mismo código de la regla `/manufacturing` del frontend); sin él responde `403`. Superusuario y admin de empresa pasan siempre; sólo cuentan los roles y overrides de la empresa activa y un override DENY gana al rol (EC-875).
 - **Alcance:** siempre la empresa activa del usuario, también para el superusuario. Si el usuario no tiene empresa, responde `400`.
 - **Importes:** `importe_vendido` solo llega con permiso de importes de pedido (contabilidad de ventas o de compras); sin él llega `null`, y ordenar por ese campo responde `400`.
 - **Velocidad:** 7 consultas fijas, sin importar cuántos artículos haya (3 con `variante`).
@@ -8042,7 +8043,7 @@ Sirve a la junta semanal de planeación: qué producto terminado se vende más, 
 | Dato | De dónde sale |
 |---|---|
 | Universo | Variantes activas de productos activos con tipo `PT` (producto terminado) |
-| Venta | Piezas de pedidos de **venta** autorizados o en proceso (sin muestras, errores ni cancelados). Fecha = confirmación del pedido, o su alta si no tiene |
+| Venta | Piezas de pedidos de **venta** autorizados o en proceso (sin muestras, errores ni cancelados). Fecha = alta del pedido (`created_at`). No se usa `fecha_confirmacion`: es la fecha compromiso y puede ser futura (EC-875) |
 | Importe | Piezas × precio de la talla (o del renglón), en la moneda del pedido |
 | Existencia | Suma de existencias en los almacenes de la empresa |
 | En proceso | Piezas ordenadas en OPs abiertas (pendiente, preparación, en producción, revisión, detenida) |
@@ -8051,7 +8052,7 @@ Sirve a la junta semanal de planeación: qué producto terminado se vende más, 
 
 | Parámetro | Default | Uso |
 |---|---|---|
-| `semanas` | 12 | Periodo de análisis (1–104). La tendencia lo compara con las `semanas` anteriores |
+| `semanas` | 12 | Periodo de análisis (1–104): los últimos `semanas × 7` días locales completos, hoy incluido (`desde`–`hasta`). La tendencia lo compara con las `semanas` anteriores |
 | `semanas_objetivo` | 8 | Semanas de inventario que se quieren cubrir (1–52) |
 | `dias_sin_venta` | 90 | A partir de cuántos días sin venta un artículo es `SIN_VENTA` (1–730) |
 | `agrupar` | `variante` | `variante` (SKU) o `producto` (modelo, suma sus variantes) |
@@ -8106,7 +8107,7 @@ Filtro extra: `fabricacion=SIN_BOM|ALCANZA|NO_ALCANZA`. `ALCANZA` y `NO_ALCANZA`
 
 ```json
 {
-  "parametros": {"semanas": 12, "semanas_objetivo": 8, "dias_sin_venta": 90, "agrupar": "variante", "desde": "2026-08-19", "hasta": "2026-11-11"},
+  "parametros": {"semanas": 12, "semanas_objetivo": 8, "dias_sin_venta": 90, "agrupar": "variante", "desde": "2026-08-20", "hasta": "2026-11-11"},
   "resumen": {
     "articulos": 3187, "vendido_periodo": 5758, "vendido_periodo_anterior": 4535, "tendencia_pct": 27.0,
     "existencia": 6211646, "en_proceso": 314, "resurtido_sugerido": 1, "importe_vendido": 2478663.74,
@@ -8134,7 +8135,7 @@ Filtro extra: `fabricacion=SIN_BOM|ALCANZA|NO_ALCANZA`. `ALCANZA` y `NO_ALCANZA`
 
 `GET /api/v1/planeacion/necesidades-materia-prima/`
 
-Mismo alcance y mismos parámetros que el tablero. Tiene dos modos.
+Mismo permiso (`R-PRODUCCION`), mismo alcance y mismos parámetros que el tablero. Tiene dos modos.
 
 **1. Consolidado del resurtido (sin `variante`)**
 
