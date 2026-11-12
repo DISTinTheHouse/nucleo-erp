@@ -71,6 +71,7 @@ from ventas.api.serializers import (
 
 from nucleo.kpis import entero_param, rango_fechas, validar_parametros
 from nucleo.listados import PaginacionOpcionalLimitOffset, estatus_param
+from ventas.services import subtotales
 from nucleo.models import SerieFolio, Empresa
 from ventas.api import cotizaciones_listado
 from notificaciones.services.notificacion_service import crear_notificacion_usuario
@@ -348,6 +349,7 @@ def _copiar_renglones_cotizacion_a_pedido(cotizacion, pedido, claves_sat_servici
             )
         )
     PedidoServicioExtra.objects.bulk_create(servicios)
+    subtotales.recalcular_pedido(pedido)  # #1121
 
 
 class PedidoConDependencias(APIException):
@@ -2653,6 +2655,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     cantidad=s.get("cantidad") or 1,
                     visible_en_factura=bool(s.get("visible_en_factura", True)),
                 )
+            subtotales.recalcular_cotizacion(cotizacion)  # #1121: el snapshot podía traer 0
             pedido_id = (
                 Pedido.objects.filter(cotizacion=cotizacion, activo=True)
                 .order_by("-id")
@@ -3272,6 +3275,15 @@ class PedidoViewSet(viewsets.ModelViewSet):
             "tipos_bloqueo": [item.get("tipo") for item in bloqueos],
         }
 
+    def _incluye_cancelados(self):
+        """Un cancelado queda ``activo=False`` (#1118): solo se lee en el detalle y en el
+        listado con ``?estatus=5`` explícito. Ninguna escritura lo encuentra."""
+        accion = getattr(self, "action", None)
+        if accion == "retrieve":
+            return True
+        return accion == "list" and Pedido.ESTATUS_CANCELADO in (estatus_param(
+            self.request, {e for e, _ in Pedido.CHOICES_ESTATUS}) or ())
+
     def get_queryset(self):
         user = self.request.user
         # Queryset base + aislamiento multi-tenant, común a todas las acciones.
@@ -3280,7 +3292,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # pueda separarse de él: superuser ve todo, y sin empresa no se ve nada
         # (antes ese usuario no caía en ninguna rama y se llevaba los pedidos de
         # todas las empresas).
-        qs = pedidos_visibles(super().get_queryset(), user)
+        base = super().get_queryset()
+        if self._incluye_cancelados():  # #1118
+            base = Pedido.objects.filter(Q(activo=True) | Q(estatus=Pedido.ESTATUS_CANCELADO))
+        qs = pedidos_visibles(base, user)
         # ``?mis_pedidos=true``: sólo los pedidos que nacieron de una cotización
         # creada por el usuario autenticado. El vendedor no vive en ``Pedido``,
         # se resuelve por la cadena ``pedido.cotizacion.vendedor``. Ambos
@@ -3549,7 +3564,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
             estatus_anterior = pedido.estatus
             pedido.estatus = Pedido.ESTATUS_CANCELADO
             pedido.activo = False
-            pedido.save(update_fields=["estatus", "activo", "updated_at"])
+            pedido.motivo_cancelacion = motivo
+            pedido.save(update_fields=["estatus", "activo", "motivo_cancelacion", "updated_at"])
             devuelto = [
                 {"producto_id": e["producto_id"], "producto_variante_id": e["producto_variante_id"],
                  "cantidad": str(e["cantidad_movimiento"])}
@@ -4137,6 +4153,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                     cantidad=s.cantidad,
                     visible_en_factura=s.visible_en_factura,
                 )
+            subtotales.recalcular_cotizacion(cotizacion)  # #1121
 
         cotizacion = Cotizacion.objects.filter(pk=cotizacion.pk).first()
         detalles_qs = CotizacionDetalle.objects.filter(

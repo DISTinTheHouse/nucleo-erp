@@ -1804,7 +1804,7 @@ Las tarjetas de Mesa de Control **con los mismos filtros que el listado** (todos
 ```
 
 - **Los cancelados (estatus 5) no cuentan** en `total`, `confirmados`, `por_confirmar` ni `por_moneda`: `total` = `confirmados` + `por_confirmar`. Van aparte en `cancelados` (mismos filtros), así que `total` + `cancelados` = `count` del listado con los mismos parámetros. Con `?estatus=5` todo sale en 0 salvo `cancelados`.
-- Un pedido cancelado con `POST /pedidos/{id}/cancelar/` queda además `activo=false` y ya no está ni en el listado ni aquí; `cancelados` cuenta los que siguen activos con estatus 5 (p. ej. anteriores a esa regla).
+- Un pedido cancelado con `POST /pedidos/{id}/cancelar/` queda además `activo=false`: no sale en el listado salvo con `?estatus=5` explícito, pero sí se lee en el detalle (`GET /pedidos/{id}/`, con `motivo_cancelacion`; #1118). Ninguna escritura lo encuentra (404). Aquí no cuenta; `cancelados` cuenta los que siguen activos con estatus 5 (p. ej. anteriores a esa regla).
 - `confirmados` = con `fecha_confirmacion`. `valor` = Σ `gran_total` por moneda (nunca se suman monedas).
 - Sin permiso de importes: `puede_ver_importes: false` y cada fila de `por_moneda` sin `valor` (los conteos quedan). Sin empresa: todo en 0.
 
@@ -2052,6 +2052,7 @@ La cotización que dio origen al pedido, para quien ve el pedido aunque no vea l
 - Solo lectura.
 - **Alcance**: el del pedido (`pedidos_visibles`, por empresa; el superusuario ve todos). La cotización debe ser de la misma empresa que el pedido.
 - **Respuesta** (`200`): la misma forma que `GET /cotizaciones/{id}/` (`detalles[]` con `tallas[]`, `servicios_extras[]`, `piezas`, `importe_sin_iva`/`importe_iva`…) **sin `aprobado_snapshot`**, para todos los perfiles. El snapshot copia los importes de la cotización autorizada fuera del alcance del filtro de contabilidad; quien lo necesite lo sigue leyendo en `/cotizaciones/{id}/` o `mesa-control/{id}/`.
+- **Subtotales (#1121)**: `subtotal_talla = cantidad × precio_unitario` (el de la talla o, si es nulo, el del renglón) y `subtotal_linea = Σ subtotal_talla`. Los calcula el backend al guardar; no se aceptan del cliente.
 - **Importes**: misma regla de lectura que el detalle del pedido (`puede_ver_contabilidad`, EC-784). Sin ella se **eliminan** del JSON (no vienen en `null`) los campos de `CAMPOS_CONTABILIDAD_PEDIDO` en la cabecera, `precio_lista`/`precio_unitario`/`costo_unitario`/`subtotal_linea` en `detalles[]`, `precio_unitario`/`subtotal_talla` en `detalles[].tallas[]` y `monto` en `servicios_extras[]`.
 - **`404`**: pedido inexistente, dado de baja o de otra empresa; pedido sin cotización; cotización de otra empresa que el pedido. El frontend lo pinta como "sin cotización disponible", no como error.
 
