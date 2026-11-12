@@ -8034,7 +8034,10 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 Sirve a la junta semanal de planeación: qué producto terminado se vende más, cuál casi no se vende (candidatos a descontinuar) y cuánto resurtir. No incluye muestras ni pedidos especiales.
 
 - **Alcance:** siempre la empresa activa del usuario, también para el superusuario. Si el usuario no tiene empresa, responde `400`.
-- **Importes:** `importe_vendido` solo llega con permiso de importes de pedido (contabilidad de ventas o de compras); sin él llega `null`, y ordenar por ese campo responde `400`.
+- **Sucursales:** admin de empresa y superusuario ven toda la empresa; el resto, solo sus sucursales permitidas. Con `sucursal`, venta, existencia, en proceso y capacidad usan el mismo alcance (una sucursal ajena a la empresa o fuera de alcance responde `400`).
+- **Importes:** `importe_por_moneda` (`{"MXN": …, "USD": …}`, por fila y en `resumen`) nunca suma monedas distintas. `importe_vendido` por fila es el total solo si todo es de una moneda, si no `null`; ya no viene en `resumen`. Todo requiere permiso de importes de pedido (contabilidad de ventas o de compras); sin él llega `null`, y ordenar por `importe_vendido` responde `400`.
+- **Orden:** total y estable (desempate por nombre, SKU y ids), también para los nulos, así la paginación no repite ni salta filas.
+- **Validación:** con `agrupar=producto`, `fabricacion=ALCANZA|NO_ALCANZA` y `ordering=fabricable_con_existencia` responden `400`. `necesidades-materia-prima` no acepta `ordering`, `page` ni `page_size`.
 - **Velocidad:** 7 consultas fijas, sin importar cuántos artículos haya (3 con `variante`).
 
 **Origen de los datos**
@@ -8055,7 +8058,7 @@ Sirve a la junta semanal de planeación: qué producto terminado se vende más, 
 | `semanas_objetivo` | 8 | Semanas de inventario que se quieren cubrir (1–52) |
 | `dias_sin_venta` | 90 | A partir de cuántos días sin venta un artículo es `SIN_VENTA` (1–730) |
 | `agrupar` | `variante` | `variante` (SKU) o `producto` (modelo, suma sus variantes) |
-| `producto`, `categoria`, `sucursal` | — | Filtros por id (`sucursal` filtra la venta) |
+| `producto`, `categoria`, `sucursal` | — | Filtros por id (`sucursal` acota venta, existencia, en proceso y capacidad) |
 | `buscar` | — | Texto en SKU, nombre de producto o variante |
 | `clase` | — | `A`, `B` o `C` |
 | `estado` | — | `RESURTIR`, `SOBREINVENTARIO`, `LENTO`, `SIN_VENTA`, `OK` |
