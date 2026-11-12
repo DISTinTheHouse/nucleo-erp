@@ -1843,9 +1843,12 @@ class _OrdenPadreWriteOnceMixin:
                         {self.orden_padre_field: 'La orden no pertenece a la empresa del usuario.'}
                     )
                 # Mismo alcance que la lectura (``_OrdenPadreTenantScopedMixin``):
-                # un no-admin sólo escribe en OBs de sus sucursales permitidas.
+                # superusuario y admin de empresa, todas las sucursales de su
+                # empresa activa (la empresa ya la validó ``revisar_empresa``);
+                # el resto sólo sus sucursales permitidas.
                 if (
-                    not getattr(user, 'is_admin_empresa', False)
+                    not getattr(user, 'is_superuser', False)
+                    and not getattr(user, 'is_admin_empresa', False)
                     and orden.sucursal_id not in user.sucursales_permitidas()
                 ):
                     raise serializers.ValidationError(

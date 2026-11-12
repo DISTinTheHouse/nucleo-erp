@@ -823,6 +823,26 @@ class SuperusuarioEmpresaActivaOrdenesTests(TestCase):
                 self.assertIn(resp.status_code, (400, 404))
                 self.assertEqual(modelo.objects.count(), antes)
 
+    def test_registra_avances_en_otra_sucursal_de_su_empresa(self):
+        """Escritura alineada con la lectura: el superusuario (sin
+        ``is_admin_empresa``) registra en órdenes de cualquier sucursal de su
+        empresa activa, no sólo en las de ``sucursales_permitidas()``."""
+        empresa = self.a["empresa"]
+        self.superuser.sucursal_default = self.a["ob"].sucursal
+        self.superuser.save(update_fields=["sucursal_default"])
+        gdl = Sucursal.objects.create(empresa=empresa, codigo="GDL2", nombre="Guadalajara")
+        comun = {"empresa": empresa, "sucursal": gdl, "pedido": self.a["ob"].pedido}
+        ob = OrdenesBordado.objects.create(folio_bordado="OB-acme-gdl", **comun)
+        orden_r = OrdenesReflejante.objects.create(folio_reflejante="OR-acme-gdl", **comun)
+        for url, cuerpo in (
+            ("/api/v1/produccion/bordado-avances/", {"ob": ob.pk, "cantidad_bordada": 1, "puntadas_por_pieza": 10}),
+            ("/api/v1/produccion/bordado-incidencias/", {"ob": ob.pk, "tipo_incidencia": 1, "usuario": self.superuser.pk}),
+            ("/api/v1/produccion/reflejante-incidencias/", {"orden_r": orden_r.pk, "usuario": self.superuser.pk}),
+        ):
+            with self.subTest(url):
+                resp = self.client.post(url, cuerpo, format="json")
+                self.assertEqual(resp.status_code, 201, resp.data)
+
     def test_satelites_de_otra_empresa_no_se_leen_editan_ni_borran(self):
         for url, fk, modelo, _ in self.SATELITES_LECTURA:
             with self.subTest(url):
