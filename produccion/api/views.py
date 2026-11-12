@@ -522,6 +522,14 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             return OrdenProduccionListSerializer
         return OrdenProduccionSerializer
 
+    def get_serializer_context(self):
+        # ``pedidos[].cliente`` (EC-880) en el detalle, igual que en
+        # ``onboarding/?op_id=``; el listado no lo lleva.
+        contexto = super().get_serializer_context()
+        if getattr(self, "action", None) == "retrieve":
+            contexto["pedidos_con_cliente"] = True
+        return contexto
+
     # EC-870: editar requiere ``E-PRODUCCION-OP`` y el DELETE es baja lógica
     # (pasa a Cancelado) con ``D-PRODUCCION-OP``: el borrado físico arrastraba en
     # cascada movimientos de inventario, recepciones y consumos de la OP.
@@ -565,13 +573,20 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             # una query lazy en retrieve; el listado usa el serializer ligero y no
             # las toca, por eso solo se aplica fuera de ``list``.
             queryset = queryset.select_related(
-                "empresa", "sucursal", "pedido", "usuario_asignado"
+                "empresa", "sucursal", "pedido__cliente", "usuario_asignado"
             ).prefetch_related(
-                Prefetch("op_pedidos", queryset=OrdenProduccionPedido.objects.select_related("pedido").only(
-                    "id", "op_id", "pedido_id", "pedido__folio")),
+                # En el detalle cada pedido trae su cliente (``pedidos[].cliente``):
+                # una sola consulta para todos los pedidos de la OP.
+                Prefetch("op_pedidos", queryset=(
+                    OrdenProduccionPedido.objects.select_related("pedido__cliente")
+                    if self.action == "retrieve"
+                    else OrdenProduccionPedido.objects.select_related("pedido").only(
+                        "id", "op_id", "pedido_id", "pedido__folio")
+                )),
                 Prefetch(
                     "orden_produccion_detalle",
-                    queryset=OrdenProduccionDetalle.objects.select_related(
+                    # Sólo renglones activos (EC-880), como el listado.
+                    queryset=OrdenProduccionDetalle.objects.filter(activo=True).select_related(
                         "producto_variante",
                         "producto_variante__producto",
                         "producto_variante__color",
@@ -1150,6 +1165,13 @@ class ConsumoProduccionViewSet(viewsets.ModelViewSet):
             return ConsumoProduccion.objects.none()
         return self.queryset.filter(op__empresa=empresa)
 
+    def create(self, request, *args, **kwargs):
+        # EC-880: mismo gate que las demás escrituras de consumo de la OP
+        # (``recalcular-consumos``); antes cualquier usuario de la empresa podía
+        # crear encabezados de consumo (vacíos) para cualquier OP.
+        _require_produccion(request.user)
+        return super().create(request, *args, **kwargs)
+
     # ``confirmar``/``anular`` siguen siendo stubs, pero resuelven el registro
     # por ``get_queryset``: un consumo ajeno (o inexistente) responde 404.
     @action(detail=True, methods=['post'])
@@ -1269,6 +1291,10 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                     puntadas_por_pieza__gt=0, cantidad_bordada__gt=0,
                 ),
             )
+        if self.action == "retrieve":
+            # ``pedido_vinculado.cliente`` (EC-880): respaldo al cliente vivo
+            # cuando la foto del pedido está vacía, en el mismo JOIN.
+            qs = qs.select_related("pedido__cliente")
         return ordenes_bordado_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
@@ -1496,9 +1522,10 @@ class _OrdenPadreTenantScopedMixin:
 
     Los modelos satélite (Avances/Incidencias de Bordado y Reflejante) no
     tienen ``empresa``/``sucursal`` propios: el tenant sólo se alcanza
-    atravesando ``orden_padre_field`` (``ob``/``orden_r``). Mismo criterio que
-    ``OrdenBordadoViewSet.get_queryset()``, pero sobre la orden padre. Una sola
-    definición para los cuatro ViewSets; cada uno declara su ``orden_padre_field``.
+    atravesando ``orden_padre_field`` (``ob``/``orden_r``/``ocm``). Mismo criterio
+    que ``OrdenBordadoViewSet.get_queryset()``, pero sobre la orden padre: siempre
+    la empresa activa (``user.empresa``), superusuario incluido (EC-880). Una sola
+    definición para los cinco ViewSets; cada uno declara su ``orden_padre_field``.
     """
 
     #: Nombre de la FK a la orden padre en el modelo satélite.
@@ -1508,13 +1535,11 @@ class _OrdenPadreTenantScopedMixin:
         user = self.request.user
         qs = self.queryset.model.objects.filter(activo=True)
 
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
         qs = qs.filter(**{f"{self.orden_padre_field}__empresa": empresa})
-        if getattr(user, "is_admin_empresa", False):
+        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(
             **{f"{self.orden_padre_field}__sucursal_id__in": user.sucursales_permitidas()}
@@ -1687,6 +1712,10 @@ class OrdenReflejanteViewSet(
         )
         if self.action == "list":
             qs = qs.annotate(av_cantidad=_suma_avances(ReflejanteAvances, "orden_r", "cantidad_aplicada"))
+        if self.action == "retrieve":
+            # ``pedido_vinculado.cliente`` (EC-880): respaldo al cliente vivo
+            # cuando la foto del pedido está vacía, en el mismo JOIN.
+            qs = qs.select_related("pedido__cliente")
         return ordenes_reflejante_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
@@ -2072,6 +2101,10 @@ class OrdenesCorteMangaViewSet(
         )
         if self.action == "list":
             qs = qs.annotate(av_cantidad=_suma_avances(CorteMangaAvances, "ocm", "cantidad"))
+        if self.action == "retrieve":
+            # ``pedido_vinculado.cliente`` (EC-880): respaldo al cliente vivo
+            # cuando la foto del pedido está vacía, en el mismo JOIN.
+            qs = qs.select_related("pedido__cliente")
         return ordenes_corte_manga_visibles(qs, self.request.user)
 
     def get_serializer_class(self):

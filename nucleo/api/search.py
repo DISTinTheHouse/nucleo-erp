@@ -241,9 +241,10 @@ class EntidadBuscable:
 
 
 def _solo_empresa_activa(qs, user):
-    """El buscador nunca mezcla empresas (#1034, EC-798): aunque los listados de
-    bordado/reflejante/corte o el catálogo den alcance global al superusuario,
-    aquí esos grupos se acotan a su empresa activa; sin empresa, nada."""
+    """El buscador nunca mezcla empresas (#1034, EC-798): aunque el catálogo dé
+    alcance global al superusuario, aquí esos grupos se acotan a su empresa
+    activa; sin empresa, nada. Bordado/reflejante/corte ya se acotan así en
+    ``produccion.scope`` (EC-880); el filtro queda como cinturón de seguridad."""
     empresa_id = getattr(user, "empresa_id", None)
     return qs.filter(empresa_id=empresa_id) if empresa_id else qs.none()
 

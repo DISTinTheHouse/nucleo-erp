@@ -10,6 +10,7 @@ from catalogo.models import Producto
 from inventarios.services import costeo
 from inventarios.models import Existencia, MovimientoInventario, MovimientoInventarioDetalle, TipoMovimiento
 from produccion.models import ConsumoProduccion, ConsumoProduccionDetalle, OrdenProduccion
+from produccion.services.consumo_resumen import resumen_consumos
 from produccion.services.orden_produccion_service import OrdenProduccionService
 
 QTY_PRECISION = Decimal("0.0001")
@@ -107,13 +108,25 @@ class RecalculoConsumoTelaService:
         if not ids:
             raise ValidationError({"productos": "La OP no tiene consumos que recalcular."})
 
+        # Planeado = cantidad del material en el consumo inicial de la OP (0 si
+        # no está); actual = suma de todos sus renglones. Misma regla que
+        # ``consumos_resumen`` del detalle (EC-880).
+        por_producto = {d["producto_id"]: d for d in resumen_consumos(base)}
+        telas = list(Producto.objects.filter(pk__in=ids).order_by("pk"))
+        # Sin planeado (no está en el consumo inicial) el objetivo sería 0 y se
+        # devolvería al inventario todo lo consumido: se rechaza, no se omite.
+        sin_planeado = [p for p in telas if por_producto[p.pk]["planeado"] == 0]
+        if sin_planeado:
+            nombres = ", ".join(f"{p.nombre} ({p.pk})" for p in sin_planeado)
+            raise ValidationError({
+                "productos": f"Sin consumo planeado en la OP, no se pueden recalcular: {nombres}."
+            })
+
         movimientos_salida, movimientos_entrada = [], []
         resumen = []
-        for producto in Producto.objects.filter(pk__in=ids).order_by("pk"):
-            filas = base.filter(producto=producto)
-            primer = filas.order_by("consumo_produccion_id", "consumo_detalle_id").first()
-            planeado = RecalculoConsumoTelaService._q(primer.cantidad)
-            actual = RecalculoConsumoTelaService._q(filas.aggregate(t=Sum("cantidad"))["t"] or 0)
+        for producto in telas:
+            planeado = RecalculoConsumoTelaService._q(por_producto[producto.pk]["planeado"])
+            actual = RecalculoConsumoTelaService._q(por_producto[producto.pk]["actual"])
             objetivo = RecalculoConsumoTelaService._q(planeado * factor)
             delta = objetivo - actual
             if delta == 0:

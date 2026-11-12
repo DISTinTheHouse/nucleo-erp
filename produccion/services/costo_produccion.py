@@ -27,7 +27,8 @@ def costo_unitario_produccion(op):
         .annotate(total=Sum(importe))
     )
     materiales = (filas.get(TipoMovimiento.SALIDA) or CERO) - (filas.get(TipoMovimiento.ENTRADA) or CERO)
-    piezas = op.orden_produccion_detalle.aggregate(t=Sum("cantidad"))["t"] or CERO
+    # Sólo renglones activos (EC-880): uno dado de baja no es pieza producida.
+    piezas = op.orden_produccion_detalle.filter(activo=True).aggregate(t=Sum("cantidad"))["t"] or CERO
     maquila = op.costo_maquila_unitario or CERO
     if piezas <= 0:
         return maquila or None

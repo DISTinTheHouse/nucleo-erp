@@ -40,6 +40,8 @@ from produccion.models import (
     BordadoAvances,
     BordadoIncidencias,
     ConsumoProduccion,
+    ConsumoProduccionDetalle,
+    CorteMangaAvances,
     ListaMaterialBom,
     OrdenBordadoDetalle,
     OrdenesBordado,
@@ -682,17 +684,22 @@ class SatelitesScopeTenantTests(TestCase):
                 self.assertEqual(resp.json(), [])
 
     def test_superuser_ve_ambas_empresas(self):
+        """EC-880: el nombre se conserva por historia, pero el superusuario ya NO
+        ve ambas empresas: sólo la activa (todas sus sucursales); sin empresa,
+        nada."""
+        self.superuser.empresa = self.a["empresa"]
+        self.superuser.save(update_fields=["empresa"])
         client = self._client(self.superuser)
         for cfg in SATELITES:
             with self.subTest(cfg["nombre"]):
                 ids = [row["id"] for row in client.get(cfg["url"]).json()]
-                self.assertCountEqual(
-                    ids,
-                    [
-                        self.registros[(cfg["nombre"], "a")].pk,
-                        self.registros[(cfg["nombre"], "b")].pk,
-                    ],
-                )
+                self.assertEqual(ids, [self.registros[(cfg["nombre"], "a")].pk])
+
+    def test_superuser_sin_empresa_no_ve_nada(self):
+        client = self._client(self.superuser)
+        for cfg in SATELITES:
+            with self.subTest(cfg["nombre"]):
+                self.assertEqual(client.get(cfg["url"]).json(), [])
 
     def test_usuario_sin_acceso_a_la_sucursal_no_ve_el_registro(self):
         """Tercer nivel del scope: misma empresa, sucursal fuera de alcance."""
@@ -709,6 +716,157 @@ class SatelitesScopeTenantTests(TestCase):
         for cfg in SATELITES:
             with self.subTest(cfg["nombre"]):
                 self.assertEqual(client.get(cfg["url"]).json(), [])
+
+
+class SuperusuarioEmpresaActivaOrdenesTests(TestCase):
+    """EC-880: OB/OR/OCM y sus satélites acotan al superusuario a su empresa
+    activa, igual que la OP. Antes ``produccion.scope`` y
+    ``_OrdenPadreTenantScopedMixin`` le devolvían todo y, como ``get_object``
+    pasa por ellos, podía leer, editar, borrar y registrar avances en órdenes
+    de otra empresa."""
+
+    ORDENES = (
+        ("ob", "/api/v1/produccion/orden-bordado/", {"observaciones": "tocado"}),
+        ("orden_r", "/api/v1/produccion/orden-reflejante/", {"observaciones": "tocado"}),
+        ("ocm", "/api/v1/produccion/orden-corte-manga/", {"observaciones": "tocado"}),
+    )
+    #: (url, fk, payload extra de alta, modelo) de los satélites con alta.
+    AVANCES = (
+        ("/api/v1/produccion/bordado-avances/", "ob", {"cantidad_bordada": 1, "puntadas_por_pieza": 10}, BordadoAvances),
+        ("/api/v1/produccion/reflejante-avances/", "orden_r", {"cantidad": 1}, ReflejanteAvances),
+        ("/api/v1/produccion/corte-manga-avances/", "ocm", {"cantidad": 1}, CorteMangaAvances),
+    )
+    SATELITES_LECTURA = (
+        ("/api/v1/produccion/bordado-avances/", "ob", BordadoAvances, {"cantidad_bordada": 1}),
+        ("/api/v1/produccion/bordado-incidencias/", "ob", BordadoIncidencias, {"tipo_incidencia": 1}),
+        ("/api/v1/produccion/reflejante-avances/", "orden_r", ReflejanteAvances, {"cantidad_aplicada": 1}),
+        ("/api/v1/produccion/reflejante-incidencias/", "orden_r", ReflejanteIncidencias, {}),
+        ("/api/v1/produccion/corte-manga-avances/", "ocm", CorteMangaAvances, {"cantidad": 1}),
+    )
+
+    @classmethod
+    def _tenant(cls, codigo, email):
+        empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+        sucursal = Sucursal.objects.create(empresa=empresa, codigo=codigo[:3].upper(), nombre=codigo)
+        cliente = Cliente.objects.create(empresa=empresa, nombre=f"Cliente {codigo}")
+        usuario = Usuario.objects.create(username=email, email=email, empresa=empresa, sucursal_default=sucursal)
+        pedido = Pedido.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda,
+            persona_pagos="Pagos", correo_facturas=email, telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        comun = {"empresa": empresa, "sucursal": sucursal, "pedido": pedido}
+        return {
+            "empresa": empresa, "usuario": usuario,
+            "ob": OrdenesBordado.objects.create(folio_bordado=f"OB-{codigo}", **comun),
+            "orden_r": OrdenesReflejante.objects.create(folio_reflejante=f"OR-{codigo}", **comun),
+            "ocm": OrdenesCorteManga.objects.create(folio_ocm=f"OCM-{codigo}", **comun),
+        }
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.a = cls._tenant("acme", "a@acme.test")
+        cls.b = cls._tenant("globex", "b@globex.test")
+        cls.superuser = Usuario.objects.create(
+            username="root", email="root@acme.test", is_superuser=True, is_staff=True,
+            empresa=cls.a["empresa"],
+        )
+        cls.satelites = {}
+        for url, fk, modelo, extra in cls.SATELITES_LECTURA:
+            for etiqueta, tenant in (("a", cls.a), ("b", cls.b)):
+                cls.satelites[(url, etiqueta)] = modelo.objects.create(
+                    usuario=tenant["usuario"], **{fk: tenant[fk]}, **extra
+                )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.superuser)
+
+    def test_listado_solo_trae_la_empresa_activa(self):
+        for fk, url, _ in self.ORDENES:
+            with self.subTest(url):
+                resp = self.client.get(url)
+                self.assertEqual(resp.status_code, 200)
+                filas = resp.json()
+                filas = filas.get("results", filas) if isinstance(filas, dict) else filas
+                self.assertEqual([f["id"] for f in filas], [self.a[fk].pk])
+
+    def test_retrieve_de_otra_empresa_es_404(self):
+        for fk, url, _ in self.ORDENES:
+            with self.subTest(url):
+                self.assertEqual(self.client.get(f"{url}{self.b[fk].pk}/").status_code, 404)
+                self.assertEqual(self.client.get(f"{url}{self.a[fk].pk}/").status_code, 200)
+
+    def test_patch_de_otra_empresa_es_404_y_no_modifica(self):
+        for fk, url, payload in self.ORDENES:
+            with self.subTest(url):
+                resp = self.client.patch(f"{url}{self.b[fk].pk}/", payload, format="json")
+                self.assertEqual(resp.status_code, 404)
+                orden = self.b[fk]
+                orden.refresh_from_db()
+                self.assertNotEqual(orden.observaciones, "tocado")
+
+    def test_delete_de_otra_empresa_es_404_y_no_da_de_baja(self):
+        for fk, url, _ in self.ORDENES:
+            with self.subTest(url):
+                self.assertEqual(self.client.delete(f"{url}{self.b[fk].pk}/").status_code, 404)
+                orden = self.b[fk]
+                orden.refresh_from_db()
+                self.assertTrue(orden.activo)
+
+    def test_no_registra_ni_da_de_baja_avances_de_otra_empresa(self):
+        """El alta la rechaza el serializer (400 desde antes de EC-880); lo que
+        protege el alcance nuevo es que el avance ajeno ya existente sea 404 en
+        retrieve y DELETE por ``_OrdenPadreTenantScopedMixin``: con el atajo del
+        superusuario de vuelta, esto devolvería 200/204 y lo daría de baja."""
+        for url, fk, extra, modelo in self.AVANCES:
+            with self.subTest(url):
+                antes = modelo.objects.count()
+                resp = self.client.post(url, {fk: self.b[fk].pk, **extra}, format="json")
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn(fk, resp.data)
+                self.assertEqual(modelo.objects.count(), antes)
+                ajeno = self.satelites[(url, "b")]
+                self.assertEqual(self.client.get(f"{url}{ajeno.pk}/").status_code, 404)
+                self.assertEqual(self.client.delete(f"{url}{ajeno.pk}/").status_code, 404)
+                ajeno.refresh_from_db()
+                self.assertTrue(ajeno.activo)
+
+    def test_registra_avances_en_otra_sucursal_de_su_empresa(self):
+        """Escritura alineada con la lectura: el superusuario (sin
+        ``is_admin_empresa``) registra en órdenes de cualquier sucursal de su
+        empresa activa, no sólo en las de ``sucursales_permitidas()``."""
+        empresa = self.a["empresa"]
+        self.superuser.sucursal_default = self.a["ob"].sucursal
+        self.superuser.save(update_fields=["sucursal_default"])
+        gdl = Sucursal.objects.create(empresa=empresa, codigo="GDL2", nombre="Guadalajara")
+        comun = {"empresa": empresa, "sucursal": gdl, "pedido": self.a["ob"].pedido}
+        ob = OrdenesBordado.objects.create(folio_bordado="OB-acme-gdl", **comun)
+        orden_r = OrdenesReflejante.objects.create(folio_reflejante="OR-acme-gdl", **comun)
+        for url, cuerpo in (
+            ("/api/v1/produccion/bordado-avances/", {"ob": ob.pk, "cantidad_bordada": 1, "puntadas_por_pieza": 10}),
+            ("/api/v1/produccion/bordado-incidencias/", {"ob": ob.pk, "tipo_incidencia": 1, "usuario": self.superuser.pk}),
+            ("/api/v1/produccion/reflejante-incidencias/", {"orden_r": orden_r.pk, "usuario": self.superuser.pk}),
+        ):
+            with self.subTest(url):
+                resp = self.client.post(url, cuerpo, format="json")
+                self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_satelites_de_otra_empresa_no_se_leen_editan_ni_borran(self):
+        for url, fk, modelo, _ in self.SATELITES_LECTURA:
+            with self.subTest(url):
+                ajeno = self.satelites[(url, "b")]
+                ids = [f["id"] for f in self.client.get(url).json()]
+                self.assertEqual(ids, [self.satelites[(url, "a")].pk])
+                self.assertEqual(self.client.get(f"{url}{ajeno.pk}/").status_code, 404)
+                self.assertEqual(
+                    self.client.patch(f"{url}{ajeno.pk}/", {"comentario": "x"}, format="json").status_code,
+                    404 if "incidencias" in url or "bordado" in url else 405,
+                )
+                self.assertEqual(self.client.delete(f"{url}{ajeno.pk}/").status_code, 404)
+                ajeno.refresh_from_db()
+                self.assertTrue(ajeno.activo)
 
 
 class SatelitesSuperficieEscribibleTests(TestCase):
@@ -6514,19 +6672,58 @@ class ConsumoProduccionTenantTests(_RegistrosDeOPTenantBase, TestCase):
 
     URL = "/api/v1/produccion/consumo/"
 
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # EC-880: el alta pasa por ``_require_produccion``; un admin de la
+        # empresa lo cumple sin depender del catálogo de roles.
+        cls.admin = Usuario.objects.create(
+            username="ti-admin-consumo", email="ti-admin-consumo@acme-ti.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+
     def setUp(self):
         self.consumo = ConsumoProduccion.objects.create(op=self.op)
         self.consumo_ajeno = ConsumoProduccion.objects.create(op=self.op_ajena)
 
-    def test_create_con_op_propia_conserva_el_shape(self):
+    def test_create_sin_permiso_de_produccion_se_rechaza(self):
+        """EC-880: un usuario de la empresa sin el departamento Producción (ni
+        admin ni superusuario) ya no crea encabezados de consumo."""
         resp = self._client().post(self.URL, {"op": self.op.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("permiso", resp.data)
+        self.assertEqual(ConsumoProduccion.objects.count(), 2)
+
+    def test_create_con_departamento_produccion_se_permite(self):
+        """EC-880: el uso real del gate es un operador sin admin ni superusuario
+        con un rol del departamento Producción en su empresa."""
+        from seguridad.models import Rol, UsuarioRol
+        from seguridad.role_identity import CLAVE_DEPARTAMENTO_PRODUCCION
+        operador = Usuario.objects.create(
+            username="ti-prod-consumo", email="ti-prod-consumo@acme-ti.test", empresa=self.empresa,
+            sucursal_default=self.sucursal,
+        )
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="PRODUCCION-TI", nombre="Producción",
+            clave_departamento=CLAVE_DEPARTAMENTO_PRODUCCION,
+        )
+        UsuarioRol.objects.create(usuario=operador, rol=rol, empresa=self.empresa)
+
+        resp = self._client(operador).post(self.URL, {"op": self.op.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(ConsumoProduccion.objects.count(), 3)
+
+    def test_create_con_op_propia_conserva_el_shape(self):
+        resp = self._client(self.admin).post(self.URL, {"op": self.op.pk}, format="json")
 
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(set(resp.data), {"consumo_produccion_id", "op", "detalles"})
         self.assertEqual((resp.data["op"], resp.data["detalles"]), (self.op.pk, []))
 
     def test_create_rechaza_op_de_otra_empresa(self):
-        resp = self._client().post(self.URL, {"op": self.op_ajena.pk}, format="json")
+        resp = self._client(self.admin).post(self.URL, {"op": self.op_ajena.pk}, format="json")
 
         self.assertEqual(resp.status_code, 400)
         self.assertIn("op", resp.data)
@@ -6534,7 +6731,15 @@ class ConsumoProduccionTenantTests(_RegistrosDeOPTenantBase, TestCase):
         self._sin_efectos_secundarios()
 
     def test_op_ajena_e_inexistente_responden_igual(self):
-        self._mismo_mensaje_que_inexistente("op", self.op_ajena.pk, lambda pk: {"op": pk})
+        inexistente_pk = self.op_ajena.pk + 999
+        client = self._client(self.admin)
+        ajeno = client.post(self.URL, {"op": self.op_ajena.pk}, format="json")
+        inexistente = client.post(self.URL, {"op": inexistente_pk}, format="json")
+        self.assertEqual((ajeno.status_code, inexistente.status_code), (400, 400))
+        self.assertEqual(
+            str(ajeno.data["op"][0]).replace(str(self.op_ajena.pk), "X"),
+            str(inexistente.data["op"][0]).replace(str(inexistente_pk), "X"),
+        )
 
     def test_list_excluye_registros_de_otra_empresa(self):
         resp = self._client().get(self.URL)
@@ -7165,6 +7370,36 @@ class RecalculoConsumoTelaTests(TestCase):
         self.assertEqual(self._total(self.tela), Decimal("100"))
         self.assertEqual(self._total(self.hilo), Decimal("10"))
 
+    def test_planeado_es_el_consumo_inicial_aun_con_encabezado_vacio_y_recalculos(self):
+        """EC-880: la regla compartida (``consumo_resumen``) da lo mismo que la
+        anterior para los materiales del consumo inicial: escala sobre lo
+        planeado (90), no sobre lo acumulado, y un encabezado vacío no cuenta."""
+        ConsumoProduccion.objects.create(op=self.op)  # alta vacía vía POST /consumo/
+        self.assertEqual(self._post(100).status_code, 200)
+        self.assertEqual(self._total(self.tela), Decimal("100"))
+        self.assertEqual(self._post(110).status_code, 200)
+        self.assertEqual(self._total(self.tela), Decimal("110"))
+        self.assertEqual(self._post(100).status_code, 200)
+        self.assertEqual(self._total(self.tela), Decimal("100"))
+        self.assertEqual(self._total(self.hilo), Decimal("9"))
+
+    def test_material_sin_planeado_se_rechaza_sin_mover_inventario(self):
+        """EC-880: un material que sólo está en un ajuste (planeado 0) daría
+        objetivo 0 y devolvería todo lo consumido; se rechaza con 400 y su nombre."""
+        from produccion.models import ConsumoProduccionDetalle
+        boton = Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre="Boton")
+        ajuste = ConsumoProduccion.objects.create(op=self.op)
+        ConsumoProduccionDetalle.objects.create(consumo_produccion=ajuste, producto=boton, cantidad=Decimal("3"))
+        movimientos = MovimientoInventario.objects.count()
+
+        resp = self._post(100, productos=[self.tela, boton])
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Boton", str(resp.data["productos"]))
+        self.assertEqual(MovimientoInventario.objects.count(), movimientos)
+        self.assertEqual(self._total(boton), Decimal("3"))
+        self.assertEqual(self._total(self.tela), Decimal("90"))
+
     def test_producto_fuera_del_consumo_se_rechaza(self):
         otro = Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre="Boton")
         self.assertEqual(self._post(100, productos=[otro]).status_code, 400)
@@ -7676,3 +7911,408 @@ class ContratoProduccionListadosYOnboardingMuestraTests(TestCase):
         for campo in ("fecha_compromiso", "prendas_total", "piezas_total", "servicios", "ordenes_produccion"):
             self.assertIn(campo, PedidoEspecialListSerializer.Meta.fields)
         self.assertIn("tiene_bom", VarianteProduccionListSerializer.Meta.fields)
+
+
+# --- EC-880: datos para el PDF de OP, OB, OR y OCM ----------------------------
+
+
+class _DetallesOrdenesEC880Base(TestCase):
+    """Una empresa con dos pedidos del mismo cliente: uno con la foto del cliente
+    llena (``cliente_*`` del pedido) y otro sin foto (respaldo al ``Cliente``
+    vivo). OB, OR y OCM sobre cada pedido y una OP que cubre ambos."""
+
+    URL_OP = "/api/v1/produccion/orden-produccion/onboarding/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="ec880", razon_social="EC880 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="E88", nombre="Matriz")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.usuario = Usuario.objects.create(
+            username="ec880@acme.test", email="ec880@acme.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(
+            empresa=cls.empresa, nombre="Cliente Vivo", razon_social="CLIENTE VIVO SA",
+            rfc="CVI010101AA1",
+        )
+        cls.pedido_foto = cls._pedido(
+            cliente_nombre="Foto Nombre", cliente_razon_social="FOTO SA", cliente_rfc="FOT010101AA1",
+        )
+        cls.pedido_vivo = cls._pedido()
+        comun = {"empresa": cls.empresa, "sucursal": cls.sucursal}
+        cls.ordenes = {}
+        for etiqueta, pedido in (("foto", cls.pedido_foto), ("vivo", cls.pedido_vivo)):
+            cls.ordenes[("ob", etiqueta)] = OrdenesBordado.objects.create(
+                folio_bordado=f"OB-880-{etiqueta}", pedido=pedido, **comun)
+            cls.ordenes[("or", etiqueta)] = OrdenesReflejante.objects.create(
+                folio_reflejante=f"OR-880-{etiqueta}", pedido=pedido, **comun)
+            cls.ordenes[("ocm", etiqueta)] = OrdenesCorteManga.objects.create(
+                folio_ocm=f"OCM-880-{etiqueta}", pedido=pedido, **comun)
+        cls.op = OrdenProduccion.objects.create(folio_op="OP-880-1", pedido=cls.pedido_foto, **comun)
+        from produccion.api.serializers import ligar_pedidos_op
+        ligar_pedidos_op(cls.op, [cls.pedido_foto, cls.pedido_vivo])
+
+    @classmethod
+    def _pedido(cls, **extra):
+        return Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente, moneda=cls.moneda,
+            persona_pagos="Pagos", correo_facturas="f@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", **extra,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(self.usuario)
+
+    def _detalle_op(self, op=None):
+        resp = self.client.get(self.URL_OP, {"op_id": (op or self.op).pk})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return resp.json()
+
+
+class ClienteEnDetallesDeOrdenesTests(_DetallesOrdenesEC880Base):
+    """``pedido_vinculado.cliente`` en OB/OR/OCM (y OP) y ``pedidos[].cliente``
+    en el detalle de la OP: la foto del pedido manda; dato vacío -> cliente vivo."""
+
+    URLS = {
+        "ob": "/api/v1/produccion/orden-bordado/",
+        "or": "/api/v1/produccion/orden-reflejante/",
+        "ocm": "/api/v1/produccion/orden-corte-manga/",
+    }
+
+    def _esperado(self, etiqueta):
+        if etiqueta == "foto":
+            return {"id": self.cliente.pk, "nombre": "Foto Nombre", "razon_social": "FOTO SA",
+                    "rfc": "FOT010101AA1"}
+        return {"id": self.cliente.pk, "nombre": "Cliente Vivo", "razon_social": "CLIENTE VIVO SA",
+                "rfc": "CVI010101AA1"}
+
+    def test_ob_or_ocm_traen_el_cliente_en_pedido_vinculado(self):
+        for tipo, url in self.URLS.items():
+            for etiqueta in ("foto", "vivo"):
+                with self.subTest(tipo=tipo, etiqueta=etiqueta):
+                    orden = self.ordenes[(tipo, etiqueta)]
+                    resp = self.client.get(f"{url}{orden.pk}/")
+                    self.assertEqual(resp.status_code, 200)
+                    vinculado = resp.json()["pedido_vinculado"]
+                    self.assertEqual(vinculado["id"], orden.pedido_id)
+                    self.assertIn("folio", vinculado)
+                    self.assertEqual(vinculado["cliente"], self._esperado(etiqueta))
+
+    def test_foto_parcial_no_se_mezcla_con_el_cliente_vivo(self):
+        """La foto se usa en bloque: un dato vacío queda ``None``, no se toma del
+        cliente vivo (podría ser otro cliente)."""
+        Pedido.objects.filter(pk=self.pedido_foto.pk).update(cliente_rfc="")
+        orden = self.ordenes[("ob", "foto")]
+        cliente = self.client.get(f"{self.URLS['ob']}{orden.pk}/").json()["pedido_vinculado"]["cliente"]
+        self.assertEqual(
+            cliente,
+            {"id": self.cliente.pk, "nombre": "Foto Nombre", "razon_social": "FOTO SA", "rfc": None},
+        )
+
+    def test_detalle_op_trae_cliente_por_pedido_principal_primero(self):
+        data = self._detalle_op()
+        self.assertEqual(
+            data["pedidos"],
+            [
+                {"id": self.pedido_foto.pk, "folio": self.pedido_foto.folio, "cliente": self._esperado("foto")},
+                {"id": self.pedido_vivo.pk, "folio": self.pedido_vivo.folio, "cliente": self._esperado("vivo")},
+            ],
+        )
+        self.assertEqual(data["pedido_vinculado"]["cliente"], self._esperado("foto"))
+
+    def test_retrieve_op_trae_cliente_por_pedido(self):
+        """``/orden-produccion/{id}/`` lleva el mismo ``pedidos[]`` que el detalle
+        ``onboarding/?op_id=``."""
+        resp = self.client.get(f"/api/v1/produccion/orden-produccion/{self.op.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["pedidos"], self._detalle_op()["pedidos"])
+        self.assertEqual(
+            [p["cliente"] for p in resp.json()["pedidos"]], [self._esperado("foto"), self._esperado("vivo")])
+
+    def test_op_sin_pedido_no_trae_pedido_vinculado(self):
+        op = OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op="OP-880-SP")
+        data = self._detalle_op(op)
+        self.assertIsNone(data["pedido_vinculado"])
+        self.assertEqual(data["pedidos"], [])
+
+    def test_listado_de_op_no_cambia_su_forma_de_pedidos(self):
+        filas = self.client.get("/api/v1/produccion/orden-produccion/").json()
+        fila = next(f for f in filas if f["op_id"] == self.op.pk)
+        self.assertEqual(
+            fila["pedidos"],
+            [{"id": self.pedido_foto.pk, "folio": self.pedido_foto.folio},
+             {"id": self.pedido_vivo.pk, "folio": self.pedido_vivo.folio}],
+        )
+
+
+class FechasEnDetallesOcmYOpTests(_DetallesOrdenesEC880Base):
+    """``fecha_pedido``/``fecha_vence`` en el detalle de la OCM y de la OP, con
+    los mismos valores que sus listados."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        confirmacion = timezone.make_aware(timezone.datetime(2026, 10, 1, 12, 0))
+        Pedido.objects.filter(pk=cls.pedido_foto.pk).update(clasificacion="B", fecha_confirmacion=confirmacion)
+
+    def _fechas(self, data):
+        return data["fecha_pedido"], data["fecha_vence"]
+
+    def test_ocm_detalle_igual_al_listado(self):
+        orden = self.ordenes[("ocm", "foto")]
+        detalle = self.client.get(f"/api/v1/produccion/orden-corte-manga/{orden.pk}/").json()
+        fila = next(f for f in self.client.get("/api/v1/produccion/orden-corte-manga/").json() if f["id"] == orden.pk)
+        self.assertEqual(self._fechas(detalle), self._fechas(fila))
+        # Clasificación B: 8 días máximos desde la confirmación.
+        self.assertEqual(detalle["fecha_vence"], "2026-10-09")
+        self.assertEqual(detalle["fecha_pedido"], str(timezone.localdate(self.pedido_foto.created_at)))
+
+    def test_ocm_sin_clasificacion_vence_null(self):
+        orden = self.ordenes[("ocm", "vivo")]
+        detalle = self.client.get(f"/api/v1/produccion/orden-corte-manga/{orden.pk}/").json()
+        self.assertIsNone(detalle["fecha_vence"])
+        self.assertIsNotNone(detalle["fecha_pedido"])
+
+    def test_op_detalle_igual_al_listado(self):
+        detalle = self._detalle_op()
+        fila = next(f for f in self.client.get("/api/v1/produccion/orden-produccion/").json() if f["op_id"] == self.op.pk)
+        self.assertEqual(self._fechas(detalle), self._fechas(fila))
+        self.assertEqual(detalle["fecha_vence"], "2026-10-09")
+
+    def test_op_sin_pedido_fechas_null(self):
+        op = OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op="OP-880-SF")
+        self.assertEqual(self._fechas(self._detalle_op(op)), (None, None))
+
+
+class ConsumosResumenDetalleOpTests(_DetallesOrdenesEC880Base):
+    """``consumos_resumen`` del detalle de la OP: planeado = cantidad del
+    material en el consumo inicial (primer encabezado con renglones), 0 si no
+    está; actual = suma; ajustes = actual - planeado. ``consumos`` no cambia."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.mtr = UnidadMedida.objects.create(clave="mtr", nombre="Metro")
+        cls.tela = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Tela",
+                                           unidad_medida=cls.mtr)
+        cls.hilo = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Hilo")
+        cls.boton = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Boton")
+
+    def _consumo(self, *renglones):
+        consumo = ConsumoProduccion.objects.create(op=self.op)
+        for producto, cantidad in renglones:
+            ConsumoProduccionDetalle.objects.create(
+                consumo_produccion=consumo, producto=producto, cantidad=Decimal(cantidad))
+        return consumo
+
+    def test_sin_consumos_lista_vacia(self):
+        data = self._detalle_op()
+        self.assertEqual(data["consumos_resumen"], [])
+        self.assertEqual(data["consumos"], [])
+
+    def test_encabezado_vacio_previo_no_es_el_inicial(self):
+        self._consumo()  # POST /consumo/ sin renglones
+        self._consumo((self.tela, "120"), (self.hilo, "9"))
+        resumen = {r["producto"]: r for r in self._detalle_op()["consumos_resumen"]}
+        self.assertEqual(resumen[self.tela.pk]["planeado"], "120.0000")
+        self.assertEqual(resumen[self.hilo.pk]["planeado"], "9.0000")
+
+    def test_ajustes_con_signo_y_material_solo_en_ajuste(self):
+        self._consumo((self.tela, "120"), (self.hilo, "9"))
+        self._consumo((self.tela, "10"))
+        self._consumo((self.tela, "-4"), (self.boton, "3"))
+        self._consumo()  # vacío al final: tampoco cuenta
+        data = self._detalle_op()
+        self.assertEqual(data["consumos_resumen"], [
+            {"producto": self.tela.pk, "producto_nombre": "Tela", "unidad": "MTR",
+             "planeado": "120.0000", "ajustes": "6.0000", "actual": "126.0000"},
+            {"producto": self.hilo.pk, "producto_nombre": "Hilo", "unidad": None,
+             "planeado": "9.0000", "ajustes": "0.0000", "actual": "9.0000"},
+            {"producto": self.boton.pk, "producto_nombre": "Boton", "unidad": None,
+             "planeado": "0.0000", "ajustes": "3.0000", "actual": "3.0000"},
+        ])
+        # ``consumos`` (historial) conserva su forma: un elemento por encabezado.
+        self.assertEqual(len(data["consumos"]), 4)
+        self.assertEqual(set(data["consumos"][0]), {"consumo_produccion_id", "detalles"})
+        self.assertEqual(
+            set(data["consumos"][0]["detalles"][0]), {"producto", "producto_nombre", "cantidad"})
+
+    def test_resumen_no_crece_en_consultas_con_los_renglones(self):
+        self._consumo((self.tela, "120"), (self.hilo, "9"))
+        with CaptureQueriesContext(connection) as uno:
+            self._detalle_op()
+        for _ in range(3):
+            self._consumo((self.tela, "1"), (self.boton, "1"))
+        with CaptureQueriesContext(connection) as varios:
+            self._detalle_op()
+        self.assertEqual(len(varios), len(uno))
+
+
+class _OpRealEC880Base(_DetallesOrdenesEC880Base):
+    """OP creada con ``save_orden_produccion`` (consumo real con desperdicio):
+    dos variantes con BOM (uno con un insumo inactivo) y existencias de sobra."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.pza = UnidadMedida.objects.create(clave="pza", nombre="Pieza")
+        cls.mtr = UnidadMedida.objects.create(clave="mtr", nombre="Metro")
+        color = Color.objects.create(nombre="Azul", codigo="AZU", codigo_hex="#0000FF")
+        cls.talla_m = Talla.objects.create(nombre="M")
+        cls.talla_g = Talla.objects.create(nombre="G")
+        playera = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera")
+        cls.var_m = ProductoVariante.objects.create(
+            producto=playera, empresa=cls.empresa, color=color, talla=cls.talla_m, sku="EC880-M", precio_base="1")
+        cls.var_g = ProductoVariante.objects.create(
+            producto=playera, empresa=cls.empresa, color=color, talla=cls.talla_g, sku="EC880-G", precio_base="1")
+        cls.tela = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Tela",
+                                           cod_proscai="TEL-1", unidad_medida=cls.mtr)
+        cls.hilo = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Hilo")
+        cls.boton = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Boton")
+        cls.boms = {}
+        for var, tela in ((cls.var_m, "1.25"), (cls.var_g, "1.37")):
+            bom = ListaMaterialBom.objects.create(empresa=cls.empresa, producto_variante=var)
+            BomDetalle.objects.create(bom=bom, componente=cls.tela, cantidad=Decimal(tela), unidad=cls.mtr,
+                                      desperdicio=Decimal("7.5"))
+            BomDetalle.objects.create(bom=bom, componente=cls.hilo, cantidad=Decimal("0.33"), unidad=cls.pza)
+            BomDetalle.objects.create(bom=bom, componente=cls.boton, cantidad=Decimal("2"), unidad=cls.pza,
+                                      desperdicio=Decimal("10"), activo=False)
+            cls.boms[var.pk] = bom
+        almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="A880", nombre="A")
+        for producto in (cls.tela, cls.hilo, cls.boton):
+            Existencia.objects.create(almacen=almacen, producto=producto, cantidad=Decimal("100000"))
+        SerieFolio.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="ORDEN_PRODUCCION",
+                                  serie="OP")
+        resultado = OrdenProduccionService.save_orden_produccion(
+            {
+                "empresa": cls.empresa, "sucursal": cls.sucursal, "pedido": cls.pedido_foto,
+                "orden_produccion_detalle": [
+                    {"producto_variante": cls.var_m, "bom": cls.boms[cls.var_m.pk], "cantidad": Decimal("13"),
+                     "unidad": cls.pza},
+                    {"producto_variante": cls.var_g, "bom": cls.boms[cls.var_g.pk], "cantidad": Decimal("7"),
+                     "unidad": cls.pza},
+                ],
+            },
+            cls.usuario,
+        )
+        cls.op_real = resultado["op"]
+
+
+class RenglonesInactivosOpTests(_OpRealEC880Base):
+    """Un renglón de la OP dado de baja (``activo=False``) ya no cuenta en el
+    detalle (onboarding), en el retrieve ni en el costo por pieza."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.inactivo = OrdenProduccionDetalle.objects.create(
+            op=cls.op_real, bom=cls.boms[cls.var_m.pk], producto_variante=cls.var_m,
+            cantidad=Decimal("500"), unidad=cls.pza, activo=False,
+        )
+
+    def test_detalle_onboarding_no_cuenta_el_renglon_inactivo(self):
+        productos = self._detalle_op(self.op_real)["productos"]
+        self.assertEqual(len(productos), 1)
+        self.assertEqual(productos[0]["cantidades"]["total"], 20)
+        tallas = {t["talla"]: t["cantidad"] for t in productos[0]["cantidades"]["tallas"]}
+        self.assertEqual(tallas, {"M": 13, "G": 7})
+        hilo = next(h for h in productos[0]["habilitacion"] if h["descripcion"] == "Hilo")
+        self.assertEqual(hilo["total"], 6.6)  # 20 piezas × 0.33, sin las 500 inactivas
+
+    def test_retrieve_no_devuelve_el_renglon_inactivo(self):
+        resp = self.client.get(f"/api/v1/produccion/orden-produccion/{self.op_real.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        ids = {r["op_detalle_id"] for r in resp.json()["orden_produccion_detalle"]}
+        self.assertNotIn(self.inactivo.pk, ids)
+        self.assertEqual(len(ids), 2)
+
+    def test_costo_por_pieza_divide_solo_entre_piezas_activas(self):
+        from produccion.services.costo_produccion import costo_unitario_produccion
+        mov = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, tipo_movimiento="SALIDA", usuario=self.usuario,
+            op=OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op="OP-880-C"),
+        )
+        MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=mov, producto=self.tela, cantidad=Decimal("10"), costo_unitario=Decimal("20"))
+        op = mov.op
+        OrdenProduccionDetalle.objects.create(op=op, bom=self.boms[self.var_m.pk], producto_variante=self.var_m,
+                                              cantidad=Decimal("4"), unidad=self.pza)
+        OrdenProduccionDetalle.objects.create(op=op, bom=self.boms[self.var_m.pk], producto_variante=self.var_m,
+                                              cantidad=Decimal("96"), unidad=self.pza, activo=False)
+        # 200 MXN de materiales entre 4 piezas activas (antes: entre 100).
+        self.assertEqual(costo_unitario_produccion(op), Decimal("50"))
+
+
+class HabilitacionConDesperdicioTests(_OpRealEC880Base):
+    """``productos[].habilitacion_con_desperdicio`` aplica el desperdicio con la
+    fórmula del consumo real: por material, su suma es el planeado del consumo
+    inicial. ``habilitacion`` conserva su valor (sin desperdicio)."""
+
+    def test_suma_por_material_igual_al_consumo_real(self):
+        data = self._detalle_op(self.op_real)
+        planeado = {r["producto_nombre"]: Decimal(r["planeado"]) for r in data["consumos_resumen"]}
+        suma = {}
+        for producto in data["productos"]:
+            for fila in producto["habilitacion_con_desperdicio"]:
+                suma[fila["descripcion"]] = suma.get(fila["descripcion"], Decimal("0")) + Decimal(fila["total"])
+        self.assertEqual(suma, planeado)
+        # 13 × 1.25 × 1.075 + 7 × 1.37 × 1.075 = 17.4688 + 10.3093
+        self.assertEqual(suma["Tela"], Decimal("27.7781"))
+        self.assertNotIn("Boton", suma)  # insumo inactivo del BOM: ni consumo ni habilitación
+
+    def test_habilitacion_original_sin_cambios(self):
+        producto = self._detalle_op(self.op_real)["productos"][0]
+        tela = next(h for h in producto["habilitacion"] if h["descripcion"] == "Tela")
+        self.assertEqual(tela, {"codigo": "TEL-1", "descripcion": "Tela", "unidad": "MTR", "total": 25.84})
+        tela_d = next(h for h in producto["habilitacion_con_desperdicio"] if h["descripcion"] == "Tela")
+        self.assertEqual(tela_d, {"codigo": "TEL-1", "descripcion": "Tela", "unidad": "MTR", "total": "27.7781"})
+
+
+class ConsultasDetalleYListadoOpEC880Tests(_OpRealEC880Base):
+    """El detalle de la OP (onboarding/?op_id=) no crece en consultas con el
+    número de pedidos, renglones o consumos, y el listado de OP no cambia."""
+
+    #: Consultas del detalle: 1 de alcance (``exists``) + OP con sus FK de
+    #: encabezado + renglones + BOM + consumos + pedidos ligados.
+    CONSULTAS_DETALLE = 7
+    #: Listado: OPs + ``op_pedidos`` precargados (sin cambios en EC-880).
+    CONSULTAS_LISTADO = 2
+
+    def _contar(self, url, params=None):
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self.client.get(url, params or {})
+        self.assertEqual(resp.status_code, 200)
+        return len(ctx.captured_queries)
+
+    def _otro_pedido(self, n):
+        return self._pedido(cliente_nombre=f"Otro {n}", cliente_razon_social=f"OTRO {n} SA", cliente_rfc="")
+
+    def test_detalle_constante_con_mas_pedidos_y_consumos(self):
+        base = self._contar(self.URL_OP, {"op_id": self.op_real.pk})
+        from produccion.api.serializers import ligar_pedidos_op
+        ligar_pedidos_op(self.op_real, [self.pedido_foto] + [self._otro_pedido(i) for i in range(4)])
+        ConsumoProduccion.objects.create(op=self.op_real)
+        con_mas = self._contar(self.URL_OP, {"op_id": self.op_real.pk})
+        self.assertEqual(con_mas, base)
+        self.assertEqual(base, self.CONSULTAS_DETALLE)
+
+    def test_retrieve_constante_con_mas_pedidos(self):
+        url = f"/api/v1/produccion/orden-produccion/{self.op_real.pk}/"
+        base = self._contar(url)
+        from produccion.api.serializers import ligar_pedidos_op
+        ligar_pedidos_op(self.op_real, [self.pedido_foto] + [self._otro_pedido(i) for i in range(4)])
+        self.assertEqual(self._contar(url), base)
+        self.assertEqual(len(self.client.get(url).json()["pedidos"]), 5)
+
+    def test_listado_no_crece_con_las_ops(self):
+        base = self._contar("/api/v1/produccion/orden-produccion/")
+        for i in range(3):
+            op = OrdenProduccion.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, folio_op=f"OP-880-L{i}", pedido=self._otro_pedido(i))
+            from produccion.api.serializers import ligar_pedidos_op
+            ligar_pedidos_op(op)
+        self.assertEqual(self._contar("/api/v1/produccion/orden-produccion/"), base)
+        self.assertEqual(base, self.CONSULTAS_LISTADO)
+

@@ -471,6 +471,25 @@ def estado_ruta_critica(ruta):
     }
 
 
+class _FechasPedidoListadoMixin(serializers.Serializer):
+    """``fecha_pedido`` (alta del pedido) y ``fecha_vence`` (la ``fecha_compromiso``
+    de pedidos especiales/OP) para los listados de OB/OR/OCM y los detalles de
+    OCM y OP (EC-880). ``pedido`` ya viene en ``select_related``: sin consultas
+    extra."""
+
+    fecha_pedido = serializers.SerializerMethodField()
+    fecha_vence = serializers.SerializerMethodField()
+
+    def get_fecha_pedido(self, obj):
+        from django.utils import timezone
+        pedido = obj.pedido
+        return timezone.localdate(pedido.created_at) if pedido and pedido.created_at else None
+
+    def get_fecha_vence(self, obj):
+        from ventas.services.clasificacion_service import rango_fecha_entrega
+        return rango_fecha_entrega(obj.pedido)[1] if obj.pedido else None
+
+
 class OrdenProduccionListSerializer(serializers.ModelSerializer):
     """Serializer minimalista para el LISTADO de OP.
 
@@ -517,11 +536,24 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
     def get_ruta_critica(self, obj):
         return estado_ruta_critica(getattr(obj, "ruta_critica", None))
 
-def pedidos_de_op(op):
+def pedidos_de_op(op, con_cliente=False):
     """``[{id, folio}]`` de los pedidos de la OP, principal primero. Lee la
-    precarga ``op_pedidos__pedido`` si existe (listado sin consultas por fila)."""
+    precarga ``op_pedidos__pedido`` si existe (listado sin consultas por fila).
+
+    ``con_cliente`` (EC-880, sólo los detalles ``onboarding/?op_id=`` y
+    ``/orden-produccion/{id}/``) agrega
+    ``cliente`` a cada pedido (``cliente_de_pedido``); quien lo pide precarga
+    ``op_pedidos__pedido__cliente``. El listado no lo pide: su precarga usa
+    ``.only()`` sin los campos del cliente y leerlos sería una consulta por fila.
+    """
     filas = sorted(op.op_pedidos.all(), key=lambda r: (r.pedido_id != op.pedido_id, r.pk))
-    return [{"id": r.pedido_id, "folio": r.pedido.folio} for r in filas]
+    if not con_cliente:
+        return [{"id": r.pedido_id, "folio": r.pedido.folio} for r in filas]
+    from produccion.services.orden_bordado_field_filter_service import cliente_de_pedido
+    return [
+        {"id": r.pedido_id, "folio": r.pedido.folio, "cliente": cliente_de_pedido(r.pedido)}
+        for r in filas
+    ]
 
 
 def ligar_pedidos_op(op, pedidos=None):
@@ -540,7 +572,7 @@ def ligar_pedidos_op(op, pedidos=None):
         OrdenProduccionPedido.objects.bulk_create([OrdenProduccionPedido(op=op, pedido_id=i) for i in nuevos])
 
 
-class OrdenProduccionSerializer(serializers.ModelSerializer):
+class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSerializer):
     orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
     estatus_op_display = serializers.CharField(source="get_estatus_op_display", read_only=True)
     pedido_vinculado = serializers.SerializerMethodField()
@@ -554,6 +586,8 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
     sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True)
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True, allow_null=True)
     usuario_nombre = serializers.SerializerMethodField()
+    # ``fecha_pedido``/``fecha_vence`` (EC-880): de ``_FechasPedidoListadoMixin``,
+    # mismas fechas y semántica que el listado de OP (del pedido principal).
 
     def get_pedido_vinculado(self, obj):
         from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
@@ -571,7 +605,7 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
     pedidos = serializers.SerializerMethodField()
 
     def get_pedidos(self, obj):
-        return pedidos_de_op(obj)
+        return pedidos_de_op(obj, con_cliente=self.context.get("pedidos_con_cliente", False))
 
     def validate_pedidos_ids(self, ids):
         ids = list(dict.fromkeys(ids))
@@ -1140,24 +1174,6 @@ class OrdenBordadoDetalleListSerializer(serializers.ModelSerializer):
         # ubicaciones y sus URLs de imagen, por renglón. El listado se mantiene
         # ligero y el detalle —que sí la declara— es quien la publica.
         exclude = ('configuracion',)
-
-
-class _FechasPedidoListadoMixin(serializers.Serializer):
-    """``fecha_pedido`` (alta del pedido) y ``fecha_vence`` (la ``fecha_compromiso``
-    de pedidos especiales/OP) para los listados de OB/OR/OCM. ``pedido`` ya viene
-    en ``select_related``: sin consultas extra."""
-
-    fecha_pedido = serializers.SerializerMethodField()
-    fecha_vence = serializers.SerializerMethodField()
-
-    def get_fecha_pedido(self, obj):
-        from django.utils import timezone
-        pedido = obj.pedido
-        return timezone.localdate(pedido.created_at) if pedido and pedido.created_at else None
-
-    def get_fecha_vence(self, obj):
-        from ventas.services.clasificacion_service import rango_fecha_entrega
-        return rango_fecha_entrega(obj.pedido)[1] if obj.pedido else None
 
 
 def _num(obj, attr):
@@ -1833,9 +1849,12 @@ class _OrdenPadreWriteOnceMixin:
                         {self.orden_padre_field: 'La orden no pertenece a la empresa del usuario.'}
                     )
                 # Mismo alcance que la lectura (``_OrdenPadreTenantScopedMixin``):
-                # un no-admin sólo escribe en OBs de sus sucursales permitidas.
+                # superusuario y admin de empresa, todas las sucursales de su
+                # empresa activa (la empresa ya la validó ``revisar_empresa``);
+                # el resto sólo sus sucursales permitidas.
                 if (
-                    not getattr(user, 'is_admin_empresa', False)
+                    not getattr(user, 'is_superuser', False)
+                    and not getattr(user, 'is_admin_empresa', False)
                     and orden.sucursal_id not in user.sucursales_permitidas()
                 ):
                     raise serializers.ValidationError(
@@ -2715,14 +2734,17 @@ class OrdenCorteMangaHermanaSerializer(serializers.Serializer):
     fecha_inicio = serializers.DateTimeField(read_only=True)
 
 
-class OrdenesCorteMangaRetrieveSerializer(OrdenesCorteMangaSerializer):
+class OrdenesCorteMangaRetrieveSerializer(_FechasPedidoListadoMixin, OrdenesCorteMangaSerializer):
     """Orden de corte de manga para el detalle.
 
     Hereda del serializer base —no del de listado— para conservar el renglón
     completo (``OrdenCorteMangaDetalleSerializer`` con
     ``corte_manga_config``/``ubicaciones``/``foto``/``notas``). Añade
     ``pedido_vinculado`` sólo en el detalle, igual que
-    ``OrdenReflejanteRetrieveSerializer``/``OrdenBordadoRetrieveSerializer``.
+    ``OrdenReflejanteRetrieveSerializer``/``OrdenBordadoRetrieveSerializer``, y
+    ``fecha_pedido``/``fecha_vence`` (EC-880) con el mismo mixin que el listado;
+    no ``_ResumenAvancePiezasListadoMixin``: el detalle trae su propio
+    ``resumen_avance``.
     """
 
     detalles = OrdenCorteMangaDetalleRetrieveSerializer(many=True, read_only=True)
