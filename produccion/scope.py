@@ -9,8 +9,9 @@ separarse:
 - ``ordenes_reflejante_*``: ``OrdenReflejanteViewSet`` + buscador.
 - ``ordenes_corte_manga_*``: ``OrdenesCorteMangaViewSet`` + buscador.
 
-Hoy los tres predicados aplican el mismo criterio (son copias): cambiar la
-política de uno exige revisar los otros dos.
+Los cuatro predicados aplican el mismo criterio (EC-880): SIEMPRE la empresa
+activa del usuario (``user.empresa``), superusuario incluido; cambiar la política
+de uno exige revisar los otros tres.
 
 Ninguna función aplica ``select_related``/``prefetch_related`` ni orden: eso sigue
 siendo responsabilidad de cada consumidor.
@@ -26,9 +27,8 @@ def ordenes_produccion_base():
 
 def ordenes_produccion_visibles(qs, user):
     """Alcance de ``produccion.OrdenProduccion``: SIEMPRE la empresa activa
-    del usuario (``user.empresa``), incluido el superusuario -- a propósito
-    DISTINTO de bordado/reflejante/corte de manga, donde el superusuario ve
-    todas las empresas.
+    del usuario (``user.empresa``), incluido el superusuario. Desde EC-880
+    bordado/reflejante/corte de manga usan el mismo criterio.
 
     Se decidió así en #361: ``OrdenProduccionViewSet.get_queryset()``
     (list/detail de OP) nunca le dio alcance global al superusuario, solo
@@ -56,21 +56,20 @@ def ordenes_bordado_base():
 
 
 def ordenes_bordado_visibles(qs, user):
-    """Alcance de ``produccion.OrdenesBordado``: empresa + sucursal.
+    """Alcance de ``produccion.OrdenesBordado``: empresa activa + sucursal.
 
-    El superusuario ve todo; sin empresa no se ve nada; dentro de la empresa,
-    ``is_admin_empresa`` ve todas las sucursales y el resto sólo las de
+    SIEMPRE ``user.empresa``, superusuario incluido (EC-880: antes el
+    superusuario veía, editaba y borraba órdenes de todas las empresas). Sin
+    empresa no se ve nada; dentro de la empresa, superusuario e
+    ``is_admin_empresa`` ven todas las sucursales y el resto sólo las de
     ``user.sucursales_permitidas()`` (M2M ``sucursales`` + ``sucursal_default``).
-    Mismo criterio que ``PickingViewSet``/``PackingViewSet``/``DespachoViewSet``/
-    ``TransferenciaViewSet``.
+    Mismo criterio que ``ordenes_produccion_visibles``.
     """
-    if getattr(user, "is_superuser", False):
-        return qs
     empresa = getattr(user, "empresa", None)
     if not empresa:
         return qs.none()
     qs = qs.filter(empresa=empresa)
-    if getattr(user, "is_admin_empresa", False):
+    if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
         return qs
     return qs.filter(sucursal_id__in=user.sucursales_permitidas())
 
@@ -81,20 +80,18 @@ def ordenes_reflejante_base():
 
 
 def ordenes_reflejante_visibles(qs, user):
-    """Alcance de ``produccion.OrdenesReflejante``: empresa + sucursal.
+    """Alcance de ``produccion.OrdenesReflejante``: empresa activa + sucursal.
 
-    Réplica exacta del que tenía ``OrdenReflejanteViewSet.get_queryset()``, que es
-    el mismo criterio que la orden de bordado: el superusuario ve todo; sin
-    empresa no se ve nada; dentro de la empresa, ``is_admin_empresa`` ve todas las
-    sucursales y el resto sólo las de ``user.sucursales_permitidas()``.
+    Mismo criterio que la orden de bordado (EC-880): siempre ``user.empresa``,
+    superusuario incluido; sin empresa no se ve nada; dentro de la empresa,
+    superusuario e ``is_admin_empresa`` ven todas las sucursales y el resto sólo
+    las de ``user.sucursales_permitidas()``.
     """
-    if getattr(user, "is_superuser", False):
-        return qs
     empresa = getattr(user, "empresa", None)
     if not empresa:
         return qs.none()
     qs = qs.filter(empresa=empresa)
-    if getattr(user, "is_admin_empresa", False):
+    if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
         return qs
     return qs.filter(sucursal_id__in=user.sucursales_permitidas())
 
@@ -105,17 +102,15 @@ def ordenes_corte_manga_base():
 
 
 def ordenes_corte_manga_visibles(qs, user):
-    """Alcance de ``produccion.OrdenesCorteManga``: empresa + sucursal.
+    """Alcance de ``produccion.OrdenesCorteManga``: empresa activa + sucursal.
 
-    Réplica exacta del que tenía ``OrdenesCorteMangaViewSet.get_queryset()``, el
-    mismo criterio que bordado y reflejante.
+    Mismo criterio que bordado y reflejante (EC-880): siempre ``user.empresa``,
+    superusuario incluido.
     """
-    if getattr(user, "is_superuser", False):
-        return qs
     empresa = getattr(user, "empresa", None)
     if not empresa:
         return qs.none()
     qs = qs.filter(empresa=empresa)
-    if getattr(user, "is_admin_empresa", False):
+    if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
         return qs
     return qs.filter(sucursal_id__in=user.sucursales_permitidas())

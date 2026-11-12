@@ -1496,9 +1496,10 @@ class _OrdenPadreTenantScopedMixin:
 
     Los modelos satélite (Avances/Incidencias de Bordado y Reflejante) no
     tienen ``empresa``/``sucursal`` propios: el tenant sólo se alcanza
-    atravesando ``orden_padre_field`` (``ob``/``orden_r``). Mismo criterio que
-    ``OrdenBordadoViewSet.get_queryset()``, pero sobre la orden padre. Una sola
-    definición para los cuatro ViewSets; cada uno declara su ``orden_padre_field``.
+    atravesando ``orden_padre_field`` (``ob``/``orden_r``/``ocm``). Mismo criterio
+    que ``OrdenBordadoViewSet.get_queryset()``, pero sobre la orden padre: siempre
+    la empresa activa (``user.empresa``), superusuario incluido (EC-880). Una sola
+    definición para los cinco ViewSets; cada uno declara su ``orden_padre_field``.
     """
 
     #: Nombre de la FK a la orden padre en el modelo satélite.
@@ -1508,13 +1509,11 @@ class _OrdenPadreTenantScopedMixin:
         user = self.request.user
         qs = self.queryset.model.objects.filter(activo=True)
 
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
         qs = qs.filter(**{f"{self.orden_padre_field}__empresa": empresa})
-        if getattr(user, "is_admin_empresa", False):
+        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(
             **{f"{self.orden_padre_field}__sucursal_id__in": user.sucursales_permitidas()}

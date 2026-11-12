@@ -40,6 +40,7 @@ from produccion.models import (
     BordadoAvances,
     BordadoIncidencias,
     ConsumoProduccion,
+    CorteMangaAvances,
     ListaMaterialBom,
     OrdenBordadoDetalle,
     OrdenesBordado,
@@ -682,17 +683,22 @@ class SatelitesScopeTenantTests(TestCase):
                 self.assertEqual(resp.json(), [])
 
     def test_superuser_ve_ambas_empresas(self):
+        """EC-880: el nombre se conserva por historia, pero el superusuario ya NO
+        ve ambas empresas: sólo la activa (todas sus sucursales); sin empresa,
+        nada."""
+        self.superuser.empresa = self.a["empresa"]
+        self.superuser.save(update_fields=["empresa"])
         client = self._client(self.superuser)
         for cfg in SATELITES:
             with self.subTest(cfg["nombre"]):
                 ids = [row["id"] for row in client.get(cfg["url"]).json()]
-                self.assertCountEqual(
-                    ids,
-                    [
-                        self.registros[(cfg["nombre"], "a")].pk,
-                        self.registros[(cfg["nombre"], "b")].pk,
-                    ],
-                )
+                self.assertEqual(ids, [self.registros[(cfg["nombre"], "a")].pk])
+
+    def test_superuser_sin_empresa_no_ve_nada(self):
+        client = self._client(self.superuser)
+        for cfg in SATELITES:
+            with self.subTest(cfg["nombre"]):
+                self.assertEqual(client.get(cfg["url"]).json(), [])
 
     def test_usuario_sin_acceso_a_la_sucursal_no_ve_el_registro(self):
         """Tercer nivel del scope: misma empresa, sucursal fuera de alcance."""
@@ -709,6 +715,127 @@ class SatelitesScopeTenantTests(TestCase):
         for cfg in SATELITES:
             with self.subTest(cfg["nombre"]):
                 self.assertEqual(client.get(cfg["url"]).json(), [])
+
+
+class SuperusuarioEmpresaActivaOrdenesTests(TestCase):
+    """EC-880: OB/OR/OCM y sus satélites acotan al superusuario a su empresa
+    activa, igual que la OP. Antes ``produccion.scope`` y
+    ``_OrdenPadreTenantScopedMixin`` le devolvían todo y, como ``get_object``
+    pasa por ellos, podía leer, editar, borrar y registrar avances en órdenes
+    de otra empresa."""
+
+    ORDENES = (
+        ("ob", "/api/v1/produccion/orden-bordado/", {"observaciones": "tocado"}),
+        ("orden_r", "/api/v1/produccion/orden-reflejante/", {"observaciones": "tocado"}),
+        ("ocm", "/api/v1/produccion/orden-corte-manga/", {"observaciones": "tocado"}),
+    )
+    #: (url, fk, payload extra de alta, modelo) de los satélites con alta.
+    AVANCES = (
+        ("/api/v1/produccion/bordado-avances/", "ob", {"cantidad_bordada": 1, "puntadas_por_pieza": 10}, BordadoAvances),
+        ("/api/v1/produccion/reflejante-avances/", "orden_r", {"cantidad": 1}, ReflejanteAvances),
+        ("/api/v1/produccion/corte-manga-avances/", "ocm", {"cantidad": 1}, CorteMangaAvances),
+    )
+    SATELITES_LECTURA = (
+        ("/api/v1/produccion/bordado-avances/", "ob", BordadoAvances, {"cantidad_bordada": 1}),
+        ("/api/v1/produccion/bordado-incidencias/", "ob", BordadoIncidencias, {"tipo_incidencia": 1}),
+        ("/api/v1/produccion/reflejante-avances/", "orden_r", ReflejanteAvances, {"cantidad_aplicada": 1}),
+        ("/api/v1/produccion/reflejante-incidencias/", "orden_r", ReflejanteIncidencias, {}),
+        ("/api/v1/produccion/corte-manga-avances/", "ocm", CorteMangaAvances, {"cantidad": 1}),
+    )
+
+    @classmethod
+    def _tenant(cls, codigo, email):
+        empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+        sucursal = Sucursal.objects.create(empresa=empresa, codigo=codigo[:3].upper(), nombre=codigo)
+        cliente = Cliente.objects.create(empresa=empresa, nombre=f"Cliente {codigo}")
+        usuario = Usuario.objects.create(username=email, email=email, empresa=empresa, sucursal_default=sucursal)
+        pedido = Pedido.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda,
+            persona_pagos="Pagos", correo_facturas=email, telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        comun = {"empresa": empresa, "sucursal": sucursal, "pedido": pedido}
+        return {
+            "empresa": empresa, "usuario": usuario,
+            "ob": OrdenesBordado.objects.create(folio_bordado=f"OB-{codigo}", **comun),
+            "orden_r": OrdenesReflejante.objects.create(folio_reflejante=f"OR-{codigo}", **comun),
+            "ocm": OrdenesCorteManga.objects.create(folio_ocm=f"OCM-{codigo}", **comun),
+        }
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.a = cls._tenant("acme", "a@acme.test")
+        cls.b = cls._tenant("globex", "b@globex.test")
+        cls.superuser = Usuario.objects.create(
+            username="root", email="root@acme.test", is_superuser=True, is_staff=True,
+            empresa=cls.a["empresa"],
+        )
+        cls.satelites = {}
+        for url, fk, modelo, extra in cls.SATELITES_LECTURA:
+            for etiqueta, tenant in (("a", cls.a), ("b", cls.b)):
+                cls.satelites[(url, etiqueta)] = modelo.objects.create(
+                    usuario=tenant["usuario"], **{fk: tenant[fk]}, **extra
+                )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.superuser)
+
+    def test_listado_solo_trae_la_empresa_activa(self):
+        for fk, url, _ in self.ORDENES:
+            with self.subTest(url):
+                resp = self.client.get(url)
+                self.assertEqual(resp.status_code, 200)
+                filas = resp.json()
+                filas = filas.get("results", filas) if isinstance(filas, dict) else filas
+                self.assertEqual([f["id"] for f in filas], [self.a[fk].pk])
+
+    def test_retrieve_de_otra_empresa_es_404(self):
+        for fk, url, _ in self.ORDENES:
+            with self.subTest(url):
+                self.assertEqual(self.client.get(f"{url}{self.b[fk].pk}/").status_code, 404)
+                self.assertEqual(self.client.get(f"{url}{self.a[fk].pk}/").status_code, 200)
+
+    def test_patch_de_otra_empresa_es_404_y_no_modifica(self):
+        for fk, url, payload in self.ORDENES:
+            with self.subTest(url):
+                resp = self.client.patch(f"{url}{self.b[fk].pk}/", payload, format="json")
+                self.assertEqual(resp.status_code, 404)
+                orden = self.b[fk]
+                orden.refresh_from_db()
+                self.assertNotEqual(orden.observaciones, "tocado")
+
+    def test_delete_de_otra_empresa_es_404_y_no_da_de_baja(self):
+        for fk, url, _ in self.ORDENES:
+            with self.subTest(url):
+                self.assertEqual(self.client.delete(f"{url}{self.b[fk].pk}/").status_code, 404)
+                orden = self.b[fk]
+                orden.refresh_from_db()
+                self.assertTrue(orden.activo)
+
+    def test_no_registra_avances_en_orden_de_otra_empresa(self):
+        for url, fk, extra, modelo in self.AVANCES:
+            with self.subTest(url):
+                antes = modelo.objects.count()
+                resp = self.client.post(url, {fk: self.b[fk].pk, **extra}, format="json")
+                self.assertIn(resp.status_code, (400, 404))
+                self.assertEqual(modelo.objects.count(), antes)
+
+    def test_satelites_de_otra_empresa_no_se_leen_editan_ni_borran(self):
+        for url, fk, modelo, _ in self.SATELITES_LECTURA:
+            with self.subTest(url):
+                ajeno = self.satelites[(url, "b")]
+                ids = [f["id"] for f in self.client.get(url).json()]
+                self.assertEqual(ids, [self.satelites[(url, "a")].pk])
+                self.assertEqual(self.client.get(f"{url}{ajeno.pk}/").status_code, 404)
+                self.assertEqual(
+                    self.client.patch(f"{url}{ajeno.pk}/", {"comentario": "x"}, format="json").status_code,
+                    404 if "incidencias" in url or "bordado" in url else 405,
+                )
+                self.assertEqual(self.client.delete(f"{url}{ajeno.pk}/").status_code, 404)
+                ajeno.refresh_from_db()
+                self.assertTrue(ajeno.activo)
 
 
 class SatelitesSuperficieEscribibleTests(TestCase):
