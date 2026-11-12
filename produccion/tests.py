@@ -3795,6 +3795,88 @@ class PedidoEspecialViewSetTests(TestCase):
         self.assertNotIn(pedido_b.pk, self._ids_listado())
         self.assertEqual(self._client().get(f"{self.URL}{pedido_b.pk}/").status_code, 404)
 
+    # --- EC-873: ``activo`` expuesto y ``atrasado`` falso si está dado de baja o cancelado ---
+
+    def _pedido_listado(self, horas_desde_creacion, activo=True):
+        pedido = self._pedido_especial(
+            self.empresa, self.sucursal, self.cliente,
+            clasificacion="B", fecha_confirmacion=timezone.now(),
+        )
+        # ``created_at`` es auto_now_add: se mueve con ``update`` para simular antigüedad.
+        Pedido.objects.filter(pk=pedido.pk).update(
+            created_at=timezone.now() - timedelta(hours=horas_desde_creacion), activo=activo,
+        )
+        return pedido
+
+    def _filas_por_id(self):
+        body = self._client().get(self.URL).json()
+        filas = body.get("results", body) if isinstance(body, dict) else body
+        return {p["id"]: p for p in filas}
+
+    def test_inactivo_vencido_aparece_con_activo_false_y_no_atrasado(self):
+        pedido = self._pedido_listado(horas_desde_creacion=48, activo=False)
+        fila = self._filas_por_id()[pedido.pk]
+        self.assertIs(fila["activo"], False)
+        self.assertIs(fila["atrasado"], False)
+
+    def test_activo_vencido_sin_avance_esta_atrasado(self):
+        pedido = self._pedido_listado(horas_desde_creacion=48)
+        fila = self._filas_por_id()[pedido.pk]
+        self.assertIs(fila["activo"], True)
+        self.assertIs(fila["atrasado"], True)
+
+    def test_activo_en_tiempo_no_esta_atrasado(self):
+        pedido = self._pedido_listado(horas_desde_creacion=1)
+        fila = self._filas_por_id()[pedido.pk]
+        self.assertIs(fila["activo"], True)
+        self.assertIs(fila["atrasado"], False)
+
+    def test_exactamente_24_horas_ya_esta_atrasado(self):
+        # El umbral es inclusivo (``horas >= HORAS_ALERTA_PEDIDO_ESPECIAL``).
+        en_umbral = self._pedido_listado(horas_desde_creacion=24)
+        antes = self._pedido_listado(horas_desde_creacion=23)
+        filas = self._filas_por_id()
+        self.assertIs(filas[en_umbral.pk]["atrasado"], True)
+        self.assertIs(filas[antes.pk]["atrasado"], False)
+
+    def test_activo_vencido_con_pre_orden_no_esta_atrasado(self):
+        from produccion.models import PreOrdenProduccion
+
+        pedido = self._pedido_listado(horas_desde_creacion=48)
+        PreOrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, pedido=pedido)
+        fila = self._filas_por_id()[pedido.pk]
+        self.assertIs(fila["sin_avance"], False)
+        self.assertIs(fila["atrasado"], False)
+
+    def test_cancelado_pero_activo_no_esta_atrasado(self):
+        pedido = self._pedido_listado(horas_desde_creacion=48)
+        Pedido.objects.filter(pk=pedido.pk).update(estatus=Pedido.ESTATUS_CANCELADO)
+        fila = self._filas_por_id()[pedido.pk]
+        self.assertIs(fila["activo"], True)
+        self.assertIs(fila["sin_avance"], True)
+        self.assertIs(fila["atrasado"], False)
+
+    def test_detalle_expone_activo(self):
+        pedido = self._pedido_listado(horas_desde_creacion=48, activo=False)
+        body = self._client().get(f"{self.URL}{pedido.pk}/").json()
+        self.assertIs(body["activo"], False)
+
+    #: Consultas del listado ya autenticado: una sola, todo va anotado (EC-873).
+    CONSULTAS_LISTADO = 1
+
+    def test_listado_no_crece_en_consultas_con_las_filas(self):
+        """``activo``/``estatus`` van en el ``.only()``: leerlos no difiere un query por fila."""
+        self._pedido_listado(horas_desde_creacion=48, activo=False)
+        client = self._client()
+        with self.assertNumQueries(self.CONSULTAS_LISTADO):
+            client.get(self.URL)
+        self._pedido_listado(horas_desde_creacion=48)
+        self._pedido_listado(horas_desde_creacion=1, activo=False)
+        with CaptureQueriesContext(connection) as tres:
+            filas = self._filas_por_id()
+        self.assertEqual(len(filas), 3)
+        self.assertEqual(len(tres), self.CONSULTAS_LISTADO)
+
 
 class PedidosEspecialesPorNombreExternoTests(TestCase):
     """``/produccion/pedidos-especiales/`` se deriva de ``producto_nombre_externo``.
