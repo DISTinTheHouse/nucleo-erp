@@ -3,9 +3,12 @@
 Por artículo (variante, o producto con ``agrupar=producto``) junta en memoria:
 
 - **Venta**: piezas de pedidos de VENTA autorizados o en proceso (no muestras, ni
-  pedidos de error, ni cancelados). Fecha de la venta = confirmación del pedido, o
-  su alta si no tiene. Periodo = últimas ``semanas``; periodo anterior = las
-  ``semanas`` previas, para la tendencia.
+  pedidos de error, ni cancelados). Fecha de la venta = alta del pedido
+  (``created_at``), nunca ``fecha_confirmacion``: esa es la fecha compromiso que
+  captura mesa de control y puede ser futura (EC-875). Periodo = los últimos
+  ``semanas × 7`` días locales completos, hoy incluido (empieza a medianoche, igual
+  que las cubetas de ``serie_semanal``); periodo anterior = las ``semanas`` previas,
+  para la tendencia. Nada posterior a ahora cuenta como venta.
 - **Existencia**: suma de ``Existencia`` en los almacenes de la empresa.
 - **En proceso**: piezas ordenadas en OPs abiertas (pendiente, preparación, en
   producción, revisión o detenida).
@@ -19,7 +22,7 @@ artículos haya: todo va agrupado en la base y se cruza en Python.
 
 import math
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.db.models import Count, F, Max, Q, Sum
@@ -56,6 +59,10 @@ def _num(valor):
     return Decimal(valor or 0)
 
 
+def _medianoche_local(dia):
+    return timezone.make_aware(datetime.combine(dia, time.min))
+
+
 def _fila_vacia():
     return {"vendido": CERO, "anterior": CERO, "importe": CERO, "serie": None, "ultima": None,
             "pedidos": 0, "clientes": 0, "existencia": CERO, "en_proceso": CERO}
@@ -67,8 +74,12 @@ def calcular(empresa, p):
     por_producto = p["agrupar"] == "producto"
     hoy = timezone.localdate()
     ahora = timezone.now()
-    inicio = ahora - timedelta(weeks=semanas)
-    inicio_anterior = ahora - timedelta(weeks=2 * semanas)
+    # Medianoche local del primer día del periodo: la serie agrupa por día local
+    # (``hace = (hoy - dia) // 7`` en 0..semanas-1), así que una venta del día
+    # frontera cuenta en ``vendido_periodo`` y en ``serie_semanal`` o en ninguno.
+    desde = hoy - timedelta(days=7 * semanas - 1)
+    inicio = _medianoche_local(desde)
+    inicio_anterior = _medianoche_local(desde - timedelta(weeks=semanas))
 
     # 1) Universo: variantes activas de producto terminado activo de la empresa.
     variantes = ProductoVariante.objects.filter(
@@ -119,9 +130,10 @@ def calcular(empresa, p):
     )
     if p.get("sucursal"):
         ventas = ventas.filter(pedido_detalle__pedido__sucursal_id=p["sucursal"])
-    ventas = ventas.annotate(
-        fecha=Coalesce("pedido_detalle__pedido__fecha_confirmacion", "pedido_detalle__pedido__created_at"),
-    )
+    # Fecha de venta = alta del pedido (EC-875). El tope en ``ahora`` es defensivo:
+    # ``created_at`` es ``auto_now_add``, pero una venta futura descuadraría la
+    # serie y dejaría ``dias_sin_venta`` negativo.
+    ventas = ventas.annotate(fecha=F("pedido_detalle__pedido__created_at")).filter(fecha__lte=ahora)
     producto_de = {v["id"]: v["producto_id"] for v in universo}
     en_periodo = Q(fecha__gte=inicio)
     # 2a) Totales e indicadores por variante (toda la historia para la última venta).
@@ -287,7 +299,7 @@ def calcular(empresa, p):
     return {
         "parametros": {
             "semanas": semanas, "semanas_objetivo": objetivo, "dias_sin_venta": umbral,
-            "agrupar": p["agrupar"], "desde": timezone.localtime(inicio).date(), "hasta": hoy,
+            "agrupar": p["agrupar"], "desde": desde, "hasta": hoy,
         },
         "resumen": resumen,
         "filas": filas_out,
