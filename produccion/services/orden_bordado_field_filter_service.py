@@ -12,24 +12,23 @@ _CLIENTE_SNAPSHOT = (
 def cliente_de_pedido(pedido):
     """``{id, nombre, razon_social, rfc}`` del cliente de un pedido (EC-880).
 
-    Cada dato sale de la foto que guarda el pedido (``cliente_nombre``,
-    ``cliente_razon_social``, ``cliente_rfc``): lo que se vendió. Sólo si la
-    foto de ese dato está vacía se lee el ``Cliente`` vivo. Con la foto completa
-    no se toca ``pedido.cliente`` (0 consultas); para el respaldo, el llamador
-    debe traer ``pedido__cliente`` en ``select_related``. ``None`` sin pedido.
+    En bloque, nunca dato por dato (mezclar dos fuentes podía armar un cliente
+    que no existe): si el pedido tiene la foto del cliente (``cliente_nombre``,
+    ``cliente_razon_social``, ``cliente_rfc``; basta con que uno tenga valor),
+    los tres salen de la foto, lo que se vendió, sin tocar ``pedido.cliente``
+    (0 consultas). Sin foto, los tres salen del ``Cliente`` vivo; el llamador
+    debe traer ``pedido__cliente`` en ``select_related``. ``id`` es siempre
+    ``pedido.cliente_id``: la foto no guarda id. ``None`` sin pedido.
     """
     if pedido is None:
         return None
-    datos = {"id": pedido.cliente_id}
-    cliente = None
-    for campo, foto in _CLIENTE_SNAPSHOT:
-        valor = getattr(pedido, foto, None)
-        if not valor and pedido.cliente_id:
-            if cliente is None:
-                cliente = pedido.cliente
-            valor = getattr(cliente, campo, None)
-        datos[campo] = valor or None
-    return datos
+    foto = {campo: getattr(pedido, columna, None) for campo, columna in _CLIENTE_SNAPSHOT}
+    if any(foto.values()):
+        origen = foto
+    else:
+        cliente = pedido.cliente if pedido.cliente_id else None
+        origen = {campo: getattr(cliente, campo, None) for campo, _ in _CLIENTE_SNAPSHOT}
+    return {"id": pedido.cliente_id, **{campo: valor or None for campo, valor in origen.items()}}
 
 
 def armar_pedido_vinculado(orden):

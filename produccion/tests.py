@@ -8000,12 +8000,16 @@ class ClienteEnDetallesDeOrdenesTests(_DetallesOrdenesEC880Base):
                     self.assertIn("folio", vinculado)
                     self.assertEqual(vinculado["cliente"], self._esperado(etiqueta))
 
-    def test_foto_parcial_completa_solo_lo_que_falta(self):
+    def test_foto_parcial_no_se_mezcla_con_el_cliente_vivo(self):
+        """La foto se usa en bloque: un dato vacío queda ``None``, no se toma del
+        cliente vivo (podría ser otro cliente)."""
         Pedido.objects.filter(pk=self.pedido_foto.pk).update(cliente_rfc="")
         orden = self.ordenes[("ob", "foto")]
         cliente = self.client.get(f"{self.URLS['ob']}{orden.pk}/").json()["pedido_vinculado"]["cliente"]
-        self.assertEqual(cliente["nombre"], "Foto Nombre")
-        self.assertEqual(cliente["rfc"], "CVI010101AA1")
+        self.assertEqual(
+            cliente,
+            {"id": self.cliente.pk, "nombre": "Foto Nombre", "razon_social": "FOTO SA", "rfc": None},
+        )
 
     def test_detalle_op_trae_cliente_por_pedido_principal_primero(self):
         data = self._detalle_op()
