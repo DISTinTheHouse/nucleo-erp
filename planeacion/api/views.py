@@ -30,7 +30,7 @@ class FiltrosPlaneacionSerializer(serializers.Serializer):
 
     def validate_sucursal(self, value):
         ambito = self.context.get("sucursales_visibles")
-        if not Sucursal.objects.filter(pk=value, empresa=self.context["empresa"]).exists() or (
+        if not Sucursal.objects.filter(pk=value, empresa=self.context["empresa"], activo=True).exists() or (
             ambito is not None and value not in ambito
         ):
             raise serializers.ValidationError("Sucursal no encontrada.")
@@ -45,8 +45,6 @@ class TableroRotacionParamsSerializer(FiltrosPlaneacionSerializer):
     def validate_ordering(self, value):
         if value.lstrip("-") not in tablero.ORDENAMIENTOS:
             raise serializers.ValidationError(f"Opciones: {', '.join(sorted(tablero.ORDENAMIENTOS))} (con - para descendente).")
-        if value.lstrip("-") == "importe_vendido" and not self.context["ver_importes"]:
-            raise serializers.ValidationError("No tienes permiso para ver importes.")
         return value
 
     def validate(self, attrs):
@@ -55,9 +53,9 @@ class TableroRotacionParamsSerializer(FiltrosPlaneacionSerializer):
             if attrs.get("fabricacion") in ("ALCANZA", "NO_ALCANZA"):
                 raise serializers.ValidationError(
                     {"fabricacion": "ALCANZA y NO_ALCANZA solo aplican con agrupar=variante."})
-            if attrs["ordering"].lstrip("-") == "fabricable_con_existencia":
+            if attrs["ordering"].lstrip("-") in ("fabricable_con_existencia", "sku"):
                 raise serializers.ValidationError(
-                    {"ordering": "fabricable_con_existencia solo aplica con agrupar=variante."})
+                    {"ordering": f'{attrs["ordering"].lstrip("-")} solo aplica con agrupar=variante.'})
         return attrs
 
 
@@ -134,6 +132,10 @@ class NecesidadesParamsSerializer(FiltrosPlaneacionSerializer):
     cantidad = serializers.IntegerField(min_value=1, max_value=1_000_000, required=False)
 
     def validate(self, attrs):
+        no_aplican = {c: ["No aplica en necesidades-materia-prima."]
+                      for c in ("ordering", "page", "page_size") if c in self.initial_data}
+        if no_aplican:  # #1115: antes se ignoraban en silencio
+            raise serializers.ValidationError(no_aplican)
         if "cantidad" in attrs and "variante" not in attrs:
             raise serializers.ValidationError({"cantidad": "Solo aplica con variante."})
         return attrs

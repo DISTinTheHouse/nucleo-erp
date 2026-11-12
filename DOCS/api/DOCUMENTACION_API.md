@@ -8037,9 +8037,9 @@ Sirve a la junta semanal de planeación: qué producto terminado se vende más, 
 - **Permiso:** exige `R-PRODUCCION` (el mismo código de la regla `/manufacturing` del frontend); sin él responde `403`. Superusuario y admin de empresa pasan siempre; sólo cuentan los roles y overrides de la empresa activa y un override DENY gana al rol (EC-875).
 - **Alcance:** siempre la empresa activa del usuario, también para el superusuario. El permiso se revisa antes que la empresa: sin empresa activa no cuenta ningún rol (todos son de una empresa), así que un usuario normal sin empresa recibe `403`. Solo llegan al `400` ("Tu usuario no tiene una empresa activa.") quienes pasan el permiso sin rol: superusuario, admin de empresa o un override GRANT global de `R-PRODUCCION`.
 - **Sucursales:** admin de empresa y superusuario ven toda la empresa; el resto, solo sus sucursales permitidas. Con `sucursal`, venta, existencia, en proceso y capacidad usan el mismo alcance (una sucursal ajena a la empresa o fuera de alcance responde `400`).
-- **Importes:** `importe_por_moneda` (`{"MXN": …, "USD": …}`, por fila y en `resumen`) nunca suma monedas distintas. `importe_vendido` por fila es el total solo si todo es de una moneda, si no `null`; ya no viene en `resumen`. Todo requiere permiso de importes de pedido (contabilidad de ventas o de compras); sin él llega `null`, y ordenar por `importe_vendido` responde `400`.
+- **Importes:** `importe_por_moneda` (`{"MXN": …, "USD": …}`, por fila y en `resumen`) nunca suma monedas distintas. `importe_vendido` por fila es el total solo si todo es de una moneda, si no `null`; ya no viene en `resumen`. Todo requiere permiso de importes de pedido (contabilidad de ventas o de compras); sin él llega `null`. No se puede ordenar por `importe_vendido` (`400`): mezclaría monedas.
 - **Orden:** total y estable (desempate por nombre, SKU y ids), también para los nulos, así la paginación no repite ni salta filas.
-- **Validación:** con `agrupar=producto`, `fabricacion=ALCANZA|NO_ALCANZA` y `ordering=fabricable_con_existencia` responden `400`. `necesidades-materia-prima` no acepta `ordering`, `page` ni `page_size`.
+- **Validación:** con `agrupar=producto`, `fabricacion=ALCANZA|NO_ALCANZA` y `ordering=fabricable_con_existencia|sku` responden `400`. `?sucursal` solo acepta sucursales activas. En `necesidades-materia-prima`, `ordering`, `page` o `page_size` responden `400`.
 - **Velocidad:** consultas fijas, sin importar cuántos artículos haya. Medido en la BD real (sin contar la autenticación):
   - Cálculo: **8** en el tablero y en el consolidado de necesidades (universo, venta agrupada, importe por moneda, serie semanal, existencias, OPs abiertas, BOM e insumos); **3** con `variante` (variante, BOM e insumos).
   - Usuario normal con `R-PRODUCCION`: + 2 del permiso (overrides y roles) + 1 de las claves de departamento para los importes + 1 de la empresa activa + 1 de sus sucursales visibles = **13** (tablero y consolidado) y **8** (con `variante`).
@@ -8069,7 +8069,7 @@ Sirve a la junta semanal de planeación: qué producto terminado se vende más, 
 | `clase` | — | `A`, `B` o `C` |
 | `estado` | — | `RESURTIR`, `SOBREINVENTARIO`, `LENTO`, `SIN_VENTA`, `OK` |
 | `solo_candidatos` | `false` | Solo candidatos a descontinuar |
-| `ordering` | `-vendido_periodo` | `vendido_periodo`, `venta_semanal`, `tendencia_pct`, `existencia`, `en_proceso`, `disponible`, `cobertura_semanas`, `resurtido_sugerido`, `dias_sin_venta`, `ultima_venta`, `importe_vendido`, `nombre`, `sku`, `clase_abc`; con `-` es descendente. Los nulos van al final |
+| `ordering` | `-vendido_periodo` | `vendido_periodo`, `venta_semanal`, `tendencia_pct`, `existencia`, `en_proceso`, `disponible`, `cobertura_semanas`, `resurtido_sugerido`, `dias_sin_venta`, `ultima_venta`, `nombre`, `sku`, `clase_abc`; con `-` es descendente. Los nulos van al final |
 | `page`, `page_size` | 1, 50 | Paginación (`page_size` máx. 500) |
 
 Un valor inválido responde `400` con el campo.

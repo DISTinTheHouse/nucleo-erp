@@ -86,6 +86,8 @@ class ClienteViewSetMesaControl(viewsets.ModelViewSet):
 class ClienteViewSet(viewsets.ModelViewSet):
     # #1020: lecturas con código R-*; el detalle también desde ``/orders/[id]``.
     permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    # Lecturas sin código R-* a propósito; cualquier otra no declarada se niega (#1108).
+    acciones_sin_codigo = ("verificar_rfc", "en_facturama")
     codigos_lectura = {
         "list": CODIGOS_CLIENTES,
         "kpis": CODIGOS_CLIENTES,
