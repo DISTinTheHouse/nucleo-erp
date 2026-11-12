@@ -6641,19 +6641,38 @@ class ConsumoProduccionTenantTests(_RegistrosDeOPTenantBase, TestCase):
 
     URL = "/api/v1/produccion/consumo/"
 
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # EC-880: el alta pasa por ``_require_produccion``; un admin de la
+        # empresa lo cumple sin depender del catálogo de roles.
+        cls.admin = Usuario.objects.create(
+            username="ti-admin-consumo", email="ti-admin-consumo@acme-ti.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+
     def setUp(self):
         self.consumo = ConsumoProduccion.objects.create(op=self.op)
         self.consumo_ajeno = ConsumoProduccion.objects.create(op=self.op_ajena)
 
-    def test_create_con_op_propia_conserva_el_shape(self):
+    def test_create_sin_permiso_de_produccion_se_rechaza(self):
+        """EC-880: un usuario de la empresa sin el departamento Producción (ni
+        admin ni superusuario) ya no crea encabezados de consumo."""
         resp = self._client().post(self.URL, {"op": self.op.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("permiso", resp.data)
+        self.assertEqual(ConsumoProduccion.objects.count(), 2)
+
+    def test_create_con_op_propia_conserva_el_shape(self):
+        resp = self._client(self.admin).post(self.URL, {"op": self.op.pk}, format="json")
 
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(set(resp.data), {"consumo_produccion_id", "op", "detalles"})
         self.assertEqual((resp.data["op"], resp.data["detalles"]), (self.op.pk, []))
 
     def test_create_rechaza_op_de_otra_empresa(self):
-        resp = self._client().post(self.URL, {"op": self.op_ajena.pk}, format="json")
+        resp = self._client(self.admin).post(self.URL, {"op": self.op_ajena.pk}, format="json")
 
         self.assertEqual(resp.status_code, 400)
         self.assertIn("op", resp.data)
@@ -6661,7 +6680,15 @@ class ConsumoProduccionTenantTests(_RegistrosDeOPTenantBase, TestCase):
         self._sin_efectos_secundarios()
 
     def test_op_ajena_e_inexistente_responden_igual(self):
-        self._mismo_mensaje_que_inexistente("op", self.op_ajena.pk, lambda pk: {"op": pk})
+        inexistente_pk = self.op_ajena.pk + 999
+        client = self._client(self.admin)
+        ajeno = client.post(self.URL, {"op": self.op_ajena.pk}, format="json")
+        inexistente = client.post(self.URL, {"op": inexistente_pk}, format="json")
+        self.assertEqual((ajeno.status_code, inexistente.status_code), (400, 400))
+        self.assertEqual(
+            str(ajeno.data["op"][0]).replace(str(self.op_ajena.pk), "X"),
+            str(inexistente.data["op"][0]).replace(str(inexistente_pk), "X"),
+        )
 
     def test_list_excluye_registros_de_otra_empresa(self):
         resp = self._client().get(self.URL)

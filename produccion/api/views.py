@@ -1150,6 +1150,13 @@ class ConsumoProduccionViewSet(viewsets.ModelViewSet):
             return ConsumoProduccion.objects.none()
         return self.queryset.filter(op__empresa=empresa)
 
+    def create(self, request, *args, **kwargs):
+        # EC-880: mismo gate que las demás escrituras de consumo de la OP
+        # (``recalcular-consumos``); antes cualquier usuario de la empresa podía
+        # crear encabezados de consumo (vacíos) para cualquier OP.
+        _require_produccion(request.user)
+        return super().create(request, *args, **kwargs)
+
     # ``confirmar``/``anular`` siguen siendo stubs, pero resuelven el registro
     # por ``get_queryset``: un consumo ajeno (o inexistente) responde 404.
     @action(detail=True, methods=['post'])
