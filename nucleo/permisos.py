@@ -205,17 +205,24 @@ class RequiereCodigo(BasePermission):
     Para ``APIView``, donde ``LecturaPorCodigo`` no sirve: ahí ``view.action`` no
     existe y aquélla deja pasar todo. Misma regla de resolución (``permisos_efectivos``:
     superusuario y admin de empresa pasan, sólo cuentan roles y overrides de la
-    empresa activa, el DENY gana). Falla cerrado: una vista sin códigos es un error
-    de configuración, no un endpoint abierto (EC-875).
+    empresa activa, el DENY gana). Falla cerrado: una vista sin códigos, o con algo
+    que no sea una tupla/lista/conjunto de strings, es un error de configuración, no
+    un endpoint abierto (EC-875). Un string suelto se recorrería letra por letra:
+    nadie normal pasaría y el superusuario sí, así que el error pasaría inadvertido.
     """
 
     message = "No tienes permiso para consultar esta información."
 
     def has_permission(self, request, view):
         codigos = getattr(view, "codigos_requeridos", None)
-        if not codigos:
+        if (
+            not isinstance(codigos, (tuple, list, set, frozenset))
+            or not codigos
+            or not all(isinstance(c, str) for c in codigos)
+        ):
             raise ImproperlyConfigured(
-                f"{type(view).__name__} usa RequiereCodigo sin declarar codigos_requeridos."
+                f"{type(view).__name__} usa RequiereCodigo sin declarar codigos_requeridos "
+                "como tupla, lista o conjunto de códigos."
             )
         permisos = permisos_de_la_peticion(request)
         return any(c in permisos for c in codigos)

@@ -8,6 +8,7 @@ Correr SOLO con ``--settings=ERP.settings_test`` (Postgres local, ver ``CLAUDE.m
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
+from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connection
 from django.test import SimpleTestCase, TestCase
@@ -178,6 +179,21 @@ class RequiereCodigoTests(SimpleTestCase):
         for attrs in ({}, {"codigos_requeridos": ()}, {"codigos_requeridos": None}):
             with self.subTest(attrs=attrs), self.assertRaises(ImproperlyConfigured):
                 RequiereCodigo().has_permission(request, self._vista(**attrs))
+
+    def test_codigos_mal_declarados_son_error_de_configuracion(self):
+        """Un string se recorrería letra por letra: nadie normal pasaría y el
+        superusuario sí, así que el error no se vería al probar con él."""
+        request = APIRequestFactory().get("/x/")
+        for codigos in ("R-PRODUCCION", b"R-PRODUCCION", ("R-PRODUCCION", 1), [None], {"R-PRODUCCION": 1}):
+            with self.subTest(codigos=codigos), self.assertRaises(ImproperlyConfigured):
+                RequiereCodigo().has_permission(request, self._vista(codigos_requeridos=codigos))
+
+    def test_codigos_bien_declarados_no_son_error(self):
+        request = APIRequestFactory().get("/x/")
+        request.user = AnonymousUser()
+        for codigos in (("R-PRODUCCION",), ["R-PRODUCCION"], {"R-PRODUCCION"}, frozenset({"R-PRODUCCION"})):
+            with self.subTest(codigos=codigos):
+                self.assertFalse(RequiereCodigo().has_permission(request, self._vista(codigos_requeridos=codigos)))
 
 
 class AislamientoPlaneacionTests(PlaneacionBaseTestCase):
