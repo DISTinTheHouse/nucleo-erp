@@ -687,6 +687,11 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
         return attrs
 
     def update(self, instance, validated_data):
+        # #1125: la edición de renglones no está soportada; antes DRF respondía 500.
+        if 'orden_produccion_detalle' in validated_data:
+            raise serializers.ValidationError(
+                {'orden_produccion_detalle': 'Los renglones no se editan por este endpoint; solo se definen al crear la OP.'}
+            )
         # #1090: una OP terminada o cancelada ya no cambia de pedidos.
         E = OrdenProduccion.EstatusOrdenProduccion
         cambia_pedido = 'pedido' in validated_data and validated_data['pedido'] != instance.pedido
