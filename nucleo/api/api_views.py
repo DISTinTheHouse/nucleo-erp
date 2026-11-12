@@ -315,7 +315,9 @@ class UserEmpresasAPIView(APIView):
         user = request.user
         activas = empresas_activas()
         if not user.is_superuser:
-            activas = activas.filter(pk__in=user.empresas.values('pk'))
+            # #1049: solo el superusuario puede cambiarse (``cambiar-empresa``);
+            # ofrecer el M2M ``empresas`` a los demás daba opciones que fallan 403.
+            activas = activas.none()
         empresas = (
             (activas | Empresa.objects.filter(pk=user.empresa_id))
             .distinct().order_by('razon_social', 'pk')
@@ -355,8 +357,8 @@ class CambiarEmpresaAPIView(APIView):
     usuario.
 
     El alcance por sucursal se rehace para cumplir la regla de EC-844
-    (``usuarios/alcance.py``): ``sucursal_default`` pasa a la primera sucursal
-    activa de la empresa nueva por ``codigo`` (``None`` si no tiene) y
+    (``usuarios/alcance.py``): ``sucursal_default`` pasa a la sucursal
+    activa más antigua de la empresa nueva (#1050; ``None`` si no tiene) y
     ``sucursales``/``departamentos`` quedan vacíos; el superusuario no se acota
     por sucursal, así que no pierde lectura. No toca el M2M ``empresas``, los
     roles, los overrides ni ``is_admin_empresa``.
@@ -407,9 +409,10 @@ class CambiarEmpresaAPIView(APIView):
                     "departamentos": sorted(departamentos.values_list("departamento_id", flat=True)),
                 }
                 user.empresa = empresa
+                # #1050: la sucursal más antigua (id más bajo), no la primera por
+                # ``codigo``: en la empresa 1 eso elegía la de prueba PRUEBA-SUC2.
                 user.sucursal_default = (
-                    Sucursal.objects.filter(empresa=empresa, activo=True)
-                    .order_by("codigo", "pk").first()
+                    Sucursal.objects.filter(empresa=empresa, activo=True).order_by("pk").first()
                 )
                 user.save(update_fields=["empresa", "sucursal_default", "updated_at"])
                 # Directo sobre las tablas intermedias y solo si había filas (ya se
@@ -480,13 +483,8 @@ class UserSucursalesAPIView(APIView):
         qs = Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
         
         if not user.is_superuser and not getattr(user, 'is_admin_empresa', False):
-            allowed_ids = list(user.sucursales.values_list('id_sucursal', flat=True))
-            if not allowed_ids and getattr(user, 'sucursal_default_id', None):
-                try:
-                    if user.sucursal_default and user.sucursal_default.empresa_id == empresa_id:
-                        allowed_ids = [user.sucursal_default_id]
-                except Exception:
-                    allowed_ids = allowed_ids
+            # #1097: el mismo conjunto que acepta el backend (M2M ∪ sucursal_default).
+            allowed_ids = list(user.sucursales_permitidas())
             if allowed_ids:
                 qs = qs.filter(id_sucursal__in=allowed_ids)
             else:

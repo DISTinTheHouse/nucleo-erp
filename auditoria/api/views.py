@@ -39,7 +39,7 @@ from .serializers import BitacoraDocumentoSerializer, LineaTiempoSerializer
 
 CODIGOS_BITACORA = ("R-CORE", "R-CORE-REPORTES")
 MAX_LINEA_TIEMPO = 500
-_NIVELES_DERIVADOS = 4
+_NIVELES_DERIVADOS = 5
 
 
 class LecturaBitacora(permissions.BasePermission):
@@ -95,14 +95,24 @@ def _tipo(params, requerido=False):
     return tipo
 
 
+#: Documentos que finanzas acota por empresa, no por sucursal (``finanzas/scope.py``):
+#: la bitácora sigue la misma regla (#1073).
+TIPOS_POR_EMPRESA = ("poliza", "factura_proveedor", "pago")
+
+
+def _acotado_por_sucursal(user):
+    return not (user.is_superuser or getattr(user, "is_admin_empresa", False))
+
+
 def _alcance(user):
-    """Bitácora visible: empresa activa y, para no admins, sus sucursales."""
+    """Bitácora visible: empresa activa y, para no admins, sus sucursales (salvo
+    ``TIPOS_POR_EMPRESA``)."""
     empresa_id = getattr(user, "empresa_id", None)
     if not empresa_id:
         return BitacoraDocumento.objects.none()
     qs = BitacoraDocumento.objects.filter(empresa_id=empresa_id)
-    if not (user.is_superuser or getattr(user, "is_admin_empresa", False)):
-        qs = qs.filter(sucursal_id__in=user.sucursales_permitidas())
+    if _acotado_por_sucursal(user):
+        qs = qs.filter(Q(sucursal_id__in=user.sucursales_permitidas()) | Q(tipo_documento__in=TIPOS_POR_EMPRESA))
     return qs
 
 
@@ -185,7 +195,14 @@ class BitacoraDocumentoViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError({"documento_id": "Es obligatorio."})
         user = request.user
         modelo = apps.get_model(TIPOS[tipo])
-        if not modelo.objects.filter(pk=doc_id, empresa_id=getattr(user, "empresa_id", None)).exists():
+        raiz = modelo.objects.filter(pk=doc_id, empresa_id=getattr(user, "empresa_id", None))
+        # #1073: la raíz con la misma regla que sus eventos; fuera de alcance → 404.
+        if (
+            _acotado_por_sucursal(user) and tipo not in TIPOS_POR_EMPRESA
+            and any(f.name == "sucursal" for f in modelo._meta.get_fields())
+        ):
+            raiz = raiz.filter(sucursal_id__in=user.sucursales_permitidas())
+        if not raiz.exists():
             raise NotFound("Documento no encontrado.")
 
         base = _alcance(user)
@@ -198,12 +215,14 @@ class BitacoraDocumentoViewSet(viewsets.ReadOnlyModelViewSet):
                 q |= Q(origen_tipo=t, origen_id=i)
             nuevos = {
                 (t, int(i)) for t, i in base.filter(q).values_list("tipo_documento", "documento_id").distinct()
-            } - docs
+            }
+            # #1074: dentro de cada nivel, para seguir también lo que cuelga de ellos
+            # (pedido → picking → TR → movimientos de la TR).
+            nuevos = (nuevos | _derivados_sin_origen(frontera)) - docs
             if not nuevos:
                 break
             docs |= nuevos
             frontera = nuevos
-        docs |= _derivados_sin_origen(docs)
 
         q = Q()
         for t, i in docs:

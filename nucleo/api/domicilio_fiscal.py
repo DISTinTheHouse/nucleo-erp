@@ -8,6 +8,7 @@ activa responde 400.
 """
 import re
 
+from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
@@ -59,14 +60,22 @@ def _datos(empresa):
 
 
 class DomicilioFiscalAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    """#1080: el schema declara ``DomicilioFiscalSerializer`` en las tres operaciones.
+    PUT reemplaza todo (lo que no venga queda vacío; ``pais`` por omisión ``MEX``);
+    escribir exige superusuario o admin de empresa (403)."""
 
+    permission_classes = [IsAuthenticated]
+    serializer_class = DomicilioFiscalSerializer
+
+    @extend_schema(responses={200: DomicilioFiscalSerializer})
     def get(self, request):
         return Response(_datos(_empresa(request.user)))
 
+    @extend_schema(request=DomicilioFiscalSerializer, responses={200: DomicilioFiscalSerializer})
     def patch(self, request):
         return self._guardar(request, parcial=True)
 
+    @extend_schema(request=DomicilioFiscalSerializer, responses={200: DomicilioFiscalSerializer})
     def put(self, request):
         return self._guardar(request, parcial=False)
 

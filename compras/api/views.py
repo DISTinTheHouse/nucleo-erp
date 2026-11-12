@@ -534,7 +534,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
     def _get_default_sucursal(self, user, empresa):
         permitidas = self._sucursales_del_usuario(user, empresa)
-        return permitidas.filter(pk=user.sucursal_default_id).first() or permitidas.order_by("codigo").first()
+        return permitidas.filter(pk=user.sucursal_default_id).first() or permitidas.order_by("pk").first()  # #1050: la más antigua, no por código
 
     def _get_default_moneda(self, empresa):
         moneda = getattr(empresa, "moneda_base", None)

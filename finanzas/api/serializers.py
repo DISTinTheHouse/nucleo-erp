@@ -1158,7 +1158,9 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
         fields["cliente"].queryset = Cliente.objects.filter(empresa_id=empresa_id, activo=True)
         fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id, activo=True).select_related("moneda")
-        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id)
+        # #1095: solo sucursales activas. #1096: se fija al crear; cambiarla al editar → 400.
+        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
+        fields["sucursal"].help_text = "Solo al crear; al editar, mandar otra responde 400."
         cxcs = CuentaPorCobrar.objects.filter(CuentaPorCobrar.q_de_la_empresa(empresa_id))
         user = getattr(self.context.get("request"), "user", None)
         fields["cobro_detalles"].child.fields["cxc"].queryset = por_sucursal(cxcs, user, "factura__sucursal") if user else cxcs
@@ -1166,7 +1168,10 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
 
     def validate(self, attrs):
         if self.instance is not None:
-            attrs.pop("sucursal", None)  # #1063: la sucursal se fija al crear
+            # #1063: la sucursal se fija al crear. #1096: antes se ignoraba en silencio.
+            nueva = attrs.pop("sucursal", None)
+            if nueva is not None and nueva.pk != self.instance.sucursal_id:
+                raise ValidationError({"sucursal": "No se puede cambiar: se fija al crear."})
         req = self.context.get("request")
         if req and hasattr(req, "user"):
             user_empresa = getattr(req.user, "empresa", None)
@@ -1224,14 +1229,19 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
         else:
             request = self.context.get("request")
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
-        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id)
+        # #1095: solo sucursales activas. #1096: se fija al crear; cambiarla al editar → 400.
+        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
+        fields["sucursal"].help_text = "Solo al crear; al editar, mandar otra responde 400."
         fields["proveedor"].queryset = Proveedor.objects.filter(empresa_id=empresa_id)
         fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id).select_related("moneda")
         return fields
 
     def validate(self, attrs):
         if self.instance is not None:
-            attrs.pop("sucursal", None)  # #1063: la sucursal se fija al crear
+            # #1063: la sucursal se fija al crear. #1096: antes se ignoraba en silencio.
+            nueva = attrs.pop("sucursal", None)
+            if nueva is not None and nueva.pk != self.instance.sucursal_id:
+                raise ValidationError({"sucursal": "No se puede cambiar: se fija al crear."})
         req = self.context.get("request")
         if req and hasattr(req, "user"):
             user_empresa = getattr(req.user, "empresa", None)
