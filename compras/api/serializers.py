@@ -295,6 +295,11 @@ class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
     producto_variante_sku = serializers.CharField(
         source="producto_variante.sku", read_only=True, default=None
     )
+    # Mismo nombre que en los renglones de la OC; ``None`` sin variante o sin
+    # talla. ``producto_variante__talla`` va en el mismo ``select_related``.
+    producto_variante_talla = serializers.CharField(
+        source="producto_variante.talla.nombre", read_only=True, default=None
+    )
     ubicacion_nombre = serializers.SerializerMethodField()
 
     class Meta:
@@ -308,6 +313,7 @@ class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
             "producto_cod_proscai",
             "producto_variante",
             "producto_variante_sku",
+            "producto_variante_talla",
             "ubicacion",
             "ubicacion_nombre",
             "lote",
@@ -517,6 +523,11 @@ class RecepcionDetalleRetrieveSerializer(serializers.ModelSerializer):
     producto_variante_sku = serializers.CharField(
         source="producto_variante.sku", read_only=True, default=None
     )
+    # Mismo nombre que en los renglones de la OC; ``None`` sin variante (materia
+    # prima) o sin talla. ``producto_variante__talla`` va en el mismo prefetch.
+    producto_variante_talla = serializers.CharField(
+        source="producto_variante.talla.nombre", read_only=True, default=None
+    )
     ubicacion_nombre = serializers.SerializerMethodField()
 
     class Meta:
@@ -530,6 +541,7 @@ class RecepcionDetalleRetrieveSerializer(serializers.ModelSerializer):
             "producto_cod_proscai",
             "producto_variante",
             "producto_variante_sku",
+            "producto_variante_talla",
             "ubicacion",
             "ubicacion_nombre",
             "lote",
@@ -547,13 +559,20 @@ class RecepcionRetrieveSerializer(serializers.ModelSerializer):
     Forma dedicada, independiente de ``RecepcionListSerializer`` (que conserva la
     forma plana ``__all__`` que consume WMS/list): expone las FK resueltas
     (``estatus_label``, ``sucursal_nombre``…) y anida los renglones en
-    ``detalles``. Deliberadamente NO incluye ``orden_compra``/``op``/
-    ``orden_compra_folio``/``activo`` — no forman parte del shape objetivo del
-    detalle. Se deja separada del chain de retrieve de OrdenCompra
+    ``detalles``. No incluye los ids ``orden_compra``/``op`` ni ``activo``; sí el
+    folio del origen (EC-879), con los mismos nombres que el listado y el
+    encuadre RFID: ``orden_compra_folio`` y ``op_folio`` vienen siempre y el que
+    no corresponde a ``tipo_origen`` es ``null`` (``OrdenCompra.folio`` también
+    puede ser nulo). Ambas FK van en el ``select_related`` del viewset: sin
+    consultas extra. Se deja separada del chain de retrieve de OrdenCompra
     (``RecepcionRelacionadaSerializer``) para no acoplar ambos caminos.
     """
 
     estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
+    orden_compra_folio = serializers.CharField(
+        source="orden_compra.folio", read_only=True, default=None
+    )
+    op_folio = serializers.CharField(source="op.folio_op", read_only=True, default=None)
     sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True)
     proveedor_nombre = serializers.CharField(
         source="proveedor.nombre", read_only=True, default=None
@@ -573,6 +592,8 @@ class RecepcionRetrieveSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "tipo_origen",
+            "orden_compra_folio",
+            "op_folio",
             "folio",
             "remision",
             "factura_referencia",
