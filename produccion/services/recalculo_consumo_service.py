@@ -112,10 +112,19 @@ class RecalculoConsumoTelaService:
         # no está); actual = suma de todos sus renglones. Misma regla que
         # ``consumos_resumen`` del detalle (EC-880).
         por_producto = {d["producto_id"]: d for d in resumen_consumos(base)}
+        telas = list(Producto.objects.filter(pk__in=ids).order_by("pk"))
+        # Sin planeado (no está en el consumo inicial) el objetivo sería 0 y se
+        # devolvería al inventario todo lo consumido: se rechaza, no se omite.
+        sin_planeado = [p for p in telas if por_producto[p.pk]["planeado"] == 0]
+        if sin_planeado:
+            nombres = ", ".join(f"{p.nombre} ({p.pk})" for p in sin_planeado)
+            raise ValidationError({
+                "productos": f"Sin consumo planeado en la OP, no se pueden recalcular: {nombres}."
+            })
 
         movimientos_salida, movimientos_entrada = [], []
         resumen = []
-        for producto in Producto.objects.filter(pk__in=ids).order_by("pk"):
+        for producto in telas:
             planeado = RecalculoConsumoTelaService._q(por_producto[producto.pk]["planeado"])
             actual = RecalculoConsumoTelaService._q(por_producto[producto.pk]["actual"])
             objetivo = RecalculoConsumoTelaService._q(planeado * factor)

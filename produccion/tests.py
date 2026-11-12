@@ -7333,6 +7333,23 @@ class RecalculoConsumoTelaTests(TestCase):
         self.assertEqual(self._total(self.tela), Decimal("100"))
         self.assertEqual(self._total(self.hilo), Decimal("9"))
 
+    def test_material_sin_planeado_se_rechaza_sin_mover_inventario(self):
+        """EC-880: un material que sólo está en un ajuste (planeado 0) daría
+        objetivo 0 y devolvería todo lo consumido; se rechaza con 400 y su nombre."""
+        from produccion.models import ConsumoProduccionDetalle
+        boton = Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre="Boton")
+        ajuste = ConsumoProduccion.objects.create(op=self.op)
+        ConsumoProduccionDetalle.objects.create(consumo_produccion=ajuste, producto=boton, cantidad=Decimal("3"))
+        movimientos = MovimientoInventario.objects.count()
+
+        resp = self._post(100, productos=[self.tela, boton])
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Boton", str(resp.data["productos"]))
+        self.assertEqual(MovimientoInventario.objects.count(), movimientos)
+        self.assertEqual(self._total(boton), Decimal("3"))
+        self.assertEqual(self._total(self.tela), Decimal("90"))
+
     def test_producto_fuera_del_consumo_se_rechaza(self):
         otro = Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre="Boton")
         self.assertEqual(self._post(100, productos=[otro]).status_code, 400)
