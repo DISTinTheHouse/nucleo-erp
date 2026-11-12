@@ -2703,7 +2703,7 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             # programacion_conf) -- antes de eso, no hay compromiso de
             # entrega real sobre el que producción pueda planear.
             .filter(clasificacion__isnull=False, fecha_confirmacion__isnull=False)
-            .only("id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "created_at", "empresa", "cotizacion")
+            .only("id", "folio", "cliente_nombre", "clasificacion", "fecha_confirmacion", "activo", "estatus", "created_at", "empresa", "cotizacion")
             .annotate(**_contadores_tallas_especiales())
             .annotate(**(_resumen_pedido_especial() if self.action == "list" else {}))
             .order_by("-fecha_confirmacion", "-id")
