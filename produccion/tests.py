@@ -8189,3 +8189,42 @@ class HabilitacionConDesperdicioTests(_OpRealEC880Base):
         tela_d = next(h for h in producto["habilitacion_con_desperdicio"] if h["descripcion"] == "Tela")
         self.assertEqual(tela_d, {"codigo": "TEL-1", "descripcion": "Tela", "unidad": "MTR", "total": "27.7781"})
 
+
+class ConsultasDetalleYListadoOpEC880Tests(_OpRealEC880Base):
+    """El detalle de la OP (onboarding/?op_id=) no crece en consultas con el
+    número de pedidos, renglones o consumos, y el listado de OP no cambia."""
+
+    #: Consultas del detalle: 1 de alcance (``exists``) + OP con sus FK de
+    #: encabezado + renglones + BOM + consumos + pedidos ligados.
+    CONSULTAS_DETALLE = 7
+    #: Listado: OPs + ``op_pedidos`` precargados (sin cambios en EC-880).
+    CONSULTAS_LISTADO = 2
+
+    def _contar(self, url, params=None):
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self.client.get(url, params or {})
+        self.assertEqual(resp.status_code, 200)
+        return len(ctx.captured_queries)
+
+    def _otro_pedido(self, n):
+        return self._pedido(cliente_nombre=f"Otro {n}", cliente_razon_social=f"OTRO {n} SA", cliente_rfc="")
+
+    def test_detalle_constante_con_mas_pedidos_y_consumos(self):
+        base = self._contar(self.URL_OP, {"op_id": self.op_real.pk})
+        from produccion.api.serializers import ligar_pedidos_op
+        ligar_pedidos_op(self.op_real, [self.pedido_foto] + [self._otro_pedido(i) for i in range(4)])
+        ConsumoProduccion.objects.create(op=self.op_real)
+        con_mas = self._contar(self.URL_OP, {"op_id": self.op_real.pk})
+        self.assertEqual(con_mas, base)
+        self.assertEqual(base, self.CONSULTAS_DETALLE)
+
+    def test_listado_no_crece_con_las_ops(self):
+        base = self._contar("/api/v1/produccion/orden-produccion/")
+        for i in range(3):
+            op = OrdenProduccion.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, folio_op=f"OP-880-L{i}", pedido=self._otro_pedido(i))
+            from produccion.api.serializers import ligar_pedidos_op
+            ligar_pedidos_op(op)
+        self.assertEqual(self._contar("/api/v1/produccion/orden-produccion/"), base)
+        self.assertEqual(base, self.CONSULTAS_LISTADO)
+

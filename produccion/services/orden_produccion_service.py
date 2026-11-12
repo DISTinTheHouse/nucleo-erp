@@ -9,6 +9,7 @@ from catalogo.models import ProductoVariante
 from inventarios.services import costeo
 from inventarios.models import Existencia, MovimientoInventario, MovimientoInventarioDetalle, TipoMovimiento
 from produccion.models import (
+    BomDetalle,
     ConsumoProduccion,
     ConsumoProduccionDetalle,
     OrdenProduccion,
@@ -332,22 +333,35 @@ class OrdenProduccionService:
     
     @staticmethod
     def get_formatted_op_detalle(op_id):
-        op = OrdenProduccion.objects.filter(pk=op_id).prefetch_related(
+        # Consultas fijas, sin importar renglones, consumos ni pedidos (EC-880):
+        # OP con sus FK de encabezado (las etiquetas y ``pedido_vinculado`` del
+        # serializer) + renglones activos con sus FK + insumos del BOM +
+        # consumos + sus renglones + pedidos ligados con su cliente.
+        op = OrdenProduccion.objects.filter(pk=op_id).select_related(
+            'empresa', 'sucursal', 'pedido__cliente', 'usuario_asignado',
+        ).prefetch_related(
             # Sólo renglones activos (EC-880), como el listado y los KPIs.
             models.Prefetch(
                 'orden_produccion_detalle',
-                queryset=OrdenProduccionDetalle.objects.filter(activo=True).prefetch_related(
+                queryset=OrdenProduccionDetalle.objects.filter(activo=True).select_related(
                     'producto_variante__producto',
                     'producto_variante__talla',
                     'producto_variante__color',
                     'variante_produccion__talla',
                     'variante_produccion__color',
-                    'bom__materia_prima_detalle__componente',
-                    'bom__materia_prima_detalle__unidad',
+                    'bom',
+                ).prefetch_related(
+                    models.Prefetch(
+                        'bom__materia_prima_detalle',
+                        queryset=BomDetalle.objects.select_related('componente', 'unidad'),
+                    ),
                 ),
             ),
             # ``unidad_medida``: la ``unidad`` de ``consumos_resumen`` (EC-880).
-            'consumoproduccion_set__detalles__producto__unidad_medida',
+            models.Prefetch(
+                'consumoproduccion_set__detalles',
+                queryset=ConsumoProduccionDetalle.objects.select_related('producto__unidad_medida'),
+            ),
             # ``pedidos[].cliente`` (EC-880): una consulta para todos los pedidos.
             models.Prefetch(
                 'op_pedidos',
