@@ -295,18 +295,22 @@ class FechaVentaTests(PlaneacionBaseTestCase):
         self.assertEqual((_n(f_futura["vendido_periodo"]), f_futura["ultima_venta"]), (0, None))
 
     def test_necesidades_usa_el_mismo_calculo(self):
-        """El resurtido de ``necesidades-materia-prima`` sale de la venta por alta: una
-        confirmación futura no la saca del periodo ni la duplica."""
-        v = self._variante(self.a, "A-NEC")
-        self._venta(self.a, v, 80, _local(timezone.localdate() - timedelta(days=2)),
+        """``necesidades-materia-prima`` resurte con la venta por alta: un pedido dado de
+        alta fuera del periodo no se resurte aunque su confirmación sea futura (con
+        ``fecha_confirmacion`` como fecha de venta sí entraba)."""
+        hoy = timezone.localdate()
+        viejo = self._variante(self.a, "A-NEC-VIEJO")
+        reciente = self._variante(self.a, "A-NEC-RECIENTE")
+        self._venta(self.a, viejo, 80, _local(hoy - timedelta(days=120)),
                     fecha_confirmacion=timezone.now() + timedelta(days=40))
-        tablero = self._fila(self._get(self.a["admin"]).json(), v)
+        self._venta(self.a, reciente, 80, _local(hoy - timedelta(days=2)))
+        data = self._get(self.a["admin"]).json()
+        self.assertEqual(self._fila(data, viejo)["resurtido_sugerido"], 0)
+        resurtido = self._fila(data, reciente)["resurtido_sugerido"]
+        self.assertGreater(resurtido, 0)
         necesidades = self._get(self.a["admin"], NECESIDADES_URL).json()
-        self.assertGreater(tablero["resurtido_sugerido"], 0)
-        self.assertEqual(necesidades["resumen"]["piezas_a_resurtir"], tablero["resurtido_sugerido"])
-        self.assertEqual(
-            [x["variante_id"] for x in necesidades["variantes_sin_bom"]], [v.pk],
-        )
+        self.assertEqual([x["variante_id"] for x in necesidades["variantes_sin_bom"]], [reciente.pk])
+        self.assertEqual(necesidades["resumen"]["piezas_a_resurtir"], resurtido)
 
 
 class ConsultasFijasTests(PlaneacionBaseTestCase):
