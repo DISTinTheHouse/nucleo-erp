@@ -52,7 +52,7 @@ Dos detalles de fidelidad que es fácil perder de vista:
 
 from django.core.exceptions import ImproperlyConfigured
 from django.db.models import Q
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import SAFE_METHODS, BasePermission
 from seguridad.models import Rol, UsuarioPermiso
 
 
@@ -183,8 +183,9 @@ class LecturaPorCodigo(BasePermission):
     """Exige uno de los códigos ``R-*`` que el ViewSet declara por acción.
 
     El ViewSet declara ``codigos_lectura = {"list": (...), "retrieve": (...), ...}``.
-    Una acción que no aparece ahí no se toca (escrituras y acciones con su propia
-    regla siguen como estaban). Superusuario y admin de empresa pasan siempre
+    Falla cerrado (#1108): sin ``view.action`` (``APIView``) se niega, y una lectura
+    (GET/HEAD/OPTIONS) no declarada también, salvo que esté en
+    ``acciones_sin_codigo``. Las escrituras no declaradas siguen con su propia regla. Superusuario y admin de empresa pasan siempre
     (``permisos_efectivos``). Mismos códigos que la ruta del frontend: el backend
     deja de depender de ella como único control (#1020).
     """
@@ -192,9 +193,12 @@ class LecturaPorCodigo(BasePermission):
     message = "No tienes permiso para consultar esta información."
 
     def has_permission(self, request, view):
-        codigos = getattr(view, "codigos_lectura", {}).get(getattr(view, "action", None))
+        accion = getattr(view, "action", None)
+        if accion is None:
+            return False
+        codigos = getattr(view, "codigos_lectura", {}).get(accion)
         if not codigos:
-            return True
+            return request.method not in SAFE_METHODS or accion in getattr(view, "acciones_sin_codigo", ())
         permisos = permisos_de_la_peticion(request)
         return any(c in permisos for c in codigos)
 

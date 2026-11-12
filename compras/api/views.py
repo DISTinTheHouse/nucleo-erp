@@ -1853,7 +1853,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         if op.estatus_op != OrdenProduccion.EstatusOrdenProduccion.COMPLETADO:
             return
 
-        detalles = OrdenProduccionDetalle.objects.filter(op=op).only("op_detalle_id", "cantidad")
+        detalles = OrdenProduccionDetalle.objects.filter(op=op, activo=True).only("op_detalle_id", "cantidad")
         if not detalles.exists():
             return
 
@@ -3043,7 +3043,7 @@ def _resolver_tag_rfid(encuadre, codigo_tag):
                 orden_compra_detalle = renglones.first()
         elif encuadre.op_id:
             renglones = OrdenProduccionDetalle.objects.filter(
-                op_id=encuadre.op_id, producto_variante__producto_id=producto.pk
+                op_id=encuadre.op_id, activo=True, producto_variante__producto_id=producto.pk
             ).order_by("op_detalle_id")
             if producto_variante:
                 renglones = renglones.filter(producto_variante=producto_variante)
@@ -3077,7 +3077,7 @@ def _renglones_oc_rfid(orden_compra_ids):
 
 def _renglones_op_rfid(op_ids):
     return (
-        OrdenProduccionDetalle.objects.filter(op_id__in=op_ids)
+        OrdenProduccionDetalle.objects.filter(op_id__in=op_ids, activo=True)
         .select_related("producto_variante__producto", "producto_variante__talla").order_by("op_detalle_id")
     )
 

@@ -207,6 +207,8 @@ class OportunidadSerializer(ClienteVisibleMixin, serializers.ModelSerializer):
 class OportunidadViewSet(viewsets.ModelViewSet):
     # #1020: lecturas con código R-CRM / R-CRM-OPORTUNIDADES.
     permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    # Lecturas sin código R-* a propósito; cualquier otra no declarada se niega (#1108).
+    acciones_sin_codigo = ("cotizaciones", "onboarding")
     codigos_lectura = {
         "list": CODIGOS_OPORTUNIDADES,
         "retrieve": CODIGOS_OPORTUNIDADES,

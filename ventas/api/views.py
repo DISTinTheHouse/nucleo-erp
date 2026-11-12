@@ -212,6 +212,20 @@ ACCIONES_BLOQUEO_MESA_CONTROL = {
 }
 
 
+_FOTO_CLIENTE = (
+    "cliente_razon_social", "cliente_nombre", "cliente_rfc", "cliente_regimen_fiscal_id",
+    "cliente_direccion_fiscal", "cliente_colonia", "cliente_codigo_postal", "cliente_ciudad",
+    "cliente_estado", "cliente_giro_empresarial",
+)
+
+
+def _vaciar_foto_cliente(pedido):
+    """Vacía en memoria la foto del cliente para que ``_snapshot_facturacion*`` la
+    vuelva a tomar completa del cliente nuevo (#1127: solo llenaba vacíos)."""
+    for campo in _FOTO_CLIENTE:
+        setattr(pedido, campo, None)
+
+
 def _pedido_detalles_prefetch():
     """Prefetch de ``detalles`` (+``tallas``) con las FK que
     ``PedidoDetalleReadSerializer`` resuelve a nombre — un único set de
@@ -448,6 +462,8 @@ PARAMETROS_FILTRO_COTIZACIONES = list(cotizaciones_listado.PARAMETROS_FILTRO_OPE
 class CotizacionViewSet(viewsets.ModelViewSet):
     # #1020: lecturas con código R-*; el detalle también desde ``/orders/[id]``.
     permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    # Lecturas sin código R-* a propósito; cualquier otra no declarada se niega (#1108).
+    acciones_sin_codigo = ("onboarding", "opciones", "tablero", "comentarios")
     codigos_lectura = {
         "list": CODIGOS_COTIZACIONES,
         "kpis": CODIGOS_COTIZACIONES,
@@ -2093,6 +2109,9 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         self._exigir_sucursal(cotizacion)
         pedido.empresa = cotizacion.empresa
         pedido.sucursal = cotizacion.sucursal
+        cambio_cliente = pedido.cliente_id != cotizacion.cliente_id
+        if cambio_cliente:
+            _vaciar_foto_cliente(pedido)
         pedido.cliente = cotizacion.cliente
         pedido.moneda = cotizacion.moneda
         pedido.tipo_pedido = cotizacion.tipo_pedido
@@ -2151,6 +2170,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         pedido.iva = cotizacion.iva
         pedido.gran_total = cotizacion.gran_total
         pedido.save()
+        if cambio_cliente:
+            self._snapshot_facturacion_pedido(pedido)
 
         try:
             PedidoDetalle.objects.filter(pedido=pedido).delete()
@@ -3451,7 +3472,12 @@ class PedidoViewSet(viewsets.ModelViewSet):
         # antes de validar el payload.
         self._validar_cambio_estatus(serializer.instance, serializer.validated_data.get("estatus"))
         self._validar_vaciado_confirmacion(serializer.instance, serializer.validated_data)
-        serializer.save()
+        nuevo_cliente = serializer.validated_data.get("cliente")
+        cambio_cliente = nuevo_cliente is not None and nuevo_cliente.pk != serializer.instance.cliente_id
+        pedido = serializer.save()
+        if cambio_cliente:
+            _vaciar_foto_cliente(pedido)
+            self._snapshot_facturacion(pedido)
         # ``UpdateModelMixin.update`` vacía el prefetch de ``serializer.instance``
         # después de este método y la respuesta recargaba renglones y tallas uno
         # por uno (N+1, y sin el orden por ``id`` del GET). Se serializa una
@@ -3671,6 +3697,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 serializer.validated_data.get("servicios_extras") or []
             )
 
+            if "cliente" in pedido_data and pedido_data["cliente"].pk != pedido.cliente_id:
+                _vaciar_foto_cliente(pedido)  # #1127
             for field, value in pedido_data.items():
                 setattr(pedido, field, value)
             pedido.save(update_fields=list(pedido_data.keys()) + ["updated_at"])

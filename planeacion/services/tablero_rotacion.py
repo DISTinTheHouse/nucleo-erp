@@ -50,7 +50,7 @@ ESTADOS = (RESURTIR, SOBREINVENTARIO, LENTO, SIN_VENTA, OK)
 
 ORDENAMIENTOS = {
     "vendido_periodo", "venta_semanal", "tendencia_pct", "existencia", "en_proceso", "disponible",
-    "cobertura_semanas", "resurtido_sugerido", "dias_sin_venta", "ultima_venta", "importe_vendido",
+    "cobertura_semanas", "resurtido_sugerido", "dias_sin_venta", "ultima_venta",
     "nombre", "sku", "clase_abc", "fabricable_con_existencia",
 }
 CERO = Decimal("0")

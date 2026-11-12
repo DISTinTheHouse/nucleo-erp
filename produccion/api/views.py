@@ -1172,17 +1172,7 @@ class ConsumoProduccionViewSet(viewsets.ModelViewSet):
         _require_produccion(request.user)
         return super().create(request, *args, **kwargs)
 
-    # ``confirmar``/``anular`` siguen siendo stubs, pero resuelven el registro
-    # por ``get_queryset``: un consumo ajeno (o inexistente) responde 404.
-    @action(detail=True, methods=['post'])
-    def confirmar(self, request, pk=None):
-        self.get_object()
-        return Response({'msg': 'ConsumoProduccionViewSet.confirmar'}, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=['post'])
-    def anular(self, request, pk=None):
-        self.get_object()
-        return Response({'msg': 'ConsumoProduccionViewSet.anular'}, status=status.HTTP_200_OK)
+    # Sin ``confirmar``/``anular``: eran stubs que respondían 200 sin hacer nada (#1124).
 
 class ProductoTerminadoEntradasViewSet(viewsets.ModelViewSet):
     queryset = ProductoTerminadoEntradas.objects.all()
@@ -1198,17 +1188,7 @@ class ProductoTerminadoEntradasViewSet(viewsets.ModelViewSet):
             return ProductoTerminadoEntradas.objects.none()
         return self.queryset.filter(op__empresa=empresa)
 
-    # ``confirmar``/``anular`` siguen siendo stubs, pero resuelven el registro
-    # por ``get_queryset``: una entrada ajena (o inexistente) responde 404.
-    @action(detail=True, methods=['post'])
-    def confirmar(self, request, pk=None):
-        self.get_object()
-        return Response({'msg': 'ProductoTerminadoEntradasViewSet.confirmar'}, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=['post'])
-    def anular(self, request, pk=None):
-        self.get_object()
-        return Response({'msg': 'ProductoTerminadoEntradasViewSet.anular'}, status=status.HTTP_200_OK)
+    # Sin ``confirmar``/``anular``: eran stubs que respondían 200 sin hacer nada (#1124).
 
 def _suma_avances(modelo, fk, campo, **filtro):
     """``Σ campo`` de los avances activos de la orden (``OuterRef("pk")``) como
