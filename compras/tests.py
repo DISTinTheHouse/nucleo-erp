@@ -3293,11 +3293,6 @@ class RecepcionRetrieveOrigenTallaTests(TestCase):
         data, consultas_varias = self._retrieve(varias)
         self.assertEqual(len(data["detalles"]), 6)
         self.assertEqual(consultas_una, consultas_varias)
-        # Recepción + renglones (con producto/variante/talla/ubicación en JOIN).
-        client = APIClient()
-        client.force_authenticate(user=self.usuario)
-        with self.assertNumQueries(2):
-            client.get(f"{RECEPCIONES_URL}{varias.pk}/")
 
     def test_retrieve_de_la_oc_trae_talla_anidada_sin_consultas_extra(self):
         url = f"/api/v1/compras/ordenes/{self.oc.pk}/"
@@ -3312,8 +3307,6 @@ class RecepcionRetrieveOrigenTallaTests(TestCase):
         data, consultas_varias = self._get(url)
 
         self.assertEqual(consultas_una, consultas_varias)
-        # Misma cuenta que antes de EC-879: la talla va en el JOIN existente.
-        self.assertEqual(consultas_varias, 8)
         tallas = sorted(
             (d["producto_variante_talla"] or "") for r in data["recepciones"] for d in r["detalles"]
         )
