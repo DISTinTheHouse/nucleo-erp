@@ -9,7 +9,7 @@ from rest_framework import status, viewsets, mixins
 from rest_framework.decorators import action
 from rest_framework.viewsets import GenericViewSet
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 
 from ventas.models import CotizacionDetalle, Pedido, PedidoDetalle, PedidoDetalleTalla
@@ -521,6 +521,27 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         if getattr(self, "action", None) == "list":
             return OrdenProduccionListSerializer
         return OrdenProduccionSerializer
+
+    # EC-870: editar requiere ``E-PRODUCCION-OP`` y el DELETE es baja lógica
+    # (pasa a Cancelado) con ``D-PRODUCCION-OP``: el borrado físico arrastraba en
+    # cascada movimientos de inventario, recepciones y consumos de la OP.
+    PERMISO_EDITAR = "E-PRODUCCION-OP"
+    PERMISO_BORRAR = "D-PRODUCCION-OP"
+
+    def perform_update(self, serializer):
+        if not self.request.user.tiene_permiso(self.PERMISO_EDITAR):
+            raise PermissionDenied("No tienes permiso para editar órdenes de producción (E-PRODUCCION-OP).")
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.tiene_permiso(self.PERMISO_BORRAR):
+            raise PermissionDenied("No tienes permiso para dar de baja órdenes de producción (D-PRODUCCION-OP).")
+        op = self.get_object()
+        cancelado = OrdenProduccion.EstatusOrdenProduccion.CANCELADO
+        if op.estatus_op != cancelado:
+            op.estatus_op = cancelado
+            op.save(update_fields=["estatus_op"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def get_queryset(self):
         user = self.request.user
