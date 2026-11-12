@@ -43,12 +43,16 @@ def exigir_factura_visible(user, factura):
         raise ValidationError({"factura": "Factura no encontrada."})
 
 
-def resolver_sucursal_documento(user, empresa, sucursal, sucursales_lineas):
+def resolver_sucursal_documento(user, empresa, sucursal, sucursales_lineas, *, acotar=True, lineas_misma_sucursal=False):
     """Sucursal de un cobro o pago al crearlo (#1063). Siempre queda una.
 
-    - La enviada: debe ser de la empresa y, para no admins, de sus sucursales.
+    - La enviada: debe ser de la empresa y, con ``acotar``, de las sucursales del
+      usuario no admin. Los pagos van con ``acotar=False``: CxP y pagos son por
+      empresa (EC-874).
     - Si no viene: la de la primera línea (factura de la CxC o de la CxP).
     - Si no hay líneas: la ``sucursal_default`` del usuario, si es de la empresa.
+    - Con ``lineas_misma_sucursal`` (cobros): todas las facturas de las líneas deben
+      ser de esa sucursal, porque el folio sale de su serie (EC-874).
     """
     from nucleo.models import Sucursal
 
@@ -63,7 +67,9 @@ def resolver_sucursal_documento(user, empresa, sucursal, sucursales_lineas):
             raise ValidationError({"sucursal": "Indica la sucursal."})
     if sucursal.empresa_id != empresa_id:
         raise ValidationError({"sucursal": "La sucursal no pertenece a la empresa."})
-    ids = sucursales_visibles(user)
+    ids = sucursales_visibles(user) if acotar else None
     if ids is not None and sucursal.pk not in ids:
         raise ValidationError({"sucursal": "No tienes acceso a esa sucursal."})
+    if lineas_misma_sucursal and any(s and s != sucursal.pk for s in sucursales_lineas):
+        raise ValidationError({"sucursal": "Todas las facturas del cobro deben ser de la sucursal del cobro."})
     return sucursal
