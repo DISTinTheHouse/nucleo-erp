@@ -8069,3 +8069,98 @@ class ConsumosResumenDetalleOpTests(_DetallesOrdenesEC880Base):
             self._detalle_op()
         self.assertEqual(len(varios), len(uno))
 
+
+class _OpRealEC880Base(_DetallesOrdenesEC880Base):
+    """OP creada con ``save_orden_produccion`` (consumo real con desperdicio):
+    dos variantes con BOM (uno con un insumo inactivo) y existencias de sobra."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.pza = UnidadMedida.objects.create(clave="pza", nombre="Pieza")
+        cls.mtr = UnidadMedida.objects.create(clave="mtr", nombre="Metro")
+        color = Color.objects.create(nombre="Azul", codigo="AZU", codigo_hex="#0000FF")
+        cls.talla_m = Talla.objects.create(nombre="M")
+        cls.talla_g = Talla.objects.create(nombre="G")
+        playera = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera")
+        cls.var_m = ProductoVariante.objects.create(
+            producto=playera, empresa=cls.empresa, color=color, talla=cls.talla_m, sku="EC880-M", precio_base="1")
+        cls.var_g = ProductoVariante.objects.create(
+            producto=playera, empresa=cls.empresa, color=color, talla=cls.talla_g, sku="EC880-G", precio_base="1")
+        cls.tela = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Tela",
+                                           cod_proscai="TEL-1", unidad_medida=cls.mtr)
+        cls.hilo = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Hilo")
+        cls.boton = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Boton")
+        cls.boms = {}
+        for var, tela in ((cls.var_m, "1.25"), (cls.var_g, "1.37")):
+            bom = ListaMaterialBom.objects.create(empresa=cls.empresa, producto_variante=var)
+            BomDetalle.objects.create(bom=bom, componente=cls.tela, cantidad=Decimal(tela), unidad=cls.mtr,
+                                      desperdicio=Decimal("7.5"))
+            BomDetalle.objects.create(bom=bom, componente=cls.hilo, cantidad=Decimal("0.33"), unidad=cls.pza)
+            BomDetalle.objects.create(bom=bom, componente=cls.boton, cantidad=Decimal("2"), unidad=cls.pza,
+                                      desperdicio=Decimal("10"), activo=False)
+            cls.boms[var.pk] = bom
+        almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="A880", nombre="A")
+        for producto in (cls.tela, cls.hilo, cls.boton):
+            Existencia.objects.create(almacen=almacen, producto=producto, cantidad=Decimal("100000"))
+        SerieFolio.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="ORDEN_PRODUCCION",
+                                  serie="OP")
+        resultado = OrdenProduccionService.save_orden_produccion(
+            {
+                "empresa": cls.empresa, "sucursal": cls.sucursal, "pedido": cls.pedido_foto,
+                "orden_produccion_detalle": [
+                    {"producto_variante": cls.var_m, "bom": cls.boms[cls.var_m.pk], "cantidad": Decimal("13"),
+                     "unidad": cls.pza},
+                    {"producto_variante": cls.var_g, "bom": cls.boms[cls.var_g.pk], "cantidad": Decimal("7"),
+                     "unidad": cls.pza},
+                ],
+            },
+            cls.usuario,
+        )
+        cls.op_real = resultado["op"]
+
+
+class RenglonesInactivosOpTests(_OpRealEC880Base):
+    """Un renglón de la OP dado de baja (``activo=False``) ya no cuenta en el
+    detalle (onboarding), en el retrieve ni en el costo por pieza."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.inactivo = OrdenProduccionDetalle.objects.create(
+            op=cls.op_real, bom=cls.boms[cls.var_m.pk], producto_variante=cls.var_m,
+            cantidad=Decimal("500"), unidad=cls.pza, activo=False,
+        )
+
+    def test_detalle_onboarding_no_cuenta_el_renglon_inactivo(self):
+        productos = self._detalle_op(self.op_real)["productos"]
+        self.assertEqual(len(productos), 1)
+        self.assertEqual(productos[0]["cantidades"]["total"], 20)
+        tallas = {t["talla"]: t["cantidad"] for t in productos[0]["cantidades"]["tallas"]}
+        self.assertEqual(tallas, {"M": 13, "G": 7})
+        hilo = next(h for h in productos[0]["habilitacion"] if h["descripcion"] == "Hilo")
+        self.assertEqual(hilo["total"], 6.6)  # 20 piezas × 0.33, sin las 500 inactivas
+
+    def test_retrieve_no_devuelve_el_renglon_inactivo(self):
+        resp = self.client.get(f"/api/v1/produccion/orden-produccion/{self.op_real.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        ids = {r["op_detalle_id"] for r in resp.json()["orden_produccion_detalle"]}
+        self.assertNotIn(self.inactivo.pk, ids)
+        self.assertEqual(len(ids), 2)
+
+    def test_costo_por_pieza_divide_solo_entre_piezas_activas(self):
+        from produccion.services.costo_produccion import costo_unitario_produccion
+        mov = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, tipo_movimiento="SALIDA", usuario=self.usuario,
+            op=OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op="OP-880-C"),
+        )
+        MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=mov, producto=self.tela, cantidad=Decimal("10"), costo_unitario=Decimal("20"))
+        op = mov.op
+        OrdenProduccionDetalle.objects.create(op=op, bom=self.boms[self.var_m.pk], producto_variante=self.var_m,
+                                              cantidad=Decimal("4"), unidad=self.pza)
+        OrdenProduccionDetalle.objects.create(op=op, bom=self.boms[self.var_m.pk], producto_variante=self.var_m,
+                                              cantidad=Decimal("96"), unidad=self.pza, activo=False)
+        # 200 MXN de materiales entre 4 piezas activas (antes: entre 100).
+        self.assertEqual(costo_unitario_produccion(op), Decimal("50"))
+

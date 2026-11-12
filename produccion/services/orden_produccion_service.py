@@ -324,13 +324,19 @@ class OrdenProduccionService:
     @staticmethod
     def get_formatted_op_detalle(op_id):
         op = OrdenProduccion.objects.filter(pk=op_id).prefetch_related(
-            'orden_produccion_detalle__producto_variante__producto',
-            'orden_produccion_detalle__producto_variante__talla',
-            'orden_produccion_detalle__producto_variante__color',
-            'orden_produccion_detalle__variante_produccion__talla',
-            'orden_produccion_detalle__variante_produccion__color',
-            'orden_produccion_detalle__bom__materia_prima_detalle__componente',
-            'orden_produccion_detalle__bom__materia_prima_detalle__unidad',
+            # Sólo renglones activos (EC-880), como el listado y los KPIs.
+            models.Prefetch(
+                'orden_produccion_detalle',
+                queryset=OrdenProduccionDetalle.objects.filter(activo=True).prefetch_related(
+                    'producto_variante__producto',
+                    'producto_variante__talla',
+                    'producto_variante__color',
+                    'variante_produccion__talla',
+                    'variante_produccion__color',
+                    'bom__materia_prima_detalle__componente',
+                    'bom__materia_prima_detalle__unidad',
+                ),
+            ),
             # ``unidad_medida``: la ``unidad`` de ``consumos_resumen`` (EC-880).
             'consumoproduccion_set__detalles__producto__unidad_medida',
             # ``pedidos[].cliente`` (EC-880): una consulta para todos los pedidos.

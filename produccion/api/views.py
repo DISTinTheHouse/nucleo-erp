@@ -571,7 +571,8 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                     "id", "op_id", "pedido_id", "pedido__folio")),
                 Prefetch(
                     "orden_produccion_detalle",
-                    queryset=OrdenProduccionDetalle.objects.select_related(
+                    # Sólo renglones activos (EC-880), como el listado.
+                    queryset=OrdenProduccionDetalle.objects.filter(activo=True).select_related(
                         "producto_variante",
                         "producto_variante__producto",
                         "producto_variante__color",
