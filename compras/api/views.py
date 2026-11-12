@@ -302,7 +302,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                     "recepciondetalle_set",
                     queryset=RecepcionDetalle.objects.select_related(
                         "producto",
-                        "producto_variante",
+                        # La talla de ``producto_variante_talla`` va en el mismo JOIN.
+                        "producto_variante__talla",
                         "ubicacion",
                         "ubicacion__almacen",
                     ).order_by("id"),
@@ -1592,16 +1593,16 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         qs = self.queryset.filter(activo=True).order_by("-fecha_recepcion", "-id")
 
         # Solo el retrieve individual anida ``detalles``: se traen los renglones
-        # con sus FK en un único prefetch (producto/producto_variante/ubicacion)
-        # para evitar el N+1 que tendría el shape anidado. El list no lo necesita
-        # y se mantiene ligero.
+        # con sus FK en un único prefetch (producto/producto_variante y su
+        # talla/ubicacion) para evitar el N+1 que tendría el shape anidado. El
+        # list no lo necesita y se mantiene ligero.
         if self.action == "retrieve":
             qs = qs.prefetch_related(
                 Prefetch(
                     "recepciondetalle_set",
                     queryset=RecepcionDetalle.objects.select_related(
                         "producto",
-                        "producto_variante",
+                        "producto_variante__talla",
                         "ubicacion",
                         "ubicacion__almacen",
                     ).order_by("id"),

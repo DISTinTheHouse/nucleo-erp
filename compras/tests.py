@@ -3172,3 +3172,204 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
         root = APIClient()
         root.force_authenticate(Usuario.objects.create(username="su778", email="su778@ec778.test", is_superuser=True))
         self.assertLessEqual({self.e_b.pk, *self.ids_a}, {e["id"] for e in root.get(self.URL_ENCUADRES).json()})
+
+
+class RecepcionRetrieveOrigenTallaTests(TestCase):
+    """EC-879: folio del origen y talla en el retrieve de recepciones.
+
+    ``orden_compra_folio`` y ``op_folio`` siempre vienen; el que no corresponde a
+    ``tipo_origen`` es ``null``. Cada renglón trae ``producto_variante_talla``
+    (``null`` sin variante o sin talla). El número de consultas no crece con los
+    renglones, ni en ``GET /recepciones/{id}/`` ni en las recepciones anidadas de
+    ``GET /ordenes/{id}/``.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import Talla
+        from produccion.models import OrdenProduccion
+
+        cls.empresa = Empresa.objects.create(codigo="acme-879", razon_social="acme-879 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="A79", nombre="acme-879")
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM", nombre="Almacen 879"
+        )
+        cls.usuario = Usuario.objects.create(
+            username="u@acme-879.test", email="u@acme-879.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso 879")
+        cls.oc = OrdenCompra.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, moneda=moneda, usuario=cls.usuario,
+            fecha_oc=timezone.localdate(), folio="OC-879-1",
+            estatus=OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+        )
+        cls.op = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-879-1",
+        )
+        color = Color.objects.create(nombre="Negro 879", codigo="N79", codigo_hex="#000000")
+        cls.producto_pt = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera 879")
+        cls.producto_mp = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Hilo 879")
+        cls.variantes = [
+            ProductoVariante.objects.create(
+                producto=cls.producto_pt, empresa=cls.empresa, color=color,
+                talla=Talla.objects.create(nombre=nombre), sku=f"PLA-879-{nombre}", precio_base="1",
+            )
+            for nombre in ("CH", "M", "G", "XG", "2XG")
+        ]
+        cls.variante_sin_talla = ProductoVariante.objects.create(
+            producto=cls.producto_pt, empresa=cls.empresa, color=color, sku="PLA-879-ST", precio_base="1",
+        )
+        cls.folios = 0
+
+    @classmethod
+    def _recepcion(cls, orden_compra=None, op=None, estatus=Recepcion.EstatusRecepcion.BORRADOR):
+        cls.folios += 1
+        return Recepcion.objects.create(
+            tipo_origen="OC" if orden_compra else "OP", orden_compra=orden_compra, op=op,
+            empresa=cls.empresa, sucursal=cls.sucursal, almacen=cls.almacen, usuario=cls.usuario,
+            folio=f"RC-879-{cls.folios}", fecha_recepcion=timezone.now(), estatus=estatus,
+        )
+
+    def _renglon(self, recepcion, variante=None):
+        return RecepcionDetalle.objects.create(
+            recepcion=recepcion, producto=self.producto_pt if variante else self.producto_mp,
+            producto_variante=variante, cantidad_recibida=Decimal("1"),
+        )
+
+    def _get(self, url):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.get(url)
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return resp.json(), len(ctx)
+
+    def _retrieve(self, recepcion):
+        return self._get(f"{RECEPCIONES_URL}{recepcion.pk}/")
+
+    def test_origen_oc_trae_folio_de_la_oc_y_op_folio_nulo(self):
+        recepcion = self._recepcion(orden_compra=self.oc)
+        data, _ = self._retrieve(recepcion)
+        self.assertEqual(data["tipo_origen"], "OC")
+        self.assertEqual(data["orden_compra_folio"], "OC-879-1")
+        self.assertIsNone(data["op_folio"])
+
+    def test_origen_op_trae_folio_op_y_orden_compra_folio_nulo(self):
+        recepcion = self._recepcion(op=self.op)
+        data, _ = self._retrieve(recepcion)
+        self.assertEqual(data["tipo_origen"], "OP")
+        self.assertEqual(data["op_folio"], "OP-879-1")
+        self.assertIsNone(data["orden_compra_folio"])
+
+    def test_oc_sin_folio_devuelve_null(self):
+        # ``OrdenCompra.folio`` es nulable (se asigna al aceptar).
+        oc = OrdenCompra.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, moneda=self.oc.moneda, usuario=self.usuario,
+            fecha_oc=timezone.localdate(),
+        )
+        data, _ = self._retrieve(self._recepcion(orden_compra=oc))
+        self.assertIsNone(data["orden_compra_folio"])
+        self.assertIsNone(data["op_folio"])
+
+    def test_talla_por_renglon(self):
+        recepcion = self._recepcion(op=self.op)
+        con_talla = self._renglon(recepcion, self.variantes[1])
+        sin_variante = self._renglon(recepcion)
+        sin_talla = self._renglon(recepcion, self.variante_sin_talla)
+        data, _ = self._retrieve(recepcion)
+        tallas = {d["id"]: d["producto_variante_talla"] for d in data["detalles"]}
+        self.assertEqual(tallas, {con_talla.pk: "M", sin_variante.pk: None, sin_talla.pk: None})
+
+    def test_consultas_del_retrieve_no_crecen_con_los_renglones(self):
+        una = self._recepcion(op=self.op)
+        self._renglon(una, self.variantes[0])
+        varias = self._recepcion(op=self.op)
+        for variante in self.variantes:
+            self._renglon(varias, variante)
+        self._renglon(varias)
+
+        _, consultas_una = self._retrieve(una)
+        data, consultas_varias = self._retrieve(varias)
+        self.assertEqual(len(data["detalles"]), 6)
+        self.assertEqual(consultas_una, consultas_varias)
+
+    def test_retrieve_de_la_oc_trae_talla_anidada_sin_consultas_extra(self):
+        url = f"/api/v1/compras/ordenes/{self.oc.pk}/"
+        primera = self._recepcion(orden_compra=self.oc)
+        self._renglon(primera, self.variantes[0])
+        _, consultas_una = self._get(url)
+
+        self._renglon(primera)
+        segunda = self._recepcion(orden_compra=self.oc)
+        for variante in self.variantes[1:]:
+            self._renglon(segunda, variante)
+        data, consultas_varias = self._get(url)
+
+        self.assertEqual(consultas_una, consultas_varias)
+        tallas = sorted(
+            (d["producto_variante_talla"] or "") for r in data["recepciones"] for d in r["detalles"]
+        )
+        self.assertEqual(tallas, ["", "2XG", "CH", "G", "M", "XG"])
+
+    def test_listado_trae_op_folio_sin_consultas_extra(self):
+        de_op = self._recepcion(op=self.op)
+        de_oc = self._recepcion(orden_compra=self.oc)
+        filas, consultas_dos = self._get(RECEPCIONES_URL)
+        por_id = {f["id"]: f for f in filas}
+        self.assertEqual((por_id[de_op.pk]["op_folio"], por_id[de_op.pk]["orden_compra_folio"]), ("OP-879-1", None))
+        self.assertEqual((por_id[de_oc.pk]["op_folio"], por_id[de_oc.pk]["orden_compra_folio"]), (None, "OC-879-1"))
+        for _ in range(3):
+            self._recepcion(op=self.op)
+        filas, consultas_cinco = self._get(RECEPCIONES_URL)
+        self.assertEqual(len(filas), 5)
+        self.assertEqual(consultas_dos, consultas_cinco)
+
+    def test_renglon_igual_en_el_retrieve_de_la_recepcion_y_en_el_de_la_oc(self):
+        # Ambos retrieves sirven el mismo serializer de renglón: mismas llaves y valores.
+        ubicacion = Ubicacion.objects.create(almacen=self.almacen, pasillo="9")
+        recepcion = self._recepcion(orden_compra=self.oc)
+        self._renglon(recepcion, self.variantes[2])
+        self._renglon(recepcion)
+        RecepcionDetalle.objects.create(
+            recepcion=recepcion, producto=self.producto_pt, producto_variante=self.variante_sin_talla,
+            ubicacion=ubicacion, cantidad_recibida=Decimal("2.5"),
+        )
+        de_recepcion, _ = self._retrieve(recepcion)
+        de_oc, _ = self._get(f"/api/v1/compras/ordenes/{self.oc.pk}/")
+        (anidada,) = [r for r in de_oc["recepciones"] if r["id"] == recepcion.pk]
+        self.assertEqual(len(de_recepcion["detalles"]), 3)
+        self.assertEqual(de_recepcion["detalles"], anidada["detalles"])
+
+    def test_cancelar_oc_trae_talla_anidada_sin_consultas_extra(self):
+        # ``cancelar`` solo rechaza recepciones activas no canceladas: una OC cuyas
+        # recepciones están CANCELADA se cancela y su respuesta (forma del
+        # retrieve) las anida con sus renglones.
+        cancelada = Recepcion.EstatusRecepcion.CANCELADA
+
+        def oc_con_renglones(variantes):
+            oc = OrdenCompra.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, moneda=self.oc.moneda, usuario=self.usuario,
+                fecha_oc=timezone.localdate(), estatus=OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+            )
+            recepcion = self._recepcion(orden_compra=oc, estatus=cancelada)
+            for variante in variantes:
+                self._renglon(recepcion, variante)
+            return oc
+
+        def cancelar(oc):
+            client = APIClient()
+            client.force_authenticate(user=self.usuario)
+            with CaptureQueriesContext(connection) as ctx:
+                resp = client.post(
+                    f"/api/v1/compras/ordenes/{oc.pk}/cancelar/", {"motivo_cancelacion": "EC-879"}, format="json",
+                )
+            self.assertEqual(resp.status_code, 200, resp.content[:300])
+            return resp.json(), len(ctx)
+
+        _, consultas_una = cancelar(oc_con_renglones(self.variantes[:1]))
+        data, consultas_varias = cancelar(oc_con_renglones([*self.variantes, None]))
+
+        self.assertEqual(consultas_una, consultas_varias)
+        tallas = sorted((d["producto_variante_talla"] or "") for r in data["recepciones"] for d in r["detalles"])
+        self.assertEqual(tallas, ["", "2XG", "CH", "G", "M", "XG"])
