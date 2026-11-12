@@ -236,17 +236,14 @@ class AislamientoPlaneacionTests(PlaneacionBaseTestCase):
                 self.assertEqual([r["variante_id"] for r in data["results"]], [self.va.pk])
                 self.assertEqual(_n(data["resumen"]["vendido_periodo"]), 4)
 
-    def test_sucursal_de_otra_empresa_no_trae_ventas(self):
+    def test_sucursal_de_otra_empresa_responde_400(self):
+        """Una sucursal ajena a la empresa no se acepta como filtro (#1109): ``400``
+        en ambos endpoints, sin datos de la otra empresa."""
         for url in URLS:
             with self.subTest(url=url):
                 resp = self._get(self.a["admin"], url, sucursal=self.b["sucursal"].pk)
-                self.assertEqual(resp.status_code, 200)
-                data = resp.json()
-                if url == TABLERO_URL:
-                    self.assertEqual(_n(data["resumen"]["vendido_periodo"]), 0)
-                    self.assertTrue(all(_n(r["vendido_periodo"]) == 0 for r in data["results"]))
-                else:
-                    self.assertEqual(data["resumen"]["variantes_a_resurtir"], 0)
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(resp.json(), {"sucursal": ["Sucursal no encontrada."]})
 
 
 class FechaVentaTests(PlaneacionBaseTestCase):
