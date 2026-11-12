@@ -4,9 +4,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from catalogo.models import ProductoVariante
+from nucleo.permisos import RequiereCodigo
 from planeacion.services import capacidad
 from planeacion.services import tablero_rotacion as tablero
 from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
+
+# Lee ventas, clientes, existencias y BOM: módulo de Producción (EC-875). Mismo
+# código que la regla ``/manufacturing`` del frontend.
+CODIGOS_PLANEACION = ("R-PRODUCCION",)
 
 
 class TableroRotacionParamsSerializer(serializers.Serializer):
@@ -51,10 +56,11 @@ def _params(request, serializer_class):
 class TableroRotacionView(APIView):
     """``GET /api/v1/planeacion/tablero-rotacion/``: rotación de producto terminado
     para la junta semanal (ver ``planeacion.services.tablero_rotacion``). Siempre
-    sobre la empresa activa del usuario; los importes solo con permiso de importes
-    de pedido."""
+    sobre la empresa activa del usuario y con ``R-PRODUCCION``; los importes solo con
+    permiso de importes de pedido."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequiereCodigo]
+    codigos_requeridos = CODIGOS_PLANEACION
 
     def get(self, request):
         empresa, p, ver_importes = _params(request, TableroRotacionParamsSerializer)
@@ -97,7 +103,8 @@ class NecesidadesMateriaPrimaView(APIView):
       (``agrupar`` se ignora: siempre por variante).
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequiereCodigo]
+    codigos_requeridos = CODIGOS_PLANEACION
 
     def get(self, request):
         empresa, p, error = _params(request, NecesidadesParamsSerializer)

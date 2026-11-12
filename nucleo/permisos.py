@@ -50,6 +50,7 @@ Dos detalles de fidelidad que es fácil perder de vista:
   de los dos, igual que en ``tiene_permiso()``, que consulta cada uno por separado.
 """
 
+from django.core.exceptions import ImproperlyConfigured
 from django.db.models import Q
 from rest_framework.permissions import BasePermission
 from seguridad.models import Rol, UsuarioPermiso
@@ -194,6 +195,28 @@ class LecturaPorCodigo(BasePermission):
         codigos = getattr(view, "codigos_lectura", {}).get(getattr(view, "action", None))
         if not codigos:
             return True
+        permisos = permisos_de_la_peticion(request)
+        return any(c in permisos for c in codigos)
+
+
+class RequiereCodigo(BasePermission):
+    """Exige uno de los códigos de ``view.codigos_requeridos`` en TODA petición.
+
+    Para ``APIView``, donde ``LecturaPorCodigo`` no sirve: ahí ``view.action`` no
+    existe y aquélla deja pasar todo. Misma regla de resolución (``permisos_efectivos``:
+    superusuario y admin de empresa pasan, sólo cuentan roles y overrides de la
+    empresa activa, el DENY gana). Falla cerrado: una vista sin códigos es un error
+    de configuración, no un endpoint abierto (EC-875).
+    """
+
+    message = "No tienes permiso para consultar esta información."
+
+    def has_permission(self, request, view):
+        codigos = getattr(view, "codigos_requeridos", None)
+        if not codigos:
+            raise ImproperlyConfigured(
+                f"{type(view).__name__} usa RequiereCodigo sin declarar codigos_requeridos."
+            )
         permisos = permisos_de_la_peticion(request)
         return any(c in permisos for c in codigos)
 
