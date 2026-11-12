@@ -2800,6 +2800,12 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
             raise ValidationError({
                 'pedido': 'El pedido está CANCELADO; no se pueden generar SKU de producción.'
             })
+        # #1098: dado de baja (``activo=False``) tampoco; el listado lo muestra
+        # (EC-873) pero ya no se escribe sobre él.
+        if not pedido.activo:
+            raise ValidationError({
+                'pedido': 'El pedido está dado de baja; no se pueden generar SKU de producción.'
+            })
 
         # Con contexto: ``BomDetalleSerializer`` valida ``componente`` contra la
         # empresa de ``request.user`` y sin ``request`` rechaza todo.

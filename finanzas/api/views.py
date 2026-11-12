@@ -648,7 +648,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
         if sucursal and getattr(sucursal, "empresa_id", None) == getattr(empresa, "pk", None):
             return sucursal
         # Nunca una sucursal que el usuario no vería después (#753).
-        return por_sucursal(Sucursal.objects.filter(empresa=empresa, activo=True), user, "pk").order_by("codigo").first()
+        return por_sucursal(Sucursal.objects.filter(empresa=empresa, activo=True), user, "pk").order_by("pk").first()  # #1050: la más antigua
 
     @action(detail=False, methods=['post'], url_path='registrar-pendiente-cobro')
     def registrar_pendiente_cobro(self, request):

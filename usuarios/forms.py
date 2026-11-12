@@ -3,6 +3,9 @@ from django.contrib.auth.forms import UserCreationForm, UserChangeForm
 from .models import Usuario
 from seguridad.models import Rol
 
+from .alcance import errores_de_alcance
+
+
 class TailwindFormMixin:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -118,6 +121,16 @@ class UsuarioCreationForm(TailwindFormMixin, UserCreationForm):
         if sucursal_default and empresa:
             if sucursal_default.empresa != empresa:
                 self.add_error('sucursal_default', f"La sucursal '{sucursal_default}' no pertenece a la empresa '{empresa}'.")
+
+        # #1044: sucursales y departamentos con la misma regla que la API (EC-844),
+        # también al mover al usuario de empresa con el alcance anterior.
+        if 'empresa' in cleaned_data:
+            for campo, mensaje in errores_de_alcance(
+                getattr(empresa, 'pk', None),
+                sucursales=list(cleaned_data.get('sucursales') or []),
+                departamentos=list(cleaned_data.get('departamentos') or []),
+            ).items():
+                self.add_error(campo, mensaje)
         
         if sucursal_default and not empresa:
              self.add_error('sucursal_default', "No puedes asignar una sucursal si no hay empresa seleccionada.")
@@ -238,6 +251,16 @@ class UsuarioChangeForm(TailwindFormMixin, UserChangeForm):
         if sucursal_default and empresa:
             if sucursal_default.empresa != empresa:
                 self.add_error('sucursal_default', f"La sucursal '{sucursal_default}' no pertenece a la empresa '{empresa}'.")
+
+        # #1044: sucursales y departamentos con la misma regla que la API (EC-844),
+        # también al mover al usuario de empresa con el alcance anterior.
+        if 'empresa' in cleaned_data:
+            for campo, mensaje in errores_de_alcance(
+                getattr(empresa, 'pk', None),
+                sucursales=list(cleaned_data.get('sucursales') or []),
+                departamentos=list(cleaned_data.get('departamentos') or []),
+            ).items():
+                self.add_error(campo, mensaje)
         
         if sucursal_default and not empresa:
              self.add_error('sucursal_default', "No puedes asignar una sucursal si no hay empresa seleccionada.")
