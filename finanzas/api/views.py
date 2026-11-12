@@ -1985,6 +1985,7 @@ class CobroViewSet(FinanzasBaseViewSet):
         sucursal = resolver_sucursal_documento(
             user, empresa, serializer.validated_data.pop("sucursal", None),
             [getattr(getattr(d.get("cxc"), "factura", None), "sucursal_id", None) for d in detalles_data],
+            lineas_misma_sucursal=True,
         )
         cobro = serializer.save(empresa=empresa, sucursal=sucursal)
         self._guardar_detalles(cobro, detalles_data)
@@ -2146,6 +2147,7 @@ class PagoViewSet(FinanzasBaseViewSet):
         sucursal = resolver_sucursal_documento(
             user, empresa, serializer.validated_data.pop("sucursal", None),
             [getattr(getattr(d.get("cxp"), "factura_proveedor", None), "sucursal_id", None) for d in detalles_data],
+            acotar=False,
         )
         pago = serializer.save(empresa=empresa, sucursal=sucursal)
         for d in detalles_data:
