@@ -40,6 +40,7 @@ from produccion.models import (
     BordadoAvances,
     BordadoIncidencias,
     ConsumoProduccion,
+    ConsumoProduccionDetalle,
     CorteMangaAvances,
     ListaMaterialBom,
     OrdenBordadoDetalle,
@@ -7319,6 +7320,19 @@ class RecalculoConsumoTelaTests(TestCase):
         self.assertEqual(self._total(self.tela), Decimal("100"))
         self.assertEqual(self._total(self.hilo), Decimal("10"))
 
+    def test_planeado_es_el_consumo_inicial_aun_con_encabezado_vacio_y_recalculos(self):
+        """EC-880: la regla compartida (``consumo_resumen``) da lo mismo que la
+        anterior para los materiales del consumo inicial: escala sobre lo
+        planeado (90), no sobre lo acumulado, y un encabezado vacío no cuenta."""
+        ConsumoProduccion.objects.create(op=self.op)  # alta vacía vía POST /consumo/
+        self.assertEqual(self._post(100).status_code, 200)
+        self.assertEqual(self._total(self.tela), Decimal("100"))
+        self.assertEqual(self._post(110).status_code, 200)
+        self.assertEqual(self._total(self.tela), Decimal("110"))
+        self.assertEqual(self._post(100).status_code, 200)
+        self.assertEqual(self._total(self.tela), Decimal("100"))
+        self.assertEqual(self._total(self.hilo), Decimal("9"))
+
     def test_producto_fuera_del_consumo_se_rechaza(self):
         otro = Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre="Boton")
         self.assertEqual(self._post(100, productos=[otro]).status_code, 400)
@@ -7990,3 +8004,68 @@ class FechasEnDetallesOcmYOpTests(_DetallesOrdenesEC880Base):
     def test_op_sin_pedido_fechas_null(self):
         op = OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op="OP-880-SF")
         self.assertEqual(self._fechas(self._detalle_op(op)), (None, None))
+
+
+class ConsumosResumenDetalleOpTests(_DetallesOrdenesEC880Base):
+    """``consumos_resumen`` del detalle de la OP: planeado = cantidad del
+    material en el consumo inicial (primer encabezado con renglones), 0 si no
+    está; actual = suma; ajustes = actual - planeado. ``consumos`` no cambia."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.mtr = UnidadMedida.objects.create(clave="mtr", nombre="Metro")
+        cls.tela = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Tela",
+                                           unidad_medida=cls.mtr)
+        cls.hilo = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Hilo")
+        cls.boton = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Boton")
+
+    def _consumo(self, *renglones):
+        consumo = ConsumoProduccion.objects.create(op=self.op)
+        for producto, cantidad in renglones:
+            ConsumoProduccionDetalle.objects.create(
+                consumo_produccion=consumo, producto=producto, cantidad=Decimal(cantidad))
+        return consumo
+
+    def test_sin_consumos_lista_vacia(self):
+        data = self._detalle_op()
+        self.assertEqual(data["consumos_resumen"], [])
+        self.assertEqual(data["consumos"], [])
+
+    def test_encabezado_vacio_previo_no_es_el_inicial(self):
+        self._consumo()  # POST /consumo/ sin renglones
+        self._consumo((self.tela, "120"), (self.hilo, "9"))
+        resumen = {r["producto"]: r for r in self._detalle_op()["consumos_resumen"]}
+        self.assertEqual(resumen[self.tela.pk]["planeado"], "120.0000")
+        self.assertEqual(resumen[self.hilo.pk]["planeado"], "9.0000")
+
+    def test_ajustes_con_signo_y_material_solo_en_ajuste(self):
+        self._consumo((self.tela, "120"), (self.hilo, "9"))
+        self._consumo((self.tela, "10"))
+        self._consumo((self.tela, "-4"), (self.boton, "3"))
+        self._consumo()  # vacío al final: tampoco cuenta
+        data = self._detalle_op()
+        self.assertEqual(data["consumos_resumen"], [
+            {"producto": self.tela.pk, "producto_nombre": "Tela", "unidad": "MTR",
+             "planeado": "120.0000", "ajustes": "6.0000", "actual": "126.0000"},
+            {"producto": self.hilo.pk, "producto_nombre": "Hilo", "unidad": None,
+             "planeado": "9.0000", "ajustes": "0.0000", "actual": "9.0000"},
+            {"producto": self.boton.pk, "producto_nombre": "Boton", "unidad": None,
+             "planeado": "0.0000", "ajustes": "3.0000", "actual": "3.0000"},
+        ])
+        # ``consumos`` (historial) conserva su forma: un elemento por encabezado.
+        self.assertEqual(len(data["consumos"]), 4)
+        self.assertEqual(set(data["consumos"][0]), {"consumo_produccion_id", "detalles"})
+        self.assertEqual(
+            set(data["consumos"][0]["detalles"][0]), {"producto", "producto_nombre", "cantidad"})
+
+    def test_resumen_no_crece_en_consultas_con_los_renglones(self):
+        self._consumo((self.tela, "120"), (self.hilo, "9"))
+        with CaptureQueriesContext(connection) as uno:
+            self._detalle_op()
+        for _ in range(3):
+            self._consumo((self.tela, "1"), (self.boton, "1"))
+        with CaptureQueriesContext(connection) as varios:
+            self._detalle_op()
+        self.assertEqual(len(varios), len(uno))
+

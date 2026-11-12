@@ -331,7 +331,8 @@ class OrdenProduccionService:
             'orden_produccion_detalle__variante_produccion__color',
             'orden_produccion_detalle__bom__materia_prima_detalle__componente',
             'orden_produccion_detalle__bom__materia_prima_detalle__unidad',
-            'consumoproduccion_set__detalles__producto',
+            # ``unidad_medida``: la ``unidad`` de ``consumos_resumen`` (EC-880).
+            'consumoproduccion_set__detalles__producto__unidad_medida',
             # ``pedidos[].cliente`` (EC-880): una consulta para todos los pedidos.
             models.Prefetch(
                 'op_pedidos',
@@ -450,4 +451,10 @@ class OrdenProduccionService:
             }
             for consumo in op.consumoproduccion_set.all()
         ]
+        # EC-880: planeado/ajustes/actual por material, con la misma regla que
+        # ``recalcular-consumos`` (``produccion.services.consumo_resumen``).
+        from produccion.services.consumo_resumen import resumen_consumos_api
+        res_data["consumos_resumen"] = resumen_consumos_api(
+            detalle for consumo in op.consumoproduccion_set.all() for detalle in consumo.detalles.all()
+        )
         return res_data
