@@ -50,6 +50,7 @@ Dos detalles de fidelidad que es fácil perder de vista:
   de los dos, igual que en ``tiene_permiso()``, que consulta cada uno por separado.
 """
 
+from django.core.exceptions import ImproperlyConfigured
 from django.db.models import Q
 from rest_framework.permissions import BasePermission
 from seguridad.models import Rol, UsuarioPermiso
@@ -198,6 +199,35 @@ class LecturaPorCodigo(BasePermission):
         return any(c in permisos for c in codigos)
 
 
+class RequiereCodigo(BasePermission):
+    """Exige uno de los códigos de ``view.codigos_requeridos`` en TODA petición.
+
+    Para ``APIView``, donde ``LecturaPorCodigo`` no sirve: ahí ``view.action`` no
+    existe y aquélla deja pasar todo. Misma regla de resolución (``permisos_efectivos``:
+    superusuario y admin de empresa pasan, sólo cuentan roles y overrides de la
+    empresa activa, el DENY gana). Falla cerrado: una vista sin códigos, o con algo
+    que no sea una tupla/lista/conjunto de strings, es un error de configuración, no
+    un endpoint abierto (EC-875). Un string suelto se recorrería letra por letra:
+    nadie normal pasaría y el superusuario sí, así que el error pasaría inadvertido.
+    """
+
+    message = "No tienes permiso para consultar esta información."
+
+    def has_permission(self, request, view):
+        codigos = getattr(view, "codigos_requeridos", None)
+        if (
+            not isinstance(codigos, (tuple, list, set, frozenset))
+            or not codigos
+            or not all(isinstance(c, str) for c in codigos)
+        ):
+            raise ImproperlyConfigured(
+                f"{type(view).__name__} usa RequiereCodigo sin declarar codigos_requeridos "
+                "como tupla, lista o conjunto de códigos."
+            )
+        permisos = permisos_de_la_peticion(request)
+        return any(c in permisos for c in codigos)
+
+
 # Códigos de lectura de CRM (#1020). Mismos que ``routePermissions.ts`` del frontend y
 # que el buscador global (``nucleo.api.search``).
 CODIGOS_PEDIDO_NEUTRO = (
@@ -215,3 +245,8 @@ CODIGOS_CLIENTES = (
     "R-MESACONTROL", "R-MESACONTROL-CLIENTES",
     "R-CONTABILIDAD", "R-CONTABILIDAD-CLIENTES", "R-CONTABILIDAD-CXC",
 )
+
+# Planeación (EC-875): tablero de rotación y necesidades de materia prima leen ventas,
+# clientes, existencias y BOM. Mismo código que la regla de módulo ``/manufacturing``
+# de ``routePermissions.ts``; el catálogo no tiene código de sección de Planeación.
+CODIGOS_PLANEACION = ("R-PRODUCCION",)

@@ -8033,19 +8033,24 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 
 Sirve a la junta semanal de planeación: qué producto terminado se vende más, cuál casi no se vende (candidatos a descontinuar) y cuánto resurtir. No incluye muestras ni pedidos especiales.
 
-- **Alcance:** siempre la empresa activa del usuario, también para el superusuario. Si el usuario no tiene empresa, responde `400`.
+- **Permiso:** exige `R-PRODUCCION` (el mismo código de la regla `/manufacturing` del frontend); sin él responde `403`. Superusuario y admin de empresa pasan siempre; sólo cuentan los roles y overrides de la empresa activa y un override DENY gana al rol (EC-875).
+- **Alcance:** siempre la empresa activa del usuario, también para el superusuario. El permiso se revisa antes que la empresa: sin empresa activa no cuenta ningún rol (todos son de una empresa), así que un usuario normal sin empresa recibe `403`. Solo llegan al `400` ("Tu usuario no tiene una empresa activa.") quienes pasan el permiso sin rol: superusuario, admin de empresa o un override GRANT global de `R-PRODUCCION`.
 - **Sucursales:** admin de empresa y superusuario ven toda la empresa; el resto, solo sus sucursales permitidas. Con `sucursal`, venta, existencia, en proceso y capacidad usan el mismo alcance (una sucursal ajena a la empresa o fuera de alcance responde `400`).
 - **Importes:** `importe_por_moneda` (`{"MXN": …, "USD": …}`, por fila y en `resumen`) nunca suma monedas distintas. `importe_vendido` por fila es el total solo si todo es de una moneda, si no `null`; ya no viene en `resumen`. Todo requiere permiso de importes de pedido (contabilidad de ventas o de compras); sin él llega `null`, y ordenar por `importe_vendido` responde `400`.
 - **Orden:** total y estable (desempate por nombre, SKU y ids), también para los nulos, así la paginación no repite ni salta filas.
 - **Validación:** con `agrupar=producto`, `fabricacion=ALCANZA|NO_ALCANZA` y `ordering=fabricable_con_existencia` responden `400`. `necesidades-materia-prima` no acepta `ordering`, `page` ni `page_size`.
-- **Velocidad:** 7 consultas fijas, sin importar cuántos artículos haya (3 con `variante`).
+- **Velocidad:** consultas fijas, sin importar cuántos artículos haya. Medido en la BD real (sin contar la autenticación):
+  - Cálculo: **8** en el tablero y en el consolidado de necesidades (universo, venta agrupada, importe por moneda, serie semanal, existencias, OPs abiertas, BOM e insumos); **3** con `variante` (variante, BOM e insumos).
+  - Usuario normal con `R-PRODUCCION`: + 2 del permiso (overrides y roles) + 1 de las claves de departamento para los importes + 1 de la empresa activa + 1 de sus sucursales visibles = **13** (tablero y consolidado) y **8** (con `variante`).
+  - Admin de empresa (y superusuario): no consulta permisos, claves ni sucursales, solo + 1 de la empresa = **9** y **4**.
+  - Con `?sucursal=` se suma 1 consulta que la valida (14 para el usuario normal en el tablero).
 
 **Origen de los datos**
 
 | Dato | De dónde sale |
 |---|---|
 | Universo | Variantes activas de productos activos con tipo `PT` (producto terminado) |
-| Venta | Piezas de pedidos de **venta** autorizados o en proceso (sin muestras, errores ni cancelados). Fecha = confirmación del pedido, o su alta si no tiene |
+| Venta | Piezas de pedidos de **venta** autorizados o en proceso (sin muestras, errores ni cancelados). Fecha = alta del pedido (`created_at`). No se usa `fecha_confirmacion`: es la fecha compromiso y puede ser futura (EC-875) |
 | Importe | Piezas × precio de la talla (o del renglón), en la moneda del pedido |
 | Existencia | Suma de existencias en los almacenes de la empresa |
 | En proceso | Piezas ordenadas en OPs abiertas (pendiente, preparación, en producción, revisión, detenida) |
@@ -8054,7 +8059,7 @@ Sirve a la junta semanal de planeación: qué producto terminado se vende más, 
 
 | Parámetro | Default | Uso |
 |---|---|---|
-| `semanas` | 12 | Periodo de análisis (1–104). La tendencia lo compara con las `semanas` anteriores |
+| `semanas` | 12 | Periodo de análisis (1–104): los últimos `semanas × 7` días locales completos, hoy incluido (`desde`–`hasta`). La tendencia lo compara con las `semanas` anteriores |
 | `semanas_objetivo` | 8 | Semanas de inventario que se quieren cubrir (1–52) |
 | `dias_sin_venta` | 90 | A partir de cuántos días sin venta un artículo es `SIN_VENTA` (1–730) |
 | `agrupar` | `variante` | `variante` (SKU) o `producto` (modelo, suma sus variantes) |
@@ -8109,7 +8114,7 @@ Filtro extra: `fabricacion=SIN_BOM|ALCANZA|NO_ALCANZA`. `ALCANZA` y `NO_ALCANZA`
 
 ```json
 {
-  "parametros": {"semanas": 12, "semanas_objetivo": 8, "dias_sin_venta": 90, "agrupar": "variante", "desde": "2026-08-19", "hasta": "2026-11-11"},
+  "parametros": {"semanas": 12, "semanas_objetivo": 8, "dias_sin_venta": 90, "agrupar": "variante", "desde": "2026-08-20", "hasta": "2026-11-11"},
   "resumen": {
     "articulos": 3187, "vendido_periodo": 5758, "vendido_periodo_anterior": 4535, "tendencia_pct": 27.0,
     "existencia": 6211646, "en_proceso": 314, "resurtido_sugerido": 1, "importe_vendido": 2478663.74,
@@ -8137,7 +8142,7 @@ Filtro extra: `fabricacion=SIN_BOM|ALCANZA|NO_ALCANZA`. `ALCANZA` y `NO_ALCANZA`
 
 `GET /api/v1/planeacion/necesidades-materia-prima/`
 
-Mismo alcance y mismos parámetros que el tablero. Tiene dos modos.
+Mismo permiso (`R-PRODUCCION`), mismo alcance y mismos parámetros que el tablero. Tiene dos modos.
 
 **1. Consolidado del resurtido (sin `variante`)**
 

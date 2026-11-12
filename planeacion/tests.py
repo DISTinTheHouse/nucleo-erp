@@ -1,0 +1,364 @@
+"""Tests de Planeación: tablero de rotación y necesidades de materia prima (EC-875).
+
+Correr SOLO con ``--settings=ERP.settings_test`` (Postgres local, ver ``CLAUDE.md``):
+
+    python manage.py test --settings=ERP.settings_test --keepdb planeacion
+"""
+
+from datetime import datetime, time, timedelta
+from decimal import Decimal
+
+from django.contrib.auth.models import AnonymousUser
+from django.core.exceptions import ImproperlyConfigured
+from django.db import connection
+from django.test import SimpleTestCase, TestCase
+from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
+from rest_framework.test import APIClient, APIRequestFactory
+from rest_framework.views import APIView
+
+from catalogo.models import Color, Producto, ProductoVariante, Talla, TipoProducto
+from nucleo.models import Empresa, Moneda, Sucursal
+from nucleo.permisos import RequiereCodigo
+from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
+from terceros.models import Cliente
+from usuarios.models import Usuario
+from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+
+TABLERO_URL = "/api/v1/planeacion/tablero-rotacion/"
+NECESIDADES_URL = "/api/v1/planeacion/necesidades-materia-prima/"
+URLS = (TABLERO_URL, NECESIDADES_URL)
+
+
+def _tipo_producto():
+    """Tipo de producto obligatorio (#871); PT tiene pk=3 como en producción."""
+    return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
+
+
+def _n(valor):
+    """Cantidad del JSON como ``Decimal`` (la respuesta trae ``Decimal`` sin serializer)."""
+    return Decimal(str(valor))
+
+
+def _local(dia, hora=time(12, 0)):
+    """``datetime`` aware en la zona local para ese día y hora."""
+    return timezone.make_aware(datetime.combine(dia, hora))
+
+
+class PlaneacionBaseTestCase(TestCase):
+    """Dos empresas, cada una con un producto terminado y variantes propias."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.talla = Talla.objects.create(nombre="M")
+        cls.color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000")
+        cls.a = cls._tenant("plan-a")
+        cls.b = cls._tenant("plan-b")
+        cls.superuser = Usuario.objects.create(
+            username="root-plan", email="root@plan.test", is_superuser=True,
+            empresa=cls.a["empresa"], sucursal_default=cls.a["sucursal"],
+        )
+
+    @classmethod
+    def _tenant(cls, codigo):
+        empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+        sucursal = Sucursal.objects.create(empresa=empresa, codigo=codigo[-1].upper(), nombre=codigo)
+        cliente = Cliente.objects.create(empresa=empresa, nombre=f"Cliente {codigo}")
+        admin = Usuario.objects.create(
+            username=f"admin-{codigo}", email=f"admin@{codigo}.test", empresa=empresa,
+            sucursal_default=sucursal, is_admin_empresa=True,
+        )
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Playera {codigo}")
+        return {"empresa": empresa, "sucursal": sucursal, "cliente": cliente, "admin": admin, "producto": producto}
+
+    @classmethod
+    def _variante(cls, t, sku):
+        return ProductoVariante.objects.create(
+            producto=t["producto"], empresa=t["empresa"], color=cls.color, talla=cls.talla, sku=sku, precio_base="1",
+        )
+
+    @classmethod
+    def _venta(cls, t, variante, cantidad, creado, fecha_confirmacion=None):
+        """Pedido de venta AUTORIZADO con una talla de ``variante``, dado de alta en ``creado``."""
+        pedido = Pedido.objects.create(
+            empresa=t["empresa"], sucursal=t["sucursal"], cliente=t["cliente"], moneda=cls.moneda,
+            folio=f"P-{Pedido.objects.count() + 1:05d}", persona_pagos="Pagos", correo_facturas="pagos@plan.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            estatus=Pedido.ESTATUS_AUTORIZADA, fecha_confirmacion=fecha_confirmacion,
+        )
+        # ``created_at`` es ``auto_now_add``: se fija con ``update``.
+        Pedido.objects.filter(pk=pedido.pk).update(created_at=creado)
+        detalle = PedidoDetalle.objects.create(pedido=pedido, producto=t["producto"], precio_unitario="10")
+        PedidoDetalleTalla.objects.create(pedido_detalle=detalle, talla=cls.talla, cantidad=cantidad, variante=variante)
+        return pedido
+
+    @classmethod
+    def _rol_con(cls, empresa, codigo, claves):
+        rol = Rol.objects.create(empresa=empresa, codigo=codigo, nombre=codigo, estatus=Rol.Estatus.ACTIVO)
+        for clave in claves:
+            permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+            RolPermiso.objects.create(rol=rol, permiso=permiso)
+        return rol
+
+    def _usuario(self, sufijo, claves=(), empresa_rol=None):
+        """Usuario normal de la empresa A con un rol de ``claves`` en ``empresa_rol`` (A por default)."""
+        user = Usuario.objects.create(
+            username=f"plan-{sufijo}", email=f"plan-{sufijo}@plan.test",
+            empresa=self.a["empresa"], sucursal_default=self.a["sucursal"],
+        )
+        if claves:
+            empresa_rol = empresa_rol or self.a["empresa"]
+            rol = self._rol_con(empresa_rol, f"rol-{sufijo}", claves)
+            UsuarioRol.objects.create(usuario=user, rol=rol, empresa=empresa_rol)
+        return user
+
+    def _get(self, user, url=TABLERO_URL, **params):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(url, {"page_size": 500, **params})
+
+    def _fila(self, data, variante):
+        filas = [r for r in data["results"] if r["variante_id"] == variante.pk]
+        self.assertEqual(len(filas), 1, f"la variante {variante.sku} no vino en el tablero")
+        return filas[0]
+
+
+class PermisoPlaneacionTests(PlaneacionBaseTestCase):
+    """Ambos endpoints exigen ``R-PRODUCCION`` con la regla de ``permisos_efectivos``."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls._variante(cls.a, "A-1")
+
+    def _assert_status(self, user, esperado):
+        for url in URLS:
+            with self.subTest(url=url, usuario=user.username):
+                self.assertEqual(self._get(user, url).status_code, esperado)
+
+    def test_sin_codigo_responde_403(self):
+        self._assert_status(self._usuario("sin"), 403)
+
+    def test_codigo_de_otro_modulo_no_basta(self):
+        self._assert_status(self._usuario("crm", ["R-CRM", "R-PRODUCCION-OP"]), 403)
+
+    def test_con_r_produccion_responde_200(self):
+        self._assert_status(self._usuario("prod", ["R-PRODUCCION"]), 200)
+
+    def test_superusuario_pasa(self):
+        self._assert_status(self.superuser, 200)
+
+    def test_admin_de_empresa_pasa(self):
+        self._assert_status(self.a["admin"], 200)
+
+    def test_override_deny_gana_al_rol(self):
+        user = self._usuario("deny", ["R-PRODUCCION"])
+        UsuarioPermiso.objects.create(
+            usuario=user, permiso=Permiso.objects.get(clave="R-PRODUCCION"), tipo=UsuarioPermiso.TIPO_DENY,
+        )
+        self._assert_status(user, 403)
+
+    def test_rol_de_otra_empresa_no_cuenta(self):
+        self._assert_status(self._usuario("otra", ["R-PRODUCCION"], empresa_rol=self.b["empresa"]), 403)
+
+    def test_sin_empresa_el_permiso_va_antes_que_el_400(self):
+        """Sin empresa activa no cuenta ningún rol (``UsuarioRol.empresa`` es
+        obligatorio): un usuario normal recibe 403. Solo llegan al 400 quien pasa el
+        permiso sin rol: superusuario, admin de empresa u override GRANT global."""
+        normal = self._usuario("sin-emp", ["R-PRODUCCION"])
+        normal.empresa = None
+        normal.save(update_fields=["empresa"])
+        self._assert_status(normal, 403)
+
+        grant = Usuario.objects.create(username="plan-grant", email="plan-grant@plan.test")
+        UsuarioPermiso.objects.create(
+            usuario=grant, tipo=UsuarioPermiso.TIPO_GRANT,
+            permiso=Permiso.objects.get_or_create(clave="R-PRODUCCION", defaults={"nombre": "R-PRODUCCION"})[0],
+        )
+        superuser = Usuario.objects.create(username="root-sin-emp", email="root-sin@plan.test", is_superuser=True)
+        admin = Usuario.objects.create(username="admin-sin-emp", email="admin-sin@plan.test", is_admin_empresa=True)
+        for user in (grant, superuser, admin):
+            self._assert_status(user, 400)
+
+    def test_anonimo_no_entra(self):
+        for url in URLS:
+            with self.subTest(url=url):
+                self.assertIn(APIClient().get(url).status_code, (401, 403))
+
+
+class RequiereCodigoTests(SimpleTestCase):
+    """``RequiereCodigo`` falla cerrado: sin códigos es error de configuración."""
+
+    def _vista(self, **attrs):
+        return type("VistaPrueba", (APIView,), attrs)()
+
+    def test_sin_codigos_declarados_es_error_de_configuracion(self):
+        request = APIRequestFactory().get("/x/")
+        for attrs in ({}, {"codigos_requeridos": ()}, {"codigos_requeridos": None}):
+            with self.subTest(attrs=attrs), self.assertRaises(ImproperlyConfigured):
+                RequiereCodigo().has_permission(request, self._vista(**attrs))
+
+    def test_codigos_mal_declarados_son_error_de_configuracion(self):
+        """Un string se recorrería letra por letra: nadie normal pasaría y el
+        superusuario sí, así que el error no se vería al probar con él."""
+        request = APIRequestFactory().get("/x/")
+        for codigos in ("R-PRODUCCION", b"R-PRODUCCION", ("R-PRODUCCION", 1), [None], {"R-PRODUCCION": 1}):
+            with self.subTest(codigos=codigos), self.assertRaises(ImproperlyConfigured):
+                RequiereCodigo().has_permission(request, self._vista(codigos_requeridos=codigos))
+
+    def test_codigos_bien_declarados_no_son_error(self):
+        request = APIRequestFactory().get("/x/")
+        request.user = AnonymousUser()
+        for codigos in (("R-PRODUCCION",), ["R-PRODUCCION"], {"R-PRODUCCION"}, frozenset({"R-PRODUCCION"})):
+            with self.subTest(codigos=codigos):
+                self.assertFalse(RequiereCodigo().has_permission(request, self._vista(codigos_requeridos=codigos)))
+
+
+class AislamientoPlaneacionTests(PlaneacionBaseTestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.va = cls._variante(cls.a, "A-1")
+        cls.vb = cls._variante(cls.b, "B-1")
+        hace_dias = timezone.localdate() - timedelta(days=3)
+        cls._venta(cls.a, cls.va, 4, _local(hace_dias))
+        cls._venta(cls.b, cls.vb, 9, _local(hace_dias))
+
+    def test_variante_de_otra_empresa_responde_404(self):
+        resp = self._get(self.a["admin"], NECESIDADES_URL, variante=self.vb.pk)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_solo_aparecen_variantes_y_ventas_de_la_empresa_activa(self):
+        for user in (self.a["admin"], self.superuser):
+            with self.subTest(usuario=user.username):
+                data = self._get(user).json()
+                self.assertEqual([r["variante_id"] for r in data["results"]], [self.va.pk])
+                self.assertEqual(_n(data["resumen"]["vendido_periodo"]), 4)
+
+    def test_sucursal_de_otra_empresa_responde_400(self):
+        """Una sucursal ajena a la empresa no se acepta como filtro (#1109): ``400``
+        en ambos endpoints, sin datos de la otra empresa."""
+        for url in URLS:
+            with self.subTest(url=url):
+                resp = self._get(self.a["admin"], url, sucursal=self.b["sucursal"].pk)
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(resp.json(), {"sucursal": ["Sucursal no encontrada."]})
+
+
+class FechaVentaTests(PlaneacionBaseTestCase):
+    """La fecha de venta es el alta del pedido, no ``fecha_confirmacion`` (EC-875)."""
+
+    def test_confirmacion_futura_cuenta_por_su_alta(self):
+        v = self._variante(self.a, "A-FUT")
+        hoy = timezone.localdate()
+        self._venta(self.a, v, 7, _local(hoy - timedelta(days=10)), fecha_confirmacion=timezone.now() + timedelta(days=60))
+        fila = self._fila(self._get(self.a["admin"]).json(), v)
+        self.assertEqual(_n(fila["vendido_periodo"]), 7)
+        self.assertEqual(sum(fila["serie_semanal"]), 7)
+        self.assertEqual(fila["ultima_venta"], (hoy - timedelta(days=10)).isoformat())
+        self.assertEqual(fila["dias_sin_venta"], 10)
+
+    def test_serie_cuadra_con_el_vendido_y_no_hay_dias_negativos(self):
+        hoy = timezone.localdate()
+        ahora = timezone.now()
+        for i, (dias, conf) in enumerate([(0, 30), (5, -2), (20, 90), (40, None), (80, 5)]):
+            v = self._variante(self.a, f"A-MIX-{i}")
+            creado = min(_local(hoy - timedelta(days=dias), time(0, 30)), ahora)
+            self._venta(self.a, v, i + 1, creado, ahora + timedelta(days=conf) if conf is not None else None)
+        for r in self._get(self.a["admin"]).json()["results"]:
+            with self.subTest(sku=r["sku"]):
+                self.assertEqual(sum(r["serie_semanal"]), _n(r["vendido_periodo"]))
+                self.assertGreaterEqual(r["dias_sin_venta"], 0)
+
+    def test_dia_frontera_cuenta_igual_en_vendido_y_serie(self):
+        """Con ``semanas=1`` el periodo son los 7 días locales hasta hoy: la venta del
+        primer día cuenta en ambos y la del día anterior en ninguno (va al periodo anterior)."""
+        hoy = timezone.localdate()
+        primer_dia = hoy - timedelta(days=6)
+        dentro = self._variante(self.a, "A-DENTRO")
+        fuera = self._variante(self.a, "A-FUERA")
+        self._venta(self.a, dentro, 3, _local(primer_dia, time(0, 1)))
+        self._venta(self.a, fuera, 5, _local(primer_dia - timedelta(days=1), time(23, 59)))
+        data = self._get(self.a["admin"], semanas=1).json()
+        self.assertEqual(data["parametros"]["desde"], primer_dia.isoformat())
+        f_dentro, f_fuera = self._fila(data, dentro), self._fila(data, fuera)
+        self.assertEqual((_n(f_dentro["vendido_periodo"]), f_dentro["serie_semanal"]), (3, [3]))
+        self.assertEqual((_n(f_fuera["vendido_periodo"]), f_fuera["serie_semanal"]), (0, [0]))
+        self.assertEqual(_n(f_fuera["vendido_periodo_anterior"]), 5)
+
+    def test_sin_venta_reciente_queda_sin_venta_aunque_la_confirmacion_sea_futura(self):
+        v = self._variante(self.a, "A-VIEJO")
+        self._venta(self.a, v, 2, _local(timezone.localdate() - timedelta(days=120)),
+                    fecha_confirmacion=timezone.now() + timedelta(days=30))
+        fila = self._fila(self._get(self.a["admin"]).json(), v)
+        self.assertEqual(fila["estado"], "SIN_VENTA")
+        self.assertEqual(fila["dias_sin_venta"], 120)
+        self.assertTrue(fila["candidato_descontinuar"])
+
+    def test_sin_alta_usa_la_confirmacion_pasada_y_descarta_la_futura(self):
+        """``created_at`` admite NULL: solo entonces la fecha de venta es
+        ``fecha_confirmacion``, y una futura sigue sin contar."""
+        hoy = timezone.localdate()
+        pasada = self._variante(self.a, "A-NULL-PASADA")
+        futura = self._variante(self.a, "A-NULL-FUTURA")
+        self._venta(self.a, pasada, 6, None, fecha_confirmacion=_local(hoy - timedelta(days=10)))
+        self._venta(self.a, futura, 4, None, fecha_confirmacion=timezone.now() + timedelta(days=20))
+        data = self._get(self.a["admin"]).json()
+        f_pasada, f_futura = self._fila(data, pasada), self._fila(data, futura)
+        self.assertEqual((_n(f_pasada["vendido_periodo"]), sum(f_pasada["serie_semanal"])), (6, 6))
+        self.assertEqual(f_pasada["dias_sin_venta"], 10)
+        self.assertEqual((_n(f_futura["vendido_periodo"]), f_futura["ultima_venta"]), (0, None))
+
+    def test_necesidades_usa_el_mismo_calculo(self):
+        """``necesidades-materia-prima`` resurte con la venta por alta: un pedido dado de
+        alta fuera del periodo no se resurte aunque su confirmación sea futura (con
+        ``fecha_confirmacion`` como fecha de venta sí entraba)."""
+        hoy = timezone.localdate()
+        viejo = self._variante(self.a, "A-NEC-VIEJO")
+        reciente = self._variante(self.a, "A-NEC-RECIENTE")
+        self._venta(self.a, viejo, 80, _local(hoy - timedelta(days=120)),
+                    fecha_confirmacion=timezone.now() + timedelta(days=40))
+        self._venta(self.a, reciente, 80, _local(hoy - timedelta(days=2)))
+        data = self._get(self.a["admin"]).json()
+        self.assertEqual(self._fila(data, viejo)["resurtido_sugerido"], 0)
+        resurtido = self._fila(data, reciente)["resurtido_sugerido"]
+        self.assertGreater(resurtido, 0)
+        necesidades = self._get(self.a["admin"], NECESIDADES_URL).json()
+        self.assertEqual([x["variante_id"] for x in necesidades["variantes_sin_bom"]], [reciente.pk])
+        self.assertEqual(necesidades["resumen"]["piezas_a_resurtir"], resurtido)
+
+
+class ConsultasFijasTests(PlaneacionBaseTestCase):
+    """El número de consultas no crece con variantes ni pedidos."""
+
+    def _consultas(self, url):
+        user = self._usuario(f"q-{Usuario.objects.count()}", ["R-PRODUCCION"])
+        with CaptureQueriesContext(connection) as ctx:
+            self.assertEqual(self._get(user, url).status_code, 200)
+        return len(ctx.captured_queries)
+
+    def test_consultas_constantes(self):
+        hoy = timezone.localdate()
+        self._venta(self.a, self._variante(self.a, "A-Q0"), 1, _local(hoy - timedelta(days=1)))
+        antes = {url: self._consultas(url) for url in URLS}
+        for i in range(1, 6):
+            v = self._variante(self.a, f"A-Q{i}")
+            self._venta(self.a, v, 50 * i, _local(hoy - timedelta(days=i)), fecha_confirmacion=timezone.now() + timedelta(days=i))
+            self._venta(self.a, v, i, _local(hoy - timedelta(days=100 + i)))
+        for url in URLS:
+            with self.subTest(url=url):
+                self.assertEqual(self._consultas(url), antes[url])
+
+    def test_sucursales_visibles_una_vez_por_peticion(self):
+        """La validación de ``?sucursal=`` y el ámbito del cálculo comparten las
+        sucursales visibles del usuario: una sola consulta a su M2M de sucursales."""
+        tabla = Usuario.sucursales.through._meta.db_table
+        user = self._usuario("suc-una", ["R-PRODUCCION"])
+        user.sucursales.add(self.a["sucursal"])
+        variante = self._variante(self.a, "A-SUC")
+        for url, params in ((TABLERO_URL, {}), (NECESIDADES_URL, {}), (NECESIDADES_URL, {"variante": variante.pk})):
+            with self.subTest(url=url, params=params):
+                with CaptureQueriesContext(connection) as ctx:
+                    self.assertEqual(self._get(user, url, **params).status_code, 200)
+                self.assertEqual(sum(f'"{tabla}"' in q["sql"] for q in ctx.captured_queries), 1)
