@@ -6805,6 +6805,66 @@ class OrdenProduccionDetalleTenantTests(_BomTenantBase, TestCase):
 
         self.assertEqual(resp.status_code, 200, resp.data)
 
+    def test_patch_sin_pedido_en_el_body_no_revisa_renglones_guardados(self):
+        op = self._op_con_renglon(pedido=self.pedido, pedido_detalle=self.linea_otro_pedido)
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"prioridad": 3}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.prioridad, 3)
+
+    # --- varios pedidos: cambiar el conjunto ``pedidos_ids`` también revisa ---
+
+    def _op_con_pedidos(self, pedidos, pedido_detalle):
+        from produccion.models import OrdenProduccionPedido
+
+        op = self._op_con_renglon(pedido=pedidos[0], pedido_detalle=pedido_detalle)
+        for pedido in pedidos:
+            OrdenProduccionPedido.objects.create(op=op, pedido=pedido)
+        return op
+
+    def _pedidos_ligados(self, op):
+        return set(op.op_pedidos.values_list("pedido_id", flat=True))
+
+    def test_reducir_pedidos_ids_rechaza_renglones_del_pedido_que_se_quita(self):
+        op = self._op_con_pedidos([self.pedido, self.otro_pedido], self.linea_otro_pedido)
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedidos_ids": [self.pedido.pk]}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pedido", resp.data)
+        self.assertEqual(self._pedidos_ligados(op), {self.pedido.pk, self.otro_pedido.pk})
+
+    def test_cambiar_pedidos_ids_rechaza_renglones_del_pedido_que_sale(self):
+        tercero, _ = self._pedido_muestra(self.empresa, self.sucursal, self.cliente)
+        op = self._op_con_pedidos([self.pedido, self.otro_pedido], self.linea_otro_pedido)
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", {"pedidos_ids": [self.pedido.pk, tercero.pk]}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pedido", resp.data)
+        self.assertEqual(self._pedidos_ligados(op), {self.pedido.pk, self.otro_pedido.pk})
+
+    def test_mismos_pedidos_ids_no_revisa_renglones_guardados(self):
+        # Renglón heredado de un pedido que la OP no tiene: reenviar el mismo
+        # conjunto no es un cambio y no bloquea la edición del encabezado.
+        op = self._op_con_pedidos([self.pedido], self.linea_otro_pedido)
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", {"pedidos_ids": [self.pedido.pk], "prioridad": 2}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._pedidos_ligados(op), {self.pedido.pk})
+
+    def test_ampliar_pedidos_ids_acepta_renglones_de_los_pedidos_ligados(self):
+        op = self._op_con_pedidos([self.pedido], self.linea)
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", {"pedidos_ids": [self.pedido.pk, self.otro_pedido.pk]}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._pedidos_ligados(op), {self.pedido.pk, self.otro_pedido.pk})
+
     # --- ruta_produccion (FK de encabezado con empresa propia) ---
 
     def test_ruta_produccion_de_otra_empresa_se_rechaza_en_create_y_patch(self):
