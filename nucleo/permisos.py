@@ -245,3 +245,8 @@ CODIGOS_CLIENTES = (
     "R-MESACONTROL", "R-MESACONTROL-CLIENTES",
     "R-CONTABILIDAD", "R-CONTABILIDAD-CLIENTES", "R-CONTABILIDAD-CXC",
 )
+
+# Planeación (EC-875): tablero de rotación y necesidades de materia prima leen ventas,
+# clientes, existencias y BOM. Mismo código que la regla de módulo ``/manufacturing``
+# de ``routePermissions.ts``; el catálogo no tiene código de sección de Planeación.
+CODIGOS_PLANEACION = ("R-PRODUCCION",)

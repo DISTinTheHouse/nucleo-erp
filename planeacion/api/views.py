@@ -4,14 +4,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from catalogo.models import ProductoVariante
-from nucleo.permisos import RequiereCodigo
+from nucleo.permisos import CODIGOS_PLANEACION, RequiereCodigo
 from planeacion.services import capacidad
 from planeacion.services import tablero_rotacion as tablero
 from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
-
-# Lee ventas, clientes, existencias y BOM: módulo de Producción (EC-875). Mismo
-# código que la regla ``/manufacturing`` del frontend.
-CODIGOS_PLANEACION = ("R-PRODUCCION",)
 
 
 class TableroRotacionParamsSerializer(serializers.Serializer):
