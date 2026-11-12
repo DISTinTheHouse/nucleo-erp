@@ -517,11 +517,23 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
     def get_ruta_critica(self, obj):
         return estado_ruta_critica(getattr(obj, "ruta_critica", None))
 
-def pedidos_de_op(op):
+def pedidos_de_op(op, con_cliente=False):
     """``[{id, folio}]`` de los pedidos de la OP, principal primero. Lee la
-    precarga ``op_pedidos__pedido`` si existe (listado sin consultas por fila)."""
+    precarga ``op_pedidos__pedido`` si existe (listado sin consultas por fila).
+
+    ``con_cliente`` (EC-880, sólo el detalle ``onboarding/?op_id=``) agrega
+    ``cliente`` a cada pedido (``cliente_de_pedido``); quien lo pide precarga
+    ``op_pedidos__pedido__cliente``. El listado no lo pide: su precarga usa
+    ``.only()`` sin los campos del cliente y leerlos sería una consulta por fila.
+    """
     filas = sorted(op.op_pedidos.all(), key=lambda r: (r.pedido_id != op.pedido_id, r.pk))
-    return [{"id": r.pedido_id, "folio": r.pedido.folio} for r in filas]
+    if not con_cliente:
+        return [{"id": r.pedido_id, "folio": r.pedido.folio} for r in filas]
+    from produccion.services.orden_bordado_field_filter_service import cliente_de_pedido
+    return [
+        {"id": r.pedido_id, "folio": r.pedido.folio, "cliente": cliente_de_pedido(r.pedido)}
+        for r in filas
+    ]
 
 
 def ligar_pedidos_op(op, pedidos=None):
@@ -571,7 +583,7 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
     pedidos = serializers.SerializerMethodField()
 
     def get_pedidos(self, obj):
-        return pedidos_de_op(obj)
+        return pedidos_de_op(obj, con_cliente=self.context.get("pedidos_con_cliente", False))
 
     def validate_pedidos_ids(self, ids):
         ids = list(dict.fromkeys(ids))

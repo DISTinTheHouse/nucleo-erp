@@ -565,7 +565,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             # una query lazy en retrieve; el listado usa el serializer ligero y no
             # las toca, por eso solo se aplica fuera de ``list``.
             queryset = queryset.select_related(
-                "empresa", "sucursal", "pedido", "usuario_asignado"
+                "empresa", "sucursal", "pedido__cliente", "usuario_asignado"
             ).prefetch_related(
                 Prefetch("op_pedidos", queryset=OrdenProduccionPedido.objects.select_related("pedido").only(
                     "id", "op_id", "pedido_id", "pedido__folio")),
@@ -1276,6 +1276,10 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                     puntadas_por_pieza__gt=0, cantidad_bordada__gt=0,
                 ),
             )
+        if self.action == "retrieve":
+            # ``pedido_vinculado.cliente`` (EC-880): respaldo al cliente vivo
+            # cuando la foto del pedido está vacía, en el mismo JOIN.
+            qs = qs.select_related("pedido__cliente")
         return ordenes_bordado_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
@@ -1693,6 +1697,10 @@ class OrdenReflejanteViewSet(
         )
         if self.action == "list":
             qs = qs.annotate(av_cantidad=_suma_avances(ReflejanteAvances, "orden_r", "cantidad_aplicada"))
+        if self.action == "retrieve":
+            # ``pedido_vinculado.cliente`` (EC-880): respaldo al cliente vivo
+            # cuando la foto del pedido está vacía, en el mismo JOIN.
+            qs = qs.select_related("pedido__cliente")
         return ordenes_reflejante_visibles(qs, self.request.user)
 
     def get_serializer_class(self):
@@ -2078,6 +2086,10 @@ class OrdenesCorteMangaViewSet(
         )
         if self.action == "list":
             qs = qs.annotate(av_cantidad=_suma_avances(CorteMangaAvances, "ocm", "cantidad"))
+        if self.action == "retrieve":
+            # ``pedido_vinculado.cliente`` (EC-880): respaldo al cliente vivo
+            # cuando la foto del pedido está vacía, en el mismo JOIN.
+            qs = qs.select_related("pedido__cliente")
         return ordenes_corte_manga_visibles(qs, self.request.user)
 
     def get_serializer_class(self):

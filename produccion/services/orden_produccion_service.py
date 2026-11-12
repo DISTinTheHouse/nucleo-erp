@@ -13,6 +13,7 @@ from produccion.models import (
     ConsumoProduccionDetalle,
     OrdenProduccion,
     OrdenProduccionDetalle,
+    OrdenProduccionPedido,
 )
 from produccion.utils.folios import generate_op_folio
 
@@ -331,6 +332,11 @@ class OrdenProduccionService:
             'orden_produccion_detalle__bom__materia_prima_detalle__componente',
             'orden_produccion_detalle__bom__materia_prima_detalle__unidad',
             'consumoproduccion_set__detalles__producto',
+            # ``pedidos[].cliente`` (EC-880): una consulta para todos los pedidos.
+            models.Prefetch(
+                'op_pedidos',
+                queryset=OrdenProduccionPedido.objects.select_related('pedido__cliente'),
+            ),
         ).first()
 
         if not op:
@@ -426,7 +432,7 @@ class OrdenProduccionService:
             })
 
         from produccion.api.serializers import OrdenProduccionSerializer
-        res_data = OrdenProduccionSerializer(op).data
+        res_data = OrdenProduccionSerializer(op, context={"pedidos_con_cliente": True}).data
         res_data.pop("orden_produccion_detalle", None)
         res_data["op_info"] = op.folio_op
         res_data["productos"] = productos_list

@@ -7830,3 +7830,125 @@ class ContratoProduccionListadosYOnboardingMuestraTests(TestCase):
         for campo in ("fecha_compromiso", "prendas_total", "piezas_total", "servicios", "ordenes_produccion"):
             self.assertIn(campo, PedidoEspecialListSerializer.Meta.fields)
         self.assertIn("tiene_bom", VarianteProduccionListSerializer.Meta.fields)
+
+
+# --- EC-880: datos para el PDF de OP, OB, OR y OCM ----------------------------
+
+
+class _DetallesOrdenesEC880Base(TestCase):
+    """Una empresa con dos pedidos del mismo cliente: uno con la foto del cliente
+    llena (``cliente_*`` del pedido) y otro sin foto (respaldo al ``Cliente``
+    vivo). OB, OR y OCM sobre cada pedido y una OP que cubre ambos."""
+
+    URL_OP = "/api/v1/produccion/orden-produccion/onboarding/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="ec880", razon_social="EC880 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="E88", nombre="Matriz")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.usuario = Usuario.objects.create(
+            username="ec880@acme.test", email="ec880@acme.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(
+            empresa=cls.empresa, nombre="Cliente Vivo", razon_social="CLIENTE VIVO SA",
+            rfc="CVI010101AA1",
+        )
+        cls.pedido_foto = cls._pedido(
+            cliente_nombre="Foto Nombre", cliente_razon_social="FOTO SA", cliente_rfc="FOT010101AA1",
+        )
+        cls.pedido_vivo = cls._pedido()
+        comun = {"empresa": cls.empresa, "sucursal": cls.sucursal}
+        cls.ordenes = {}
+        for etiqueta, pedido in (("foto", cls.pedido_foto), ("vivo", cls.pedido_vivo)):
+            cls.ordenes[("ob", etiqueta)] = OrdenesBordado.objects.create(
+                folio_bordado=f"OB-880-{etiqueta}", pedido=pedido, **comun)
+            cls.ordenes[("or", etiqueta)] = OrdenesReflejante.objects.create(
+                folio_reflejante=f"OR-880-{etiqueta}", pedido=pedido, **comun)
+            cls.ordenes[("ocm", etiqueta)] = OrdenesCorteManga.objects.create(
+                folio_ocm=f"OCM-880-{etiqueta}", pedido=pedido, **comun)
+        cls.op = OrdenProduccion.objects.create(folio_op="OP-880-1", pedido=cls.pedido_foto, **comun)
+        from produccion.api.serializers import ligar_pedidos_op
+        ligar_pedidos_op(cls.op, [cls.pedido_foto, cls.pedido_vivo])
+
+    @classmethod
+    def _pedido(cls, **extra):
+        return Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente, moneda=cls.moneda,
+            persona_pagos="Pagos", correo_facturas="f@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", **extra,
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(self.usuario)
+
+    def _detalle_op(self, op=None):
+        resp = self.client.get(self.URL_OP, {"op_id": (op or self.op).pk})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return resp.json()
+
+
+class ClienteEnDetallesDeOrdenesTests(_DetallesOrdenesEC880Base):
+    """``pedido_vinculado.cliente`` en OB/OR/OCM (y OP) y ``pedidos[].cliente``
+    en el detalle de la OP: la foto del pedido manda; dato vacío -> cliente vivo."""
+
+    URLS = {
+        "ob": "/api/v1/produccion/orden-bordado/",
+        "or": "/api/v1/produccion/orden-reflejante/",
+        "ocm": "/api/v1/produccion/orden-corte-manga/",
+    }
+
+    def _esperado(self, etiqueta):
+        if etiqueta == "foto":
+            return {"id": self.cliente.pk, "nombre": "Foto Nombre", "razon_social": "FOTO SA",
+                    "rfc": "FOT010101AA1"}
+        return {"id": self.cliente.pk, "nombre": "Cliente Vivo", "razon_social": "CLIENTE VIVO SA",
+                "rfc": "CVI010101AA1"}
+
+    def test_ob_or_ocm_traen_el_cliente_en_pedido_vinculado(self):
+        for tipo, url in self.URLS.items():
+            for etiqueta in ("foto", "vivo"):
+                with self.subTest(tipo=tipo, etiqueta=etiqueta):
+                    orden = self.ordenes[(tipo, etiqueta)]
+                    resp = self.client.get(f"{url}{orden.pk}/")
+                    self.assertEqual(resp.status_code, 200)
+                    vinculado = resp.json()["pedido_vinculado"]
+                    self.assertEqual(vinculado["id"], orden.pedido_id)
+                    self.assertIn("folio", vinculado)
+                    self.assertEqual(vinculado["cliente"], self._esperado(etiqueta))
+
+    def test_foto_parcial_completa_solo_lo_que_falta(self):
+        Pedido.objects.filter(pk=self.pedido_foto.pk).update(cliente_rfc="")
+        orden = self.ordenes[("ob", "foto")]
+        cliente = self.client.get(f"{self.URLS['ob']}{orden.pk}/").json()["pedido_vinculado"]["cliente"]
+        self.assertEqual(cliente["nombre"], "Foto Nombre")
+        self.assertEqual(cliente["rfc"], "CVI010101AA1")
+
+    def test_detalle_op_trae_cliente_por_pedido_principal_primero(self):
+        data = self._detalle_op()
+        self.assertEqual(
+            data["pedidos"],
+            [
+                {"id": self.pedido_foto.pk, "folio": self.pedido_foto.folio, "cliente": self._esperado("foto")},
+                {"id": self.pedido_vivo.pk, "folio": self.pedido_vivo.folio, "cliente": self._esperado("vivo")},
+            ],
+        )
+        self.assertEqual(data["pedido_vinculado"]["cliente"], self._esperado("foto"))
+
+    def test_op_sin_pedido_no_trae_pedido_vinculado(self):
+        op = OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op="OP-880-SP")
+        data = self._detalle_op(op)
+        self.assertIsNone(data["pedido_vinculado"])
+        self.assertEqual(data["pedidos"], [])
+
+    def test_listado_de_op_no_cambia_su_forma_de_pedidos(self):
+        filas = self.client.get("/api/v1/produccion/orden-produccion/").json()
+        fila = next(f for f in filas if f["op_id"] == self.op.pk)
+        self.assertEqual(
+            fila["pedidos"],
+            [{"id": self.pedido_foto.pk, "folio": self.pedido_foto.folio},
+             {"id": self.pedido_vivo.pk, "folio": self.pedido_vivo.folio}],
+        )
+
