@@ -162,6 +162,25 @@ class PermisoPlaneacionTests(PlaneacionBaseTestCase):
     def test_rol_de_otra_empresa_no_cuenta(self):
         self._assert_status(self._usuario("otra", ["R-PRODUCCION"], empresa_rol=self.b["empresa"]), 403)
 
+    def test_sin_empresa_el_permiso_va_antes_que_el_400(self):
+        """Sin empresa activa no cuenta ningún rol (``UsuarioRol.empresa`` es
+        obligatorio): un usuario normal recibe 403. Solo llegan al 400 quien pasa el
+        permiso sin rol: superusuario, admin de empresa u override GRANT global."""
+        normal = self._usuario("sin-emp", ["R-PRODUCCION"])
+        normal.empresa = None
+        normal.save(update_fields=["empresa"])
+        self._assert_status(normal, 403)
+
+        grant = Usuario.objects.create(username="plan-grant", email="plan-grant@plan.test")
+        UsuarioPermiso.objects.create(
+            usuario=grant, tipo=UsuarioPermiso.TIPO_GRANT,
+            permiso=Permiso.objects.get_or_create(clave="R-PRODUCCION", defaults={"nombre": "R-PRODUCCION"})[0],
+        )
+        superuser = Usuario.objects.create(username="root-sin-emp", email="root-sin@plan.test", is_superuser=True)
+        admin = Usuario.objects.create(username="admin-sin-emp", email="admin-sin@plan.test", is_admin_empresa=True)
+        for user in (grant, superuser, admin):
+            self._assert_status(user, 400)
+
     def test_anonimo_no_entra(self):
         for url in URLS:
             with self.subTest(url=url):

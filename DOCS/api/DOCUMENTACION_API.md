@@ -8034,9 +8034,9 @@ Response 200: misma shape que Response 201 (con totales actualizados).
 Sirve a la junta semanal de planeación: qué producto terminado se vende más, cuál casi no se vende (candidatos a descontinuar) y cuánto resurtir. No incluye muestras ni pedidos especiales.
 
 - **Permiso:** exige `R-PRODUCCION` (el mismo código de la regla `/manufacturing` del frontend); sin él responde `403`. Superusuario y admin de empresa pasan siempre; sólo cuentan los roles y overrides de la empresa activa y un override DENY gana al rol (EC-875).
-- **Alcance:** siempre la empresa activa del usuario, también para el superusuario. Si el usuario no tiene empresa, responde `400`.
+- **Alcance:** siempre la empresa activa del usuario, también para el superusuario. El permiso se revisa antes que la empresa: sin empresa activa no cuenta ningún rol (todos son de una empresa), así que un usuario normal sin empresa recibe `403`. Solo llegan al `400` ("Tu usuario no tiene una empresa activa.") quienes pasan el permiso sin rol: superusuario, admin de empresa o un override GRANT global de `R-PRODUCCION`.
 - **Importes:** `importe_vendido` solo llega con permiso de importes de pedido (contabilidad de ventas o de compras); sin él llega `null`, y ordenar por ese campo responde `400`.
-- **Velocidad:** 7 consultas fijas, sin importar cuántos artículos haya (3 con `variante`).
+- **Velocidad:** consultas fijas, sin importar cuántos artículos haya. Medido con un usuario normal con `R-PRODUCCION` (sin contar la autenticación): **11** en el tablero y en el consolidado de necesidades = 7 del cálculo (universo, venta agrupada, serie semanal, existencias, OPs abiertas, BOM e insumos) + 2 del permiso (overrides y roles) + 1 de las claves de departamento para los importes + 1 de la empresa activa. Con `variante`: **7** = 3 del cálculo + las mismas 4. Superusuario y admin de empresa no consultan permisos ni claves: 8 y 4.
 
 **Origen de los datos**
 
