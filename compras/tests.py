@@ -3331,3 +3331,19 @@ class RecepcionRetrieveOrigenTallaTests(TestCase):
         filas, consultas_cinco = self._get(RECEPCIONES_URL)
         self.assertEqual(len(filas), 5)
         self.assertEqual(consultas_dos, consultas_cinco)
+
+    def test_renglon_igual_en_el_retrieve_de_la_recepcion_y_en_el_de_la_oc(self):
+        # Ambos retrieves sirven el mismo serializer de renglón: mismas llaves y valores.
+        ubicacion = Ubicacion.objects.create(almacen=self.almacen, pasillo="9")
+        recepcion = self._recepcion(orden_compra=self.oc)
+        self._renglon(recepcion, self.variantes[2])
+        self._renglon(recepcion)
+        RecepcionDetalle.objects.create(
+            recepcion=recepcion, producto=self.producto_pt, producto_variante=self.variante_sin_talla,
+            ubicacion=ubicacion, cantidad_recibida=Decimal("2.5"),
+        )
+        de_recepcion, _ = self._retrieve(recepcion)
+        de_oc, _ = self._get(f"/api/v1/compras/ordenes/{self.oc.pk}/")
+        (anidada,) = [r for r in de_oc["recepciones"] if r["id"] == recepcion.pk]
+        self.assertEqual(len(de_recepcion["detalles"]), 3)
+        self.assertEqual(de_recepcion["detalles"], anidada["detalles"])

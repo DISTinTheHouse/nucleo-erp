@@ -287,11 +287,29 @@ class OrdenCompraDetalleSerializer(serializers.ModelSerializer):
 
 
 class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
+    """Renglón de recepción anidado: en ``recepciones[].detalles[]`` del retrieve
+    de la OC y, vía ``RecepcionDetalleRetrieveSerializer``, en ``detalles[]`` del
+    retrieve de la recepción.
+
+    Las FK que resuelve (producto, variante y su talla, ubicación y su almacén)
+    llegan en el ``select_related`` del ``Prefetch`` de ``recepciondetalle_set``
+    de ambos viewsets: sin consultas por fila. Mantén los dos ``Prefetch`` al
+    día si agregas un campo que cruce otra FK.
+
+    Sirve tanto a renglones de OC como de OP: ``producto`` es NOT NULL en el
+    modelo (el onboarding lo puebla en ambos orígenes), así que
+    ``producto_nombre`` siempre resuelve. En un renglón de OC ``producto_variante``
+    y ``orden_compra_detalle`` conviven con ``orden_produccion_detalle`` nulo; en
+    uno de OP es al revés (``producto_variante`` poblado, ``orden_compra_detalle``
+    nulo). La forma expone ``orden_compra_detalle`` pero no
+    ``orden_produccion_detalle``.
+    """
+
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
     # Identifica la materia prima, que no tiene variante (``producto`` va en el select_related).
     producto_codigo = serializers.CharField(source="producto.codigo", read_only=True, default=None)
     producto_cod_proscai = serializers.CharField(source="producto.cod_proscai", read_only=True, default=None)
-    # ``producto_variante`` viene en el ``select_related`` del retrieve de la OC.
+    # ``producto_variante`` viene en el ``select_related`` de ambos retrieves.
     producto_variante_sku = serializers.CharField(
         source="producto_variante.sku", read_only=True, default=None
     )
@@ -500,59 +518,14 @@ class RecepcionListSerializer(RecepcionSerializer):
         pass
 
 
-class RecepcionDetalleRetrieveSerializer(serializers.ModelSerializer):
+class RecepcionDetalleRetrieveSerializer(RecepcionDetalleResumenSerializer):
     """Renglón anidado del ``retrieve`` individual de una recepción.
 
-    Resuelve ``producto_nombre`` y ``ubicacion_nombre`` a través de las FK que el
-    ``prefetch_related`` del viewset trae con ``select_related`` — sin consultas
-    por fila (a diferencia de ``RecepcionDetalleResumenSerializer``, cuyo
-    ``recepciondetalle_set`` no venía optimizado).
-
-    Sirve tanto a renglones de OC como de OP: ``producto`` es NOT NULL en el
-    modelo (el onboarding lo puebla en ambos orígenes), así que
-    ``producto_nombre`` siempre resuelve. En un renglón de OC ``producto_variante``
-    y ``orden_compra_detalle`` conviven con ``orden_produccion_detalle`` nulo; en
-    uno de OP es al revés (``producto_variante`` poblado, ``orden_compra_detalle``
-    nulo). Esta forma refleja el shape objetivo, que expone ``orden_compra_detalle``
-    pero no ``orden_produccion_detalle``.
+    Es la misma forma que el renglón de las recepciones anidadas en el retrieve
+    de la OC (``RecepcionDetalleResumenSerializer``): hereda sus campos para que
+    ambos detalles no diverjan. Se conserva como clase propia porque es el nombre
+    que usa ``RecepcionRetrieveSerializer`` y el schema de OpenAPI.
     """
-
-    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
-    # Identifica la materia prima, que no tiene variante (``producto`` va en el select_related).
-    producto_codigo = serializers.CharField(source="producto.codigo", read_only=True, default=None)
-    producto_cod_proscai = serializers.CharField(source="producto.cod_proscai", read_only=True, default=None)
-    # ``producto_variante`` ya viene en el ``select_related`` del retrieve: sin consultas extra.
-    producto_variante_sku = serializers.CharField(
-        source="producto_variante.sku", read_only=True, default=None
-    )
-    # Mismo nombre que en los renglones de la OC; ``None`` sin variante (materia
-    # prima) o sin talla. ``producto_variante__talla`` va en el mismo prefetch.
-    producto_variante_talla = serializers.CharField(
-        source="producto_variante.talla.nombre", read_only=True, default=None
-    )
-    ubicacion_nombre = serializers.SerializerMethodField()
-
-    class Meta:
-        model = RecepcionDetalle
-        fields = [
-            "id",
-            "orden_compra_detalle",
-            "producto",
-            "producto_nombre",
-            "producto_codigo",
-            "producto_cod_proscai",
-            "producto_variante",
-            "producto_variante_sku",
-            "producto_variante_talla",
-            "ubicacion",
-            "ubicacion_nombre",
-            "lote",
-            "serie",
-            "cantidad_recibida",
-        ]
-
-    def get_ubicacion_nombre(self, obj):
-        return str(obj.ubicacion) if obj.ubicacion_id else None
 
 
 class RecepcionRetrieveSerializer(serializers.ModelSerializer):
