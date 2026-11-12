@@ -8164,3 +8164,28 @@ class RenglonesInactivosOpTests(_OpRealEC880Base):
         # 200 MXN de materiales entre 4 piezas activas (antes: entre 100).
         self.assertEqual(costo_unitario_produccion(op), Decimal("50"))
 
+
+class HabilitacionConDesperdicioTests(_OpRealEC880Base):
+    """``productos[].habilitacion_con_desperdicio`` aplica el desperdicio con la
+    fórmula del consumo real: por material, su suma es el planeado del consumo
+    inicial. ``habilitacion`` conserva su valor (sin desperdicio)."""
+
+    def test_suma_por_material_igual_al_consumo_real(self):
+        data = self._detalle_op(self.op_real)
+        planeado = {r["producto_nombre"]: Decimal(r["planeado"]) for r in data["consumos_resumen"]}
+        suma = {}
+        for producto in data["productos"]:
+            for fila in producto["habilitacion_con_desperdicio"]:
+                suma[fila["descripcion"]] = suma.get(fila["descripcion"], Decimal("0")) + Decimal(fila["total"])
+        self.assertEqual(suma, planeado)
+        # 13 × 1.25 × 1.075 + 7 × 1.37 × 1.075 = 17.4688 + 10.3093
+        self.assertEqual(suma["Tela"], Decimal("27.7781"))
+        self.assertNotIn("Boton", suma)  # insumo inactivo del BOM: ni consumo ni habilitación
+
+    def test_habilitacion_original_sin_cambios(self):
+        producto = self._detalle_op(self.op_real)["productos"][0]
+        tela = next(h for h in producto["habilitacion"] if h["descripcion"] == "Tela")
+        self.assertEqual(tela, {"codigo": "TEL-1", "descripcion": "Tela", "unidad": "MTR", "total": 25.84})
+        tela_d = next(h for h in producto["habilitacion_con_desperdicio"] if h["descripcion"] == "Tela")
+        self.assertEqual(tela_d, {"codigo": "TEL-1", "descripcion": "Tela", "unidad": "MTR", "total": "27.7781"})
+

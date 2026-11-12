@@ -27,6 +27,19 @@ class OrdenProduccionService:
         return Decimal(str(value or 0)).quantize(QTY_PRECISION, rounding=ROUND_HALF_UP)
 
     @staticmethod
+    def _cantidad_requerida(cantidad_op, bom_det):
+        """Insumo que consume un renglón de la OP para un renglón del BOM:
+        ``piezas × cantidad del BOM × (1 + desperdicio/100)`` a 4 decimales
+        (``ROUND_HALF_UP``). Única fórmula del consumo real
+        (``_build_consumption_plan``) y de ``habilitacion_con_desperdicio`` del
+        detalle de la OP (EC-880), para que ambos totales cuadren."""
+        cantidad_op = OrdenProduccionService._to_decimal(cantidad_op)
+        cantidad_base = OrdenProduccionService._to_decimal(bom_det.cantidad)
+        desperdicio = OrdenProduccionService._to_decimal(bom_det.desperdicio or 0)
+        factor_desperdicio = Decimal("1") + (desperdicio / Decimal("100"))
+        return (cantidad_op * cantidad_base * factor_desperdicio).quantize(QTY_PRECISION, rounding=ROUND_HALF_UP)
+
+    @staticmethod
     def _build_consumption_plan(op_rows, empresa):
         # Consolidamos el consumo por insumo para validar y descontar inventario
         # una sola vez por producto componente.
@@ -81,11 +94,7 @@ class OrdenProduccionService:
                         {"orden_produccion_detalle": f"Detalle #{idx}: el insumo {componente.nombre} tiene cantidad inválida en el BOM."}
                     )
 
-                desperdicio = OrdenProduccionService._to_decimal(bom_det.desperdicio or 0)
-                factor_desperdicio = Decimal("1") + (desperdicio / Decimal("100"))
-                cantidad_requerida = (
-                    cantidad_op * cantidad_base * factor_desperdicio
-                ).quantize(QTY_PRECISION, rounding=ROUND_HALF_UP)
+                cantidad_requerida = OrdenProduccionService._cantidad_requerida(cantidad_op, bom_det)
 
                 if componente.pk not in plan:
                     plan[componente.pk] = {
@@ -374,7 +383,8 @@ class OrdenProduccionService:
                         "total": 0.0,
                         "tallas": {}
                     },
-                    "habilitacion": {}
+                    "habilitacion": {},
+                    "habilitacion_con_desperdicio": {},
                 }
 
             p_data = products_data[product_id]
@@ -403,6 +413,10 @@ class OrdenProduccionService:
 
                     key = (code, name, unit)
                     p_data["habilitacion"][key] = p_data["habilitacion"].get(key, 0.0) + needed
+                    con_desperdicio = p_data["habilitacion_con_desperdicio"]
+                    con_desperdicio[key] = con_desperdicio.get(key, Decimal("0")) + (
+                        OrdenProduccionService._cantidad_requerida(detail.cantidad, bom_det)
+                    )
 
         productos_list = []
         for p_id, p_info in products_data.items():
@@ -435,7 +449,15 @@ class OrdenProduccionService:
                     "total": total_qty_formatted,
                     "tallas": tallas_list
                 },
-                "habilitacion": habilitacion_list
+                "habilitacion": habilitacion_list,
+                # EC-880: misma forma que ``habilitacion`` pero con el desperdicio
+                # del BOM y la fórmula del consumo real (``_cantidad_requerida``);
+                # ``total`` como texto a 4 decimales, igual que ``consumos``.
+                # ``habilitacion`` conserva su valor (sin desperdicio).
+                "habilitacion_con_desperdicio": [
+                    {"codigo": code, "descripcion": name, "unidad": unit, "total": str(total)}
+                    for (code, name, unit), total in p_info["habilitacion_con_desperdicio"].items()
+                ],
             })
 
         from produccion.api.serializers import OrdenProduccionSerializer
