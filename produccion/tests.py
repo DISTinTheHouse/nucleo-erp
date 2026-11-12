@@ -815,13 +815,23 @@ class SuperusuarioEmpresaActivaOrdenesTests(TestCase):
                 orden.refresh_from_db()
                 self.assertTrue(orden.activo)
 
-    def test_no_registra_avances_en_orden_de_otra_empresa(self):
+    def test_no_registra_ni_da_de_baja_avances_de_otra_empresa(self):
+        """El alta la rechaza el serializer (400 desde antes de EC-880); lo que
+        protege el alcance nuevo es que el avance ajeno ya existente sea 404 en
+        retrieve y DELETE por ``_OrdenPadreTenantScopedMixin``: con el atajo del
+        superusuario de vuelta, esto devolvería 200/204 y lo daría de baja."""
         for url, fk, extra, modelo in self.AVANCES:
             with self.subTest(url):
                 antes = modelo.objects.count()
                 resp = self.client.post(url, {fk: self.b[fk].pk, **extra}, format="json")
-                self.assertIn(resp.status_code, (400, 404))
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn(fk, resp.data)
                 self.assertEqual(modelo.objects.count(), antes)
+                ajeno = self.satelites[(url, "b")]
+                self.assertEqual(self.client.get(f"{url}{ajeno.pk}/").status_code, 404)
+                self.assertEqual(self.client.delete(f"{url}{ajeno.pk}/").status_code, 404)
+                ajeno.refresh_from_db()
+                self.assertTrue(ajeno.activo)
 
     def test_registra_avances_en_otra_sucursal_de_su_empresa(self):
         """Escritura alineada con la lectura: el superusuario (sin
