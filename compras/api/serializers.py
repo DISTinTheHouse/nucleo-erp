@@ -477,10 +477,11 @@ class RecepcionListSerializer(RecepcionSerializer):
       - ``almacen_nombre``: siempre presente (``almacen`` es NOT NULL).
       - ``proveedor_nombre``: ``null`` cuando la recepción no tiene proveedor (p. ej. OP).
       - ``orden_compra_folio``: ``null`` salvo que la recepción provenga de una
-        orden de compra (``tipo_origen == 'OC'``).
-
-    El enriquecimiento del lado OP (folio/referencia de la orden de producción) queda
-    fuera de este paso; puede sumarse aquí después con el mismo patrón (``op_folio``…).
+        orden de compra (``tipo_origen == 'OC'``); también ``null`` si la OC no
+        tiene folio.
+      - ``op_folio``: ``null`` salvo que la recepción provenga de una orden de
+        producción (``tipo_origen == 'OP'``). Misma declaración que el retrieve
+        (EC-879).
     """
 
     almacen_nombre = serializers.CharField(source="almacen.nombre", read_only=True)
@@ -490,6 +491,7 @@ class RecepcionListSerializer(RecepcionSerializer):
     orden_compra_folio = serializers.CharField(
         source="orden_compra.folio", read_only=True, default=None
     )
+    op_folio = serializers.CharField(source="op.folio_op", read_only=True, default=None)
     orden_compra_tipo_compra = serializers.CharField(
         source="orden_compra.tipo_compra", read_only=True, default=None
     )

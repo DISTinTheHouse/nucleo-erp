@@ -3318,3 +3318,16 @@ class RecepcionRetrieveOrigenTallaTests(TestCase):
             (d["producto_variante_talla"] or "") for r in data["recepciones"] for d in r["detalles"]
         )
         self.assertEqual(tallas, ["", "2XG", "CH", "G", "M", "XG"])
+
+    def test_listado_trae_op_folio_sin_consultas_extra(self):
+        de_op = self._recepcion(op=self.op)
+        de_oc = self._recepcion(orden_compra=self.oc)
+        filas, consultas_dos = self._get(RECEPCIONES_URL)
+        por_id = {f["id"]: f for f in filas}
+        self.assertEqual((por_id[de_op.pk]["op_folio"], por_id[de_op.pk]["orden_compra_folio"]), ("OP-879-1", None))
+        self.assertEqual((por_id[de_oc.pk]["op_folio"], por_id[de_oc.pk]["orden_compra_folio"]), (None, "OC-879-1"))
+        for _ in range(3):
+            self._recepcion(op=self.op)
+        filas, consultas_cinco = self._get(RECEPCIONES_URL)
+        self.assertEqual(len(filas), 5)
+        self.assertEqual(consultas_dos, consultas_cinco)
