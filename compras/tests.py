@@ -3223,12 +3223,12 @@ class RecepcionRetrieveOrigenTallaTests(TestCase):
         cls.folios = 0
 
     @classmethod
-    def _recepcion(cls, orden_compra=None, op=None):
+    def _recepcion(cls, orden_compra=None, op=None, estatus=Recepcion.EstatusRecepcion.BORRADOR):
         cls.folios += 1
         return Recepcion.objects.create(
             tipo_origen="OC" if orden_compra else "OP", orden_compra=orden_compra, op=op,
             empresa=cls.empresa, sucursal=cls.sucursal, almacen=cls.almacen, usuario=cls.usuario,
-            folio=f"RC-879-{cls.folios}", fecha_recepcion=timezone.now(),
+            folio=f"RC-879-{cls.folios}", fecha_recepcion=timezone.now(), estatus=estatus,
         )
 
     def _renglon(self, recepcion, variante=None):
@@ -3340,3 +3340,36 @@ class RecepcionRetrieveOrigenTallaTests(TestCase):
         (anidada,) = [r for r in de_oc["recepciones"] if r["id"] == recepcion.pk]
         self.assertEqual(len(de_recepcion["detalles"]), 3)
         self.assertEqual(de_recepcion["detalles"], anidada["detalles"])
+
+    def test_cancelar_oc_trae_talla_anidada_sin_consultas_extra(self):
+        # ``cancelar`` solo rechaza recepciones activas no canceladas: una OC cuyas
+        # recepciones están CANCELADA se cancela y su respuesta (forma del
+        # retrieve) las anida con sus renglones.
+        cancelada = Recepcion.EstatusRecepcion.CANCELADA
+
+        def oc_con_renglones(variantes):
+            oc = OrdenCompra.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, moneda=self.oc.moneda, usuario=self.usuario,
+                fecha_oc=timezone.localdate(), estatus=OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+            )
+            recepcion = self._recepcion(orden_compra=oc, estatus=cancelada)
+            for variante in variantes:
+                self._renglon(recepcion, variante)
+            return oc
+
+        def cancelar(oc):
+            client = APIClient()
+            client.force_authenticate(user=self.usuario)
+            with CaptureQueriesContext(connection) as ctx:
+                resp = client.post(
+                    f"/api/v1/compras/ordenes/{oc.pk}/cancelar/", {"motivo_cancelacion": "EC-879"}, format="json",
+                )
+            self.assertEqual(resp.status_code, 200, resp.content[:300])
+            return resp.json(), len(ctx)
+
+        _, consultas_una = cancelar(oc_con_renglones(self.variantes[:1]))
+        data, consultas_varias = cancelar(oc_con_renglones([*self.variantes, None]))
+
+        self.assertEqual(consultas_una, consultas_varias)
+        tallas = sorted((d["producto_variante_talla"] or "") for r in data["recepciones"] for d in r["detalles"])
+        self.assertEqual(tallas, ["", "2XG", "CH", "G", "M", "XG"])
