@@ -349,3 +349,16 @@ class ConsultasFijasTests(PlaneacionBaseTestCase):
         for url in URLS:
             with self.subTest(url=url):
                 self.assertEqual(self._consultas(url), antes[url])
+
+    def test_sucursales_visibles_una_vez_por_peticion(self):
+        """La validación de ``?sucursal=`` y el ámbito del cálculo comparten las
+        sucursales visibles del usuario: una sola consulta a su M2M de sucursales."""
+        tabla = Usuario.sucursales.through._meta.db_table
+        user = self._usuario("suc-una", ["R-PRODUCCION"])
+        user.sucursales.add(self.a["sucursal"])
+        variante = self._variante(self.a, "A-SUC")
+        for url, params in ((TABLERO_URL, {}), (NECESIDADES_URL, {}), (NECESIDADES_URL, {"variante": variante.pk})):
+            with self.subTest(url=url, params=params):
+                with CaptureQueriesContext(connection) as ctx:
+                    self.assertEqual(self._get(user, url, **params).status_code, 200)
+                self.assertEqual(sum(f'"{tabla}"' in q["sql"] for q in ctx.captured_queries), 1)

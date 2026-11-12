@@ -61,13 +61,25 @@ class TableroRotacionParamsSerializer(FiltrosPlaneacionSerializer):
         return attrs
 
 
-def _ambito(user, p):
+_SUCURSALES_PETICION = "_planeacion_sucursales_visibles"
+
+
+def _sucursales_de_la_peticion(request):
+    """``sucursales_visibles(request.user)`` UNA vez por petición, ya evaluado: lo usan
+    la validación de ``?sucursal=`` y ``_ambito`` (antes se consultaba en cada uno).
+    ``None`` = toda la empresa (superuser y admin de empresa)."""
+    if not hasattr(request, _SUCURSALES_PETICION):
+        visibles = sucursales_visibles(request.user)
+        setattr(request, _SUCURSALES_PETICION, None if visibles is None else list(visibles))
+    return getattr(request, _SUCURSALES_PETICION)
+
+
+def _ambito(request, p):
     """Ids de sucursal que acotan el cálculo: ``?sucursal=`` o, sin él, las visibles del
     usuario (``None`` = toda la empresa: superuser y admin de empresa)."""
     if p.get("sucursal"):
         return [p["sucursal"]]
-    visibles = sucursales_visibles(user)
-    return None if visibles is None else list(visibles)
+    return _sucursales_de_la_peticion(request)
 
 
 def _params(request, serializer_class):
@@ -80,7 +92,7 @@ def _params(request, serializer_class):
     # Vacíos = como si no vinieran (mismo criterio que finanzas, EC-760).
     datos = {k: v for k, v in request.query_params.items() if v != ""}
     params = serializer_class(data=datos, context={
-        "ver_importes": ver_importes, "empresa": empresa, "sucursales_visibles": sucursales_visibles(request.user),
+        "ver_importes": ver_importes, "empresa": empresa, "sucursales_visibles": _sucursales_de_la_peticion(request),
     })
     params.is_valid(raise_exception=True)
     return empresa, params.validated_data, ver_importes
@@ -99,7 +111,7 @@ class TableroRotacionView(APIView):
         empresa, p, ver_importes = _params(request, TableroRotacionParamsSerializer)
         if empresa is None:
             return ver_importes  # la respuesta 400
-        resultado = tablero.calcular(empresa, p, _ambito(request.user, p))
+        resultado = tablero.calcular(empresa, p, _ambito(request, p))
         resultado.pop("boms")
         filas = resultado.pop("filas")
         if not ver_importes:
@@ -145,10 +157,10 @@ class NecesidadesMateriaPrimaView(APIView):
         if empresa is None:
             return error
         if p.get("variante"):
-            return self._una_variante(empresa, p["variante"], p.get("cantidad", 1), _ambito(request.user, p))
+            return self._una_variante(empresa, p["variante"], p.get("cantidad", 1), _ambito(request, p))
 
         p = {**p, "agrupar": "variante", "ordering": "-vendido_periodo"}
-        resultado = tablero.calcular(empresa, p, _ambito(request.user, p))
+        resultado = tablero.calcular(empresa, p, _ambito(request, p))
         filas = [r for r in resultado["filas"] if r["resurtido_sugerido"] > 0]
         cantidades = {r["variante_id"]: r["resurtido_sugerido"] for r in filas}
         componentes, sin_bom = capacidad.necesidades(resultado["boms"], cantidades)
