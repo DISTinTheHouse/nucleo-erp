@@ -471,18 +471,23 @@ def estado_ruta_critica(ruta):
     }
 
 
-def fecha_pedido_de(pedido):
-    """Alta del pedido (día local): ``fecha_pedido`` de los listados y detalles
-    de OP/OB/OR/OCM. ``None`` sin pedido."""
-    from django.utils import timezone
-    return timezone.localdate(pedido.created_at) if pedido and pedido.created_at else None
+class _FechasPedidoListadoMixin(serializers.Serializer):
+    """``fecha_pedido`` (alta del pedido) y ``fecha_vence`` (la ``fecha_compromiso``
+    de pedidos especiales/OP) para los listados de OB/OR/OCM y los detalles de
+    OCM y OP (EC-880). ``pedido`` ya viene en ``select_related``: sin consultas
+    extra."""
 
+    fecha_pedido = serializers.SerializerMethodField()
+    fecha_vence = serializers.SerializerMethodField()
 
-def fecha_vence_de(pedido):
-    """La ``fecha_compromiso`` de pedidos especiales: ``fecha_vence`` de los
-    listados y detalles de OP/OB/OR/OCM. ``None`` sin pedido o sin clasificación."""
-    from ventas.services.clasificacion_service import rango_fecha_entrega
-    return rango_fecha_entrega(pedido)[1] if pedido else None
+    def get_fecha_pedido(self, obj):
+        from django.utils import timezone
+        pedido = obj.pedido
+        return timezone.localdate(pedido.created_at) if pedido and pedido.created_at else None
+
+    def get_fecha_vence(self, obj):
+        from ventas.services.clasificacion_service import rango_fecha_entrega
+        return rango_fecha_entrega(obj.pedido)[1] if obj.pedido else None
 
 
 class OrdenProduccionListSerializer(serializers.ModelSerializer):
@@ -519,11 +524,14 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
         return {"id": p.pk, "nombre": p.nombre} if p else None
 
     def get_fecha_pedido(self, obj):
-        return fecha_pedido_de(obj.pedido)
+        from django.utils import timezone
+        pedido = obj.pedido
+        return timezone.localdate(pedido.created_at) if pedido and pedido.created_at else None
 
     def get_fecha_vence(self, obj):
         # La misma ``fecha_compromiso`` del listado de pedidos especiales.
-        return fecha_vence_de(obj.pedido)
+        from ventas.services.clasificacion_service import rango_fecha_entrega
+        return rango_fecha_entrega(obj.pedido)[1] if obj.pedido else None
 
     def get_ruta_critica(self, obj):
         return estado_ruta_critica(getattr(obj, "ruta_critica", None))
@@ -563,7 +571,7 @@ def ligar_pedidos_op(op, pedidos=None):
         OrdenProduccionPedido.objects.bulk_create([OrdenProduccionPedido(op=op, pedido_id=i) for i in nuevos])
 
 
-class OrdenProduccionSerializer(serializers.ModelSerializer):
+class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSerializer):
     orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
     estatus_op_display = serializers.CharField(source="get_estatus_op_display", read_only=True)
     pedido_vinculado = serializers.SerializerMethodField()
@@ -577,19 +585,12 @@ class OrdenProduccionSerializer(serializers.ModelSerializer):
     sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True)
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True, allow_null=True)
     usuario_nombre = serializers.SerializerMethodField()
-    # EC-880: mismas fechas y semántica que el listado de OP (del pedido principal).
-    fecha_pedido = serializers.SerializerMethodField()
-    fecha_vence = serializers.SerializerMethodField()
+    # ``fecha_pedido``/``fecha_vence`` (EC-880): de ``_FechasPedidoListadoMixin``,
+    # mismas fechas y semántica que el listado de OP (del pedido principal).
 
     def get_pedido_vinculado(self, obj):
         from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
         return armar_pedido_vinculado(obj)
-
-    def get_fecha_pedido(self, obj):
-        return fecha_pedido_de(obj.pedido)
-
-    def get_fecha_vence(self, obj):
-        return fecha_vence_de(obj.pedido)
 
     def get_usuario_nombre(self, obj):
         usuario = obj.usuario_asignado
@@ -1167,21 +1168,6 @@ class OrdenBordadoDetalleListSerializer(serializers.ModelSerializer):
         # ubicaciones y sus URLs de imagen, por renglón. El listado se mantiene
         # ligero y el detalle —que sí la declara— es quien la publica.
         exclude = ('configuracion',)
-
-
-class _FechasPedidoListadoMixin(serializers.Serializer):
-    """``fecha_pedido`` (alta del pedido) y ``fecha_vence`` (la ``fecha_compromiso``
-    de pedidos especiales/OP) para los listados de OB/OR/OCM. ``pedido`` ya viene
-    en ``select_related``: sin consultas extra."""
-
-    fecha_pedido = serializers.SerializerMethodField()
-    fecha_vence = serializers.SerializerMethodField()
-
-    def get_fecha_pedido(self, obj):
-        return fecha_pedido_de(obj.pedido)
-
-    def get_fecha_vence(self, obj):
-        return fecha_vence_de(obj.pedido)
 
 
 def _num(obj, attr):
