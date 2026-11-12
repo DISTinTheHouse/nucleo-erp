@@ -1,4 +1,5 @@
 from decimal import Decimal
+from ventas.services import subtotales
 from django.db.models import Q
 from catalogo.compatibilidad import exigir_compatibilidad
 from catalogo.models import CategoriaProductoTalla, Talla, Producto, ProductoVariante
@@ -486,6 +487,7 @@ def _save_cotizacion_detalle(cotizacion_obj, rows, empresa, user, validar_matriz
             cotizacion_obj.empresa_id,
             CotizacionDetalleTalla.objects.filter(cotizacion_detalle__cotizacion=cotizacion_obj),
         )
+    subtotales.recalcular_cotizacion(cotizacion_obj)  # #1121
 
 def _save_servicios_extras(cotizacion_obj, rows):
     CotizacionServicioExtra.objects.filter(cotizacion=cotizacion_obj).delete()
@@ -728,6 +730,7 @@ def _save_pedido_detalle(pedido_obj, rows, empresa, user):
     exigir_compatibilidad(
         pedido_obj.empresa_id, PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido_obj)
     )
+    subtotales.recalcular_pedido(pedido_obj)  # #1121
 
 
 def _save_pedido_servicios_extras(pedido_obj, rows):

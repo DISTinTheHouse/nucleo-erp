@@ -1007,6 +1007,7 @@ class PedidoSerializer(serializers.ModelSerializer):
         model = Pedido
         read_only_fields = [
             'empresa',
+            'motivo_cancelacion',  # solo vía cancelar/ (#1118)
             # Sólo se escribe vía ``PATCH /pedidos/{id}/programar/``, que valida
             # destino/cantidades y sella fecha/usuario en el servidor. Aquí de
             # solo lectura para que un PATCH genérico no se salte ese flujo.

@@ -491,6 +491,8 @@ class Pedido(StatusLifecycleModel):
         db_index=True,
         help_text="Clasificación de tiempo de entrega: A=2-5d, B=5-8d, C=5-15d, D=4-6sem, E=6-8sem, F=8-10sem, X=Solo facturar"
     )
+    # Lo llena ``POST /pedidos/{id}/cancelar/`` (#1118).
+    motivo_cancelacion = models.CharField(max_length=500, null=True, blank=True)
 
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
