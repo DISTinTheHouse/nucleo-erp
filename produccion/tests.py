@@ -6695,6 +6695,26 @@ class ConsumoProduccionTenantTests(_RegistrosDeOPTenantBase, TestCase):
         self.assertIn("permiso", resp.data)
         self.assertEqual(ConsumoProduccion.objects.count(), 2)
 
+    def test_create_con_departamento_produccion_se_permite(self):
+        """EC-880: el uso real del gate es un operador sin admin ni superusuario
+        con un rol del departamento Producción en su empresa."""
+        from seguridad.models import Rol, UsuarioRol
+        from seguridad.role_identity import CLAVE_DEPARTAMENTO_PRODUCCION
+        operador = Usuario.objects.create(
+            username="ti-prod-consumo", email="ti-prod-consumo@acme-ti.test", empresa=self.empresa,
+            sucursal_default=self.sucursal,
+        )
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="PRODUCCION-TI", nombre="Producción",
+            clave_departamento=CLAVE_DEPARTAMENTO_PRODUCCION,
+        )
+        UsuarioRol.objects.create(usuario=operador, rol=rol, empresa=self.empresa)
+
+        resp = self._client(operador).post(self.URL, {"op": self.op.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(ConsumoProduccion.objects.count(), 3)
+
     def test_create_con_op_propia_conserva_el_shape(self):
         resp = self._client(self.admin).post(self.URL, {"op": self.op.pk}, format="json")
 
