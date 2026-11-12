@@ -8022,6 +8022,15 @@ class ClienteEnDetallesDeOrdenesTests(_DetallesOrdenesEC880Base):
         )
         self.assertEqual(data["pedido_vinculado"]["cliente"], self._esperado("foto"))
 
+    def test_retrieve_op_trae_cliente_por_pedido(self):
+        """``/orden-produccion/{id}/`` lleva el mismo ``pedidos[]`` que el detalle
+        ``onboarding/?op_id=``."""
+        resp = self.client.get(f"/api/v1/produccion/orden-produccion/{self.op.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["pedidos"], self._detalle_op()["pedidos"])
+        self.assertEqual(
+            [p["cliente"] for p in resp.json()["pedidos"]], [self._esperado("foto"), self._esperado("vivo")])
+
     def test_op_sin_pedido_no_trae_pedido_vinculado(self):
         op = OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op="OP-880-SP")
         data = self._detalle_op(op)
@@ -8288,6 +8297,14 @@ class ConsultasDetalleYListadoOpEC880Tests(_OpRealEC880Base):
         con_mas = self._contar(self.URL_OP, {"op_id": self.op_real.pk})
         self.assertEqual(con_mas, base)
         self.assertEqual(base, self.CONSULTAS_DETALLE)
+
+    def test_retrieve_constante_con_mas_pedidos(self):
+        url = f"/api/v1/produccion/orden-produccion/{self.op_real.pk}/"
+        base = self._contar(url)
+        from produccion.api.serializers import ligar_pedidos_op
+        ligar_pedidos_op(self.op_real, [self.pedido_foto] + [self._otro_pedido(i) for i in range(4)])
+        self.assertEqual(self._contar(url), base)
+        self.assertEqual(len(self.client.get(url).json()["pedidos"]), 5)
 
     def test_listado_no_crece_con_las_ops(self):
         base = self._contar("/api/v1/produccion/orden-produccion/")

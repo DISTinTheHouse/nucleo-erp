@@ -522,6 +522,14 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             return OrdenProduccionListSerializer
         return OrdenProduccionSerializer
 
+    def get_serializer_context(self):
+        # ``pedidos[].cliente`` (EC-880) en el detalle, igual que en
+        # ``onboarding/?op_id=``; el listado no lo lleva.
+        contexto = super().get_serializer_context()
+        if getattr(self, "action", None) == "retrieve":
+            contexto["pedidos_con_cliente"] = True
+        return contexto
+
     # EC-870: editar requiere ``E-PRODUCCION-OP`` y el DELETE es baja lógica
     # (pasa a Cancelado) con ``D-PRODUCCION-OP``: el borrado físico arrastraba en
     # cascada movimientos de inventario, recepciones y consumos de la OP.
@@ -567,8 +575,14 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             queryset = queryset.select_related(
                 "empresa", "sucursal", "pedido__cliente", "usuario_asignado"
             ).prefetch_related(
-                Prefetch("op_pedidos", queryset=OrdenProduccionPedido.objects.select_related("pedido").only(
-                    "id", "op_id", "pedido_id", "pedido__folio")),
+                # En el detalle cada pedido trae su cliente (``pedidos[].cliente``):
+                # una sola consulta para todos los pedidos de la OP.
+                Prefetch("op_pedidos", queryset=(
+                    OrdenProduccionPedido.objects.select_related("pedido__cliente")
+                    if self.action == "retrieve"
+                    else OrdenProduccionPedido.objects.select_related("pedido").only(
+                        "id", "op_id", "pedido_id", "pedido__folio")
+                )),
                 Prefetch(
                     "orden_produccion_detalle",
                     # Sólo renglones activos (EC-880), como el listado.

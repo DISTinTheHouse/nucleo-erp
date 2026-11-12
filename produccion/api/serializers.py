@@ -540,7 +540,8 @@ def pedidos_de_op(op, con_cliente=False):
     """``[{id, folio}]`` de los pedidos de la OP, principal primero. Lee la
     precarga ``op_pedidos__pedido`` si existe (listado sin consultas por fila).
 
-    ``con_cliente`` (EC-880, sólo el detalle ``onboarding/?op_id=``) agrega
+    ``con_cliente`` (EC-880, sólo los detalles ``onboarding/?op_id=`` y
+    ``/orden-produccion/{id}/``) agrega
     ``cliente`` a cada pedido (``cliente_de_pedido``); quien lo pide precarga
     ``op_pedidos__pedido__cliente``. El listado no lo pide: su precarga usa
     ``.only()`` sin los campos del cliente y leerlos sería una consulta por fila.
