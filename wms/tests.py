@@ -948,6 +948,59 @@ class PickingGeneraTransferenciaTests(TestCase):
         resp = api.post("/api/v1/wms/pickings/onboarding/", cuerpo, format="json")
         self.assertEqual(resp.status_code, 400, resp.content)
 
+    def test_alta_responde_el_detalle_precargado(self):
+        """EC-882: el alta de picking y de packing responde lo mismo que su retrieve, y
+        la respuesta del packing no suma consultas por renglón (antes cada FK de cada
+        renglón era una consulta)."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from catalogo.models import Talla
+        from nucleo.models import SerieFolio
+        from ventas.models import PedidoDetalleTalla
+
+        SerieFolio.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, tipo_documento="Packing", serie="A", prefijo="PAK"
+        )
+        talla_l = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.talla_row.pedido_detalle, talla=Talla.objects.create(nombre="L"), cantidad=4
+        )
+        api = APIClient()
+        api.force_authenticate(self.usuario)
+        consultas_packing = []
+        for tallas in ([self.talla_row], [self.talla_row, talla_l]):
+            resp = api.post(
+                "/api/v1/wms/pickings/",
+                {
+                    "pedido": self.pedido.pk, "operador": self.usuario.pk, "almacen": self.origen.pk,
+                    "almacen_destino": self.destino.pk,
+                    "picking_detalle": [{"pedido_detalle_talla": t.pk, "cantidad_asignada": "1"} for t in tallas],
+                },
+                format="json",
+            )
+            self.assertEqual(resp.status_code, 201, resp.content)
+            picking = resp.json()
+            self.assertEqual(picking.pop("ordenes_trabajo_generadas"), [])
+            self.assertEqual(picking, api.get(f"/api/v1/wms/pickings/{picking['id']}/").json())
+
+            with CaptureQueriesContext(connection) as ctx:
+                resp = api.post(
+                    "/api/v1/wms/packings/",
+                    {
+                        "picking": picking["id"],
+                        "packing_detalle": [
+                            {"picking_detalle": linea["id"], "cantidad_empacada": "1"}
+                            for linea in picking["picking_detalle"]
+                        ],
+                    },
+                    format="json",
+                )
+            self.assertEqual(resp.status_code, 201, resp.content)
+            consultas_packing.append(len(ctx.captured_queries))
+            packing = resp.json()
+            self.assertEqual(packing, api.get(f"/api/v1/wms/packings/{packing['id']}/").json())
+        self.assertEqual(consultas_packing[1], consultas_packing[0])
+
     def test_picking_crea_transferencia_con_folio_tr_y_mueve_stock(self):
         from wms.services.picking_service import PickingService
 
@@ -1796,3 +1849,531 @@ class PackingDespachoEC574Tests(TestCase):
         self.assertIsNone(datos["embarque"]["motivo"])
         self.assertEqual(datos["embarque"]["piezas_por_empacar"], "0")
         self.assertTrue(all(d["disponible_para_despacho"] for d in datos["despacho_detalle"]))
+
+
+def _documentos_wms(codigo, *, superusuario=False):
+    """Una empresa con un picking, un packing y una transferencia con dos tipos de línea.
+
+    Fixture de EC-882, armado con el ORM y sin servicios: cada documento trae una
+    línea de catálogo (``ProductoVariante`` con color y talla) y una de muestra
+    (``VarianteProductoProduccion``, sin producto ni variante de catálogo), las
+    dos formas que el PDF de WMS tiene que poder imprimir.
+    """
+    from catalogo.models import Color, ProductoVariante, Talla, VarianteProductoProduccion
+    from inventarios.models import Almacen
+    from nucleo.models import Moneda
+    from terceros.models import Cliente
+    from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+    from wms.models import (
+        Packing,
+        PackingDetalle,
+        Picking,
+        PickingDetalle,
+        Transferencia,
+        TransferenciaDetalle,
+    )
+
+    d = {}
+    d["empresa"] = Empresa.objects.create(codigo=f"wms-{codigo}", razon_social=f"WMS {codigo} SA")
+    d["sucursal"] = Sucursal.objects.create(empresa=d["empresa"], codigo=f"S{codigo}", nombre=f"Sucursal {codigo}")
+    d["usuario"] = Usuario.objects.create(
+        username=f"wms-{codigo}@example.com",
+        email=f"wms-{codigo}@example.com",
+        empresa=d["empresa"],
+        sucursal_default=d["sucursal"],
+        is_superuser=superusuario,
+        is_admin_empresa=not superusuario,
+    )
+    origen = Almacen.objects.create(
+        empresa=d["empresa"], sucursal=d["sucursal"], codigo=f"PT{codigo}", nombre=f"Terminado {codigo}",
+        permite_salida=True, permite_entrada=True,
+    )
+    destino = Almacen.objects.create(
+        empresa=d["empresa"], sucursal=d["sucursal"], codigo=f"AP{codigo}", nombre=f"Apartados {codigo}",
+        permite_salida=True, permite_entrada=True,
+    )
+    d["color"] = Color.objects.create(nombre=f"MARINO {codigo}", codigo="MAR", codigo_hex="#000080")
+    d["talla"] = Talla.objects.create(nombre=f"M{codigo}")
+    d["color_muestra"] = Color.objects.create(nombre=f"ROJO {codigo}", codigo="ROJ", codigo_hex="#FF0000")
+    d["talla_muestra"] = Talla.objects.create(nombre=f"G{codigo}")
+    producto = Producto.objects.create(
+        tipo=_tipo_producto(), empresa=d["empresa"], nombre=f"Chamarra {codigo}", codigo=f"CH{codigo}"
+    )
+    d["variante"] = ProductoVariante.objects.create(
+        producto=producto, empresa=d["empresa"], color=d["color"], talla=d["talla"],
+        nombre=f"Chamarra {codigo} variante", sku=f"CH{codigo}-MAR-M", precio_base=Decimal("100"),
+    )
+    d["muestra"] = VarianteProductoProduccion.objects.create(
+        empresa=d["empresa"], color=d["color_muestra"], talla=d["talla_muestra"],
+        nombre=f"Muestra {codigo}", sku=f"MP-{codigo}-G",
+    )
+    moneda, _ = Moneda.objects.get_or_create(codigo_iso="MXN", defaults={"nombre": "Peso"})
+    d["cliente"] = Cliente.objects.create(
+        empresa=d["empresa"], nombre=f"Cliente {codigo}", razon_social=f"Cliente {codigo} SA de CV",
+        rfc=f"CLI{codigo}010101A",
+    )
+    d["pedido"] = Pedido.objects.create(
+        empresa=d["empresa"], sucursal=d["sucursal"], cliente=d["cliente"], moneda=moneda,
+        folio=f"P-{codigo}", estatus=3, persona_pagos="Pagos", correo_facturas="p@example.com",
+        telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+    )
+    linea = PedidoDetalle.objects.create(pedido=d["pedido"], producto=producto)
+    talla_catalogo = PedidoDetalleTalla.objects.create(
+        pedido_detalle=linea, talla=d["talla"], cantidad=2, variante=d["variante"]
+    )
+    linea_muestra = PedidoDetalle.objects.create(pedido=d["pedido"])
+    talla_muestra = PedidoDetalleTalla.objects.create(
+        pedido_detalle=linea_muestra, talla=d["talla_muestra"], cantidad=1, sku_muestra=d["muestra"].sku
+    )
+
+    d["transferencia"] = Transferencia.objects.create(
+        empresa=d["empresa"], sucursal=d["sucursal"], almacen_origen=origen, almacen_destino=destino,
+        folio=f"TR-{codigo}", usuario=d["usuario"],
+    )
+    d["tr_catalogo"] = TransferenciaDetalle.objects.create(
+        transferencia=d["transferencia"], producto=producto, producto_variante=d["variante"], cantidad=2
+    )
+    d["tr_muestra"] = TransferenciaDetalle.objects.create(
+        transferencia=d["transferencia"], variante_produccion=d["muestra"], cantidad=1
+    )
+    d["picking"] = Picking.objects.create(
+        folio=f"PICK-{codigo}", empresa=d["empresa"], sucursal=d["sucursal"], pedido=d["pedido"],
+        operador=d["usuario"], almacen=origen, almacen_destino=destino, transferencia=d["transferencia"],
+        usuario=d["usuario"],
+    )
+    d["pk_catalogo"] = PickingDetalle.objects.create(
+        picking=d["picking"], pedido_detalle=linea, pedido_detalle_talla=talla_catalogo, producto=producto,
+        producto_variante=d["variante"], cantidad_solicitada=2, cantidad_asignada=2, cantidad_surtida=2,
+    )
+    d["pk_muestra"] = PickingDetalle.objects.create(
+        picking=d["picking"], pedido_detalle=linea_muestra, pedido_detalle_talla=talla_muestra,
+        variante_produccion=d["muestra"], cantidad_solicitada=1, cantidad_asignada=1, cantidad_surtida=1,
+    )
+    d["packing"] = Packing.objects.create(
+        folio=f"PACK-{codigo}", empresa=d["empresa"], sucursal=d["sucursal"], pedido=d["pedido"],
+        picking=d["picking"], operador=d["usuario"], usuario=d["usuario"],
+    )
+    PackingDetalle.objects.create(packing=d["packing"], picking_detalle=d["pk_catalogo"], cantidad_empacada=2)
+    PackingDetalle.objects.create(packing=d["packing"], picking_detalle=d["pk_muestra"], cantidad_empacada=1)
+    return d
+
+
+def _api_de(user):
+    api = APIClient()
+    api.force_authenticate(user)
+    return api
+
+
+class DocumentosWmsAlcanceSuperusuarioTests(TestCase):
+    """EC-882: picking, packing y transferencia acotan al superusuario a su empresa activa.
+
+    Mismo criterio que Producción desde EC-880 (``wms/scope.py``): antes el
+    superusuario veía en list y retrieve los documentos de todas las empresas.
+    """
+
+    RECURSOS = {"pickings": "picking", "packings": "packing", "transferencias": "transferencia"}
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.propia = _documentos_wms("A", superusuario=True)
+        cls.ajena = _documentos_wms("B")
+        cls.superusuario = cls.propia["usuario"]
+
+    def _ids(self, user, recurso):
+        resp = _api_de(user).get(f"/api/v1/wms/{recurso}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return [fila["id"] for fila in resp.json()]
+
+    def test_superusuario_solo_lista_su_empresa_activa(self):
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(self.superusuario, recurso), [self.propia[clave].pk])
+
+    def test_superusuario_recibe_404_en_el_detalle_de_otra_empresa(self):
+        api = _api_de(self.superusuario)
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                propio = api.get(f"/api/v1/wms/{recurso}/{self.propia[clave].pk}/")
+                self.assertEqual(propio.status_code, 200, propio.content)
+                ajeno = api.get(f"/api/v1/wms/{recurso}/{self.ajena[clave].pk}/")
+                self.assertEqual(ajeno.status_code, 404, ajeno.content)
+
+    def test_superusuario_sigue_a_su_empresa_activa_al_cambiarla(self):
+        """Tras ``POST /api/v1/nucleo/cambiar-empresa/`` (EC-843) list, retrieve y
+        ``trasladar`` siguen a la empresa nueva y ya no ven la anterior."""
+        resp = _api_de(self.superusuario).post(
+            "/api/v1/nucleo/cambiar-empresa/", {"empresa": self.ajena["empresa"].pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        # El JWT sólo lleva el id: cada petición vuelve a leer al usuario de la BD.
+        user = Usuario.objects.get(pk=self.superusuario.pk)
+        self.assertEqual(user.empresa_id, self.ajena["empresa"].pk)
+        api = _api_de(user)
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(user, recurso), [self.ajena[clave].pk])
+                nueva = api.get(f"/api/v1/wms/{recurso}/{self.ajena[clave].pk}/")
+                self.assertEqual(nueva.status_code, 200, nueva.content)
+                anterior = api.get(f"/api/v1/wms/{recurso}/{self.propia[clave].pk}/")
+                self.assertEqual(anterior.status_code, 404, anterior.content)
+        resp = api.post(
+            f"/api/v1/wms/pickings/{self.propia['picking'].pk}/trasladar/",
+            {"almacen": self.propia["picking"].almacen_destino_id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_superusuario_sin_empresa_no_ve_nada(self):
+        Usuario.objects.filter(pk=self.superusuario.pk).update(empresa=None)
+        user = Usuario.objects.get(pk=self.superusuario.pk)
+        for recurso in self.RECURSOS:
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(user, recurso), [])
+
+    def test_trasladar_un_picking_de_otra_empresa_es_404(self):
+        resp = _api_de(self.superusuario).post(
+            f"/api/v1/wms/pickings/{self.ajena['picking'].pk}/trasladar/",
+            {"almacen": self.ajena["picking"].almacen_destino_id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_admin_de_empresa_conserva_su_alcance(self):
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(self.ajena["usuario"], recurso), [self.ajena[clave].pk])
+
+    def _usuario_normal(self, sucursal, codigo):
+        """Usuario de la empresa B sin ``is_admin_empresa`` ni superusuario."""
+        return Usuario.objects.create(
+            username=f"wms-normal-{codigo}@example.com",
+            email=f"wms-normal-{codigo}@example.com",
+            empresa=self.ajena["empresa"],
+            sucursal_default=sucursal,
+        )
+
+    def test_usuario_normal_ve_su_sucursal_y_no_otra_empresa(self):
+        """Sin cambios para el usuario normal: su sucursal sí, la empresa A es 404 (también en trasladar)."""
+        user = self._usuario_normal(self.ajena["sucursal"], "b")
+        api = _api_de(user)
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(user, recurso), [self.ajena[clave].pk])
+                propio = api.get(f"/api/v1/wms/{recurso}/{self.ajena[clave].pk}/")
+                self.assertEqual(propio.status_code, 200, propio.content)
+                ajeno = api.get(f"/api/v1/wms/{recurso}/{self.propia[clave].pk}/")
+                self.assertEqual(ajeno.status_code, 404, ajeno.content)
+        resp = api.post(
+            f"/api/v1/wms/pickings/{self.propia['picking'].pk}/trasladar/",
+            {"almacen": self.propia["picking"].almacen_destino_id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_usuario_normal_de_otra_sucursal_no_ve_nada(self):
+        """Dentro de su empresa sigue acotado a ``sucursales_permitidas()``: otra sucursal es 404."""
+        otra = Sucursal.objects.create(empresa=self.ajena["empresa"], codigo="SB2", nombre="Sucursal B2")
+        user = self._usuario_normal(otra, "b2")
+        api = _api_de(user)
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(user, recurso), [])
+                resp = api.get(f"/api/v1/wms/{recurso}/{self.ajena[clave].pk}/")
+                self.assertEqual(resp.status_code, 404, resp.content)
+        resp = api.post(
+            f"/api/v1/wms/pickings/{self.ajena['picking'].pk}/trasladar/",
+            {"almacen": self.ajena["picking"].almacen_destino_id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
+
+
+class DocumentosWmsLineasVarianteTests(TestCase):
+    """EC-882: SKU, color y talla en los renglones de picking, packing y transferencia.
+
+    Una línea de catálogo los lee de su ``ProductoVariante``; una de muestra, de su
+    ``VarianteProductoProduccion``, y además trae un ``producto_nombre`` usable en
+    vez de ``null`` (antes una TR nacida de un picking con muestra llegaba con
+    producto, variante y los dos nombres vacíos).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.d = _documentos_wms("L")
+
+    def _detalle(self, recurso, documento):
+        resp = _api_de(self.d["usuario"]).get(f"/api/v1/wms/{recurso}/{documento.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def _esperado_catalogo(self):
+        d = self.d
+        return {
+            "sku": d["variante"].sku,
+            "color_id": d["color"].pk,
+            "color_nombre": d["color"].nombre,
+            "talla_id": d["talla"].pk,
+            "talla_nombre": d["talla"].nombre,
+            "sku_muestra": None,
+        }
+
+    def _esperado_muestra(self):
+        d = self.d
+        return {
+            "sku": d["muestra"].sku,
+            "color_id": d["color_muestra"].pk,
+            "color_nombre": d["color_muestra"].nombre,
+            "talla_id": d["talla_muestra"].pk,
+            "talla_nombre": d["talla_muestra"].nombre,
+            "sku_muestra": d["muestra"].sku,
+            "producto_nombre": d["muestra"].nombre,
+            "producto": None,
+            "producto_variante": None,
+            "producto_variante_nombre": None,
+            "variante_produccion": d["muestra"].pk,
+        }
+
+    def _assert_lineas(self, lineas):
+        catalogo, muestra = lineas
+        self.assertEqual({k: catalogo[k] for k in self._esperado_catalogo()}, self._esperado_catalogo())
+        self.assertEqual({k: muestra[k] for k in self._esperado_muestra()}, self._esperado_muestra())
+
+    def test_picking(self):
+        self._assert_lineas(self._detalle("pickings", self.d["picking"])["picking_detalle"])
+
+    def test_packing(self):
+        self._assert_lineas(self._detalle("packings", self.d["packing"])["packing_detalle"])
+
+    def test_transferencia(self):
+        self._assert_lineas(self._detalle("transferencias", self.d["transferencia"])["transferencia_detalle"])
+
+    def test_los_listados_de_picking_y_packing_traen_los_mismos_campos(self):
+        api = _api_de(self.d["usuario"])
+        (picking,) = api.get("/api/v1/wms/pickings/").json()
+        self._assert_lineas(picking["picking_detalle"])
+        (packing,) = api.get("/api/v1/wms/packings/").json()
+        self._assert_lineas(packing["packing_detalle"])
+
+    def test_packing_sin_talla_de_pedido_trae_talla_id_en_null(self):
+        """``talla_id`` viaja siempre en packing: sin variante ni talla de pedido, ``null`` (antes se omitía)."""
+        from wms.models import PickingDetalle
+
+        PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(
+            pedido_detalle_talla=None, producto_variante=None
+        )
+        catalogo, muestra = self._detalle("packings", self.d["packing"])["packing_detalle"]
+        self.assertIn("talla_id", catalogo)
+        self.assertEqual((catalogo["talla_id"], catalogo["talla_nombre"]), (None, None))
+        self.assertEqual(catalogo["producto_nombre"], self.d["variante"].producto.nombre)
+        self.assertEqual(muestra["talla_id"], self.d["talla_muestra"].pk)
+
+    def _campos(self, linea):
+        return {k: linea[k] for k in ("sku", "color_id", "color_nombre", "talla_id", "talla_nombre", "sku_muestra")}
+
+    def _lineas_catalogo(self):
+        """El renglón de catálogo en el detalle de picking y en el de packing."""
+        return {
+            "picking": self._detalle("pickings", self.d["picking"])["picking_detalle"][0],
+            "packing": self._detalle("packings", self.d["packing"])["packing_detalle"][0],
+        }
+
+    def test_linea_de_catalogo_sin_variante_toma_la_talla_del_pedido(self):
+        """Sin ``producto_variante`` ni muestra, ``talla_*`` sale de ``PedidoDetalleTalla.talla``;
+        ``sku`` y ``color_*`` quedan en ``null`` (antes la talla también llegaba en ``null``)."""
+        from wms.models import PickingDetalle
+
+        PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(producto_variante=None)
+        for documento, linea in self._lineas_catalogo().items():
+            with self.subTest(documento=documento):
+                self.assertEqual(
+                    self._campos(linea),
+                    {
+                        "sku": None, "color_id": None, "color_nombre": None,
+                        "talla_id": self.d["talla"].pk, "talla_nombre": self.d["talla"].nombre,
+                        "sku_muestra": None,
+                    },
+                )
+                self.assertEqual(linea["producto_nombre"], self.d["variante"].producto.nombre)
+
+    def test_pedido_editado_despues_del_picking_no_cambia_el_renglon(self):
+        """SKU, color y talla salen de la variante surtida en la línea, no de la que hoy
+        tenga la talla del pedido: reasignarla o dejarla en ``null`` no mueve el renglón."""
+        from catalogo.models import Color, ProductoVariante, Talla
+        from ventas.models import PedidoDetalleTalla
+
+        otra = ProductoVariante.objects.create(
+            producto=self.d["variante"].producto, empresa=self.d["empresa"],
+            color=Color.objects.create(nombre="VERDE L", codigo="VER", codigo_hex="#00FF00"),
+            talla=Talla.objects.create(nombre="XGL"), nombre="Otra variante", sku="CHL-VER-XG",
+            precio_base=Decimal("100"),
+        )
+        esperado = self._esperado_catalogo()
+        talla_pedido = PedidoDetalleTalla.objects.filter(pk=self.d["pk_catalogo"].pedido_detalle_talla_id)
+        for variante_del_pedido in (otra, None):
+            talla_pedido.update(variante=variante_del_pedido)
+            for documento, linea in self._lineas_catalogo().items():
+                with self.subTest(variante_del_pedido=variante_del_pedido, documento=documento):
+                    self.assertEqual(self._campos(linea), esperado)
+
+    def test_linea_con_las_dos_variantes_da_dos_skus(self):
+        """Con variante de catálogo y muestra, ``sku`` es el de catálogo (lo surtido) y
+        ``sku_muestra`` el de la muestra: pueden diferir, como dice la documentación."""
+        from wms.models import PickingDetalle
+
+        PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(variante_produccion=self.d["muestra"])
+        for documento, linea in self._lineas_catalogo().items():
+            with self.subTest(documento=documento):
+                self.assertEqual(self._campos(linea), {**self._esperado_catalogo(), "sku_muestra": self.d["muestra"].sku})
+                self.assertNotEqual(linea["sku"], linea["sku_muestra"])
+
+    def test_linea_sin_variante_deja_los_campos_en_null(self):
+        from wms.models import TransferenciaDetalle
+
+        TransferenciaDetalle.objects.filter(pk=self.d["tr_catalogo"].pk).update(producto_variante=None)
+        catalogo, _ = self._detalle("transferencias", self.d["transferencia"])["transferencia_detalle"]
+        self.assertEqual(
+            {k: catalogo[k] for k in ("sku", "color_id", "color_nombre", "talla_id", "talla_nombre")},
+            dict.fromkeys(("sku", "color_id", "color_nombre", "talla_id", "talla_nombre")),
+        )
+        self.assertEqual(catalogo["producto_nombre"], self.d["tr_catalogo"].producto.nombre)
+
+    def test_las_consultas_no_crecen_con_los_renglones(self):
+        """Duplicar los renglones no agrega consultas en ningún detalle ni listado."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from wms.models import PackingDetalle, PickingDetalle, TransferenciaDetalle
+
+        rutas = (
+            f"/api/v1/wms/pickings/{self.d['picking'].pk}/",
+            f"/api/v1/wms/packings/{self.d['packing'].pk}/",
+            f"/api/v1/wms/transferencias/{self.d['transferencia'].pk}/",
+            "/api/v1/wms/pickings/",
+            "/api/v1/wms/packings/",
+        )
+        api = _api_de(self.d["usuario"])
+
+        def consultas():
+            conteo = {}
+            for ruta in rutas:
+                with CaptureQueriesContext(connection) as ctx:
+                    self.assertEqual(api.get(ruta).status_code, 200)
+                conteo[ruta] = len(ctx.captured_queries)
+            return conteo
+
+        antes = consultas()
+        for modelo, filtro in (
+            (PickingDetalle, {"picking": self.d["picking"]}),
+            (PackingDetalle, {"packing": self.d["packing"]}),
+            (TransferenciaDetalle, {"transferencia": self.d["transferencia"]}),
+        ):
+            for fila in list(modelo.objects.filter(**filtro)):
+                fila.pk = None
+                fila.save()
+        self.assertEqual(consultas(), antes)
+
+
+class DocumentosWmsClienteTests(TestCase):
+    """EC-882: picking y packing traen ``pedido_vinculado`` con el cliente del pedido.
+
+    Misma forma y regla que los detalles de Producción (EC-880,
+    ``armar_pedido_vinculado``): ``{id, folio, cliente: {id, nombre, razon_social,
+    rfc}}``, con la foto del cliente del pedido o, sin foto, el cliente vivo.
+    """
+
+    RECURSOS = {"pickings": "picking", "packings": "packing"}
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.d = _documentos_wms("C")
+
+    def _vinculado(self, recurso):
+        documento = self.d[self.RECURSOS[recurso]]
+        resp = _api_de(self.d["usuario"]).get(f"/api/v1/wms/{recurso}/{documento.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        cuerpo = resp.json()
+        # Lo que ya había no cambia.
+        self.assertEqual((cuerpo["pedido"], cuerpo["pedido_folio"]), (self.d["pedido"].pk, self.d["pedido"].folio))
+        return cuerpo["pedido_vinculado"]
+
+    def test_produccion_conserva_su_ruta_de_importacion(self):
+        """El helper vive en ``ventas``; la ruta de Producción (EC-880) sigue dando el mismo."""
+        from produccion.services import orden_bordado_field_filter_service as ruta_produccion
+        from ventas.services import pedido_vinculado
+
+        self.assertIs(ruta_produccion.armar_pedido_vinculado, pedido_vinculado.armar_pedido_vinculado)
+        self.assertIs(ruta_produccion.cliente_de_pedido, pedido_vinculado.cliente_de_pedido)
+
+    def test_sin_foto_sale_el_cliente_vivo(self):
+        cliente = self.d["cliente"]
+        for recurso in self.RECURSOS:
+            with self.subTest(recurso=recurso):
+                self.assertEqual(
+                    self._vinculado(recurso),
+                    {
+                        "id": self.d["pedido"].pk,
+                        "folio": self.d["pedido"].folio,
+                        "cliente": {
+                            "id": cliente.pk,
+                            "nombre": cliente.nombre,
+                            "razon_social": cliente.razon_social,
+                            "rfc": cliente.rfc,
+                        },
+                    },
+                )
+
+    def test_con_foto_sale_lo_que_se_vendio(self):
+        from ventas.models import Pedido
+
+        Pedido.objects.filter(pk=self.d["pedido"].pk).update(
+            cliente_nombre="Foto", cliente_razon_social="Foto SA", cliente_rfc=None
+        )
+        for recurso in self.RECURSOS:
+            with self.subTest(recurso=recurso):
+                self.assertEqual(
+                    self._vinculado(recurso)["cliente"],
+                    {"id": self.d["cliente"].pk, "nombre": "Foto", "razon_social": "Foto SA", "rfc": None},
+                )
+
+    def test_los_listados_lo_traen_sin_consultas_por_documento(self):
+        """Un segundo documento, de otro pedido y otro cliente, no agrega consultas al listado."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from terceros.models import Cliente
+        from ventas.models import Pedido
+        from wms.models import Packing, Picking
+
+        api = _api_de(self.d["usuario"])
+
+        def listar():
+            conteo, cuerpos = {}, {}
+            for recurso in self.RECURSOS:
+                with CaptureQueriesContext(connection) as ctx:
+                    resp = api.get(f"/api/v1/wms/{recurso}/")
+                conteo[recurso], cuerpos[recurso] = len(ctx.captured_queries), resp.json()
+            return conteo, cuerpos
+
+        antes, cuerpos = listar()
+        for recurso in self.RECURSOS:
+            (fila,) = cuerpos[recurso]
+            self.assertEqual(fila["pedido_vinculado"]["cliente"]["id"], self.d["cliente"].pk)
+
+        otro_cliente = Cliente.objects.create(empresa=self.d["empresa"], nombre="Otro cliente")
+        pedido = Pedido.objects.get(pk=self.d["pedido"].pk)
+        pedido.pk, pedido.folio, pedido.cliente = None, "P-C2", otro_cliente
+        pedido.save()
+        picking = Picking.objects.get(pk=self.d["picking"].pk)
+        picking.pk, picking.folio, picking.pedido = None, "PICK-C2", pedido
+        picking.save()
+        packing = Packing.objects.get(pk=self.d["packing"].pk)
+        packing.pk, packing.folio, packing.pedido, packing.picking = None, "PACK-C2", pedido, picking
+        packing.save()
+
+        despues, cuerpos = listar()
+        self.assertEqual(despues, antes)
+        for recurso in self.RECURSOS:
+            self.assertEqual(
+                {fila["pedido_vinculado"]["cliente"]["nombre"] for fila in cuerpos[recurso]},
+                {self.d["cliente"].nombre, "Otro cliente"},
+            )

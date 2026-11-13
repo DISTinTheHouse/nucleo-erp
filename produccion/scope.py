@@ -13,10 +13,14 @@ Los cuatro predicados aplican el mismo criterio (EC-880): SIEMPRE la empresa
 activa del usuario (``user.empresa``), superusuario incluido; cambiar la política
 de uno exige revisar los otros tres.
 
+Los cuatro delegan en ``nucleo.scope.visibles_en_empresa_activa``, el mismo
+predicado que WMS.
+
 Ninguna función aplica ``select_related``/``prefetch_related`` ni orden: eso sigue
 siendo responsabilidad de cada consumidor.
 """
 
+from nucleo.scope import visibles_en_empresa_activa
 from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejante, OrdenProduccion
 
 
@@ -41,13 +45,7 @@ def ordenes_produccion_visibles(qs, user):
     Dentro de la empresa: superusuario e ``is_admin_empresa`` ven todas las
     sucursales, el resto solo las de ``user.sucursales_permitidas()``.
     """
-    empresa = getattr(user, "empresa", None)
-    if not empresa:
-        return qs.none()
-    qs = qs.filter(empresa=empresa)
-    if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
-        return qs
-    return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+    return visibles_en_empresa_activa(qs, user)
 
 
 def ordenes_bordado_base():
@@ -65,13 +63,7 @@ def ordenes_bordado_visibles(qs, user):
     ``user.sucursales_permitidas()`` (M2M ``sucursales`` + ``sucursal_default``).
     Mismo criterio que ``ordenes_produccion_visibles``.
     """
-    empresa = getattr(user, "empresa", None)
-    if not empresa:
-        return qs.none()
-    qs = qs.filter(empresa=empresa)
-    if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
-        return qs
-    return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+    return visibles_en_empresa_activa(qs, user)
 
 
 def ordenes_reflejante_base():
@@ -87,13 +79,7 @@ def ordenes_reflejante_visibles(qs, user):
     superusuario e ``is_admin_empresa`` ven todas las sucursales y el resto sólo
     las de ``user.sucursales_permitidas()``.
     """
-    empresa = getattr(user, "empresa", None)
-    if not empresa:
-        return qs.none()
-    qs = qs.filter(empresa=empresa)
-    if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
-        return qs
-    return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+    return visibles_en_empresa_activa(qs, user)
 
 
 def ordenes_corte_manga_base():
@@ -107,10 +93,4 @@ def ordenes_corte_manga_visibles(qs, user):
     Mismo criterio que bordado y reflejante (EC-880): siempre ``user.empresa``,
     superusuario incluido.
     """
-    empresa = getattr(user, "empresa", None)
-    if not empresa:
-        return qs.none()
-    qs = qs.filter(empresa=empresa)
-    if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
-        return qs
-    return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+    return visibles_en_empresa_activa(qs, user)

@@ -117,6 +117,8 @@ Expected behavior: list returns `200 []` when out of scope; detail returns `404`
 
 **`produccion` scopes superusers too.** Per decision #361, `orden-produccion` (list/detail and `kpis`), `lista-material`, `bom-detalle`, `consumo`, `producto-terminado-entradas` and `pedidos-especiales` always use `user.empresa`, superuser included: no `if user.is_superuser: return qs` branch, empty lists and `400` on writes without an empresa, and writable FKs validated against `user.empresa` (`_fk_de_la_empresa_del_usuario` in `produccion/api/serializers.py`). Since EC-880 bordado/reflejante/corte de manga follow the same rule (`produccion/scope.py` and `_OrdenPadreTenantScopedMixin` for their avances/incidencias): the superuser sees only the active empresa, all its sucursales; another empresa's order is a `404` for read, edit, delete and avances.
 
+**`wms` scopes superusers too (EC-882).** Picking, packing and transferencias (`wms/scope.py`, `documentos_wms_visibles`) follow the same rule, with the same predicate as `produccion/scope.py` (`nucleo.scope.visibles_en_empresa_activa`, built on `empresa_ids_lectura`): active `user.empresa`, superuser included, all its sucursales for superuser and admin, `sucursales_permitidas()` for the rest; another empresa's document is a `404` (also for picking's `trasladar`, the only one with that action). Despacho and etiquetas RFID still have their own `get_queryset` with the old superuser branch.
+
 **`finanzas` scopes the commercial side by sucursal (#753).** Facturas, notas de crédito, CxC, cobros and CxC mora alerts also filter by `sucursales_permitidas()` for non-admins, via `finanzas/scope.py`. Pólizas, banks, CxP, conciliaciones and reports stay empresa-wide on purpose.
 
 ### RBAC + overrides

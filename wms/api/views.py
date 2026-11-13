@@ -33,6 +33,7 @@ from wms.models import (
     Transferencia,
     TransferenciaDetalle,
 )
+from wms.scope import documentos_wms_visibles
 from wms.services.despacho_service import DespachoService
 from wms.services.rfid_scan_service import (
     lector_desde_request,
@@ -44,6 +45,20 @@ from wms.services.transferencia_service import TransferenciaService
 from wms.services.picking_service import PickingService
 from wms.services.packing_service import PackingService
 from wms.services.rfid_label_service import RFIDLabelService
+
+
+class _ReleerAltaMixin:
+    """``_releer``: el documento recién creado, leído con las precargas de ``get_queryset``.
+
+    Lo comparten ``PickingViewSet`` y ``PackingViewSet``. Serializar la instancia
+    que devuelve el servicio resolvía cada FK de cada renglón con su propia
+    consulta; releerla deja la respuesta del alta con el mismo costo fijo que el
+    retrieve (EC-882), como ya hace ``trasladar``. El servicio ya validó empresa y
+    sucursal, así que el documento está en alcance.
+    """
+
+    def _releer(self, documento):
+        return self.get_queryset().get(pk=documento.pk)
 
 
 class TransferenciaViewSet(
@@ -73,6 +88,10 @@ class TransferenciaViewSet(
                     queryset=TransferenciaDetalle.objects.select_related(
                         "producto",
                         "producto_variante",
+                        "producto_variante__color",
+                        "producto_variante__talla",
+                        "variante_produccion__color",
+                        "variante_produccion__talla",
                         "ubicacion_origen",
                         "ubicacion_origen__almacen",
                         "ubicacion_destino",
@@ -81,30 +100,12 @@ class TransferenciaViewSet(
                 )
             )
 
-        # Aislamiento multi-tenant: sin empresa no se ve nada. list devuelve 200 []
-        # fuera de alcance; retrieve de otra empresa/sucursal devuelve 404 (no 403).
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-
-        # Scope por sucursal dentro de la empresa: el admin de empresa ve todas sus
-        # sucursales; el resto ve las asignadas en el M2M ``usuario.sucursales``
-        # más su ``sucursal_default`` —mismo criterio que
-        # ``PickingViewSet``/``PackingViewSet``/``DespachoViewSet.get_queryset()``,
-        # y que ``TransferenciaService.handle_store()`` ya exige del lado de
-        # escritura (la transferencia se timbra con ``user.sucursal_default``)—.
-        # Sin esto un usuario cuyo único acceso fuera la sucursal por defecto podía
-        # crear la transferencia pero no volver a verla en list/retrieve. Sin
-        # sucursales asignadas no ve nada, igual que un usuario sin empresa: se
-        # falla cerrado. Se filtra por ``Transferencia.sucursal`` (la dueña del
-        # documento), no por la sucursal de los almacenes origen/destino, que
-        # pueden diferir.
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        # Aislamiento multi-tenant (``wms/scope.py``): empresa activa, superusuario
+        # incluido (EC-882). Dentro de la empresa, los no admin solo ven las
+        # sucursales de ``sucursales_permitidas()`` —el mismo conjunto que
+        # ``TransferenciaService.handle_store()`` exige al escribir—, filtradas por
+        # ``Transferencia.sucursal`` (la dueña), no por la de los almacenes.
+        return documentos_wms_visibles(qs, user)
 
     def get_serializer_class(self):
         # retrieve → encabezado + renglones anidados; list → forma plana ligera;
@@ -121,7 +122,7 @@ class TransferenciaViewSet(
         res = TransferenciaService.handle_store(serializer.validated_data, request.user, request=request)
         return Response(TransferenciaSerializer(res).data, status=status.HTTP_201_CREATED)
 
-class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericViewSet):
+class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericViewSet):
     queryset = Picking.objects.all()
     serializer_class = PickingSerializer
 
@@ -141,6 +142,7 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
             .get_queryset()
             .select_related(
                 "pedido",
+                "pedido__cliente",
                 "operador",
                 "almacen",
                 "almacen_destino",
@@ -157,9 +159,11 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
                         "producto",
                         "producto_variante",
                         "pedido_detalle_talla",
-                        "pedido_detalle_talla__variante",
-                        "pedido_detalle_talla__variante__talla",
+                        "pedido_detalle_talla__talla",
+                        "producto_variante__talla",
                         "variante_produccion__talla",
+                        "variante_produccion__color",
+                        "producto_variante__color",
                         "ubicacion",
                         "ubicacion__almacen",
                         "operador",
@@ -177,30 +181,12 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
             .order_by("-created_at", "-id")
         )
 
-        # Aislamiento multi-tenant: sin empresa no se ve nada. list devuelve 200 []
-        # fuera de alcance; retrieve de otra empresa/sucursal devuelve 404 (no 403).
-        # Mismo criterio que TransferenciaViewSet.get_queryset().
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-
-        # Scope por sucursal dentro de la empresa: el admin de empresa ve todas sus
-        # sucursales; el resto ve las asignadas en el M2M ``usuario.sucursales``
-        # más su ``sucursal_default`` —mismo criterio que
-        # ``PackingViewSet``/``DespachoViewSet.get_queryset()``—. Sin esto un
-        # usuario cuyo único acceso fuera la sucursal por defecto podía completar
-        # el onboarding (que sí une ambos conjuntos, ver
-        # ``PickingService.onboarding_payload``) y crear el picking, pero no
-        # volver a verlo en list/retrieve. Sin sucursales asignadas no ve nada,
-        # igual que un usuario sin empresa: se falla cerrado. Se filtra por
-        # ``Picking.sucursal`` (la dueña del documento), no por la sucursal del
-        # almacén, que puede diferir.
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        # Aislamiento multi-tenant (``wms/scope.py``): empresa activa, superusuario
+        # incluido (EC-882). Los no admin ven las sucursales de
+        # ``sucursales_permitidas()``, el mismo conjunto que une el onboarding
+        # (``PickingService.onboarding_payload``): quien crea un picking lo vuelve a
+        # ver en list/retrieve. ``trasladar`` pasa por aquí vía ``get_object``.
+        return documentos_wms_visibles(qs, user)
 
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
@@ -225,7 +211,7 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         picking, ordenes_trabajo = PickingService.handle_store(serializer.validated_data, request.user)
-        response_data = PickingSerializer(picking).data
+        response_data = PickingSerializer(self._releer(picking)).data
         response_data["ordenes_trabajo_generadas"] = ordenes_trabajo
         return Response(response_data, status=status.HTTP_201_CREATED)
 
@@ -250,11 +236,11 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         picking, ordenes_trabajo = PickingService.handle_store(serializer.validated_data, request.user)
-        response_data = PickingSerializer(picking).data
+        response_data = PickingSerializer(self._releer(picking)).data
         response_data["ordenes_trabajo_generadas"] = ordenes_trabajo
         return Response(response_data, status=status.HTTP_201_CREATED)
 
-class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
+class PackingViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
     queryset = Packing.objects.all()
     serializer_class = PackingSerializer
 
@@ -263,7 +249,9 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
         qs = (
             super()
             .get_queryset()
-            .select_related("pedido", "picking", "picking__almacen", "operador", "usuario")
+            .select_related(
+                "pedido", "pedido__cliente", "picking", "picking__almacen", "operador", "usuario"
+            )
             .prefetch_related(
                 Prefetch(
                     "packing_detalle",
@@ -273,9 +261,11 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
                         "picking_detalle__producto",
                         "picking_detalle__producto_variante",
                         "picking_detalle__pedido_detalle_talla",
-                        "picking_detalle__pedido_detalle_talla__variante",
-                        "picking_detalle__pedido_detalle_talla__variante__talla",
+                        "picking_detalle__pedido_detalle_talla__talla",
+                        "picking_detalle__producto_variante__talla",
                         "picking_detalle__variante_produccion__talla",
+                        "picking_detalle__variante_produccion__color",
+                        "picking_detalle__producto_variante__color",
                         "picking_detalle__ubicacion",
                         "picking_detalle__ubicacion__almacen",
                     ).order_by("id"),
@@ -284,15 +274,8 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
             .order_by("-created_at", "-id")
         )
 
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        # Mismo alcance que picking y transferencias (``wms/scope.py``, EC-882).
+        return documentos_wms_visibles(qs, user)
 
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
@@ -314,13 +297,13 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         packing_instance = PackingService.handle_store(serializer.validated_data, request.user)
-        return Response(PackingSerializer(packing_instance).data, status=status.HTTP_201_CREATED)
+        return Response(PackingSerializer(self._releer(packing_instance)).data, status=status.HTTP_201_CREATED)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         packing_instance = PackingService.handle_store(serializer.validated_data, request.user)
-        return Response(PackingSerializer(packing_instance).data, status=status.HTTP_201_CREATED)
+        return Response(PackingSerializer(self._releer(packing_instance)).data, status=status.HTTP_201_CREATED)
 
 
 class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):

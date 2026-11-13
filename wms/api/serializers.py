@@ -18,6 +18,7 @@ from wms.models import (
     Transferencia,
     TransferenciaDetalle,
 )
+from ventas.services.pedido_vinculado import armar_pedido_vinculado
 from wms.services.rfid_label_service import zpl_rfid_vigente
 
 class TransferenciaDetalleSerializer(serializers.ModelSerializer):
@@ -75,7 +76,80 @@ class TransferenciaSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class TransferenciaDetalleReadSerializer(serializers.ModelSerializer):
+class _VarianteDeLineaWmsMixin(serializers.Serializer):
+    """Producto, ``sku``, color y talla de un renglón de WMS (EC-882), con una sola fuente.
+
+    ``sku``, ``color_*`` y ``talla_*`` salen SIEMPRE de la misma variante, la que se
+    surtió en la línea: su ``producto_variante`` (catálogo) o, si no tiene, su
+    ``variante_produccion`` (muestra, con su propio ``sku``, ``color`` y ``talla``).
+    Nunca de la variante que hoy tenga la talla del pedido, que puede cambiar
+    después del picking. Sólo si la línea no tiene ninguna de las dos, ``talla_*``
+    cae a la talla del pedido (``pedido_detalle_talla.talla``; la transferencia no
+    tiene) y ``sku``/``color_*`` quedan en ``null``. Una línea con las dos variantes
+    da el ``sku`` de catálogo y ``sku_muestra`` el de la muestra: pueden diferir.
+
+    ``producto_nombre``: el del producto de la línea o, sin producto, el de su
+    muestra; ``null`` si no hay ninguno o el nombre viene vacío.
+
+    ``_linea_wms`` devuelve el objeto con esas FK: el propio renglón en picking y
+    transferencia, su ``picking_detalle`` en packing. Quien lo usa precarga
+    ``producto``, ``producto_variante__color``/``__talla``,
+    ``variante_produccion__color``/``__talla`` y, en picking y packing,
+    ``pedido_detalle_talla__talla`` (sin consultas por fila).
+    """
+
+    producto_nombre = serializers.SerializerMethodField()
+    sku = serializers.SerializerMethodField()
+    color_id = serializers.SerializerMethodField()
+    color_nombre = serializers.SerializerMethodField()
+    talla_id = serializers.SerializerMethodField()
+    talla_nombre = serializers.SerializerMethodField()
+
+    def _linea_wms(self, obj):
+        return obj
+
+    def _variante_wms(self, obj):
+        linea = self._linea_wms(obj)
+        if linea.producto_variante_id:
+            return linea.producto_variante
+        if linea.variante_produccion_id:
+            return linea.variante_produccion
+        return None
+
+    def _color_wms(self, obj):
+        variante = self._variante_wms(obj)
+        return variante.color if variante is not None and variante.color_id else None
+
+    def _talla_wms(self, obj):
+        variante = self._variante_wms(obj)
+        if variante is not None:
+            return variante.talla if variante.talla_id else None
+        talla_pedido = getattr(self._linea_wms(obj), "pedido_detalle_talla", None)
+        return talla_pedido.talla if talla_pedido is not None else None
+
+    def get_producto_nombre(self, obj):
+        linea = self._linea_wms(obj)
+        if linea.producto_id:
+            return linea.producto.nombre or None
+        return getattr(linea.variante_produccion, "nombre", None) or None
+
+    def get_sku(self, obj):
+        return getattr(self._variante_wms(obj), "sku", None) or None
+
+    def get_color_id(self, obj):
+        return getattr(self._color_wms(obj), "pk", None)
+
+    def get_color_nombre(self, obj):
+        return getattr(self._color_wms(obj), "nombre", None)
+
+    def get_talla_id(self, obj):
+        return getattr(self._talla_wms(obj), "pk", None)
+
+    def get_talla_nombre(self, obj):
+        return getattr(self._talla_wms(obj), "nombre", None)
+
+
+class TransferenciaDetalleReadSerializer(_VarianteDeLineaWmsMixin, serializers.ModelSerializer):
     """Renglón anidado del ``retrieve`` individual de una transferencia.
 
     Resuelve los nombres a través de las FK que el ``prefetch_related`` del viewset
@@ -94,14 +168,19 @@ class TransferenciaDetalleReadSerializer(serializers.ModelSerializer):
 
     ``lote``/``serie`` se exponen solo como id: ambos modelos únicamente tienen
     ``id`` y una FK a ``producto``, sin ningún campo identificador que resolver.
+
+    Línea de muestra (EC-882): sin ``producto`` ni ``producto_variante``, la línea
+    trae ``variante_produccion`` (la crea así el picking de una talla con SKU de
+    muestra). ``producto_nombre`` cae entonces al nombre de esa variante —misma
+    regla que ``PickingDetalleSerializer``— y ``sku_muestra`` lleva su SKU. ``sku``,
+    ``color_*`` y ``talla_*`` salen de la variante de catálogo o de la de muestra
+    (``_VarianteDeLineaWmsMixin``).
     """
 
-    producto_nombre = serializers.CharField(
-        source="producto.nombre", read_only=True, default=None
-    )
     producto_variante_nombre = serializers.CharField(
         source="producto_variante.nombre", read_only=True, default=None
     )
+    sku_muestra = serializers.CharField(source="variante_produccion.sku", read_only=True, default=None)
     ubicacion_origen_nombre = serializers.SerializerMethodField()
     ubicacion_destino_nombre = serializers.SerializerMethodField()
 
@@ -113,6 +192,13 @@ class TransferenciaDetalleReadSerializer(serializers.ModelSerializer):
             "producto_nombre",
             "producto_variante",
             "producto_variante_nombre",
+            "variante_produccion",
+            "sku_muestra",
+            "sku",
+            "color_id",
+            "color_nombre",
+            "talla_id",
+            "talla_nombre",
             "cantidad",
             "ubicacion_origen",
             "ubicacion_origen_nombre",
@@ -185,7 +271,7 @@ class TransferenciaRetrieveSerializer(TransferenciaListSerializer):
         fields = TransferenciaListSerializer.Meta.fields + ["transferencia_detalle"]
 
 
-class PickingDetalleSerializer(serializers.ModelSerializer):
+class PickingDetalleSerializer(_VarianteDeLineaWmsMixin, serializers.ModelSerializer):
     """Renglón anidado de un picking.
 
     Resuelve los nombres a través de las FK que el ``prefetch_related`` del viewset
@@ -207,33 +293,20 @@ class PickingDetalleSerializer(serializers.ModelSerializer):
     ``oleada`` y ``lote_picking`` usan ``__str__`` null-safe como etiqueta porque
     sus modelos no tienen un campo ``nombre`` natural (su ``__str__`` compone id
     + estado), al igual que ``TransferenciaDetalleReadSerializer`` con ``Ubicacion``.
+
+    ``sku``, ``color_id`` y ``color_nombre`` (EC-882) salen de la variante de
+    catálogo o, en una línea de muestra, de su ``variante_produccion``
+    (``_VarianteDeLineaWmsMixin``); ``sku_muestra`` sigue siendo sólo el SKU de la
+    muestra.
     """
 
-    producto_nombre = serializers.SerializerMethodField()
     producto_variante_nombre = serializers.CharField(
         source="producto_variante.nombre", read_only=True, default=None
     )
     # Línea de muestra: su SKU de muestra (``variante_produccion``).
     sku_muestra = serializers.CharField(source="variante_produccion.sku", read_only=True, default=None)
-    talla_id = serializers.SerializerMethodField()
-    talla_nombre = serializers.SerializerMethodField()
     ubicacion_nombre = serializers.SerializerMethodField()
     operador_nombre = serializers.SerializerMethodField()
-
-    def get_producto_nombre(self, obj):
-        if obj.producto_id:
-            return obj.producto.nombre
-        return getattr(obj.variante_produccion, "nombre", None)
-
-    def _talla(self, obj):
-        variante = getattr(obj.pedido_detalle_talla, "variante", None)
-        return getattr(variante, "talla", None) or getattr(obj.variante_produccion, "talla", None)
-
-    def get_talla_id(self, obj):
-        return getattr(self._talla(obj), "pk", None)
-
-    def get_talla_nombre(self, obj):
-        return getattr(self._talla(obj), "nombre", None)
 
     class Meta:
         model = PickingDetalle
@@ -310,12 +383,19 @@ class PickingSerializer(serializers.ModelSerializer):
     ``ordenes_trabajo`` está nested y prefetchceado para que el GET recupere la
     trazabilidad contra producción; el POST además inyecta un arreglo plano
     ``ordenes_trabajo_generadas`` con resumen ``{tipo, id, folio}``.
+
+    ``pedido_vinculado`` (EC-882) es ``{id, folio, cliente}`` con la misma forma y
+    regla que los detalles de Producción (EC-880, ``armar_pedido_vinculado``): el
+    cliente sale de la foto que guarda el pedido o, sin foto, del ``Cliente`` vivo
+    (``pedido__cliente`` en el ``select_related`` del viewset). ``pedido`` y
+    ``pedido_folio`` no cambian.
     """
 
     picking_detalle = PickingDetalleSerializer(many=True)
     ordenes_trabajo = PickingOrdenTrabajoReadSerializer(many=True, read_only=True)
 
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
+    pedido_vinculado = serializers.SerializerMethodField()
     operador_nombre = serializers.SerializerMethodField()
     almacen_nombre = serializers.CharField(source="almacen.nombre", read_only=True)
     almacen_destino_nombre = serializers.CharField(
@@ -364,6 +444,9 @@ class PickingSerializer(serializers.ModelSerializer):
 
     def get_oleada_nombre(self, obj):
         return str(obj.oleada) if obj.oleada_id else None
+
+    def get_pedido_vinculado(self, obj):
+        return armar_pedido_vinculado(obj)
 
     def get_lote_nombre(self, obj):
         return str(obj.lote) if obj.lote_id else None
@@ -436,12 +519,19 @@ class PickingCreateSerializer(serializers.ModelSerializer):
             "picking_detalle",
         ]
 
-class PackingDetalleReadSerializer(serializers.ModelSerializer):
+class PackingDetalleReadSerializer(_VarianteDeLineaWmsMixin, serializers.ModelSerializer):
+    """Renglón anidado de un packing: los datos del producto salen de su ``picking_detalle``.
+
+    Línea de muestra (EC-882): su ``picking_detalle`` no tiene ``producto`` ni
+    ``producto_variante`` sino ``variante_produccion``. ``producto_nombre`` cae al
+    nombre de esa variante y ``talla_*`` a su talla —las mismas reglas que
+    ``PickingDetalleSerializer``—, ``sku_muestra`` lleva su SKU y ``sku``/``color_*``
+    salen de la variante de catálogo o de la de muestra. ``talla_id`` ya no se
+    omite cuando falta la cadena de la talla del pedido: viaja en ``null``.
+    """
+
     producto = serializers.IntegerField(
         source="picking_detalle.producto_id", read_only=True
-    )
-    producto_nombre = serializers.CharField(
-        source="picking_detalle.producto.nombre", read_only=True, default=None
     )
     producto_variante = serializers.IntegerField(
         source="picking_detalle.producto_variante_id", read_only=True
@@ -449,19 +539,17 @@ class PackingDetalleReadSerializer(serializers.ModelSerializer):
     producto_variante_nombre = serializers.CharField(
         source="picking_detalle.producto_variante.nombre", read_only=True, default=None
     )
+    variante_produccion = serializers.IntegerField(
+        source="picking_detalle.variante_produccion_id", read_only=True
+    )
+    sku_muestra = serializers.CharField(
+        source="picking_detalle.variante_produccion.sku", read_only=True, default=None
+    )
     pedido_detalle = serializers.IntegerField(
         source="picking_detalle.pedido_detalle_id", read_only=True
     )
     pedido_detalle_talla = serializers.IntegerField(
         source="picking_detalle.pedido_detalle_talla_id", read_only=True
-    )
-    talla_id = serializers.IntegerField(
-        source="picking_detalle.pedido_detalle_talla.variante.talla_id", read_only=True
-    )
-    talla_nombre = serializers.CharField(
-        source="picking_detalle.pedido_detalle_talla.variante.talla.nombre",
-        read_only=True,
-        default=None,
     )
     cantidad_asignada = serializers.DecimalField(
         source="picking_detalle.cantidad_asignada",
@@ -495,9 +583,19 @@ class PackingDetalleReadSerializer(serializers.ModelSerializer):
     def get_ubicacion_nombre(self, obj):
         return str(obj.picking_detalle.ubicacion) if obj.picking_detalle.ubicacion_id else None
 
+    def _linea_wms(self, obj):
+        return obj.picking_detalle
+
 class PackingSerializer(serializers.ModelSerializer):
+    """Serializer compartido de packing (``list``, ``retrieve`` y respuesta del alta).
+
+    ``pedido_vinculado`` (EC-882): ``{id, folio, cliente}`` del pedido, misma forma
+    que en picking y en los detalles de Producción (``armar_pedido_vinculado``).
+    """
+
     packing_detalle = PackingDetalleReadSerializer(many=True, read_only=True)
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
+    pedido_vinculado = serializers.SerializerMethodField()
     picking_folio = serializers.CharField(source="picking.folio", read_only=True)
     picking_estado = serializers.CharField(source="picking.estado", read_only=True)
     picking_almacen = serializers.IntegerField(source="picking.almacen_id", read_only=True)
@@ -530,6 +628,9 @@ class PackingSerializer(serializers.ModelSerializer):
     def get_operador_nombre(self, obj):
         return self._nombre_usuario(obj.operador)
     
+    def get_pedido_vinculado(self, obj):
+        return armar_pedido_vinculado(obj)
+
     def get_usuario_nombre(self, obj):
         return self._nombre_usuario(obj.usuario)
 

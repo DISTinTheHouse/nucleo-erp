@@ -5755,7 +5755,10 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 ### 4) Detalle de Picking
 
 - **Endpoint**: `GET /api/v1/wms/pickings/{id}/`
-- **Descripción**: devuelve encabezado y `picking_detalle` del surtido.
+- **Descripción**: devuelve encabezado y `picking_detalle` del surtido. El listado, el alta y `trasladar/` responden la misma forma.
+- **Alcance (EC-882)**: la empresa activa (`user.empresa`), superusuario incluido; dentro de ella el superusuario y el admin ven todas las sucursales y el resto `sucursales_permitidas()`. Otra empresa → `404` en el detalle (y en `trasladar/`), `[]` en el listado.
+- **Cliente (EC-882)**: `pedido_vinculado: {id, folio, cliente: {id, nombre, razon_social, rfc}}`, la misma forma y regla que en los detalles de OP, OB, OR y OCM (EC-880): el cliente sale en bloque de la foto que guarda el pedido o, sin foto, del cliente vivo. `pedido` y `pedido_folio` no cambian.
+- **Renglones (EC-882)**: `sku`, `color_id`/`color_nombre` y `talla_id`/`talla_nombre` salen siempre de la misma variante, la surtida en la línea: su `producto_variante` (catálogo) o, si no tiene, su `variante_produccion` (muestra, con su propio SKU, color y talla). Nunca de la variante que hoy tenga la talla del pedido: editar el pedido después del picking no cambia el renglón. Si esa variante no trae talla, `talla_*` va en `null`. Sólo cuando la línea no tiene ninguna de las dos variantes, `talla_*` sale de la talla del pedido (`pedido_detalle_talla.talla`) y `sku`/`color_*` van en `null`. `sku_muestra` es siempre el SKU de la muestra: en una línea de muestra es igual a `sku`; si la línea tiene las dos variantes, `sku` es el de catálogo (lo surtido) y `sku_muestra` el de la muestra, y pueden diferir. `producto_nombre` es el nombre del producto o, sin producto, el de la muestra; en una línea de muestra `producto`, `producto_variante` y `producto_variante_nombre` vienen en `null`.
 - **Nota**: incluye `almacen_destino`, `almacen_destino_nombre` y expone el nested **`ordenes_trabajo[]`** (read-only, `related_name="ordenes_trabajo"` del modelo `PickingOrdenTrabajo`). Cada renglón contiene:
   - `tipo_orden`: `BORDADO` | `REFLEJANTE` | `CORTE_MANGA` (enum).
   - `tipo_orden_label`: label humano del tipo (ej: `"Bordado"`).
@@ -5972,7 +5975,21 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 ### 4) Detalle de Packing
 
 - **Endpoint**: `GET /api/v1/wms/packings/{id}/`
-- **Descripción**: devuelve encabezado y `packing_detalle` del empaque registrado.
+- **Descripción**: devuelve encabezado y `packing_detalle` del empaque registrado. El listado y el alta responden la misma forma.
+- **Alcance (EC-882)**: la empresa activa (`user.empresa`), superusuario incluido; dentro de ella el superusuario y el admin ven todas las sucursales y el resto `sucursales_permitidas()`. Otra empresa → `404` en el detalle, `[]` en el listado.
+- **Cliente (EC-882)**: `pedido_vinculado: {id, folio, cliente: {id, nombre, razon_social, rfc}}`, la misma forma y regla que en los detalles de OP, OB, OR y OCM (EC-880): el cliente sale en bloque de la foto que guarda el pedido o, sin foto, del cliente vivo. `pedido` y `pedido_folio` no cambian.
+- **Renglones (EC-882)**: cada renglón se lee de su `picking_detalle`, con la misma regla que picking: `sku`, `color_id`/`color_nombre` y `talla_id`/`talla_nombre` salen siempre de la misma variante, la surtida en la línea: su `producto_variante` (catálogo) o, si no tiene, su `variante_produccion` (muestra, con su propio SKU, color y talla). Nunca de la variante que hoy tenga la talla del pedido: editar el pedido después del picking no cambia el renglón. Si esa variante no trae talla, `talla_*` va en `null`. Sólo cuando la línea no tiene ninguna de las dos variantes, `talla_*` sale de la talla del pedido (`pedido_detalle_talla.talla`) y `sku`/`color_*` van en `null`. `sku_muestra` es siempre el SKU de la muestra: en una línea de muestra es igual a `sku`; si la línea tiene las dos variantes, `sku` es el de catálogo (lo surtido) y `sku_muestra` el de la muestra, y pueden diferir. `producto_nombre` es el nombre del producto o, sin producto, el de la muestra; en una línea de muestra `producto`, `producto_variante` y `producto_variante_nombre` vienen en `null`. Agrega además `variante_produccion` (id). `talla_id` viaja siempre (antes se omitía si faltaba la talla del pedido).
+
+---
+
+## 📦 WMS - Transferencias
+
+### Detalle de Transferencia
+
+- **Endpoint**: `GET /api/v1/wms/transferencias/{id}/` (listado: `GET /api/v1/wms/transferencias/`, sin renglones)
+- **Descripción**: encabezado (`folio`, `status`, `fecha_creacion`, almacenes origen/destino con nombre, `usuario_nombre`, `observaciones`) y `transferencia_detalle`.
+- **Alcance (EC-882)**: la empresa activa (`user.empresa`), superusuario incluido; dentro de ella el superusuario y el admin ven todas las sucursales y el resto `sucursales_permitidas()`. Otra empresa → `404` en el detalle, `[]` en el listado.
+- **Renglones (EC-882)**: además de `producto`, `producto_variante`, sus nombres, `cantidad`, ubicaciones, `lote` y `serie`, cada renglón trae `variante_produccion`, `sku_muestra`, `sku`, `color_id`, `color_nombre`, `talla_id` y `talla_nombre`, con la misma regla que picking, salvo que la transferencia no tiene talla de pedido: una línea sin variante deja `sku`, `color_*` y `talla_*` en `null`. La transferencia que crea un picking de una talla con SKU de muestra lleva la línea con `variante_produccion` y `producto_nombre` = nombre de la muestra (antes llegaba con producto, variante y nombres en `null`).
 
 ---
 
