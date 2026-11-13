@@ -164,12 +164,14 @@ class PreOrdenProduccion(models.Model):
     """
 
     class Estatus(models.TextChoices):
+        PENDIENTE_ACEPTAR = "pendiente_aceptar", "Pendiente de aceptar"  # resurtido de planeación
         PENDIENTE_VALIDAR = "pendiente_validar", "Pendiente de validar"
         FALTAN_MATERIALES = "faltan_materiales", "Faltan materiales"
         EN_COMPRA = "en_compra", "En compra"
         LISTA = "lista", "Lista para producir"
         CONVERTIDA = "convertida", "Convertida en OP"
         CANCELADA = "cancelada", "Cancelada"
+        RECHAZADA = "rechazada", "Rechazada"  # producción no aceptó el resurtido
 
     class Origen(models.TextChoices):
         PEDIDO = "pedido", "Pedido"
@@ -184,6 +186,8 @@ class PreOrdenProduccion(models.Model):
     producto = models.ForeignKey('catalogo.Producto', on_delete=models.PROTECT, null=True, blank=True, related_name="+")
     fecha_compromiso = models.DateField(null=True, blank=True)
     notas = models.TextField(blank=True, default="")
+    motivo_rechazo = models.CharField(max_length=500, blank=True, default="")
+    usuario_crea = models.ForeignKey('usuarios.Usuario', on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.PENDIENTE_VALIDAR, db_index=True)
     op = models.ForeignKey(
         OrdenProduccion, on_delete=models.SET_NULL, null=True, blank=True, related_name="pre_ordenes",
@@ -236,6 +240,8 @@ class PreOrdenEvento(models.Model):
         LISTA = "lista", "Lista para producir"
         OP_CREADA = "op_creada", "OP creada"
         CANCELADA = "cancelada", "Cancelada"
+        ACEPTADA = "aceptada", "Aceptada por producción"
+        RECHAZADA = "rechazada", "Rechazada por producción"
 
     pre_orden = models.ForeignKey(PreOrdenProduccion, on_delete=models.CASCADE, related_name="eventos")
     fecha = models.DateTimeField(auto_now_add=True)
@@ -259,6 +265,8 @@ class PreOrdenProduccionDetalle(models.Model):
     variante_produccion = models.ForeignKey(VarianteProductoProduccion, on_delete=models.PROTECT, related_name="+", null=True, blank=True)
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, related_name="+", null=True, blank=True)
     producto_variante = models.ForeignKey('catalogo.ProductoVariante', on_delete=models.PROTECT, related_name="+", null=True, blank=True)
+    # Resurtido: ``fabricado`` (tiene BOM, va a OP) o ``compra`` (necesidad de compra directa del SKU).
+    tipo_linea = models.CharField(max_length=10, default="fabricado", choices=[("fabricado", "Fabricado"), ("compra", "De compra")])
     cantidad = models.DecimalField(max_digits=12, decimal_places=2)
 
     class Meta:

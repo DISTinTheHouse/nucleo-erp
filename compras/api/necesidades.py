@@ -93,7 +93,7 @@ class NecesidadCompraViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, G
         if empresa is None:
             return NecesidadCompra.objects.none()
         qs = NecesidadCompra.objects.filter(empresa=empresa).select_related(
-            "producto", "unidad", "pedido", "orden_compra", "pre_orden__pedido", "pre_orden__producto"
+            "producto", "unidad", "pedido", "orden_compra", "pre_orden__pedido", "pre_orden__producto", "producto_variante"
         ).order_by("fecha_requerida", "id")
         p = self.request.query_params
         if p.get("estatus"):
@@ -122,22 +122,25 @@ class NecesidadCompraViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, G
         necs = list(self.get_queryset().filter(estatus=N.PENDIENTE))
         grupos = defaultdict(list)
         for n in necs:
-            grupos[(n.sucursal_id, n.producto_id)].append(n)
+            grupos[(n.sucursal_id, n.producto_id, n.producto_variante_id)].append(n)
         productos_por_suc = defaultdict(set)
-        for suc, prod in grupos:
+        for suc, prod, _ in grupos:
             productos_por_suc[suc].add(prod)
         ex, tr = {}, {}
         for suc, prods in productos_por_suc.items():
             ex[suc] = existencias(empresa.pk, prods, suc)
             tr[suc] = en_transito(empresa.pk, prods, suc)
-        ultimas = _ultimas_compras(empresa.pk, {p for _, p in grupos})
+        ultimas = _ultimas_compras(empresa.pk, {p for _, p, _ in grupos})
         filas = []
-        for (suc, prod), lista in grupos.items():
+        for (suc, prod, var), lista in grupos.items():
             n0 = lista[0]
             fechas = [n.fecha_requerida for n in lista if n.fecha_requerida]
             u = ultimas.get(prod)
             filas.append({
                 "material": prod,
+                # Compra directa de un SKU de resurtido: su variante (None en materiales de BOM).
+                "variante": var,
+                "sku": n0.producto_variante.sku if var else None,
                 "material_nombre": n0.producto.nombre,
                 "material_codigo": n0.producto.cod_proscai or n0.producto.codigo or "",
                 "unidad": n0.unidad.clave if n0.unidad_id else None,
@@ -213,7 +216,7 @@ def crear_oc_desde_necesidades(user, proveedor_id, necesidad_ids):
     )
     por_material = defaultdict(list)
     for n in necs:
-        por_material[n.producto_id].append(n)
+        por_material[(n.producto_id, n.producto_variante_id)].append(n)
     piezas = {p: redondear_compra(sum((n.cantidad for n in lista), CERO), lista[0].producto) for p, lista in por_material.items()}
     oc = OrdenCompra.objects.create(
         empresa=empresa, sucursal_id=sucursal_id, proveedor=proveedor, moneda=moneda, usuario=user,
@@ -224,7 +227,7 @@ def crear_oc_desde_necesidades(user, proveedor_id, necesidad_ids):
     oc.pedidos.set({n.pedido_id for n in necs if n.pedido_id})
     for prod, lista in por_material.items():
         det = OrdenCompraDetalle.objects.create(
-            orden_compra=oc, producto_id=prod, descripcion=(lista[0].producto.nombre or "")[:200],
+            orden_compra=oc, producto_id=prod[0], producto_variante_id=prod[1], descripcion=(lista[0].producto.nombre or "")[:200],
             cantidad=piezas[prod], piezas=piezas[prod], sucursal_id=sucursal_id,
         )
         NecesidadCompra.objects.filter(pk__in=[n.pk for n in lista]).update(

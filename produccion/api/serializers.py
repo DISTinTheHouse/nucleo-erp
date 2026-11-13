@@ -3334,7 +3334,7 @@ class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
     class Meta:
         model = PreOrdenProduccion
         fields = [
-            "id", "origen", "origen_display", "referencia", "producto", "producto_nombre", "notas",
+            "id", "origen", "origen_display", "referencia", "producto", "producto_nombre", "notas", "motivo_rechazo",
             "pedido", "pedido_folio", "cliente_nombre", "sucursal", "sucursal_nombre", "estatus", "estatus_display",
             "op", "op_folio", "piezas_total", "tallas_total", "fecha_confirmacion_existencias",
             "fecha_compromiso", "dias_en_estatus", "materiales_faltantes", "fecha_estimada_material",
@@ -3366,6 +3366,7 @@ class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
 class PreOrdenProduccionDetalleSerializer(serializers.ModelSerializer):
     # Pedido: variante de producción; resurtido: variante de catálogo.
     sku = serializers.SerializerMethodField()
+    avance = serializers.SerializerMethodField()
     nombre = serializers.SerializerMethodField()
     talla_nombre = serializers.SerializerMethodField()
     color_nombre = serializers.SerializerMethodField()
@@ -3393,7 +3394,24 @@ class PreOrdenProduccionDetalleSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PreOrdenProduccionDetalle
-        fields = ["id", "variante_produccion", "producto_variante", "sku", "nombre", "talla_nombre", "color_nombre", "pedido_detalle", "cantidad"]
+        fields = ["id", "variante_produccion", "producto_variante", "sku", "nombre", "talla_nombre", "color_nombre",
+                  "pedido_detalle", "cantidad", "tipo_linea", "avance"]
+
+    def get_avance(self, obj):
+        """Resurtido, por renglón: fabricado → ``pendiente``/``con_op``; de compra →
+        ``por_comprar``/``en_compra``/``recibido`` (de su necesidad directa)."""
+        pre = obj.pre_orden
+        if obj.tipo_linea == "fabricado":
+            return {"estado": "con_op" if pre.op_id else "pendiente", "op": pre.op_id,
+                    "op_folio": pre.op.folio_op if pre.op_id else None}
+        necs = [n for n in obj.necesidades.all() if n.estatus not in ("cancelada", "huerfana")]
+        if not necs:
+            return {"estado": "pendiente", "orden_compra": None, "orden_compra_folio": None, "cantidad_recibida": 0.0}
+        n = necs[-1]
+        estado = {"pendiente": "por_comprar", "en_oc": "en_compra", "recibida": "recibido"}.get(n.estatus, n.estatus)
+        return {"estado": estado, "orden_compra": n.orden_compra_id,
+                "orden_compra_folio": n.orden_compra.folio if n.orden_compra_id else None,
+                "cantidad_recibida": float(n.cantidad_recibida)}
 
 
 class PreOrdenProduccionDetailSerializer(PreOrdenProduccionListSerializer):

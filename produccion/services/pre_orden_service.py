@@ -31,6 +31,7 @@ EV = PreOrdenEvento.Evento
 ABIERTAS = (E.PENDIENTE_VALIDAR, E.FALTAN_MATERIALES, E.EN_COMPRA, E.LISTA)
 # Estatus que se recalculan solos (ya validados por almacén).
 RECALCULABLES = (E.FALTAN_MATERIALES, E.EN_COMPRA, E.LISTA)
+CANCELABLES = (E.PENDIENTE_ACEPTAR, *ABIERTAS)
 Q4 = Decimal("0.0001")
 EPS = Decimal("0.0001")
 CERO = Decimal("0")
@@ -42,6 +43,8 @@ DIAS_AMARILLO = 3
 # Áreas a avisar por evento (rol de departamento -> ``crear_notificacion_por_rol``).
 AVISOS = {
     "creada": (("almacen", "Pre-orden por validar"),),
+    "por_aceptar": (("produccion", "Resurtido por aceptar"),),
+    "aceptada": (("almacen", "Pre-orden por validar"),),
     "necesidad_enviada": (("compras", "Faltantes de pre-orden"),),
     "material_recibido": (("produccion", "Material recibido"),),
     "lista": (("produccion", "Pre-orden lista para producir"),),
@@ -74,7 +77,10 @@ def evento(pre, tipo, usuario=None, descripcion=""):
         pre_orden=pre, evento=tipo, usuario=usuario if getattr(usuario, "pk", None) else None,
         descripcion=(descripcion or "")[:500],
     )
-    avisar(pre, str(tipo), descripcion)
+    clave = str(tipo)
+    if clave == "creada" and pre.estatus == E.PENDIENTE_ACEPTAR:
+        clave = "por_aceptar"
+    avisar(pre, clave, descripcion)
 
 
 def _semaforo_rojo(pre):
@@ -169,7 +175,7 @@ def requeridos(pre_ids, empresa_id):
     para varias pre-órdenes en 2 consultas (renglones + BOM vigente)."""
     # Llave de variante: ("vp", id) muestra de pedido o ("pv", id) catálogo (resurtido).
     piezas = defaultdict(dict)
-    for pid, vid, pvid, cant in PreOrdenProduccionDetalle.objects.filter(pre_orden_id__in=list(pre_ids)).values_list(
+    for pid, vid, pvid, cant in PreOrdenProduccionDetalle.objects.filter(pre_orden_id__in=list(pre_ids), tipo_linea="fabricado").values_list(
         "pre_orden_id", "variante_produccion_id", "producto_variante_id", "cantidad"
     ):
         piezas[pid][("vp", vid) if vid else ("pv", pvid)] = Decimal(str(cant))
@@ -309,7 +315,8 @@ def _faltan(mats):
 
 def _necesidades_activas(pre):
     from compras.models import NecesidadCompra as N
-    return N.objects.filter(pre_orden=pre, estatus__in=[N.Estatus.PENDIENTE, N.Estatus.EN_OC])
+    # Solo las de materiales del BOM; las de compra directa de SKU van aparte.
+    return N.objects.filter(pre_orden=pre, pre_orden_detalle__isnull=True, estatus__in=[N.Estatus.PENDIENTE, N.Estatus.EN_OC])
 
 
 def _ajustar_necesidades(pre, mats, usuario=None):
@@ -462,6 +469,8 @@ def recalcular(pre, mats=None, motivo_regreso=None, usuario=None):
     Lista para producir según las existencias de hoy y guarda el conteo de
     faltantes. Si estaba Lista y ya no alcanza, registra el ``regreso``."""
     mats = materiales(pre) if mats is None else mats
+    if not mats and pre.origen == PreOrdenProduccion.Origen.RESURTIDO:
+        return pre  # resurtido solo de compra: no hay materiales que recalcular
     faltantes = len(_faltan(mats))
     campos = []
     if faltantes != pre.materiales_faltantes:
@@ -604,7 +613,7 @@ def cancelar(pre_id, user):
     están en una OC quedan ``huerfana`` para que compras decida."""
     from compras.models import NecesidadCompra as N
     pre = PreOrdenProduccion.objects.select_for_update().get(pk=pre_id)
-    if pre.estatus not in ABIERTAS:
+    if pre.estatus not in CANCELABLES:
         raise ValidationError({"estatus": f"La pre-orden está {pre.get_estatus_display().lower()}."})
     liberadas = N.objects.filter(pre_orden=pre, estatus=N.Estatus.PENDIENTE).update(estatus=N.Estatus.CANCELADA, updated_at=timezone.now())
     huerfanas = N.objects.filter(pre_orden=pre, estatus=N.Estatus.EN_OC).update(estatus=N.Estatus.HUERFANA, updated_at=timezone.now())
@@ -624,25 +633,144 @@ def marcar_convertida(pre, op, user):
 # --------------------------------------------------------------------------- resurtido
 
 @transaction.atomic
-def crear_resurtido(user, producto, sucursal, tallas, fecha_compromiso_, notas=""):
-    """Pre-orden de resurtido de stock (sin pedido): ``tallas`` =
-    ``[(ProductoVariante, cantidad)]`` con BOM vigente. Nace en Pendiente de
-    validar. Devuelve ``(pre, avisos)``; avisa (no bloquea) si ya hay un
-    resurtido abierto del mismo producto y sucursal."""
-    O = PreOrdenProduccion.Origen
-    avisos = []
-    abiertas = PreOrdenProduccion.objects.filter(
-        empresa_id=producto.empresa_id, sucursal=sucursal, producto=producto, origen=O.RESURTIDO, estatus__in=ABIERTAS,
-    ).values_list("pk", flat=True)
-    if abiertas:
-        avisos.append(f"Ya hay un resurtido abierto de este producto en la sucursal (pre-orden {', '.join(map(str, abiertas))}).")
+def crear_resurtido(user, sucursal, lineas, fecha_compromiso_, notas=""):
+    """Resurtido de planeación (sin pedido): un documento con muchos SKUs de una
+    sucursal. ``lineas`` = ``[(ProductoVariante, cantidad, tipo_linea)]``. Nace
+    en Pendiente de aceptar; avisa a producción."""
+    productos = {pv.producto_id for pv, _, _ in lineas}
     pre = PreOrdenProduccion.objects.create(
-        empresa_id=producto.empresa_id, sucursal=sucursal, origen=O.RESURTIDO, producto=producto,
-        fecha_compromiso=fecha_compromiso_, notas=notas or "", estatus=E.PENDIENTE_VALIDAR, estatus_desde=timezone.now(),
+        empresa_id=sucursal.empresa_id, sucursal=sucursal, origen=PreOrdenProduccion.Origen.RESURTIDO,
+        producto_id=productos.pop() if len(productos) == 1 else None, usuario_crea=user if getattr(user, "pk", None) else None,
+        fecha_compromiso=fecha_compromiso_, notas=notas or "", estatus=E.PENDIENTE_ACEPTAR, estatus_desde=timezone.now(),
     )
     PreOrdenProduccionDetalle.objects.bulk_create([
-        PreOrdenProduccionDetalle(pre_orden=pre, producto_variante=pv, cantidad=cant) for pv, cant in tallas
-    ])
-    pre.producto = producto
-    evento(pre, EV.CREADA, user, f"Resurtido de stock: {len(tallas)} talla(s), {sum(c for _, c in tallas)} pieza(s).")
-    return pre, avisos
+        PreOrdenProduccionDetalle(pre_orden=pre, producto_variante=pv, cantidad=cant, tipo_linea=tipo)
+        for pv, cant, tipo in lineas
+    ], batch_size=500)
+    fab = sum(1 for _, _, t in lineas if t == "fabricado")
+    evento(pre, EV.CREADA, user, f"Resurtido: {len(lineas)} SKU(s) ({fab} fabricado(s), {len(lineas) - fab} de compra), "
+                                 f"{sum(c for _, c, _ in lineas)} pieza(s).")
+    return pre
+
+
+@transaction.atomic
+def aceptar(pre_id, user):
+    """Producción acepta el resurtido: los SKUs de compra generan su necesidad
+    directa; con fabricados pasa a Pendiente de validar (almacén), si no, a En compra."""
+    from compras.models import NecesidadCompra as N
+    pre = PreOrdenProduccion.objects.select_for_update(of=("self",)).select_related("empresa", "producto").get(pk=pre_id)
+    if pre.estatus != E.PENDIENTE_ACEPTAR:
+        raise ValidationError({"estatus": f"Solo se acepta una pre-orden Pendiente de aceptar (está {pre.get_estatus_display().lower()})."})
+    detalles = list(pre.detalles.select_related("producto_variante__producto"))
+    compra = [d for d in detalles if d.tipo_linea == "compra"]
+    N.objects.bulk_create([
+        N(empresa_id=pre.empresa_id, sucursal_id=pre.sucursal_id, producto_id=d.producto_variante.producto_id,
+          producto_variante_id=d.producto_variante_id, unidad_id=d.producto_variante.producto.unidad_medida_id,
+          cantidad=d.cantidad, pre_orden=pre, pre_orden_detalle=d, fecha_requerida=compromiso(pre))
+        for d in compra
+    ], batch_size=500)
+    nuevo = E.PENDIENTE_VALIDAR if len(compra) < len(detalles) else E.EN_COMPRA
+    campos = _cambiar_estatus(pre, nuevo)
+    pre.save(update_fields=[*campos, "updated_at"])
+    evento(pre, EV.ACEPTADA, user, f"{len(detalles) - len(compra)} SKU(s) a fabricar, {len(compra)} de compra.")
+    if compra:
+        evento(pre, EV.NECESIDAD_ENVIADA, user, f"{len(compra)} SKU(s) de compra directa.")
+    return pre
+
+
+@transaction.atomic
+def rechazar(pre_id, user, motivo):
+    """Producción rechaza el resurtido con motivo; avisa a quien lo creó."""
+    from notificaciones.services.notificacion_service import crear_notificacion_usuario
+    motivo = (motivo or "").strip()
+    if not motivo:
+        raise ValidationError({"motivo": "Indica el motivo del rechazo."})
+    pre = PreOrdenProduccion.objects.select_for_update(of=("self",)).select_related("empresa", "producto").get(pk=pre_id)
+    if pre.estatus != E.PENDIENTE_ACEPTAR:
+        raise ValidationError({"estatus": f"Solo se rechaza una pre-orden Pendiente de aceptar (está {pre.get_estatus_display().lower()})."})
+    pre.motivo_rechazo = motivo[:500]
+    campos = _cambiar_estatus(pre, E.RECHAZADA, ["motivo_rechazo"])
+    pre.save(update_fields=[*campos, "updated_at"])
+    evento(pre, EV.RECHAZADA, user, pre.motivo_rechazo)
+    if pre.usuario_crea_id:
+        data = {"pre_orden": pre.pk, "pedido": None, "origen": pre.origen, "url": f"/produccion/pre-ordenes/{pre.pk}"}
+        transaction.on_commit(lambda: crear_notificacion_usuario(
+            pre.empresa, pre.usuario_crea_id, f"Resurtido rechazado: pre-orden {pre.pk}", pre.motivo_rechazo,
+            "produccion", "pre_orden_rechazada", data=data,
+        ))
+    return pre
+
+
+def clasificar_variantes(empresa_id, variantes):
+    """``{variante_id: "fabricado" | "compra" | None}``: con BOM activo con
+    materiales → fabricado; sin BOM y de compra (``es_compras`` o tipo MP /
+    COMPRAS) → compra; si no, ``None`` (no se puede resurtir). 1 consulta."""
+    from produccion.models import ListaMaterialBom
+    con_bom = set(
+        ListaMaterialBom.objects.filter(
+            empresa_id=empresa_id, activo=True, producto_variante_id__in=[v.pk for v in variantes],
+            variante_produccion__isnull=True, materia_prima_detalle__activo=True,
+            materia_prima_detalle__componente__isnull=False,
+        ).values_list("producto_variante_id", flat=True)
+    )
+    out = {}
+    for v in variantes:
+        p = v.producto
+        if v.pk in con_bom:
+            out[v.pk] = "fabricado"
+        elif p.es_compras or (p.tipo_id and p.tipo.codigo.upper() in ("MP", "COMPRAS")):
+            out[v.pk] = "compra"
+        else:
+            out[v.pk] = None
+    return out
+
+
+def disponibilidad(empresa_id, sucursal_id, variante_ids):
+    """Por variante en la sucursal: ``existencia``, ``por_fabricar`` (OP
+    abiertas), ``por_comprar`` (OC autorizadas/parciales sin recibir),
+    ``comprometido`` (pedidos autorizados/en proceso + resurtidos abiertos) y
+    ``disponible``. 4 consultas sin importar cuántas variantes."""
+    from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+    from produccion.models import OrdenProduccion, OrdenProduccionDetalle
+    from ventas.models import Pedido
+    ids = list(variante_ids)
+    num = models.DecimalField(max_digits=18, decimal_places=4)
+
+    def suma(qs, campo_var, campo_cant):
+        return {k: Decimal(str(v or 0)) for k, v in qs.order_by().values(campo_var).annotate(t=Sum(campo_cant)).values_list(campo_var, "t")}
+
+    existencia = suma(Existencia.objects.filter(producto_variante_id__in=ids, almacen__sucursal_id=sucursal_id,
+                                                almacen__empresa_id=empresa_id), "producto_variante_id", "cantidad")
+    EO = OrdenProduccion.EstatusOrdenProduccion
+    por_fabricar = suma(OrdenProduccionDetalle.objects.filter(
+        producto_variante_id__in=ids, activo=True, op__empresa_id=empresa_id, op__sucursal_id=sucursal_id,
+        op__estatus_op__in=[1, 2, 3, 4, 6],  # abiertas: ni Completado (5) ni Cancelado (7)
+    ), "producto_variante_id", "cantidad")
+    recibido = Coalesce(Subquery(
+        RecepcionDetalle.objects.filter(orden_compra_detalle_id=OuterRef("pk"), recepcion__activo=True)
+        .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        .order_by().values("orden_compra_detalle_id").annotate(t=Sum("cantidad_recibida")).values("t")[:1],
+        output_field=num), Decimal("0"), output_field=num)
+    EC = OrdenCompra.EstatusOrdenCompra
+    por_comprar = defaultdict(lambda: CERO)
+    for vid, cant, rec in OrdenCompraDetalle.objects.filter(
+        producto_variante_id__in=ids, orden_compra__empresa_id=empresa_id, orden_compra__sucursal_id=sucursal_id,
+        orden_compra__activo=True, orden_compra__estatus__in=[EC.AUTORIZADA, EC.PARCIALMENTE_RECIBIDA],
+    ).annotate(rec=recibido).values_list("producto_variante_id", "cantidad", "rec"):
+        por_comprar[vid] += max(Decimal(str(cant)) - Decimal(str(rec or 0)), CERO)
+    comprometido = defaultdict(lambda: CERO)
+    for k, v in suma(PedidoDetalleTalla.objects.filter(
+        variante_id__in=ids, pedido_detalle__pedido__empresa_id=empresa_id, pedido_detalle__pedido__sucursal_id=sucursal_id,
+        pedido_detalle__pedido__estatus__in=[Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO],
+    ), "variante_id", "cantidad").items():
+        comprometido[k] += v
+    for k, v in suma(PreOrdenProduccionDetalle.objects.filter(
+        producto_variante_id__in=ids, pre_orden__empresa_id=empresa_id, pre_orden__sucursal_id=sucursal_id,
+        pre_orden__origen=PreOrdenProduccion.Origen.RESURTIDO, pre_orden__estatus__in=CANCELABLES,
+    ), "producto_variante_id", "cantidad").items():
+        comprometido[k] += v
+    out = {}
+    for vid in ids:
+        e, f, c, m = existencia.get(vid, CERO), por_fabricar.get(vid, CERO), por_comprar[vid], comprometido[vid]
+        out[vid] = {"existencia": e, "por_fabricar": f, "por_comprar": c, "comprometido": m, "disponible": e + f + c - m}
+    return out
