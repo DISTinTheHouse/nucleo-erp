@@ -173,6 +173,22 @@ class ProductoVarianteSerializer(EmpresaValidadaEnCreateMixin, serializers.Model
         return attrs
 
 
+class ProductoVarianteSelectorSerializer(serializers.ModelSerializer):
+    """Fila de ``producto-variante/selector/`` (EC-886): lo que leen los selectores.
+
+    ``cod_proscai`` es el del producto, igual que en ``ProductoVarianteSerializer``.
+    ``sku_produccion`` y ``tiene_bom`` los anota la vista; ``tiene_bom`` sólo existe
+    aquí, no en el listado ni en el detalle de OP."""
+    cod_proscai = serializers.CharField(source='producto.cod_proscai', read_only=True)
+    sku_produccion = serializers.CharField(read_only=True, default=None)
+    tiene_bom = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = ProductoVariante
+        fields = ['id', 'sku', 'nombre', 'cod_proscai', 'sku_produccion', 'tiene_bom', 'activo']
+        read_only_fields = fields
+
+
 class CategoriaProductoProcesoSerializer(EmpresaValidadaEnCreateMixin, serializers.ModelSerializer):
     class Meta:
         model = CategoriaProductoProceso

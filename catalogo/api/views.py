@@ -12,7 +12,8 @@ from catalogo.codigos import siguiente_codigo_producto
 from catalogo.tallas import talla_sort_key
 from catalogo.validaciones import talla_permitida_para_producto
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso, VarianteProductoProduccion
-from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
+from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer, ProductoVarianteSelectorSerializer
+from nucleo.kpis import MENSAJE_ENTERO, entero_estricto, vacio
 from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, booleano_param
 from produccion.models import ListaMaterialBom
 
@@ -41,6 +42,41 @@ def _alcance_empresa(qs, user):
     if empresa:
         return qs.filter(empresa=empresa)
     return qs.none()
+
+
+class PaginacionSelector(PaginacionOpcionalLimitOffset):
+    """``selector/`` (EC-886) siempre pagina: sin ``?limit=`` usa ``default_limit``.
+    Mismas reglas que la paginación opcional (400 con valores inválidos, tope 500).
+    50 es el tamaño por defecto de la otra paginación opcional del ERP
+    (``produccion.api.views.PaginacionOpcional``); el selector puede pedir más."""
+
+    default_limit = 50
+
+
+# Tope de ``?ids=`` en ``selector/``: el mismo que ``limit``, una página llena.
+TOPE_IDS_SELECTOR = PaginacionSelector.max_limit
+
+
+def _ids_param(request):
+    """``?ids=1,2,3`` de ``selector/`` (EC-886); ausente o vacío → ``None``.
+    Cada id con el parser estricto de EC-829 (``entero_estricto``, positivo): un
+    token inválido o vacío (``1,,2``) es 400, y también más de ``TOPE_IDS_SELECTOR``."""
+    crudo = request.query_params.get("ids")
+    if vacio(crudo):
+        return None
+    tokens = crudo.split(",")
+    if len(tokens) > TOPE_IDS_SELECTOR:
+        raise ValidationError({"ids": f"Máximo {TOPE_IDS_SELECTOR} ids."})
+    ids = [entero_estricto(token, "ids", positivo=True) for token in tokens]
+    if None in ids:
+        raise ValidationError({"ids": MENSAJE_ENTERO})
+    return ids
+
+
+def _respuesta_selector(view, qs, serializer_class):
+    paginador = PaginacionSelector()
+    pagina = paginador.paginate_queryset(qs, view.request, view=view)
+    return paginador.get_paginated_response(serializer_class(pagina, many=True).data)
 
 
 def _lineas_param(request):
@@ -355,14 +391,7 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
             ).values('sku')[:1]
         ))
         if self.request.query_params.get('con_bom', '').lower() == 'true':
-            bom_qs = ListaMaterialBom.objects.filter(
-                producto_variante=OuterRef('pk'),
-                activo=True,
-            )
-            empresa = getattr(self.request.user, 'empresa', None)
-            if empresa:
-                bom_qs = bom_qs.filter(empresa=empresa)
-            qs = qs.filter(Exists(bom_qs))
+            qs = qs.filter(Exists(self._bom_activo()))
         q = (self.request.query_params.get('q') or '').strip()
         if q:
             qs = qs.filter(
@@ -375,6 +404,41 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
             )
         # Antes sin ``order_by``: el orden dependía del plan de PostgreSQL (EC-886).
         return qs.order_by("-id")
+
+    def _bom_activo(self):
+        """BOM activo de la variante (``OuterRef('pk')``) en la empresa del usuario:
+        la misma subconsulta para ``?con_bom=`` y para ``tiene_bom`` del selector."""
+        bom_qs = ListaMaterialBom.objects.filter(
+            producto_variante=OuterRef('pk'),
+            activo=True,
+        )
+        empresa = getattr(self.request.user, 'empresa', None)
+        if empresa:
+            bom_qs = bom_qs.filter(empresa=empresa)
+        return bom_qs
+
+    @action(detail=False, methods=['get'])
+    def selector(self, request):
+        """Variantes para selectores (EC-886), siempre paginado (``?limit``/``?offset``,
+        50 por defecto, tope 500). Mismo alcance, filtros (``con_bom``, ``q``) y
+        ``?ordering=`` que el listado, con ``id, sku, nombre, cod_proscai,
+        sku_produccion, tiene_bom, activo``.
+
+        Sólo variantes activas de productos activos, salvo con ``?ids=1,2``: entonces
+        regresa esas (activas o no, siempre de la empresa del usuario) para que lo ya
+        elegido conserve su etiqueta. ``?tiene_bom=true|false`` filtra por BOM activo."""
+        ids = _ids_param(request)
+        tiene_bom = booleano_param(request, 'tiene_bom', None)
+        # Sólo ``producto`` (por su ``cod_proscai``); color y talla no se publican.
+        qs = self.filter_queryset(self.get_queryset()).select_related(None).select_related('producto')
+        qs = qs.annotate(tiene_bom=Exists(self._bom_activo()))
+        if ids is not None:
+            qs = qs.filter(pk__in=ids)
+        else:
+            qs = qs.filter(activo=True, producto__activo=True)
+        if tiene_bom is not None:
+            qs = qs.filter(tiene_bom=tiene_bom)
+        return _respuesta_selector(self, qs, ProductoVarianteSelectorSerializer)
 
     @action(detail=False, methods=['post'])
     def onboarding(self, request):
