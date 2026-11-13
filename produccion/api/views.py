@@ -910,7 +910,8 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
 
         empresa = getattr(request.user, 'empresa', None)
         ops = list(
-            OrdenProduccion.objects.filter(pk__in=ids, empresa=empresa).order_by('op_id')
+            ordenes_produccion_visibles(OrdenProduccion.objects.all(), request.user)
+            .filter(pk__in=ids, activo=True).order_by('op_id')
             if empresa is not None else []
         )
         capturadas = {
@@ -930,10 +931,12 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # objetivo es que actualizar un checkbox de ruta crítica sea barato.
         # Aun así se valida pertenencia a la empresa antes de tocar nada
         # (mismo criterio IDOR que ``get_op_detalle``): 404, no 403, para no
-        # revelar la existencia de la OP a otra empresa.
+        # revelar la existencia de la OP a otra empresa. Mismo alcance que el
+        # detalle: sucursales permitidas y solo OPs activas.
         empresa = getattr(request.user, 'empresa', None)
         op = (
-            OrdenProduccion.objects.filter(pk=pk, empresa=empresa).first()
+            ordenes_produccion_visibles(OrdenProduccion.objects.all(), request.user)
+            .filter(pk=pk, activo=True).first()
             if empresa is not None else None
         )
         if op is None:
@@ -977,7 +980,10 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         que list/detail: solo la empresa activa (#507). 404 si la OP es de
         otra empresa."""
         empresa = getattr(request.user, 'empresa', None)
-        visibles = OrdenProduccion.objects.filter(empresa=empresa) if empresa else OrdenProduccion.objects.none()
+        visibles = (
+            ordenes_produccion_visibles(OrdenProduccion.objects.all(), request.user).filter(activo=True)
+            if empresa else OrdenProduccion.objects.none()
+        )
 
         if request.method == 'GET':
             op = visibles.only('op_id', 'folio_op', 'estatus_op').filter(pk=pk).first()
