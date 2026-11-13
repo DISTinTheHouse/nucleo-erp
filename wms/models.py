@@ -4,6 +4,8 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from simple_history.models import HistoricalRecords
 
+from nucleo.scope import empresa_ids_lectura
+
 class Estado(models.TextChoices):
     PENDIENTE = "PENDIENTE", "Pendiente"
     EN_PROCESO = "EN_PROCESO", "En proceso"
@@ -606,14 +608,24 @@ class LectorRFID(models.Model):
 
 class RfidScanQuerySet(models.QuerySet):
     def visibles_para(self, user):
-        """Superusuario: todo. Admin de empresa: su empresa. Resto: sucursales permitidas."""
-        if getattr(user, "is_superuser", False):
-            return self
-        empresa_id = getattr(user, "empresa_id", None)
-        if not empresa_id:
+        """Lecturas que ``user`` puede ver o purgar: SIEMPRE su empresa activa.
+
+        Mismo predicado de empresa que picking, packing y TR (EC-882,
+        ``nucleo.scope.empresa_ids_lectura``), superusuario incluido (EC-884):
+        sin empresa activa no se ve nada. Dentro de la empresa, superusuario e
+        ``is_admin_empresa`` ven todas las sucursales; el resto, sólo las de
+        ``user.sucursales_permitidas()``. ``RfidScan`` no tiene ``sucursal``, por
+        eso no usa ``visibles_en_empresa_activa``: la sucursal sale del lector o,
+        sin lector, de la etiqueta impresa.
+
+        Las lecturas sin empresa (tags ajenos de ``/api/receive-scan/`` sin
+        token) no las ve nadie por la API; se borran desde el Django admin.
+        """
+        empresa_ids = empresa_ids_lectura(user)
+        if not empresa_ids:
             return self.none()
-        qs = self.filter(empresa_id=empresa_id)
-        if getattr(user, "is_admin_empresa", False):
+        qs = self.filter(empresa_id__in=empresa_ids)
+        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
             return qs
         sucursales = user.sucursales_permitidas()
         # Sin lector (POST /api/receive-scan/, sin token): la sucursal es la de
