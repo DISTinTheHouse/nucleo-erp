@@ -741,7 +741,8 @@ def recibir_lecturas(request, lector):
             # empresa del lector). Los tags ajenos quedan sin etiqueta.
             # Sin lector (/api/receive-scan/) busca en todas las empresas y la
             # lectura toma la empresa de su etiqueta; un tag ajeno queda sin
-            # empresa (solo lo ve el superusuario).
+            # empresa: no lo ve nadie por la API (EC-884), sólo el Django admin,
+            # hasta que ``ligar_lecturas_previas`` lo liga a una impresión.
             match = etiquetas_por_epc(
                 [s.epc for s in tags_to_create], lector.empresa_id if lector else None
             )

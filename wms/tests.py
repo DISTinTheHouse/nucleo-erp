@@ -559,8 +559,12 @@ class ScannerRFIDSeguridadTests(TestCase):
             empresa=cls.empresa_a,
             is_admin_empresa=True,
         )
+        # EC-884: el superusuario se acota a su empresa activa (A), como en EC-882.
         cls.superuser = Usuario.objects.create(
-            username="scan-root", email="scan-root@example.com", is_superuser=True
+            username="scan-root",
+            email="scan-root@example.com",
+            is_superuser=True,
+            empresa=cls.empresa_a,
         )
 
     def _post_receive(self, payload=None, **extra):
@@ -783,11 +787,147 @@ class ScannerRFIDSeguridadTests(TestCase):
         with self.assertRaises(DjangoValidationError):
             lector.full_clean()
 
-    def test_scans_superuser_ve_todas(self):
-        self._sembrar(self.empresa_a, self.lector_a, 2, "aaaa")
+    # ── Superusuario en su empresa activa (EC-884) ────────────────────
+
+    def _sembrar_huerfanas(self, n):
+        """Tags ajenos de ``/api/receive-scan/`` sin token: sin empresa ni lector."""
+        RfidScan.objects.bulk_create(
+            [RfidScan(empresa=None, lector=None, epc=f"0000{i:08d}") for i in range(n)]
+        )
+
+    def _superuser_sin_empresa(self):
+        Usuario.objects.filter(pk=self.superuser.pk).update(empresa=None)
+        return Usuario.objects.get(pk=self.superuser.pk)
+
+    def test_scans_superuser_solo_ve_su_empresa_activa(self):
+        self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
+        self._sembrar(self.empresa_a, self.lector_a2, 1, "a2a2")
         self._sembrar(self.empresa_b, self.lector_b, 2, "bbbb")
+        self._sembrar_huerfanas(1)
+
         resp = self._api(self.superuser).get(self.SCANS_URL)
-        self.assertEqual(len(resp.json()["scans"]), 4)
+
+        self.assertEqual(resp.status_code, 200)
+        # Toda la empresa activa, sin filtro de sucursal (rama del admin).
+        self.assertEqual(
+            sorted(s["epc"] for s in resp.json()["scans"]), ["a2a200000000", "aaaa00000000"]
+        )
+
+    def test_stats_superuser_solo_cuenta_su_empresa_activa(self):
+        self._sembrar(self.empresa_a, self.lector_a, 2, "aaaa")
+        self._sembrar(self.empresa_b, self.lector_b, 5, "bbbb")
+        self._sembrar_huerfanas(1)
+
+        data = self._api(self.superuser).get(self.STATS_URL).json()
+
+        self.assertEqual(data["total_rfidscan_rows"], 2)
+        self.assertTrue(all(s["epc"].startswith("aaaa") for s in data["last_5_scans"]))
+
+    def test_clear_superuser_solo_borra_su_empresa_activa(self):
+        self._sembrar(self.empresa_a, self.lector_a, 2, "aaaa")
+        self._sembrar(self.empresa_b, self.lector_b, 3, "bbbb")
+
+        resp = self._api(self.superuser).post(self.CLEAR_URL)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "success", "deleted": 2})
+        self.assertFalse(RfidScan.objects.filter(empresa=self.empresa_a).exists())
+        self.assertEqual(RfidScan.objects.filter(empresa=self.empresa_b).count(), 3)
+
+    def test_clear_superuser_sigue_a_su_empresa_activa_al_cambiarla(self):
+        """Tras ``cambiar-empresa`` (EC-843) a B, el purge borra sólo las de B."""
+        self._sembrar(self.empresa_a, self.lector_a, 2, "aaaa")
+        self._sembrar(self.empresa_b, self.lector_b, 3, "bbbb")
+        resp = self._api(self.superuser).post(
+            "/api/v1/nucleo/cambiar-empresa/", {"empresa": self.empresa_b.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        # El JWT sólo lleva el id: cada petición vuelve a leer al usuario de la BD.
+        user = Usuario.objects.get(pk=self.superuser.pk)
+        self.assertEqual(user.empresa_id, self.empresa_b.pk)
+
+        resp = self._api(user).post(self.CLEAR_URL)
+
+        self.assertEqual(resp.json(), {"status": "success", "deleted": 3})
+        self.assertFalse(RfidScan.objects.filter(empresa=self.empresa_b).exists())
+        self.assertEqual(RfidScan.objects.filter(empresa=self.empresa_a).count(), 2)
+
+    def test_superuser_sin_empresa_no_ve_ni_borra_nada(self):
+        self._sembrar(self.empresa_a, self.lector_a, 2, "aaaa")
+        self._sembrar(self.empresa_b, self.lector_b, 3, "bbbb")
+        self._sembrar_huerfanas(1)
+        api = self._api(self._superuser_sin_empresa())
+
+        self.assertEqual(api.get(self.SCANS_URL).json()["scans"], [])
+        self.assertEqual(api.get(self.STATS_URL).json()["total_rfidscan_rows"], 0)
+        resp = api.post(self.CLEAR_URL)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"status": "success", "deleted": 0})
+        self.assertEqual(RfidScan.objects.count(), 6)
+
+    def _assert_clear_no_borra_huerfanas(self, user):
+        """Las huérfanas no las purga nadie por la API (sólo el Django admin)."""
+        self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
+        self._sembrar_huerfanas(2)
+
+        resp = self._api(user).post(self.CLEAR_URL)
+
+        self.assertEqual(resp.json()["deleted"], 1)
+        self.assertEqual(RfidScan.objects.filter(empresa__isnull=True).count(), 2)
+
+    def test_clear_superuser_no_borra_lecturas_sin_empresa(self):
+        self._assert_clear_no_borra_huerfanas(self.superuser)
+
+    def test_clear_admin_no_borra_lecturas_sin_empresa(self):
+        self._assert_clear_no_borra_huerfanas(self.admin_a)
+
+    def test_scans_no_admin_no_ve_huerfanas_por_la_rama_sin_lector(self):
+        """La rama ``lector NULL + etiqueta__impresion__sucursal`` de ``visibles_para``
+        sólo trae lecturas de la empresa activa: una huérfana ligada a una etiqueta
+        de la sucursal del usuario no se cuela."""
+        detalles = {}
+        for sucursal, epc in ((self.sucursal_a, "A1A1A1A1A1A1A1A1A1A10001"), (self.sucursal_a2, "A2A2A2A2A2A2A2A2A2A20001")):
+            impresion = EtiquetaRFIDImpresion.objects.create(
+                empresa=self.empresa_a, sucursal=sucursal, cantidad=1
+            )
+            detalles[sucursal.pk] = EtiquetaRFIDDetalle.objects.create(
+                impresion=impresion, epc=epc, barcode_value="X"
+            )
+        self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
+        RfidScan.objects.bulk_create([
+            # Sin lector, etiqueta de su sucursal: visible.
+            RfidScan(empresa=self.empresa_a, etiqueta=detalles[self.sucursal_a.pk], epc="A1A1A1A1A1A1A1A1A1A10001"),
+            # Sin lector, etiqueta de otra sucursal de su empresa: no visible.
+            RfidScan(empresa=self.empresa_a, etiqueta=detalles[self.sucursal_a2.pk], epc="A2A2A2A2A2A2A2A2A2A20001"),
+            # Huérfana ligada a una etiqueta de su sucursal: no visible.
+            RfidScan(empresa=None, etiqueta=detalles[self.sucursal_a.pk], epc="a1a1a1a1a1a1a1a1a1a10001"),
+        ])
+        self._sembrar_huerfanas(2)
+
+        resp = self._api(self.usuario_a).get(self.SCANS_URL)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            sorted(s["epc"] for s in resp.json()["scans"]),
+            ["A1A1A1A1A1A1A1A1A1A10001", "aaaa00000000"],
+        )
+
+    def test_clear_es_un_solo_delete(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._sembrar(self.empresa_a, self.lector_a, 3, "aaaa")
+        self._sembrar(self.empresa_b, self.lector_b, 2, "bbbb")
+        api = self._api(self.superuser)
+
+        with CaptureQueriesContext(connection) as ctx:
+            resp = api.post(self.CLEAR_URL)
+
+        self.assertEqual(resp.json()["deleted"], 3)
+        deletes = [q["sql"] for q in ctx.captured_queries if q["sql"].lstrip().upper().startswith("DELETE")]
+        self.assertEqual(len(deletes), 1, deletes)
+        self.assertIn('"rfid_scans"', deletes[0])
 
     def test_clear_solo_borra_la_empresa_propia(self):
         self._sembrar(self.empresa_a, self.lector_a, 2, "aaaa")
