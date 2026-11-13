@@ -8,7 +8,8 @@ compras, producción, finanzas y auditoría ya seguían este criterio; inventari
 sumaba el M2M y por eso no cambiaba al cambiar de empresa activa.
 
 El superusuario se resuelve en cada llamador (global salvo excepciones
-documentadas, p. ej. producción #361).
+documentadas, p. ej. producción #361). Producción y WMS, donde el superusuario
+también se acota a la empresa activa, comparten ``visibles_en_empresa_activa``.
 """
 
 
@@ -37,3 +38,24 @@ def empresa_ids_lectura(user):
 def es_empresa_activa(user, empresa_id):
     """``True`` si ``empresa_id`` es la empresa activa del usuario."""
     return bool(empresa_id) and empresa_id == getattr(user, "empresa_id", None)
+
+
+def visibles_en_empresa_activa(qs, user):
+    """Acota ``qs`` (modelo con ``empresa`` y ``sucursal``) a la empresa activa.
+
+    Predicado de producción (``produccion/scope.py``, #361, EC-880) y de WMS
+    (``wms/scope.py``, EC-882): SIEMPRE la empresa de ``empresa_ids_lectura``,
+    superusuario incluido; sin empresa no se ve nada. Dentro de la empresa,
+    superusuario e ``is_admin_empresa`` ven todas las sucursales y el resto sólo
+    las de ``user.sucursales_permitidas()`` (M2M ``sucursales`` +
+    ``sucursal_default``), filtrando por la sucursal dueña del registro.
+
+    No aplica ``select_related``/``prefetch_related`` ni orden.
+    """
+    empresa_ids = empresa_ids_lectura(user)
+    if not empresa_ids:
+        return qs.none()
+    qs = qs.filter(empresa_id__in=empresa_ids)
+    if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
+        return qs
+    return qs.filter(sucursal_id__in=user.sucursales_permitidas())
