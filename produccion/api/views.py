@@ -3212,13 +3212,16 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             .values("pre_orden_id").annotate(n=Count("pk")).values("n")[:1]
         )
         qs = (
-            PreOrdenProduccion.objects.filter(empresa=empresa).select_related("pedido", "op", "usuario_confirma")
+            PreOrdenProduccion.objects.filter(empresa=empresa).select_related("pedido", "op", "usuario_confirma", "producto", "sucursal")
             .annotate(
                 piezas_total=Coalesce(Subquery(piezas, output_field=DecimalField(max_digits=14, decimal_places=2)), Value(Decimal("0"))),
                 tallas_total=Coalesce(Subquery(tallas, output_field=IntegerField()), Value(0)),
                 fem=_fecha_estimada_material(OuterRef("pk")),
             )
         )
+        origen = (self.request.query_params.get("origen") or "").strip()
+        if origen and self.action in ("list", "resumen"):
+            qs = qs.filter(origen__in=[o for o in origen.split(",") if o])
         if self.action == "list":
             pedido = entero_param(self.request, "pedido")
             if pedido is not None:
@@ -3230,7 +3233,8 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             from compras.models import NecesidadCompra
             qs = qs.prefetch_related(
                 Prefetch("detalles", queryset=PreOrdenProduccionDetalle.objects.select_related(
-                    "variante_produccion__talla", "variante_produccion__color").order_by("id")),
+                    "variante_produccion__talla", "variante_produccion__color",
+                    "producto_variante__talla", "producto_variante__color").order_by("id")),
                 Prefetch("necesidades", queryset=NecesidadCompra.objects.select_related(
                     "producto", "unidad", "pedido", "orden_compra").order_by("fecha_requerida", "id")),
                 "ordenes_compra",
@@ -3260,7 +3264,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             data = self.get_serializer(pre, context={**self.get_serializer_context(), "materiales": mats}).data
             return Response(data)
         with transaction.atomic():
-            fila = PreOrdenProduccion.objects.select_for_update().select_related("pedido", "empresa").get(pk=pre.pk)
+            fila = PreOrdenProduccion.objects.select_for_update(of=("self",)).select_related("pedido", "empresa").get(pk=pre.pk)
             recalcular(fila, mats, usuario=request.user)
         return self._respuesta(fila, mats)
 
@@ -3268,7 +3272,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
     def resumen(self, request):
         """Conteos para los badges: ``{urgentes, por_validar, en_compra, listas}``.
         ``urgentes`` = semáforo rojo. 1 consulta."""
-        from produccion.services.pre_orden_service import fecha_compromiso, semaforo
+        from produccion.services.pre_orden_service import compromiso, semaforo
         E = PreOrdenProduccion.Estatus
         out = {"urgentes": 0, "por_validar": 0, "en_compra": 0, "listas": 0}
         abiertas = self.get_queryset().filter(
@@ -3278,7 +3282,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             out["por_validar"] += p.estatus == E.PENDIENTE_VALIDAR
             out["en_compra"] += p.estatus == E.EN_COMPRA
             out["listas"] += p.estatus == E.LISTA
-            out["urgentes"] += semaforo(p.estatus, p.materiales_faltantes, p.fem, fecha_compromiso(p.pedido)) == "rojo"
+            out["urgentes"] += semaforo(p.estatus, p.materiales_faltantes, p.fem, compromiso(p)) == "rojo"
         return Response(out)
 
     @action(detail=True, methods=["get"], url_path="historial")
@@ -3306,7 +3310,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         from produccion.services.pre_orden_service import marcar_convertida, materiales, recalcular
         pre = self.get_object()
         with transaction.atomic():
-            pre = PreOrdenProduccion.objects.select_for_update().select_related("pedido").get(pk=pre.pk)
+            pre = PreOrdenProduccion.objects.select_for_update(of=("self",)).select_related("pedido").get(pk=pre.pk)
             recalcular(pre, materiales(pre), usuario=request.user)
             if pre.estatus != PreOrdenProduccion.Estatus.LISTA:
                 raise ValidationError({"estatus": f"Solo se convierte en OP una pre-orden Lista para producir (está {pre.get_estatus_display().lower()})."})
@@ -3319,6 +3323,9 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 "orden_produccion_detalle": [
                     {"variante_produccion_id": d.variante_produccion_id, "pedido_detalle": d.pedido_detalle_id,
                      "cantidad": str(d.cantidad), "unidad": pieza.pk}
+                    if d.variante_produccion_id else
+                    # Resurtido: variante de catálogo, sin pedido; el PT entra a stock.
+                    {"producto_variante_id": d.producto_variante_id, "cantidad": str(d.cantidad), "unidad": pieza.pk}
                     for d in pre.detalles.all()
                 ],
             }
@@ -3332,6 +3339,75 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         if respuesta.status_code != status.HTTP_201_CREATED:
             return respuesta
         return Response({**respuesta.data, "pre_orden": pre.pk, "estatus": pre.estatus}, status=status.HTTP_201_CREATED)
+
+    def create(self, request, *args, **kwargs):
+        """Alta manual de resurtido de stock (sin pedido):
+        ``{origen: "resurtido", producto, sucursal, fecha_compromiso, tallas: [{variante, cantidad}], notas?}``.
+        Requiere ``C-PRODUCCION-OP``. Cada talla debe tener BOM vigente."""
+        from datetime import date
+        from catalogo.models import Producto, ProductoVariante
+        from nucleo.models import Sucursal
+        from produccion.services.pre_orden_service import crear_resurtido
+        user = request.user
+        empresa = getattr(user, "empresa", None)
+        if empresa is None:
+            raise ValidationError({"empresa": "El usuario no tiene una empresa asignada."})
+        if not user.tiene_permiso("C-PRODUCCION-OP"):
+            raise PermissionDenied("No tienes permiso para crear pre-órdenes de resurtido (C-PRODUCCION-OP).")
+        d = request.data
+        if d.get("origen", "resurtido") != "resurtido":
+            raise ValidationError({"origen": "El alta manual solo es para resurtido; las de pedido nacen solas con el BOM."})
+        errores = {}
+        producto = Producto.objects.filter(pk=d.get("producto"), empresa=empresa).first() if str(d.get("producto") or "").isdigit() else None
+        if producto is None:
+            errores["producto"] = "Producto no válido."
+        sucursal = Sucursal.objects.filter(pk=d.get("sucursal"), empresa=empresa).first() if str(d.get("sucursal") or "").isdigit() else None
+        if sucursal is None:
+            errores["sucursal"] = "Sucursal no válida."
+        fecha = None
+        try:
+            fecha = date.fromisoformat(str(d.get("fecha_compromiso")))
+        except (TypeError, ValueError):
+            errores["fecha_compromiso"] = "Fecha compromiso requerida (AAAA-MM-DD)."
+        tallas_in = d.get("tallas") or []
+        if not isinstance(tallas_in, list) or not tallas_in:
+            errores["tallas"] = "Indica al menos una talla."
+        if errores:
+            raise ValidationError(errores)
+        ids = []
+        for t in tallas_in:
+            try:
+                ids.append(int(t.get("variante")))
+            except (TypeError, ValueError, AttributeError):
+                raise ValidationError({"tallas": "Cada talla lleva variante y cantidad."})
+        if len(set(ids)) != len(ids):
+            raise ValidationError({"tallas": "Una variante aparece más de una vez."})
+        variantes = {v.pk: v for v in ProductoVariante.objects.filter(pk__in=ids, producto=producto)}
+        con_bom = set(
+            ListaMaterialBom.objects.filter(
+                empresa=empresa, activo=True, producto_variante_id__in=ids, variante_produccion__isnull=True,
+                materia_prima_detalle__activo=True, materia_prima_detalle__componente__isnull=False,
+            ).values_list("producto_variante_id", flat=True)
+        )
+        tallas, errs = [], [{} for _ in tallas_in]
+        for i, t in enumerate(tallas_in):
+            v = variantes.get(ids[i])
+            try:
+                cant = Decimal(str(t.get("cantidad")))
+            except Exception:
+                cant = None
+            if v is None:
+                errs[i]["variante"] = "La variante no es de este producto."
+            elif v.pk not in con_bom:
+                errs[i]["variante"] = f"{v.sku} no tiene BOM con materiales."
+            if cant is None or cant <= 0:
+                errs[i]["cantidad"] = "La cantidad debe ser mayor a 0."
+            if not errs[i]:
+                tallas.append((v, cant))
+        if any(errs):
+            raise ValidationError({"tallas": errs})
+        pre, avisos = crear_resurtido(user, producto, sucursal, tallas, fecha, d.get("notas") or "")
+        return self._respuesta(pre, status_code=status.HTTP_201_CREATED, extra={"avisos": avisos})
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):

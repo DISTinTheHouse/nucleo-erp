@@ -3316,8 +3316,12 @@ class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
     """Listado de pre-órdenes. ``piezas_total``/``tallas_total``/``fem`` vienen
     anotados (subconsultas); el resto del seguimiento se deriva sin consultas."""
     estatus_display = serializers.CharField(source="get_estatus_display", read_only=True)
-    pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
-    cliente_nombre = serializers.CharField(source="pedido.cliente_nombre", read_only=True, allow_null=True)
+    pedido_folio = serializers.CharField(source="pedido.folio", read_only=True, allow_null=True, default=None)
+    cliente_nombre = serializers.CharField(source="pedido.cliente_nombre", read_only=True, allow_null=True, default=None)
+    origen_display = serializers.CharField(source="get_origen_display", read_only=True)
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True, allow_null=True, default=None)
+    sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True, allow_null=True, default=None)
+    referencia = serializers.SerializerMethodField()
     op_folio = serializers.CharField(source="op.folio_op", read_only=True, allow_null=True, default=None)
     piezas_total = serializers.FloatField(read_only=True, default=0.0)
     tallas_total = serializers.IntegerField(read_only=True, default=0)
@@ -3330,15 +3334,21 @@ class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
     class Meta:
         model = PreOrdenProduccion
         fields = [
-            "id", "pedido", "pedido_folio", "cliente_nombre", "sucursal", "estatus", "estatus_display",
+            "id", "origen", "origen_display", "referencia", "producto", "producto_nombre", "notas",
+            "pedido", "pedido_folio", "cliente_nombre", "sucursal", "sucursal_nombre", "estatus", "estatus_display",
             "op", "op_folio", "piezas_total", "tallas_total", "fecha_confirmacion_existencias",
             "fecha_compromiso", "dias_en_estatus", "materiales_faltantes", "fecha_estimada_material",
             "regreso", "semaforo", "created_at", "updated_at",
         ]
 
     def get_fecha_compromiso(self, obj):
-        from produccion.services.pre_orden_service import fecha_compromiso
-        return fecha_compromiso(obj.pedido)
+        from produccion.services.pre_orden_service import compromiso
+        return compromiso(obj)
+
+    def get_referencia(self, obj):
+        from produccion.services.pre_orden_service import referencia
+        r = referencia(obj)
+        return r[len("pedido "):] if r.startswith("pedido ") else r
 
     def get_dias_en_estatus(self, obj):
         from django.utils import timezone
@@ -3349,20 +3359,41 @@ class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
         return {"fecha": obj.regreso_fecha, "motivo": obj.regreso_motivo} if obj.regreso_fecha else None
 
     def get_semaforo(self, obj):
-        from produccion.services.pre_orden_service import fecha_compromiso, semaforo
-        return semaforo(obj.estatus, obj.materiales_faltantes, getattr(obj, "fem", None), fecha_compromiso(obj.pedido))
+        from produccion.services.pre_orden_service import compromiso, semaforo
+        return semaforo(obj.estatus, obj.materiales_faltantes, getattr(obj, "fem", None), compromiso(obj))
 
 
 class PreOrdenProduccionDetalleSerializer(serializers.ModelSerializer):
-    sku = serializers.CharField(source="variante_produccion.sku", read_only=True)
-    nombre = serializers.CharField(source="variante_produccion.nombre", read_only=True)
-    talla_nombre = serializers.CharField(source="variante_produccion.talla.nombre", read_only=True, allow_null=True, default=None)
-    color_nombre = serializers.CharField(source="variante_produccion.color.nombre", read_only=True, allow_null=True, default=None)
+    # Pedido: variante de producción; resurtido: variante de catálogo.
+    sku = serializers.SerializerMethodField()
+    nombre = serializers.SerializerMethodField()
+    talla_nombre = serializers.SerializerMethodField()
+    color_nombre = serializers.SerializerMethodField()
+
+    @staticmethod
+    def _v(obj):
+        return obj.variante_produccion if obj.variante_produccion_id else obj.producto_variante
+
+    def get_sku(self, obj):
+        v = self._v(obj)
+        return v.sku if v else None
+
+    def get_nombre(self, obj):
+        v = self._v(obj)
+        return (v.nombre or "") if v else ""
+
+    def get_talla_nombre(self, obj):
+        v = self._v(obj)
+        return v.talla.nombre if v and v.talla_id else None
+
+    def get_color_nombre(self, obj):
+        v = self._v(obj)
+        return v.color.nombre if v and v.color_id else None
     cantidad = serializers.FloatField()
 
     class Meta:
         model = PreOrdenProduccionDetalle
-        fields = ["id", "variante_produccion", "sku", "nombre", "talla_nombre", "color_nombre", "pedido_detalle", "cantidad"]
+        fields = ["id", "variante_produccion", "producto_variante", "sku", "nombre", "talla_nombre", "color_nombre", "pedido_detalle", "cantidad"]
 
 
 class PreOrdenProduccionDetailSerializer(PreOrdenProduccionListSerializer):
