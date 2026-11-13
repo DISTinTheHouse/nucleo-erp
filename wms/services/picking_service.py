@@ -8,7 +8,7 @@ from rest_framework.exceptions import ValidationError
 from auditoria.models import AuditoriaEvento
 from ventas.models import PedidoDetalleTalla
 from ventas.services.sku_produccion_service import es_muestra
-from wms.models import Picking, PickingDetalle
+from wms.models import Estado as PackingEstado, Picking, PickingDetalle
 from wms.services.existencia_service import ExistenciaService
 from wms.services.transferencia_service import TransferenciaService
 from wms.services.picking_pipeline.catalogs import (
@@ -446,6 +446,8 @@ class PickingService:
             raise ValidationError(
                 {"estado": f"No se puede trasladar un picking en estado {picking.estado}."}
             )
+        if picking.packings.exclude(estado=PackingEstado.CANCELADO).exists():
+            raise ValidationError({"picking": "No se puede trasladar un picking que ya tiene packing."})
         actual = picking.almacen_actual
         if actual.pk == almacen.pk:
             raise ValidationError({"almacen": "El picking ya está en ese almacén."})
