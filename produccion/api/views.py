@@ -358,6 +358,18 @@ def _sincronizar_pre_orden_por_bom(bom, usuario=None):
         sincronizar_pre_orden(pedido_id, usuario=usuario)
 
 
+def _con_talla_que(campo):
+    """Pedidos con al menos una talla ``campo=True``. ``Exists`` en vez de
+    JOIN + ``DISTINCT``: el JOIN multiplicaba cada pedido (con cliente y
+    sucursal) por talla antes de deduplicar."""
+    return Exists(PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=OuterRef("pk"), **{campo: True}))
+
+
+def _componentes_bom():
+    # ``_base_manager`` = el mismo que usa el prefetch por omisión de una FK.
+    return Producto._base_manager.only('nombre')
+
+
 class ListaMaterialBomViewSet(viewsets.ModelViewSet):
     serializer_class = ListaMaterialBomSerializer
 
@@ -369,7 +381,10 @@ class ListaMaterialBomViewSet(viewsets.ModelViewSet):
             return ListaMaterialBom.objects.none()
         
         queryset = ListaMaterialBom.objects.filter(empresa=empresa).prefetch_related(
-            'materia_prima_detalle__componente',
+            'materia_prima_detalle',
+            # El serializer sólo lee ``componente.nombre``: no traer el resto
+            # de las columnas de ``Producto`` (miles de renglones en el listado).
+            Prefetch('materia_prima_detalle__componente', queryset=_componentes_bom()),
             'materia_prima_detalle__unidad',
         )
 
@@ -458,7 +473,11 @@ class BomDetalleViewSet(viewsets.ModelViewSet):
         if empresa is None:
             return BomDetalle.objects.none()
         
-        queryset = BomDetalle.objects.filter(bom__empresa=empresa)
+        # ``componente_nombre``/``unidad_clave`` leen ambas FKs por renglón:
+        # prefetch (no join) para no alterar la consulta base ni su orden.
+        queryset = BomDetalle.objects.filter(bom__empresa=empresa).prefetch_related(
+            Prefetch('componente', queryset=_componentes_bom()), 'unidad',
+        )
 
         return queryset
 
@@ -593,6 +612,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                         "producto_variante__talla",
                         "bom",
                     ).prefetch_related(
+                        # ``variante_produccion_sku`` por renglón: una consulta
+                        # para todos (prefetch, no join: no altera el orden).
+                        "variante_produccion",
                         Prefetch(
                             "bom__materia_prima_detalle",
                             queryset=BomDetalle.objects.select_related("componente", "unidad"),
@@ -1440,9 +1462,8 @@ class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixi
                     empresa=empresa,
                     sucursal_id__in=sucursal_ids,
                     activo=True,
-                    detalles__tallas__lleva_bordado=True,
                 )
-                .distinct()
+                .filter(_con_talla_que("lleva_bordado"))
                 .select_related("cliente", "sucursal")
                 .prefetch_related(
                     "detalles",
@@ -1567,6 +1588,15 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
     serializer_class = BordadoAvancesSerializer
     orden_padre_field = "ob"
     filterset_fields = ["ob"]
+
+    def get_queryset(self):
+        # Los ``*_display`` leen detalle (producto/talla/color) y talla del
+        # pedido por renglón. Prefetch, no join: la consulta base (sin orden
+        # explícito) queda idéntica.
+        return super().get_queryset().prefetch_related(
+            "orden_bordado_detalle__producto", "orden_bordado_detalle__talla",
+            "orden_bordado_detalle__color", "pedido_detalle_talla__talla",
+        )
 
     @staticmethod
     def _puntadas_total(por_pieza, cantidad):
@@ -1842,9 +1872,8 @@ class OrdenReflejanteViewSet(
                     empresa=empresa,
                     sucursal_id__in=sucursal_ids,
                     activo=True,
-                    detalles__tallas__lleva_reflejante=True,
                 )
-                .distinct()
+                .filter(_con_talla_que("lleva_reflejante"))
                 .select_related("cliente", "sucursal")
                 .prefetch_related(
                     "detalles",
@@ -2189,9 +2218,8 @@ class OrdenesCorteMangaViewSet(
                     empresa=empresa,
                     sucursal_id__in=sucursal_ids,
                     activo=True,
-                    detalles__tallas__lleva_corte_manga=True,
                 )
-                .distinct()
+                .filter(_con_talla_que("lleva_corte_manga"))
                 .select_related("cliente", "sucursal")
                 .prefetch_related(
                     "detalles",
