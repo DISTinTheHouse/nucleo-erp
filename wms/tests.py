@@ -2139,6 +2139,17 @@ class DocumentosWmsLineasVarianteTests(TestCase):
         (packing,) = api.get("/api/v1/wms/packings/").json()
         self._assert_lineas(packing["packing_detalle"])
 
+    def test_packing_sin_talla_de_pedido_trae_talla_id_en_null(self):
+        """``talla_id`` viaja siempre en packing: sin talla de pedido ni muestra, ``null`` (antes se omitía)."""
+        from wms.models import PickingDetalle
+
+        PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(pedido_detalle_talla=None)
+        catalogo, muestra = self._detalle("packings", self.d["packing"])["packing_detalle"]
+        self.assertIn("talla_id", catalogo)
+        self.assertEqual((catalogo["talla_id"], catalogo["talla_nombre"]), (None, None))
+        self.assertEqual(catalogo["producto_nombre"], self.d["variante"].producto.nombre)
+        self.assertEqual(muestra["talla_id"], self.d["talla_muestra"].pk)
+
     def test_linea_sin_variante_deja_los_campos_en_null(self):
         from wms.models import TransferenciaDetalle
 
@@ -2208,6 +2219,14 @@ class DocumentosWmsClienteTests(TestCase):
         # Lo que ya había no cambia.
         self.assertEqual((cuerpo["pedido"], cuerpo["pedido_folio"]), (self.d["pedido"].pk, self.d["pedido"].folio))
         return cuerpo["pedido_vinculado"]
+
+    def test_produccion_conserva_su_ruta_de_importacion(self):
+        """El helper vive en ``ventas``; la ruta de Producción (EC-880) sigue dando el mismo."""
+        from produccion.services import orden_bordado_field_filter_service as ruta_produccion
+        from ventas.services import pedido_vinculado
+
+        self.assertIs(ruta_produccion.armar_pedido_vinculado, pedido_vinculado.armar_pedido_vinculado)
+        self.assertIs(ruta_produccion.cliente_de_pedido, pedido_vinculado.cliente_de_pedido)
 
     def test_sin_foto_sale_el_cliente_vivo(self):
         cliente = self.d["cliente"]
