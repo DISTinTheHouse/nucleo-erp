@@ -325,15 +325,16 @@ class ProductoViewSet(viewsets.ModelViewSet):
         ``descripcion``. Publica ``id, nombre, codigo, descripcion, activo, unidad_id,
         unidad_nombre, unidad_abreviatura, tipo, categoria_producto``.
 
-        Sólo productos activos, salvo con ``?ids=1,2``: entonces regresa esos (activos
-        o no, siempre de la empresa del usuario)."""
+        Sólo productos activos, salvo con ``?ids=1,2``: entonces regresa esos, activos o
+        no, sin aplicar ``q`` ni los demás filtros, siempre de la empresa del usuario."""
         ids = _ids_param(request)
         qs = self._productos_de_la_empresa()
-        if ids is None:
-            qs = qs.filter(activo=True)
-        qs = self._filtrar(qs, buscar_en_descripcion=True)
         if ids is not None:
+            # Sólo el alcance por empresa: lo ya elegido conserva su etiqueta aunque
+            # esté inactivo o no coincida con la búsqueda o los filtros actuales.
             qs = qs.filter(pk__in=ids)
+        else:
+            qs = self._filtrar(qs.filter(activo=True), buscar_en_descripcion=True)
         return _respuesta_selector(self, self.filter_queryset(qs), ProductoSelectorSerializer)
 
     def perform_destroy(self, instance):
@@ -430,6 +431,11 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
     ]
 
     def get_queryset(self):
+        return self._filtrar(self._variantes_de_la_empresa())
+
+    def _variantes_de_la_empresa(self):
+        """Variantes de la empresa del usuario con ``sku_produccion`` y orden ``-id``.
+        Sin filtros de query string: los pone ``_filtrar``."""
         # ``ProductoVariante.empresa`` es FK propia (el onboarding la copia de
         # ``producto.empresa``); se acota por ella, no por ``producto__empresa``.
         qs = _alcance_empresa(super().get_queryset(), self.request.user)
@@ -441,6 +447,11 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
                 color=OuterRef('color'), talla=OuterRef('talla'),
             ).values('sku')[:1]
         ))
+        # Antes sin ``order_by``: el orden dependía del plan de PostgreSQL (EC-886).
+        return qs.order_by("-id")
+
+    def _filtrar(self, qs):
+        """``con_bom`` y ``q`` del query string."""
         if self.request.query_params.get('con_bom', '').lower() == 'true':
             qs = qs.filter(Exists(self._bom_activo()))
         q = (self.request.query_params.get('q') or '').strip()
@@ -453,8 +464,7 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
                 | Q(producto__nombre__icontains=q)
                 | Q(sku_produccion__icontains=q)
             )
-        # Antes sin ``order_by``: el orden dependía del plan de PostgreSQL (EC-886).
-        return qs.order_by("-id")
+        return qs
 
     def _bom_activo(self):
         """BOM activo de la variante (``OuterRef('pk')``) en la empresa del usuario:
@@ -476,20 +486,23 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
         sku_produccion, tiene_bom, activo``.
 
         Sólo variantes activas de productos activos, salvo con ``?ids=1,2``: entonces
-        regresa esas (activas o no, siempre de la empresa del usuario) para que lo ya
-        elegido conserve su etiqueta. ``?tiene_bom=true|false`` filtra por BOM activo."""
+        regresa esas, activas o no y sin aplicar ``q``, ``con_bom`` ni ``tiene_bom``,
+        siempre de la empresa del usuario, para que lo ya elegido conserve su etiqueta
+        (con su ``tiene_bom``). ``?tiene_bom=true|false`` filtra por BOM activo."""
         ids = _ids_param(request)
-        tiene_bom = booleano_param(request, 'tiene_bom', None)
-        # Sólo ``producto`` (por su ``cod_proscai``); color y talla no se publican.
-        qs = self.filter_queryset(self.get_queryset()).select_related(None).select_related('producto')
-        qs = qs.annotate(tiene_bom=Exists(self._bom_activo()))
+        qs = self._variantes_de_la_empresa()
         if ids is not None:
             qs = qs.filter(pk__in=ids)
         else:
-            qs = qs.filter(activo=True, producto__activo=True)
-        if tiene_bom is not None:
-            qs = qs.filter(tiene_bom=tiene_bom)
-        return _respuesta_selector(self, qs, ProductoVarianteSelectorSerializer)
+            qs = self._filtrar(qs).filter(activo=True, producto__activo=True)
+        # Sólo ``producto`` (por su ``cod_proscai``); color y talla no se publican.
+        qs = qs.select_related(None).select_related('producto')
+        qs = qs.annotate(tiene_bom=Exists(self._bom_activo()))
+        if ids is None:
+            tiene_bom = booleano_param(request, 'tiene_bom', None)
+            if tiene_bom is not None:
+                qs = qs.filter(tiene_bom=tiene_bom)
+        return _respuesta_selector(self, self.filter_queryset(qs), ProductoVarianteSelectorSerializer)
 
     @action(detail=False, methods=['post'])
     def onboarding(self, request):
