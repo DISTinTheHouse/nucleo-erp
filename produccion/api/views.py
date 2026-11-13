@@ -534,18 +534,26 @@ _OP_A_TIEMPO = _OP_CON_AMBAS_FECHAS & Q(fecha_fin__date__lte=F("fecha_entrega_es
 _OP_TARDIA = _OP_CON_AMBAS_FECHAS & Q(fecha_fin__date__gt=F("fecha_entrega_estimada"))
 
 
+# "Terminada" = estatus_op Completado (#354), no por ``fecha_fin``.
+_OP_TERMINADA = Q(estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO)
+
+
 def _ops_terminadas(qs):
-    # "Terminada" = estatus_op Completado (#354), no por ``fecha_fin``.
-    return qs.filter(estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO)
+    return qs.filter(_OP_TERMINADA)
 
 
-def _ops_atrasadas(qs):
-    return qs.exclude(
+def _op_atrasada():
+    """Abierta (ni Completada ni Cancelada) y con la entrega estimada vencida."""
+    return ~Q(
         estatus_op__in=[
             OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
             OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
         ]
-    ).filter(fecha_entrega_estimada__lt=timezone.localdate())
+    ) & Q(fecha_entrega_estimada__lt=timezone.localdate())
+
+
+def _ops_atrasadas(qs):
+    return qs.filter(_op_atrasada())
 
 
 KPI_OP_CONJUNTOS = {
@@ -731,17 +739,16 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # (IDOR). El servicio hace ``filter(pk=op_id)`` sin filtro de empresa. Se
         # valida la pertenencia aquí, en la capa de vista, antes de delegar. Se
         # responde 404 (no 403) para no revelar la existencia del documento a
-        # otra empresa —mismo criterio que ``retrieve`` en OB/OR/OCM—.
+        # otra empresa —mismo criterio que ``retrieve`` en OB/OR/OCM—. El alcance
+        # va en la MISMA consulta que lee la OP (antes era un ``exists()`` aparte).
         empresa = getattr(request.user, 'empresa', None)
-        es_propia = (
-            empresa is not None
-            and ordenes_produccion_visibles(
-                OrdenProduccion.objects.filter(pk=op_id, activo=True), request.user
-            ).exists()
-        )
-        if not es_propia:
+        if empresa is None:
             return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
-        res_data = OrdenProduccionService.get_formatted_op_detalle(op_id, request=request)
+        res_data = OrdenProduccionService.get_formatted_op_detalle(
+            op_id,
+            request=request,
+            base=ordenes_produccion_visibles(OrdenProduccion.objects.filter(activo=True), request.user),
+        )
         if res_data is None:
             return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
         return Response(res_data)
@@ -1108,7 +1115,16 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
                 "fecha_hasta": fecha_hasta,
             },
         }
-        data["cumplimiento_a_tiempo"] = self._kpi_otd(base, meta_otd)
+        # Todos los conteos en UNA consulta (antes el de atrasadas era otra).
+        # Invariante (#362): a_tiempo + tardias + sin_clasificar == terminadas.
+        conteos = base.aggregate(
+            terminadas=Count("op_id", filter=_OP_TERMINADA),
+            a_tiempo=Count("op_id", filter=_OP_TERMINADA & _OP_A_TIEMPO),
+            tardias=Count("op_id", filter=_OP_TERMINADA & _OP_TARDIA),
+            sin_clasificar=Count("op_id", filter=_OP_TERMINADA & ~_OP_CON_AMBAS_FECHAS),
+            atrasadas=Count("op_id", filter=_op_atrasada()),
+        )
+        data["cumplimiento_a_tiempo"] = self._kpi_otd(base, meta_otd, conteos)
         data["avance_produccion"] = {
             "disponible": False,
             "motivo": "No se registra piezas terminadas por OP en el esquema actual (solo piezas programadas).",
@@ -1117,7 +1133,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             "disponible": False,
             "motivo": "No existen campos de SAM, operarios asignados ni minutos trabajados en el esquema actual.",
         }
-        data["ops_atrasadas"] = self._kpi_atrasadas(base)
+        data["ops_atrasadas"] = self._kpi_atrasadas(base, conteos["atrasadas"] or 0)
         return Response(data)
 
     def _kpis_vacio(self):
@@ -1139,7 +1155,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             return "amarillo"
         return "rojo"
 
-    def _kpi_otd(self, base, meta_otd):
+    def _kpi_otd(self, base, meta_otd, conteos):
         # "Terminada" = estatus_op Completado (#354) -- NO por fecha_fin: ese
         # campo casi nunca se llena (solo lo hace una recepción automática de
         # OC con cerrar_orden=True), así que decidir por su presencia dejaba
@@ -1151,20 +1167,12 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         # entra ni al numerador ni al drill-down de tardías.
         terminadas = _ops_terminadas(base)
 
-        # #362: conteo exacto de tardías y sin-clasificar en el mismo
-        # aggregate() (nunca len(drill_down_tardias), que se corta en 20).
-        # Invariante: ops_a_tiempo + ops_tardias + ops_sin_clasificar ==
-        # ops_terminadas.
-        agg = terminadas.aggregate(
-            total=Count("op_id"),
-            a_tiempo=Count("op_id", filter=_OP_A_TIEMPO),
-            tardias=Count("op_id", filter=_OP_TARDIA),
-            sin_clasificar=Count("op_id", filter=~_OP_CON_AMBAS_FECHAS),
-        )
-        total = agg["total"] or 0
-        a_tiempo = agg["a_tiempo"] or 0
-        n_tardias = agg["tardias"] or 0
-        sin_clasificar = agg["sin_clasificar"] or 0
+        # #362: conteo exacto de tardías y sin-clasificar en el aggregate() de
+        # ``kpis`` (nunca len(drill_down_tardias), que se corta en 20).
+        total = conteos["terminadas"] or 0
+        a_tiempo = conteos["a_tiempo"] or 0
+        n_tardias = conteos["tardias"] or 0
+        sin_clasificar = conteos["sin_clasificar"] or 0
         pct = round((a_tiempo / total) * 100, 1) if total else None
 
         # ``-op_id`` desempata: dos OP con la misma ``fecha_fin`` no cambian de
@@ -1191,14 +1199,13 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             "listado": "?kpi=tardias",
         }
 
-    def _kpi_atrasadas(self, base):
+    def _kpi_atrasadas(self, base, total):
         # Solo cuenta lo que hoy es medible: OP vencida (fecha_entrega_estimada
         # ya pasó) y todavía no cerrada. La otra mitad del KPI del ticket
         # ("avance menor al tiempo transcurrido") necesita piezas terminadas
         # por OP, que no existen en el esquema -- ver avance_produccion.
         hoy = timezone.localdate()
         vencidas_qs = _ops_atrasadas(base)
-        total = vencidas_qs.count()
         drill_down = [
             {
                 "op_id": row["op_id"],
@@ -1407,9 +1414,6 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
         del listado.
         """
         orden = self.get_object()
-        por_linea, por_detalle, hermanas, aproximado = (
-            OrdenBordadoService.partialidad_de_orden(orden)
-        )
 
         # ``bordado_config`` de TODAS las tallas del pedido, en UNA query, con
         # la misma clave que usa el renglón. Sin esto,
@@ -1424,8 +1428,13 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
         # tampoco lo tenía, y un renglón cuyo pedido cambió después seguiría
         # resolviendo su config.
         # La misma query trae el ``sku`` de la variante de cada talla
-        # (``detalles[].sku``), sin viaje extra a la BD.
-        pdt_config_map, sku_por_linea = leer_mapa_pdt(orden.pedido_id, "bordado_config")
+        # (``detalles[].sku``) y las tallas de la parcialidad, sin viaje extra.
+        pdt_config_map, sku_por_linea, tallas_ot = leer_mapa_pdt(
+            orden.pedido_id, "bordado_config", OrdenBordadoService._tallas_bordado_qs(orden.pedido_id),
+        )
+        por_linea, por_detalle, hermanas, aproximado = (
+            OrdenBordadoService.partialidad_de_orden(orden, tallas=tallas_ot)
+        )
 
         avances = list(
             BordadoAvances.objects
@@ -1842,9 +1851,6 @@ class OrdenReflejanteViewSet(
         del listado.
         """
         orden = self.get_object()
-        por_linea, por_detalle, hermanas, aproximado = (
-            OrdenReflejanteService.partialidad_de_orden(orden)
-        )
 
         # ``reflejante_config`` de TODAS las tallas del pedido, en UNA query,
         # con la misma clave que usa el renglón. Sin esto,
@@ -1854,8 +1860,14 @@ class OrdenReflejanteViewSet(
         # ``OrdenBordadoViewSet.retrieve``. Sin filtro por
         # ``lleva_reflejante``/``cantidad``: la query por fila tampoco lo tenía,
         # y un renglón cuyo pedido cambió después seguiría resolviendo su config.
-        # La misma query trae el ``sku`` de cada talla (``detalles[].sku``).
-        pdt_config_map, sku_por_linea = leer_mapa_pdt(orden.pedido_id, "reflejante_config")
+        # La misma query trae el ``sku`` de cada talla (``detalles[].sku``) y
+        # las tallas de la parcialidad.
+        pdt_config_map, sku_por_linea, tallas_ot = leer_mapa_pdt(
+            orden.pedido_id, "reflejante_config", OrdenReflejanteService._tallas_reflejante_qs(orden.pedido_id),
+        )
+        por_linea, por_detalle, hermanas, aproximado = (
+            OrdenReflejanteService.partialidad_de_orden(orden, tallas=tallas_ot)
+        )
         avances = _avances_de_piezas(ReflejanteAvances, "orden_r", orden, "cantidad_aplicada")
 
         # Numerador y denominador de la cobertura, ya en memoria: los renglones
@@ -2211,11 +2223,14 @@ class OrdenesCorteMangaViewSet(
         ``lleva_corte_manga``/``cantidad``, igual que hacía la query por fila.
         """
         orden = self.get_object()
-        por_linea, por_detalle, hermanas, aproximado = (
-            OrdenCorteMangaService.partialidad_de_orden(orden)
+        # La misma query trae el ``sku`` de cada talla (``detalles[].sku``) y
+        # las tallas de la parcialidad.
+        pdt_config_map, sku_por_linea, tallas_ot = leer_mapa_pdt(
+            orden.pedido_id, "corte_manga_config", OrdenCorteMangaService._tallas_corte_manga_qs(orden.pedido_id),
         )
-        # La misma query trae el ``sku`` de cada talla (``detalles[].sku``).
-        pdt_config_map, sku_por_linea = leer_mapa_pdt(orden.pedido_id, "corte_manga_config")
+        por_linea, por_detalle, hermanas, aproximado = (
+            OrdenCorteMangaService.partialidad_de_orden(orden, tallas=tallas_ot)
+        )
         avances = _avances_de_piezas(CorteMangaAvances, "ocm", orden, "cantidad")
 
         # Cobertura con los totales ya en memoria, como en reflejante.
@@ -2857,16 +2872,19 @@ class PedidoEspecialViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Ge
         # las variantes de producción ya generadas para estas líneas, y se
         # cuelgan por (pedido_detalle_id, talla_id) sobre cada ``dt`` -- lo
         # que lee ``PedidoDetalleTallaEspecialSerializer.get_sku_produccion``.
-        variantes = variantes_produccion_activas().filter(
-            pedido_detalle_id__in=[d.id for d in detalles]
-        ).only("id", "sku", "pedido_detalle_id", "talla_id", "color_id", "aplica_catalogo", "producto_base_id")
+        # Una sola consulta para activas e inactivas (antes eran dos): el índice
+        # único (pedido_detalle, talla) garantiza una variante por talla.
+        todas = list(
+            VarianteProductoProduccion.objects.filter(pedido_detalle_id__in=[d.id for d in detalles])
+            .only("id", "sku", "pedido_detalle_id", "talla_id", "color_id", "aplica_catalogo",
+                  "producto_base_id", "activo")
+        )
+        # Mismo criterio que ``variantes_produccion_activas()`` (``activo=True``).
+        variantes = [v for v in todas if v.activo]
         variantes_por_talla = {(v.pedido_detalle_id, v.talla_id): v for v in variantes}
         # Tallas con variante aunque esté inactiva: ``variante-onboarding`` (y su
         # índice único) no la vuelve a generar, así que no se ofrece como pendiente (#788).
-        con_variante = set(
-            VarianteProductoProduccion.objects.filter(pedido_detalle_id__in=[d.id for d in detalles])
-            .values_list("pedido_detalle_id", "talla_id")
-        )
+        con_variante = {(v.pedido_detalle_id, v.talla_id) for v in todas}
         # SKU de catálogo de las que ya se dieron de alta: una consulta (#767).
         sku_catalogo = {
             (pv.producto_id, pv.color_id, pv.talla_id): pv.sku

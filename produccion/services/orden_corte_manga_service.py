@@ -179,18 +179,22 @@ class OrdenCorteMangaService:
         return resultado
 
     @staticmethod
-    def partialidad_de_orden(orden):
+    def partialidad_de_orden(orden, tallas=None):
         """Contexto de parcialidad para el DETALLE de una OCM.
 
         Devuelve ``(por_linea, por_detalle, hermanas, reparto_aproximado)``;
         mismo contrato que ``OrdenReflejanteService.partialidad_de_orden``.
         3 queries constantes.
+
+        ``tallas``: las tallas que entran a la orden, ya leídas (``leer_mapa_pdt``
+        del ``retrieve`` las trae en su misma consulta); ``None`` las consulta aquí.
         """
-        tallas = list(
-            OrdenCorteMangaService._tallas_corte_manga_qs(orden.pedido_id)
-            .order_by("id")
-            .values("pedido_detalle_id", "talla_id", "cantidad")
-        )
+        if tallas is None:
+            tallas = list(
+                OrdenCorteMangaService._tallas_corte_manga_qs(orden.pedido_id)
+                .order_by("id")
+                .values("pedido_detalle_id", "talla_id", "cantidad")
+            )
         por_linea_asignado, sin_talla = (
             OrdenCorteMangaService.cantidades_asignadas_por_pedidos([orden.pedido_id])
         )

@@ -239,7 +239,7 @@ class OrdenBordadoService:
         return resultado
 
     @staticmethod
-    def partialidad_de_orden(orden):
+    def partialidad_de_orden(orden, tallas=None):
         """Contexto de parcialidad para el DETALLE de una OB.
 
         Devuelve ``(por_linea, por_detalle, hermanas, reparto_aproximado)``:
@@ -263,19 +263,23 @@ class OrdenBordadoService:
 
         Cuesta 3 queries constantes (tallas del pedido, asignado por línea,
         hermanas), independientemente del número de renglones.
+
+        ``tallas``: las tallas que entran a la orden, ya leídas (``leer_mapa_pdt``
+        del ``retrieve`` las trae en su misma consulta); ``None`` las consulta aquí.
         """
-        tallas = list(
-            OrdenBordadoService._tallas_bordado_qs(orden.pedido_id)
-            # Orden explícito: ``tallas_orden_trabajo_qs`` no lo declara y
-            # ``PedidoDetalleTalla`` no tiene ``Meta.ordering``, así que el
-            # orden lo decidía la BD. ``pendientes_por_linea`` drena el pool sin
-            # talla contra las primeras líneas que encuentra, de modo que dos
-            # GET idénticos podían repartir ``asignada``/``pendiente`` distinto
-            # entre renglones (los totales por renglón sí coincidían). Mismo
-            # criterio que el ``order_by("id")`` del Prefetch de ``detalles``.
-            .order_by("id")
-            .values("pedido_detalle_id", "talla_id", "cantidad")
-        )
+        if tallas is None:
+            tallas = list(
+                OrdenBordadoService._tallas_bordado_qs(orden.pedido_id)
+                # Orden explícito: ``tallas_orden_trabajo_qs`` no lo declara y
+                # ``PedidoDetalleTalla`` no tiene ``Meta.ordering``, así que el
+                # orden lo decidía la BD. ``pendientes_por_linea`` drena el pool sin
+                # talla contra las primeras líneas que encuentra, de modo que dos
+                # GET idénticos podían repartir ``asignada``/``pendiente`` distinto
+                # entre renglones (los totales por renglón sí coincidían). Mismo
+                # criterio que el ``order_by("id")`` del Prefetch de ``detalles``.
+                .order_by("id")
+                .values("pedido_detalle_id", "talla_id", "cantidad")
+            )
         por_linea_asignado, sin_talla = (
             OrdenBordadoService.cantidades_asignadas_por_pedidos([orden.pedido_id])
         )

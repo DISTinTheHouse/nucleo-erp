@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Exists, OuterRef, Sum
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -52,25 +52,35 @@ class _SkuPorTallaMixin:
         return mapa.get((obj.pedido_detalle_id, obj.talla_id)) or None
 
 
-def leer_mapa_pdt(pedido_id, config_field):
-    """``(config_map, sku_map)`` de todas las tallas del pedido en UNA query.
+def leer_mapa_pdt(pedido_id, config_field, tallas_ot_qs):
+    """``(config_map, sku_map, tallas_ot)`` de todas las tallas del pedido en UNA query.
 
     ``config_map`` es el mismo mapa que ya armaba cada ``retrieve``
     (``pdt_*_config_map``); ``sku_map`` sale de la misma fila (JOIN a la
-    variante).
+    variante). ``tallas_ot`` son las filas de ``tallas_ot_qs`` (las tallas que
+    entran a la orden: ``_tallas_*_qs`` del servicio) en el formato que espera
+    ``partialidad_de_orden(orden, tallas=...)``: antes eran una consulta aparte
+    al mismo pedido. Se marcan con ``Exists`` sobre el MISMO queryset, así que
+    el filtro no se duplica, y salen en el mismo orden (``id``).
     """
-    config_map, sku_map = {}, {}
-    for pd_id, talla_id, cfg, sku_var, sku_muestra in (
+    config_map, sku_map, tallas_ot = {}, {}, []
+    for pd_id, talla_id, cfg, sku_var, sku_muestra, cantidad, en_ot in (
         PedidoDetalleTalla.objects
         .filter(pedido_detalle__pedido_id=pedido_id)
+        .annotate(en_ot=Exists(tallas_ot_qs.filter(pk=OuterRef("pk"))))
         .order_by("id")
-        .values_list("pedido_detalle_id", "talla_id", config_field, "variante__sku", "sku_muestra")
+        .values_list(
+            "pedido_detalle_id", "talla_id", config_field, "variante__sku", "sku_muestra",
+            "cantidad", "en_ot",
+        )
     ):
         # ``setdefault``: si hubiera dos filas para el mismo par se conserva la
         # primera, como hacía ``.first()``.
         config_map.setdefault((pd_id, talla_id), cfg)
         sku_map.setdefault((pd_id, talla_id), sku_var or sku_muestra or None)
-    return config_map, sku_map
+        if en_ot:
+            tallas_ot.append({"pedido_detalle_id": pd_id, "talla_id": talla_id, "cantidad": cantidad})
+    return config_map, sku_map, tallas_ot
 
 
 class AvancePiezasReadSerializer(serializers.Serializer):

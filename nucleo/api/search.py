@@ -754,7 +754,7 @@ class BusquedaGlobalAPIView(APIView):
         )
         suficiente = len(q) >= LONGITUD_MINIMA_Q
         # Los permisos se resuelven UNA vez por petición y se reutilizan para las
-        # entidades: 2 consultas en total, o 0 si es superusuario/admin.
+        # entidades: 1 consulta en total, o 0 si es superusuario/admin.
         permisos = permisos_efectivos(request.user)
 
         grupos = []

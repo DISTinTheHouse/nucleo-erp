@@ -43,16 +43,19 @@ def generate_ocm_folio(empresa_id, sucursal_id):
     )
 
 
-@transaction.atomic
 def preview_ocm_folio(empresa_id, sucursal_id):
-    """Shim backward-compatible. Delegación a ``SerieFolio.preview_siguiente_folio``."""
+    """Shim backward-compatible. Delegación a ``SerieFolio.preview_siguiente_folio``.
+
+    Los tres ``preview_*`` van sin ``transaction.atomic``: leen la serie sin lock
+    (``lock=False``) y no escriben; la transacción sólo sumaba BEGIN/COMMIT, un
+    viaje más a la BD en cada GET de ``onboarding``.
+    """
     return SerieFolio.preview_siguiente_folio(
         empresa_id,
         sucursal_id,
         ["Orden Corte de Manga", "ORDEN_CORTE_MANGA", "Corte de Manga", "OCM"],
     )
 
-@transaction.atomic
 def preview_ob_folio(empresa_id, sucursal_id):
     """Shim backward-compatible. Delegación a ``SerieFolio.preview_siguiente_folio``."""
     return SerieFolio.preview_siguiente_folio(
@@ -62,7 +65,6 @@ def preview_ob_folio(empresa_id, sucursal_id):
     )
 
 
-@transaction.atomic
 def preview_or_folio(empresa_id, sucursal_id):
     """Shim backward-compatible. Delegación a ``SerieFolio.preview_siguiente_folio``."""
     return SerieFolio.preview_siguiente_folio(

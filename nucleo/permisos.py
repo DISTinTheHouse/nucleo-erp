@@ -6,7 +6,7 @@ en hacerlo. Eso está bien para un gate puntual, pero el buscador global pregunt
 —Compras, Mesa de Control— pagaba ~30 consultas por búsqueda, y el buscador se
 dispara con cada pulsación.
 
-``permisos_efectivos(user)`` resuelve el conjunto entero en **2 consultas** (0 para
+``permisos_efectivos(user)`` resuelve el conjunto entero en **1 consulta** (0 para
 superusuario y admin de empresa) y devuelve un objeto que responde por pertenencia en
 O(1), sin volver a tocar la BD.
 
@@ -51,7 +51,7 @@ Dos detalles de fidelidad que es fácil perder de vista:
 """
 
 from django.core.exceptions import ImproperlyConfigured
-from django.db.models import Q
+from django.db.models import CharField, F, Q, Value
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 from seguridad.models import Rol, UsuarioPermiso
 
@@ -98,8 +98,14 @@ class PermisosEfectivos:
         return f"<PermisosEfectivos: {len(self._claves)} claves>"
 
 
+#: Marca de las filas de rol en la consulta única de ``permisos_efectivos``. Más
+#: larga que ``UsuarioPermiso.tipo`` (``max_length=10``): ningún override puede
+#: traerla y confundirse con un permiso de rol.
+_DE_ROL = "__rol_activo__"
+
+
 def permisos_efectivos(user) -> PermisosEfectivos:
-    """Permisos efectivos del usuario, en 2 consultas (0 si es superusuario/admin)."""
+    """Permisos efectivos del usuario, en 1 consulta (0 si es superusuario/admin)."""
     # Pasos 1 y 2: cortocircuito idéntico al de ``tiene_permiso()``. No se lee el
     # catálogo porque la respuesta es ``True`` para cualquier clave.
     if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
@@ -110,30 +116,35 @@ def permisos_efectivos(user) -> PermisosEfectivos:
     if not getattr(user, "is_authenticated", False):
         return PermisosEfectivos(todo=False, claves=frozenset())
 
-    # Consulta 1: los overrides del usuario, grants y denies de una sola pasada.
+    # UNA consulta (``UNION ALL``) con las dos fuentes, cada fila ``(tipo, clave)``:
+    # - los overrides del usuario, grants y denies, con su ``tipo``;
+    # - lo que conceden sus roles ACTIVOS, marcados con ``_DE_ROL``.
+    # Antes eran dos consultas; ésta se paga en cada lectura protegida por código
+    # (``LecturaPorCodigo``), así que un viaje a la BD menos por petición.
     concedidos = set()
     denegados = set()
     empresa_id = getattr(user, "empresa_id", None)
-    for tipo, clave in user.overrides_permisos.filter(
+    overrides = user.overrides_permisos.filter(
         Q(empresa__isnull=True) | Q(empresa_id=empresa_id)
-    ).values_list("tipo", "permiso__clave"):
-        if tipo == UsuarioPermiso.TIPO_DENY:
+    ).annotate(t=F("tipo"), c=F("permiso__clave")).values_list("t", "c")
+    de_roles = user.asignaciones_roles.filter(
+        rol__estatus=Rol.Estatus.ACTIVO, empresa_id=empresa_id
+    ).annotate(
+        t=Value(_DE_ROL, output_field=CharField()), c=F("rol__permisos__clave"),
+    ).values_list("t", "c")
+    for tipo, clave in overrides.union(de_roles, all=True):
+        if tipo == _DE_ROL:
+            # Se descartan los NULL que produce el LEFT JOIN cuando un rol no
+            # tiene permisos asignados. Se compara contra ``None`` y no por
+            # veracidad: una clave vacía es un dato absurdo, pero
+            # ``tiene_permiso("")`` la encontraría, y aquí se replica su
+            # decisión, no se corrige.
+            if clave is not None:
+                concedidos.add(clave)
+        elif tipo == UsuarioPermiso.TIPO_DENY:
             denegados.add(clave)
         elif tipo == UsuarioPermiso.TIPO_GRANT:
             concedidos.add(clave)
-
-    # Consulta 2: lo que conceden sus roles ACTIVOS. Se descartan los NULL que
-    # produce el LEFT JOIN cuando un rol no tiene permisos asignados. Se compara
-    # contra ``None`` y no por veracidad: una clave vacía es un dato absurdo, pero
-    # ``tiene_permiso("")`` la encontraría, y aquí se replica su decisión, no se
-    # corrige.
-    concedidos.update(
-        clave
-        for clave in user.asignaciones_roles.filter(
-            rol__estatus=Rol.Estatus.ACTIVO, empresa_id=empresa_id
-        ).values_list("rol__permisos__clave", flat=True)
-        if clave is not None
-    )
 
     return PermisosEfectivos(todo=False, claves=frozenset(concedidos - denegados))
 
