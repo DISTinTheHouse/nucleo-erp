@@ -52,6 +52,36 @@ class _SkuPorTallaMixin:
         return mapa.get((obj.pedido_detalle_id, obj.talla_id)) or None
 
 
+def _entero_o_none(valor):
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pdts_del_pedido(pedido, detalles_override):
+    """``{id: PedidoDetalleTalla}`` de los ``pedido_detalle_talla_id`` de
+    ``detalles_override`` que son del ``pedido``, en UNA consulta (EC-889).
+
+    Antes cada renglón hacía su ``.get()``. Un id ajeno al pedido o inexistente
+    simplemente no aparece y el validador responde el mismo 400 de siempre.
+    """
+    if pedido is None:
+        return {}
+    ids = {
+        _entero_o_none(item.get("pedido_detalle_talla_id"))
+        for item in detalles_override if isinstance(item, dict)
+    } - {None}
+    if not ids:
+        return {}
+    return {
+        pdt.pk: pdt
+        for pdt in PedidoDetalleTalla.objects.select_related("pedido_detalle").filter(
+            pk__in=ids, pedido_detalle__pedido=pedido,
+        )
+    }
+
+
 def leer_mapa_pdt(pedido_id, config_field, tallas_ot_qs):
     """``(config_map, sku_map, tallas_ot)`` de todas las tallas del pedido en UNA query.
 
@@ -1170,6 +1200,7 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
             from ventas.models import PedidoDetalleTalla
 
             seen_ids = set()
+            pdts_del_pedido = _pdts_del_pedido(pedido, detalles_override)
             for item in detalles_override:
                 if not isinstance(item, dict):
                     raise serializers.ValidationError({
@@ -1214,11 +1245,10 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
                 if pedido is not None:
                     # Filtrado por el pedido: un id de otro pedido responde igual que uno
                     # inexistente y no deja enumerar tallas ajenas.
-                    try:
-                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(
-                            pk=pdt_id, pedido_detalle__pedido=pedido
-                        )
-                    except PedidoDetalleTalla.DoesNotExist:
+                    # Precargadas antes del ciclo: una consulta para todos los
+                    # renglones, no una por renglón (EC-889).
+                    pdt = pdts_del_pedido.get(_entero_o_none(pdt_id))
+                    if pdt is None:
                         raise serializers.ValidationError({
                             "detalles_override": (
                                 f"`pedido_detalle_talla_id={pdt_id}` no existe "
@@ -2227,6 +2257,7 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
             from ventas.models import PedidoDetalleTalla
 
             seen_ids = set()
+            pdts_del_pedido = _pdts_del_pedido(pedido, detalles_override)
             for item in detalles_override:
                 if not isinstance(item, dict):
                     raise serializers.ValidationError({
@@ -2268,11 +2299,10 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
                 if pedido is not None:
                     # Filtrado por el pedido: un id de otro pedido responde igual que uno
                     # inexistente y no deja enumerar tallas ajenas.
-                    try:
-                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(
-                            pk=pdt_id, pedido_detalle__pedido=pedido
-                        )
-                    except PedidoDetalleTalla.DoesNotExist:
+                    # Precargadas antes del ciclo: una consulta para todos los
+                    # renglones, no una por renglón (EC-889).
+                    pdt = pdts_del_pedido.get(_entero_o_none(pdt_id))
+                    if pdt is None:
                         raise serializers.ValidationError({
                             "detalles_override": (
                                 f"`pedido_detalle_talla_id={pdt_id}` no existe "
@@ -2703,6 +2733,7 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
             from ventas.models import PedidoDetalleTalla
 
             seen_ids = set()
+            pdts_del_pedido = _pdts_del_pedido(pedido, detalles_override)
             for item in detalles_override:
                 if not isinstance(item, dict):
                     raise serializers.ValidationError({
@@ -2741,11 +2772,10 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
                 if pedido is not None:
                     # Filtrado por el pedido: un id de otro pedido responde igual que uno
                     # inexistente y no deja enumerar tallas ajenas.
-                    try:
-                        pdt = PedidoDetalleTalla.objects.select_related("pedido_detalle").get(
-                            pk=pdt_id, pedido_detalle__pedido=pedido
-                        )
-                    except PedidoDetalleTalla.DoesNotExist:
+                    # Precargadas antes del ciclo: una consulta para todos los
+                    # renglones, no una por renglón (EC-889).
+                    pdt = pdts_del_pedido.get(_entero_o_none(pdt_id))
+                    if pdt is None:
                         raise serializers.ValidationError({
                             "detalles_override": (
                                 f"`pedido_detalle_talla_id={pdt_id}` no existe "

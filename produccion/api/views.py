@@ -352,6 +352,20 @@ def _con_detalles_prefetcheados(orden, detalle_model):
     return orden
 
 
+def _respuesta_alta(orden, detalle_model, serializer_cls, config_field, tallas_qs):
+    """EC-889: respuesta de ``create``/POST ``onboarding`` sin N+1.
+
+    Igual que el detalle, la config y el SKU de cada renglón salen de una sola
+    lectura de ``pedido_detalle_talla`` en lugar de una por renglón.
+    """
+    orden = _con_detalles_prefetcheados(orden, detalle_model)
+    context = {}
+    if orden.pedido_id:
+        config_map, sku_map, _ = leer_mapa_pdt(orden.pedido_id, config_field, tallas_qs(orden.pedido_id))
+        context = {f"pdt_{config_field}_map": config_map, "sku_por_linea": sku_map}
+    return serializer_cls(orden, context=context).data
+
+
 def _sincronizar_pre_orden_por_bom(bom, usuario=None):
     """BOM de una variante de producción de muestra → crea/actualiza la
     pre-orden de producción de su pedido (``pre_orden_service``)."""
@@ -1296,6 +1310,23 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
             return OrdenBordadoRetrieveSerializer
         return OrdenBordadoSerializer
 
+    def perform_update(self, serializer):
+        """Guarda y responde con la orden recién leída y precargada (EC-889).
+
+        DRF serializaba la instancia del PATCH sin precarga: ``producto``,
+        ``talla`` y el ``bordado_config`` del pedido se consultaban por renglón
+        (104 consultas y ~10 s con 33 renglones). Se relee con el mismo
+        ``get_queryset()`` del detalle y el config del pedido va en UNA consulta
+        (``leer_mapa_pdt``), igual que en ``retrieve``.
+        """
+        serializer.save()
+        orden = self.get_queryset().get(pk=serializer.instance.pk)
+        config_map, sku_map, _ = leer_mapa_pdt(
+            orden.pedido_id, "bordado_config", OrdenBordadoService._tallas_bordado_qs(orden.pedido_id),
+        )
+        serializer.instance = orden
+        serializer.context.update(pdt_bordado_config_map=config_map, sku_por_linea=sku_map)
+
     def perform_destroy(self, instance):
         instance.soft_delete()
 
@@ -1485,9 +1516,7 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
         serializer.is_valid(raise_exception=True)
         orden_bordado = OrdenBordadoService.save(serializer.validated_data, request.user)
         return Response(
-            OrdenBordadoSerializer(
-                _con_detalles_prefetcheados(orden_bordado, OrdenBordadoDetalle)
-            ).data,
+            _respuesta_alta(orden_bordado, OrdenBordadoDetalle, OrdenBordadoSerializer, "bordado_config", OrdenBordadoService._tallas_bordado_qs),
             status=status.HTTP_200_OK,
         )
 
@@ -1571,9 +1600,7 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
         serializer.is_valid(raise_exception=True)
         orden_bordado = OrdenBordadoService.save(serializer.validated_data, request.user)
         return Response(
-            OrdenBordadoSerializer(
-                _con_detalles_prefetcheados(orden_bordado, OrdenBordadoDetalle)
-            ).data,
+            _respuesta_alta(orden_bordado, OrdenBordadoDetalle, OrdenBordadoSerializer, "bordado_config", OrdenBordadoService._tallas_bordado_qs),
             status=status.HTTP_201_CREATED,
         )
 
@@ -1905,9 +1932,7 @@ class OrdenReflejanteViewSet(
         serializer.is_valid(raise_exception=True)
         orden_reflejante = OrdenReflejanteService.save(serializer.validated_data, request.user)
         return Response(
-            OrdenReflejanteSerializer(
-                _con_detalles_prefetcheados(orden_reflejante, OrdenReflejanteDetalle)
-            ).data,
+            _respuesta_alta(orden_reflejante, OrdenReflejanteDetalle, OrdenReflejanteSerializer, "reflejante_config", OrdenReflejanteService._tallas_reflejante_qs),
             status=status.HTTP_200_OK,
         )
 
@@ -1999,9 +2024,7 @@ class OrdenReflejanteViewSet(
         serializer.is_valid(raise_exception=True)
         orden_reflejante = OrdenReflejanteService.save(serializer.validated_data, request.user)
         return Response(
-            OrdenReflejanteSerializer(
-                _con_detalles_prefetcheados(orden_reflejante, OrdenReflejanteDetalle)
-            ).data,
+            _respuesta_alta(orden_reflejante, OrdenReflejanteDetalle, OrdenReflejanteSerializer, "reflejante_config", OrdenReflejanteService._tallas_reflejante_qs),
             status=status.HTTP_201_CREATED,
         )
 
@@ -2262,9 +2285,7 @@ class OrdenesCorteMangaViewSet(
         serializer.is_valid(raise_exception=True)
         orden_corte_manga = OrdenCorteMangaService.save(serializer.validated_data, request.user)
         return Response(
-            OrdenesCorteMangaSerializer(
-                _con_detalles_prefetcheados(orden_corte_manga, OrdenCorteMangaDetalle)
-            ).data,
+            _respuesta_alta(orden_corte_manga, OrdenCorteMangaDetalle, OrdenesCorteMangaSerializer, "corte_manga_config", OrdenCorteMangaService._tallas_corte_manga_qs),
             status=status.HTTP_200_OK,
         )
 
@@ -2349,9 +2370,7 @@ class OrdenesCorteMangaViewSet(
         serializer.is_valid(raise_exception=True)
         orden_corte_manga = OrdenCorteMangaService.save(serializer.validated_data, request.user)
         return Response(
-            OrdenesCorteMangaSerializer(
-                _con_detalles_prefetcheados(orden_corte_manga, OrdenCorteMangaDetalle)
-            ).data,
+            _respuesta_alta(orden_corte_manga, OrdenCorteMangaDetalle, OrdenesCorteMangaSerializer, "corte_manga_config", OrdenCorteMangaService._tallas_corte_manga_qs),
             status=status.HTTP_201_CREATED,
         )
 
@@ -3226,15 +3245,24 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         return Response({**data, **(extra or {})}, status=status_code)
 
     def retrieve(self, request, *args, **kwargs):
-        from produccion.services.pre_orden_service import materiales, recalcular
+        """Detalle; recalcula al abrir SÓLO si algo cambió (EC-890).
+
+        ``requiere_recalculo`` es lectura pura: si nada cambió (lo normal al
+        volver a la pestaña) no se bloquea ni se escribe. Si cambió, se
+        recalcula sobre la fila bloqueada (``select_for_update``): dos GET
+        simultáneos ya no duplican eventos ni notificaciones, porque el segundo
+        espera y encuentra la pre-orden ya al día.
+        """
+        from produccion.services.pre_orden_service import materiales, recalcular, requiere_recalculo
         pre = self.get_object()
         mats = materiales(pre)
-        antes = (pre.estatus, pre.materiales_faltantes)
-        recalcular(pre, mats, usuario=request.user)
-        if (pre.estatus, pre.materiales_faltantes) != antes:
-            return self._respuesta(pre, mats)
-        data = self.get_serializer(pre, context={**self.get_serializer_context(), "materiales": mats}).data
-        return Response(data)
+        if not requiere_recalculo(pre, mats):
+            data = self.get_serializer(pre, context={**self.get_serializer_context(), "materiales": mats}).data
+            return Response(data)
+        with transaction.atomic():
+            fila = PreOrdenProduccion.objects.select_for_update().select_related("pedido", "empresa").get(pk=pre.pk)
+            recalcular(fila, mats, usuario=request.user)
+        return self._respuesta(fila, mats)
 
     @action(detail=False, methods=["get"], url_path="resumen")
     def resumen(self, request):

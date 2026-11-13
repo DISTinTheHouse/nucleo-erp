@@ -368,7 +368,7 @@ class OrdenReflejanteService:
 
         detalle_tallas_raw = list(
             OrdenReflejanteService._tallas_reflejante_qs(pedido.id).select_related(
-                "pedido_detalle", "talla"
+                "pedido_detalle__color", "talla"
             )
         )
 
