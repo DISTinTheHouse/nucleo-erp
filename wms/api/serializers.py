@@ -88,6 +88,9 @@ class _VarianteDeLineaWmsMixin(serializers.Serializer):
     tiene) y ``sku``/``color_*`` quedan en ``null``. Una línea con las dos variantes
     da el ``sku`` de catálogo y ``sku_muestra`` el de la muestra: pueden diferir.
 
+    ``producto_nombre``: el del producto de la línea o, sin producto, el de su
+    muestra; ``null`` si no hay ninguno o el nombre viene vacío.
+
     ``_linea_wms`` devuelve el objeto con esas FK: el propio renglón en picking y
     transferencia, su ``picking_detalle`` en packing. Quien lo usa precarga
     ``producto``, ``producto_variante__color``/``__talla``,
@@ -95,6 +98,7 @@ class _VarianteDeLineaWmsMixin(serializers.Serializer):
     ``pedido_detalle_talla__talla`` (sin consultas por fila).
     """
 
+    producto_nombre = serializers.SerializerMethodField()
     sku = serializers.SerializerMethodField()
     color_id = serializers.SerializerMethodField()
     color_nombre = serializers.SerializerMethodField()
@@ -122,6 +126,12 @@ class _VarianteDeLineaWmsMixin(serializers.Serializer):
             return variante.talla if variante.talla_id else None
         talla_pedido = getattr(self._linea_wms(obj), "pedido_detalle_talla", None)
         return talla_pedido.talla if talla_pedido is not None else None
+
+    def get_producto_nombre(self, obj):
+        linea = self._linea_wms(obj)
+        if linea.producto_id:
+            return linea.producto.nombre or None
+        return getattr(linea.variante_produccion, "nombre", None) or None
 
     def get_sku(self, obj):
         return getattr(self._variante_wms(obj), "sku", None) or None
@@ -167,18 +177,12 @@ class TransferenciaDetalleReadSerializer(_VarianteDeLineaWmsMixin, serializers.M
     (``_VarianteDeLineaWmsMixin``).
     """
 
-    producto_nombre = serializers.SerializerMethodField()
     producto_variante_nombre = serializers.CharField(
         source="producto_variante.nombre", read_only=True, default=None
     )
     sku_muestra = serializers.CharField(source="variante_produccion.sku", read_only=True, default=None)
     ubicacion_origen_nombre = serializers.SerializerMethodField()
     ubicacion_destino_nombre = serializers.SerializerMethodField()
-
-    def get_producto_nombre(self, obj):
-        if obj.producto_id:
-            return obj.producto.nombre
-        return getattr(obj.variante_produccion, "nombre", None) or None
 
     class Meta:
         model = TransferenciaDetalle
@@ -296,7 +300,6 @@ class PickingDetalleSerializer(_VarianteDeLineaWmsMixin, serializers.ModelSerial
     muestra.
     """
 
-    producto_nombre = serializers.SerializerMethodField()
     producto_variante_nombre = serializers.CharField(
         source="producto_variante.nombre", read_only=True, default=None
     )
@@ -304,11 +307,6 @@ class PickingDetalleSerializer(_VarianteDeLineaWmsMixin, serializers.ModelSerial
     sku_muestra = serializers.CharField(source="variante_produccion.sku", read_only=True, default=None)
     ubicacion_nombre = serializers.SerializerMethodField()
     operador_nombre = serializers.SerializerMethodField()
-
-    def get_producto_nombre(self, obj):
-        if obj.producto_id:
-            return obj.producto.nombre
-        return getattr(obj.variante_produccion, "nombre", None)
 
     class Meta:
         model = PickingDetalle
@@ -535,7 +533,6 @@ class PackingDetalleReadSerializer(_VarianteDeLineaWmsMixin, serializers.ModelSe
     producto = serializers.IntegerField(
         source="picking_detalle.producto_id", read_only=True
     )
-    producto_nombre = serializers.SerializerMethodField()
     producto_variante = serializers.IntegerField(
         source="picking_detalle.producto_variante_id", read_only=True
     )
@@ -588,12 +585,6 @@ class PackingDetalleReadSerializer(_VarianteDeLineaWmsMixin, serializers.ModelSe
 
     def _linea_wms(self, obj):
         return obj.picking_detalle
-
-    def get_producto_nombre(self, obj):
-        linea = obj.picking_detalle
-        if linea.producto_id:
-            return linea.producto.nombre
-        return getattr(linea.variante_produccion, "nombre", None)
 
 class PackingSerializer(serializers.ModelSerializer):
     """Serializer compartido de packing (``list``, ``retrieve`` y respuesta del alta).
