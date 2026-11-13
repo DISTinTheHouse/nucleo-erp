@@ -2,6 +2,8 @@ from django.db.models import F
 from django.db import IntegrityError, transaction
 from django.db.models import Exists, OuterRef, Q, Subquery
 from django.db.models.functions import Lower
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
@@ -42,6 +44,19 @@ def _alcance_empresa(qs, user):
     if empresa:
         return qs.filter(empresa=empresa)
     return qs.none()
+
+
+class PaginacionOpcionalCatalogo(PaginacionOpcionalLimitOffset):
+    """``PaginacionOpcionalLimitOffset`` con el schema real de ``producto/`` y
+    ``producto-variante/`` (EC-886): sin ``?limit=`` regresan el arreglo plano de
+    siempre; con él, ``{count, next, previous, results}``. drf-spectacular
+    documentaba sólo el sobre."""
+
+    def get_paginated_response_schema(self, schema):
+        return {
+            "oneOf": [schema, super().get_paginated_response_schema(schema)],
+            "description": "Arreglo plano sin ``limit``; sobre paginado con ``limit``.",
+        }
 
 
 class PaginacionSelector(PaginacionOpcionalLimitOffset):
@@ -93,9 +108,22 @@ def _parsear_ids(request):
 
 
 def _respuesta_selector(view, qs, serializer_class):
-    paginador = PaginacionSelector()
-    pagina = paginador.paginate_queryset(qs, view.request, view=view)
-    return paginador.get_paginated_response(serializer_class(pagina, many=True).data)
+    # ``view.paginator`` es ``PaginacionSelector`` (``pagination_class`` de la acción).
+    pagina = view.paginate_queryset(qs)
+    return view.get_paginated_response(serializer_class(pagina, many=True).data)
+
+
+def _param_texto(nombre, descripcion):
+    return OpenApiParameter(nombre, OpenApiTypes.STR, OpenApiParameter.QUERY, description=descripcion)
+
+
+PARAM_IDS_SELECTOR = _param_texto(
+    "ids",
+    "Ids separados por comas (máx. 500), para resolver la etiqueta de lo ya elegido. "
+    "Regresa cada id de la empresa del usuario, activo o no, sin aplicar los demás "
+    "filtros; sin ``limit`` todos caben en una página.",
+)
+PARAM_Q = _param_texto("q", "Búsqueda por subcadena, sin distinguir mayúsculas.")
 
 
 def _lineas_param(request):
@@ -264,7 +292,7 @@ class ProductoViewSet(viewsets.ModelViewSet):
     queryset = Producto.objects.all()
     serializer_class = ProductoSerializer
     # Sin ``?limit=`` regresa la lista completa, como antes (EC-886).
-    pagination_class = PaginacionOpcionalLimitOffset
+    pagination_class = PaginacionOpcionalCatalogo
     filter_backends = FILTROS_CON_ORDEN_ESTABLE
     # Sin ``?ordering=`` válido manda el orden de ``get_queryset`` (``-created_at, -id``).
     ordering_fields = [
@@ -317,7 +345,18 @@ class ProductoViewSet(viewsets.ModelViewSet):
             qs = qs.filter(filtro_q)
         return qs
 
-    @action(detail=False, methods=['get'])
+    @extend_schema(
+        summary="Productos para selectores (ligero y paginado)",
+        responses=ProductoSelectorSerializer(many=True),
+        parameters=[
+            PARAM_Q,
+            PARAM_IDS_SELECTOR,
+            _param_texto("tipo_id", "Uno o varios ids de tipo de producto, separados por comas."),
+            _param_texto("linea", "Una o varias líneas de categoría, separadas por comas; SIN_LINEA = sin línea."),
+            _param_texto("es_compras", "true o false."),
+        ],
+    )
+    @action(detail=False, methods=['get'], pagination_class=PaginacionSelector)
     def selector(self, request):
         """Productos para selectores (EC-886), siempre paginado (``?limit``/``?offset``,
         50 por defecto, tope 500). Mismo alcance, filtros (``tipo_id``, ``linea``,
@@ -421,7 +460,7 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
     queryset = ProductoVariante.objects.all().select_related("producto", "color", "talla")
     serializer_class = ProductoVarianteSerializer
     # Sin ``?limit=`` regresa la lista completa, como antes (EC-886).
-    pagination_class = PaginacionOpcionalLimitOffset
+    pagination_class = PaginacionOpcionalCatalogo
     filter_backends = FILTROS_CON_ORDEN_ESTABLE
     # Sin ``?ordering=`` válido manda ``-id`` (``get_queryset``). ``producto__cod_proscai``
     # es el ``cod_proscai`` que publica el serializer; ``cod_proscai`` es el de la variante.
@@ -478,7 +517,18 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
             empresa=getattr(self.request.user, 'empresa', None),
         )
 
-    @action(detail=False, methods=['get'])
+    @extend_schema(
+        summary="Variantes para selectores (ligero y paginado)",
+        responses=ProductoVarianteSelectorSerializer(many=True),
+        parameters=[
+            PARAM_Q,
+            PARAM_IDS_SELECTOR,
+            OpenApiParameter("tiene_bom", OpenApiTypes.BOOL, OpenApiParameter.QUERY,
+                             description="Sólo variantes con (true) o sin (false) BOM activo."),
+            _param_texto("con_bom", "true: sólo variantes con BOM activo (como en el listado)."),
+        ],
+    )
+    @action(detail=False, methods=['get'], pagination_class=PaginacionSelector)
     def selector(self, request):
         """Variantes para selectores (EC-886), siempre paginado (``?limit``/``?offset``,
         50 por defecto, tope 500). Mismo alcance, filtros (``con_bom``, ``q``) y
