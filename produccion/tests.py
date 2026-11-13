@@ -14,6 +14,7 @@ producción en solo lectura o dentro de una transacción con rollback (ver
 """
 
 import json
+import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -83,6 +84,24 @@ from usuarios.models import Usuario
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
 
 
+def _conceder_permisos(usuario, empresa, claves):
+    """Rol activo de ``empresa`` con esas claves, asignado a ``usuario``. El
+    catálogo de permisos solo vive en la BD, así que se siembran aquí."""
+    from seguridad.models import Permiso, Rol, RolPermiso, UsuarioRol
+
+    # Un rol por llamada: el sufijo no se repite aunque se llame dos veces para
+    # el mismo usuario (``uq_rol_empresa_codigo``).
+    rol = Rol.objects.create(
+        empresa=empresa, codigo=f"rol-{usuario.pk}-{uuid.uuid4().hex[:12]}", nombre="Permisos de prueba",
+        estatus=Rol.Estatus.ACTIVO,
+    )
+    for clave in claves:
+        permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+        RolPermiso.objects.create(rol=rol, permiso=permiso)
+    UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=empresa)
+    return rol
+
+
 def _tipo_producto():
     """Tipo de producto obligatorio (#871); PT tiene pk=3 como en producción."""
     return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
@@ -119,6 +138,9 @@ class BaseOrdenTrabajoTests:
     SERVICE = None
     MODEL = None
     DUPLICADA = None
+    #: ¿Una orden cancelada (sin baja) libera el cupo del pedido? Sí en
+    #: reflejante y corte de manga desde ddd8342 (#775); no en bordado.
+    CANCELADA_LIBERA_CUPO = False
 
     #: ¿El modelo conserva la constraint parcial "una orden activa por pedido"?
     #: Los tres tipos la tuvieron; se fueron quitando al habilitar parcialidades
@@ -300,13 +322,13 @@ class BaseOrdenTrabajoTests:
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(self.MODEL.objects.filter(pedido=pedido).count(), 1)
 
-    def test_orden_cancelada_pero_activa_sigue_bloqueando(self):
-        """Fija la semántica vigente: CANCELADO no libera el pedido.
+    def test_orden_cancelada_pero_activa_bloquea_o_libera_segun_el_tipo(self):
+        """Cancelar una orden sin darla de baja (soft delete):
 
-        ``buscar_existente_full_match`` sólo mira ``activo``, y la constraint
-        usa ese mismo criterio a propósito. Cancelar una orden sin darla de baja
-        (soft delete) deja el pedido tomado en ambas capas. Si negocio quiere
-        lo contrario, hay que cambiar los dos lados juntos.
+        - bordado: el pedido sigue tomado (``cantidades_asignadas`` solo mira
+          ``activo``);
+        - reflejante y corte de manga: la cancelada (estatus 7) libera el cupo
+          (ddd8342, #775), así que se puede volver a generar la orden.
         """
         pedido, detalle = self._crear_pedido()
         self._talla(detalle, self.talla_ch, 10)
@@ -315,6 +337,11 @@ class BaseOrdenTrabajoTests:
         setattr(primera, self.ESTATUS_FIELD, self.CANCELADO)
         primera.save(update_fields=[self.ESTATUS_FIELD])
 
+        if self.CANCELADA_LIBERA_CUPO:
+            segunda = self._save(pedido)
+            self.assertNotEqual(segunda.pk, primera.pk)
+            self.assertEqual(self.MODEL.objects.filter(pedido=pedido).count(), 2)
+            return
         with self.assertRaises(self.DUPLICADA):
             self._save(pedido)
 
@@ -366,6 +393,7 @@ class OrdenReflejanteAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
     ESTATUS_FIELD = "estatus_reflejante"
     CANCELADO = OrdenesReflejante.EstatusReflejante.CANCELADO
     CONSTRAINT_ACTIVA = False  # removida en 0025
+    CANCELADA_LIBERA_CUPO = True
 
 
 class OrdenBordadoAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
@@ -388,6 +416,7 @@ class OrdenCorteMangaAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
     ESTATUS_FIELD = "estatus_corte"
     CANCELADO = OrdenesCorteManga.EstatusCorte.CANCELADO
     CONSTRAINT_ACTIVA = False  # removida en 0025
+    CANCELADA_LIBERA_CUPO = True
 
 
 class OrdenBordadoScopeTenantTests(BaseOrdenTrabajoTests, TestCase):
@@ -498,8 +527,11 @@ class OrdenBordadoScopeTenantTests(BaseOrdenTrabajoTests, TestCase):
         self.assertEqual(orden.detalles.count(), 1)
 
 
-#: Los 4 ViewSets satélite: endpoint, modelo, FK a la orden padre y los campos
-#: requeridos / parcheables propios de cada uno.
+#: ViewSets satélite con el contrato CRUD genérico: endpoint, modelo, FK a la orden
+#: padre y los campos requeridos / parcheables propios de cada uno.
+#: ``reflejante-avances`` no está: desde a352618 es POST/DELETE con
+#: ``{orden_r, cantidad}``, sin PATCH y con el gate de Producción; sus garantías
+#: viven en ``ReflejanteAvancesContratoTenantTests``.
 SATELITES = (
     {
         "nombre": "bordado-avances",
@@ -521,14 +553,6 @@ SATELITES = (
         "fk": "ob",
         "extra": {"tipo_incidencia": 1},
         "patch": {"descripcion": "tocado"},
-    },
-    {
-        "nombre": "reflejante-avances",
-        "url": "/api/v1/produccion/reflejante-avances/",
-        "modelo": ReflejanteAvances,
-        "fk": "orden_r",
-        "extra": {"cantidad_aplicada": 5},
-        "patch": {"comentario": "tocado"},
     },
     {
         "nombre": "reflejante-incidencias",
@@ -1037,7 +1061,6 @@ class SatelitesSuperficieEscribibleTests(TestCase):
         contenido = {
             "bordado-avances": {"cantidad_bordada": 99, "comentario": "ok"},
             "bordado-incidencias": {"tipo_incidencia": 3, "descripcion": "ok"},
-            "reflejante-avances": {"cantidad_aplicada": 99, "comentario": "ok"},
             "reflejante-incidencias": {"descripcion": "ok"},
         }
         client = self._client()
@@ -1356,6 +1379,169 @@ class SatelitesOrdenPadreTenantTests(TestCase):
                 self.assertIn(cfg["fk"], payload)
                 self.assertNotIn("usuario", payload)
                 self.assertEqual(cfg["modelo"].objects.count(), 0)
+
+
+class ReflejanteAvancesContratoTenantTests(TestCase):
+    """``reflejante-avances`` con el contrato de a352618: POST/DELETE con
+    ``{orden_r, cantidad, comentario?}``, sin PATCH, autor de la sesión y gate de
+    Producción. Reúne todas sus garantías multi-tenant (antes repartidas en los
+    loops ``SATELITES``), con un alta que sí pasa el tope de piezas: listado y
+    detalle acotados a la empresa y sucursal, sin empresa nada, alta contra una
+    orden ajena rechazada, autoría de la sesión, baja ajena 404 y sin PATCH.
+    """
+
+    URL = "/api/v1/produccion/reflejante-avances/"
+
+    @classmethod
+    def _tenant(cls, codigo, email):
+        from seguridad.models import Rol, UsuarioRol
+        from seguridad.role_identity import CLAVE_DEPARTAMENTO_PRODUCCION
+
+        empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+        sucursal = Sucursal.objects.create(empresa=empresa, codigo=codigo[:3].upper(), nombre=codigo)
+        cliente = Cliente.objects.create(empresa=empresa, nombre=f"Cliente {codigo}")
+        usuario = Usuario.objects.create(username=email, email=email, empresa=empresa, sucursal_default=sucursal)
+        rol = Rol.objects.create(
+            empresa=empresa, codigo=f"PRODUCCION-{codigo}", nombre="Producción",
+            clave_departamento=CLAVE_DEPARTAMENTO_PRODUCCION,
+        )
+        UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=empresa)
+        pedido = Pedido.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda,
+            persona_pagos="Pagos", correo_facturas=email, telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        orden_r = OrdenesReflejante.objects.create(
+            empresa=empresa, sucursal=sucursal, pedido=pedido, folio_reflejante=f"OR-{codigo}",
+        )
+        # 10 piezas programadas: el alta exige Σ avances ≤ Σ renglones.
+        OrdenReflejanteDetalle.objects.create(
+            orden_r=orden_r, cantidad=10,
+            pedido_detalle=PedidoDetalle.objects.create(pedido=pedido, producto_nombre_externo="Playera"),
+            producto=Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre=f"Playera {codigo}"),
+        )
+        avance = ReflejanteAvances.objects.create(orden_r=orden_r, usuario=usuario, cantidad_aplicada=1)
+        return {"empresa": empresa, "sucursal": sucursal, "usuario": usuario, "orden_r": orden_r, "avance": avance}
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.a = cls._tenant("acme", "a@acme.test")
+        cls.b = cls._tenant("globex", "b@globex.test")
+        cls.operador_a = Usuario.objects.create(
+            username="operador_a2", email="operador_a2@acme.test", empresa=cls.a["empresa"],
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.a["usuario"])
+
+    def _alta(self, **extra):
+        return self.client.post(self.URL, {"orden_r": self.a["orden_r"].pk, "cantidad": 2, **extra}, format="json")
+
+    def _ids(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        return [row["id"] for row in resp.json()]
+
+    # --- lectura -----------------------------------------------------------------
+
+    def test_listado_solo_trae_la_propia_empresa(self):
+        self.assertEqual(self._ids(self.a["usuario"]), [self.a["avance"].pk])
+        self.assertEqual(self._ids(self.b["usuario"]), [self.b["avance"].pk])
+
+    def test_usuario_sin_acceso_a_la_sucursal_no_ve_el_registro(self):
+        otra = Sucursal.objects.create(empresa=self.a["empresa"], codigo="CDMX", nombre="Ciudad de México")
+        forastero = Usuario.objects.create(
+            username="forastero-ra", email="forastero-ra@acme.test", empresa=self.a["empresa"],
+            sucursal_default=otra,
+        )
+        self.assertEqual(self._ids(forastero), [])
+        client = APIClient()
+        client.force_authenticate(user=forastero)
+        self.assertEqual(client.get(f"{self.URL}{self.a['avance'].pk}/").status_code, 404)
+
+    def test_sin_empresa_no_ve_nada_ni_el_superusuario(self):
+        sin_empresa = Usuario.objects.create(username="huerfano-ra", email="huerfano-ra@nowhere.test")
+        root = Usuario.objects.create(username="root-ra", email="root-ra@nowhere.test", is_superuser=True)
+        for user in (sin_empresa, root):
+            with self.subTest(user=user.username):
+                self.assertEqual(self._ids(user), [])
+
+    def test_superusuario_ve_solo_su_empresa_activa(self):
+        root = Usuario.objects.create(
+            username="root-ra-a", email="root-ra-a@acme.test", is_superuser=True, empresa=self.a["empresa"],
+        )
+        self.assertEqual(self._ids(root), [self.a["avance"].pk])
+
+    def test_alta_legitima_con_autor_de_la_sesion(self):
+        # ``activo`` y ``usuario`` del body se ignoran: nace activo y a nombre del solicitante.
+        resp = self._alta(usuario=self.operador_a.pk, activo=False)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        creado = ReflejanteAvances.objects.get(pk=resp.data["id"])
+        self.assertEqual(
+            (creado.orden_r_id, creado.cantidad_aplicada, creado.activo, creado.usuario_id),
+            (self.a["orden_r"].pk, 2, True, self.a["usuario"].pk),
+        )
+
+    def test_usuario_de_otra_empresa_en_el_body_se_ignora(self):
+        resp = self._alta(usuario=self.b["usuario"].pk)
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(ReflejanteAvances.objects.get(pk=resp.data["id"]).usuario_id, self.a["usuario"].pk)
+
+    def test_alta_con_orden_de_otra_empresa_es_400_sin_crear_nada(self):
+        # Con un ``usuario`` ajeno también: un solo error claro, el de la orden.
+        antes = ReflejanteAvances.objects.count()
+        resp = self.client.post(
+            self.URL, {"orden_r": self.b["orden_r"].pk, "cantidad": 1, "usuario": self.b["usuario"].pk}, format="json",
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("orden_r", resp.data)
+        self.assertNotIn("usuario", resp.data)
+        self.assertEqual(ReflejanteAvances.objects.count(), antes)
+
+    def test_superusuario_sin_empresa_no_da_de_alta(self):
+        root = Usuario.objects.create(username="root-ra-se", email="root-ra-se@nowhere.test", is_superuser=True)
+        client = APIClient()
+        client.force_authenticate(user=root)
+        antes = ReflejanteAvances.objects.count()
+        resp = client.post(self.URL, {"orden_r": self.a["orden_r"].pk, "cantidad": 1}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("orden_r", resp.data)
+        self.assertEqual(ReflejanteAvances.objects.count(), antes)
+
+    def test_lectura_y_baja_de_otra_empresa_son_404(self):
+        ajeno = self.b["avance"]
+        self.assertEqual(self.client.get(f"{self.URL}{self.a['avance'].pk}/").status_code, 200)
+        self.assertEqual(self.client.get(f"{self.URL}{ajeno.pk}/").status_code, 404)
+        self.assertEqual(self.client.delete(f"{self.URL}{ajeno.pk}/").status_code, 404)
+        ajeno.refresh_from_db()
+        self.assertTrue(ajeno.activo)
+
+    def test_patch_es_405_y_no_modifica_ni_el_propio_ni_el_ajeno(self):
+        for avance in (self.a["avance"], self.b["avance"]):
+            with self.subTest(avance=avance.pk):
+                # Ni contenido, ni baja por ``activo``, ni reasignar orden o autor.
+                orden_original, autor_original = avance.orden_r_id, avance.usuario_id
+                resp = self.client.patch(
+                    f"{self.URL}{avance.pk}/",
+                    {"comentario": "tocado", "cantidad": 9, "activo": False,
+                     "orden_r": self.b["orden_r"].pk if avance is self.a["avance"] else self.a["orden_r"].pk,
+                     "usuario": self.operador_a.pk},
+                    format="json",
+                )
+                self.assertEqual(resp.status_code, 405)
+                avance.refresh_from_db()
+                self.assertEqual(
+                    (avance.comentario, avance.cantidad_aplicada, avance.activo, avance.orden_r_id, avance.usuario_id),
+                    (None, 1, True, orden_original, autor_original),
+                )
 
 
 class OrdenReflejanteListShapeTests(TestCase):
@@ -4448,7 +4634,10 @@ class OnboardingPostScopeTenantTests(TestCase):
         "/api/v1/produccion/orden-reflejante/onboarding/",
         "/api/v1/produccion/orden-corte-manga/onboarding/",
     )
-    CANTIDAD_AJENA = 37
+    #: Cantidad de las tallas ajenas: no debe aparecer en ninguna respuesta. Cerca
+    #: del máximo de ``PositiveIntegerField`` para que ningún id (ni el 999999 del
+    #: body) la contenga; con 37 la prueba fallaba al azar cuando un id era 137.
+    CANTIDAD_AJENA = 2147483646
 
     @classmethod
     def setUpTestData(cls):
@@ -6148,6 +6337,8 @@ class BomDetalleTenantTests(_BomTenantBase, TestCase):
         from catalogo.models import CategoriaProducto
         from ventas.models import Cotizacion, CotizacionDetalle
         categoria = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Chamarra", codigo="CHA")
+        # 766eb3c (#927): una categoría sin tallas configuradas no acepta ninguna.
+        categoria.tallas.add(self.talla)
         cotizacion = Cotizacion.objects.create(
             empresa=self.empresa, sucursal=self.sucursal, cliente=self.pedido.cliente, estatus=3,
         )
@@ -6247,6 +6438,7 @@ class BomDetalleTenantTests(_BomTenantBase, TestCase):
     def test_alta_catalogo_linea_sin_categoria_la_toma_del_body(self):
         from catalogo.models import CategoriaProducto
         categoria = CategoriaProducto.objects.create(empresa=self.empresa, nombre="Camisola", codigo="CMS")
+        categoria.tallas.add(self.talla)
         self._client(self.admin).post(self.url_onboarding, self._body_onboarding(), format="json")
         url = f"/api/v1/produccion/pedidos-especiales/{self.pedido.pk}/alta-catalogo/"
         body = {"pedido_detalle_id": self.linea_muestra.pk, "categoria_producto": categoria.pk}
@@ -6274,8 +6466,18 @@ class BomDetalleTenantTests(_BomTenantBase, TestCase):
             sku=f"CHA00-{vpp.color.codigo}-{vpp.talla.nombre}".upper(), precio_base="1",
         )
         # El ``exists`` previo no la ve (la otra alta todavía no confirmaba): manda el INSERT.
+        # Solo se finge esa verificación (``filter(empresa=, sku=)``): el resto de
+        # consultas a ``ProductoVariante`` (p. ej. los contadores de tallas del
+        # ``get_queryset`` de pedidos especiales, de6a730) siguen siendo reales.
         sin_choque = mock.Mock(exists=mock.Mock(return_value=False))
-        with mock.patch.object(ProductoVariante.objects, "filter", return_value=sin_choque):
+        filtro_real = ProductoVariante.objects.filter
+
+        def filtro(*args, **kwargs):
+            if not args and set(kwargs) == {"empresa", "sku"}:
+                return sin_choque
+            return filtro_real(*args, **kwargs)
+
+        with mock.patch.object(ProductoVariante.objects, "filter", side_effect=filtro):
             resp = self._alta_catalogo()
         self.assertEqual(resp.status_code, 400, resp.data)
         self.assertIn("ya existe", str(resp.data["alta_catalogo"]))
@@ -6359,6 +6561,9 @@ class OrdenProduccionDetalleTenantTests(_BomTenantBase, TestCase):
         cls.pedido_ajeno, cls.linea_ajena = cls._pedido_muestra(
             cls.otra_empresa, cls.otra_sucursal, cls.cliente_ajeno
         )
+        # EC-870 (b70ee1a): editar y dar de baja la OP exige estos permisos; el
+        # aislamiento por empresa se prueba con un usuario que sí los tiene.
+        _conceder_permisos(cls.usuario, cls.empresa, ["E-PRODUCCION-OP", "D-PRODUCCION-OP"])
 
     @classmethod
     def _pedido_muestra(cls, empresa, sucursal, cliente):
@@ -6553,6 +6758,23 @@ class OrdenProduccionDetalleTenantTests(_BomTenantBase, TestCase):
         ajena.refresh_from_db()
         self.assertEqual(ajena.prioridad, 1)
 
+    def test_sin_permisos_de_op_no_edita_ni_da_de_baja(self):
+        # EC-870: sin ``E-/D-PRODUCCION-OP`` no se edita ni se da de baja una OP
+        # de la propia empresa (403). La OP de otra empresa con permisos es 404
+        # (``test_op_de_otra_empresa_responde_404``).
+        sin_permisos = Usuario.objects.create(
+            username="ti-sin-op", email="ti-sin-op@acme-ti.test", empresa=self.empresa,
+            sucursal_default=self.sucursal,
+        )
+        propia = self._op(self.pedido)
+        cliente = self._client(sin_permisos)
+
+        self.assertEqual(cliente.patch(f"{self.URL}{propia.pk}/", {"prioridad": 4}, format="json").status_code, 403)
+        self.assertEqual(cliente.delete(f"{self.URL}{propia.pk}/").status_code, 403)
+        propia.refresh_from_db()
+        self.assertEqual(propia.prioridad, 1)
+        self.assertNotEqual(propia.estatus_op, OrdenProduccion.EstatusOrdenProduccion.CANCELADO)
+
     def test_validar_renglones_no_consulta_el_pedido_por_renglon(self):
         # Por renglón: variante, unidad y ``pedido_detalle`` (con su pedido en
         # el mismo JOIN). Antes eran 4: la empresa del pedido salía de una
@@ -6641,6 +6863,66 @@ class OrdenProduccionDetalleTenantTests(_BomTenantBase, TestCase):
         )
 
         self.assertEqual(resp.status_code, 200, resp.data)
+
+    def test_patch_sin_pedido_en_el_body_no_revisa_renglones_guardados(self):
+        op = self._op_con_renglon(pedido=self.pedido, pedido_detalle=self.linea_otro_pedido)
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"prioridad": 3}, format="json")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        op.refresh_from_db()
+        self.assertEqual(op.prioridad, 3)
+
+    # --- varios pedidos: cambiar el conjunto ``pedidos_ids`` también revisa ---
+
+    def _op_con_pedidos(self, pedidos, pedido_detalle):
+        from produccion.models import OrdenProduccionPedido
+
+        op = self._op_con_renglon(pedido=pedidos[0], pedido_detalle=pedido_detalle)
+        for pedido in pedidos:
+            OrdenProduccionPedido.objects.create(op=op, pedido=pedido)
+        return op
+
+    def _pedidos_ligados(self, op):
+        return set(op.op_pedidos.values_list("pedido_id", flat=True))
+
+    def test_reducir_pedidos_ids_rechaza_renglones_del_pedido_que_se_quita(self):
+        op = self._op_con_pedidos([self.pedido, self.otro_pedido], self.linea_otro_pedido)
+        resp = self._client().patch(f"{self.URL}{op.pk}/", {"pedidos_ids": [self.pedido.pk]}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pedido", resp.data)
+        self.assertEqual(self._pedidos_ligados(op), {self.pedido.pk, self.otro_pedido.pk})
+
+    def test_cambiar_pedidos_ids_rechaza_renglones_del_pedido_que_sale(self):
+        tercero, _ = self._pedido_muestra(self.empresa, self.sucursal, self.cliente)
+        op = self._op_con_pedidos([self.pedido, self.otro_pedido], self.linea_otro_pedido)
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", {"pedidos_ids": [self.pedido.pk, tercero.pk]}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("pedido", resp.data)
+        self.assertEqual(self._pedidos_ligados(op), {self.pedido.pk, self.otro_pedido.pk})
+
+    def test_mismos_pedidos_ids_no_revisa_renglones_guardados(self):
+        # Renglón heredado de un pedido que la OP no tiene: reenviar el mismo
+        # conjunto no es un cambio y no bloquea la edición del encabezado.
+        op = self._op_con_pedidos([self.pedido], self.linea_otro_pedido)
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", {"pedidos_ids": [self.pedido.pk], "prioridad": 2}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._pedidos_ligados(op), {self.pedido.pk})
+
+    def test_ampliar_pedidos_ids_acepta_renglones_de_los_pedidos_ligados(self):
+        op = self._op_con_pedidos([self.pedido], self.linea)
+        resp = self._client().patch(
+            f"{self.URL}{op.pk}/", {"pedidos_ids": [self.pedido.pk, self.otro_pedido.pk]}, format="json"
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._pedidos_ligados(op), {self.pedido.pk, self.otro_pedido.pk})
 
     # --- ruta_produccion (FK de encabezado con empresa propia) ---
 
@@ -6810,13 +7092,18 @@ class ConsumoProduccionTenantTests(_RegistrosDeOPTenantBase, TestCase):
         self.assertEqual(self._client().get(f"{self.URL}{self.consumo.pk}/").status_code, 200)
         self.assertEqual(self._client().get(f"{self.URL}{self.consumo_ajeno.pk}/").status_code, 404)
 
-    def test_acciones_sobre_registro_ajeno_responden_404(self):
-        for accion in ("confirmar", "anular"):
-            propio = self._client().post(f"{self.URL}{self.consumo.pk}/{accion}/")
-            ajeno = self._client().post(f"{self.URL}{self.consumo_ajeno.pk}/{accion}/")
-            self.assertEqual(propio.status_code, 200, accion)
-            self.assertEqual(set(propio.data), {"msg"})
-            self.assertEqual(ajeno.status_code, 404, accion)
+    def test_confirmar_y_anular_ya_no_existen(self):
+        # #1124 (271508f): eran stubs que respondían 200 sin hacer nada y se
+        # quitaron. No hay ruta ni para lo propio ni para lo ajeno, y no cambia
+        # nada; el detalle ajeno sigue en 404 (la única acción de detalle que queda).
+        for registro in (self.consumo, self.consumo_ajeno):
+            antes = ConsumoProduccion.objects.filter(pk=registro.pk).values().get()
+            for accion in ("confirmar", "anular"):
+                with self.subTest(registro=registro.pk, accion=accion):
+                    resp = self._client().post(f"{self.URL}{registro.pk}/{accion}/")
+                    self.assertEqual(resp.status_code, 404, accion)
+            self.assertEqual(ConsumoProduccion.objects.filter(pk=registro.pk).values().get(), antes)
+        self.assertEqual(self._client().get(f"{self.URL}{self.consumo_ajeno.pk}/").status_code, 404)
 
     def test_put_patch_y_delete_no_existen_y_no_modifican(self):
         # ``http_method_names = ['get', 'post']``: no hay ruta de update/delete
@@ -6949,13 +7236,18 @@ class ProductoTerminadoEntradasTenantTests(_RegistrosDeOPTenantBase, TestCase):
         self.assertEqual(self._client().get(f"{self.URL}{self.entrada.pk}/").status_code, 200)
         self.assertEqual(self._client().get(f"{self.URL}{self.entrada_ajena.pk}/").status_code, 404)
 
-    def test_acciones_sobre_registro_ajeno_responden_404(self):
-        for accion in ("confirmar", "anular"):
-            propio = self._client().post(f"{self.URL}{self.entrada.pk}/{accion}/")
-            ajeno = self._client().post(f"{self.URL}{self.entrada_ajena.pk}/{accion}/")
-            self.assertEqual(propio.status_code, 200, accion)
-            self.assertEqual(set(propio.data), {"msg"})
-            self.assertEqual(ajeno.status_code, 404, accion)
+    def test_confirmar_y_anular_ya_no_existen(self):
+        # #1124 (271508f): eran stubs que respondían 200 sin hacer nada y se
+        # quitaron. No hay ruta ni para lo propio ni para lo ajeno, y no cambia
+        # nada; el detalle ajeno sigue en 404 (la única acción de detalle que queda).
+        for registro in (self.entrada, self.entrada_ajena):
+            antes = ProductoTerminadoEntradas.objects.filter(pk=registro.pk).values().get()
+            for accion in ("confirmar", "anular"):
+                with self.subTest(registro=registro.pk, accion=accion):
+                    resp = self._client().post(f"{self.URL}{registro.pk}/{accion}/")
+                    self.assertEqual(resp.status_code, 404, accion)
+            self.assertEqual(ProductoTerminadoEntradas.objects.filter(pk=registro.pk).values().get(), antes)
+        self.assertEqual(self._client().get(f"{self.URL}{self.entrada_ajena.pk}/").status_code, 404)
 
     def test_put_patch_y_delete_no_existen_y_no_modifican(self):
         # ``http_method_names = ['get', 'post']``: no hay ruta de update/delete.

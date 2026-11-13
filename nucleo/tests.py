@@ -50,6 +50,17 @@ TODOS_LOS_TIPOS = [
 ]
 
 
+def _grant_sin_empresa(usuario, claves):
+    """GRANT con ``empresa=NULL``: sin empresa activa es la única forma de tener
+    permisos (#1038). Deja pasar la capa de permisos para probar que el alcance
+    por empresa, por debajo, sigue sin devolver filas."""
+    for clave in claves:
+        permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+        UsuarioPermiso.objects.create(
+            usuario=usuario, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=None
+        )
+
+
 class BusquedaGlobalBaseTestCase(TestCase):
     """Dos empresas cuyos datos comparten el término buscado ("acme").
 
@@ -124,6 +135,12 @@ class BusquedaGlobalBaseTestCase(TestCase):
         )
         cls.superuser = Usuario.objects.create(
             username="root-search", email="root@nowhere-search.test", is_superuser=True
+        )
+        # EC-798/#1034 (0c9a960, 2ad952c, 299e64f): el superusuario busca solo en su
+        # empresa activa (todas sus sucursales); ``superuser`` no tiene empresa.
+        cls.superuser_a = Usuario.objects.create(
+            username="root-a-search", email="root@acme-search.test", is_superuser=True,
+            empresa=cls.a["empresa"],
         )
         # Usuario normal de la empresa A: NO es admin, NO está en
         # ``cliente.vendedores`` y NO es vendedor de la cotización. Debe ver el
@@ -553,12 +570,9 @@ class AislamientoMultiTenantTests(BusquedaGlobalBaseTestCase):
         huerfano = Usuario.objects.create(
             username="huerfano-conperm", email="huerfano-cp@nowhere-search.test"
         )
-        rol = self._rol_con(
-            self.a["empresa"],
-            "rol-huerfano",
-            ["R-CRM-PEDIDOS", "R-CRM-CLIENTES", "R-CRM-COTIZACIONES"],
-        )
-        UsuarioRol.objects.create(usuario=huerfano, rol=rol, empresa=self.a["empresa"])
+        # Desde #1038 (8854be1) un rol de la empresa A no cuenta sin empresa activa;
+        # los permisos le llegan por un GRANT sin empresa.
+        _grant_sin_empresa(huerfano, ["R-CRM-PEDIDOS", "R-CRM-CLIENTES", "R-CRM-COTIZACIONES"])
 
         payload = self._buscar(huerfano, "acme")
         self.assertEqual(
@@ -575,17 +589,18 @@ class AislamientoMultiTenantTests(BusquedaGlobalBaseTestCase):
 class AlcancePorEntidadTests(BusquedaGlobalBaseTestCase):
     """Cada entidad conserva el alcance de SU ViewSet, no uno inventado aquí."""
 
-    def test_superuser_ve_las_dos_empresas(self):
-        # EC-798: pedidos y cotizaciones (ventas) se acotan a la empresa activa
-        # también para el superusuario; sin empresa no ve ninguno. Clientes
-        # (terceros) conservan su alcance global hasta alinear ese módulo.
+    def test_superuser_ve_solo_su_empresa_activa(self):
+        # EC-798: pedidos, cotizaciones (ventas) y clientes (terceros, 2ad952c) se
+        # acotan a la empresa activa también para el superusuario; sin empresa no
+        # ve ninguno.
+        payload = self._buscar(self.superuser_a, "acme")
+        self.assertEqual(self._ids(payload, "pedido"), [self.a["pedido"].pk])
+        self.assertEqual(self._ids(payload, "cotizacion"), [self.a["cotizacion"].pk])
+        self.assertEqual(self._ids(payload, "cliente"), [self.a["cliente"].pk])
+
         payload = self._buscar(self.superuser, "acme")
-        self.assertEqual(self._ids(payload, "pedido"), [])
-        self.assertEqual(self._ids(payload, "cotizacion"), [])
-        self.assertEqual(
-            sorted(self._ids(payload, "cliente")),
-            sorted([self.a["cliente"].pk, self.b["cliente"].pk]),
-        )
+        for tipo in ("pedido", "cotizacion", "cliente"):
+            self.assertEqual(self._ids(payload, tipo), [], tipo)
 
     def test_vendedor_no_admin_ve_el_pedido_pero_no_el_cliente_ni_la_cotizacion(self):
         """``Pedido`` no tiene scope por vendedor; ``Cliente`` y ``Cotizacion`` sí."""
@@ -806,9 +821,13 @@ class OrdenBordadoBusquedaTests(BusquedaGlobalBaseTestCase):
         )
         self.assertNotIn(self.b["orden_bordado"].pk, self._ids(payload, "orden_bordado"))
 
-    def test_superuser_ve_las_dos_empresas(self):
-        payload = self._buscar(self.superuser, "OB-000")
-        self.assertIn(self.b["orden_bordado"].pk, self._ids(payload, "orden_bordado"))
+    def test_superuser_ve_solo_su_empresa_activa(self):
+        payload = self._buscar(self.superuser_a, "OB-000")
+        self.assertEqual(
+            sorted(self._ids(payload, "orden_bordado")),
+            sorted([self.a["orden_bordado"].pk, self.ob_otra_sucursal.pk]),
+        )
+        self.assertEqual(self._ids(self._buscar(self.superuser, "OB-000"), "orden_bordado"), [])
 
     def test_no_admin_no_ve_ob_fuera_de_sus_sucursales(self):
         user = self._usuario_con("suc", ["R-PRODUCCION-OB"])
@@ -1005,12 +1024,13 @@ class _OrdenTrabajoBusquedaMixin:
             sorted([self.orden_a.pk, self.orden_otra_sucursal.pk]),
         )
 
-    def test_superuser_ve_las_dos_empresas(self):
-        payload = self._buscar(self.superuser, f"{self.SERIE}-000")
+    def test_superuser_ve_solo_su_empresa_activa(self):
+        payload = self._buscar(self.superuser_a, f"{self.SERIE}-000")
         self.assertEqual(
             sorted(self._ids(payload, self.TIPO)),
-            sorted([self.orden_a.pk, self.orden_b.pk, self.orden_otra_sucursal.pk]),
+            sorted([self.orden_a.pk, self.orden_otra_sucursal.pk]),
         )
+        self.assertEqual(self._ids(self._buscar(self.superuser, f"{self.SERIE}-000"), self.TIPO), [])
 
     def test_no_admin_no_ve_ordenes_fuera_de_sus_sucursales(self):
         user = self._usuario_con("suc", [self.CLAVE])
@@ -1227,11 +1247,9 @@ class FacturaBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
         payload = self._buscar(user, "FAC-000")
         self.assertEqual(self._ids(payload, "factura"), [self.fac_a.pk])
 
-    def test_superuser_ve_las_dos_empresas(self):
-        payload = self._buscar(self.superuser, "FAC-000")
-        self.assertEqual(
-            sorted(self._ids(payload, "factura")), sorted([self.fac_a.pk, self.fac_b.pk])
-        )
+    def test_superuser_ve_solo_su_empresa_activa(self):
+        self.assertEqual(self._ids(self._buscar(self.superuser_a, "FAC-000"), "factura"), [self.fac_a.pk])
+        self.assertEqual(self._ids(self._buscar(self.superuser, "FAC-000"), "factura"), [])
 
     def test_acota_por_sucursal_salvo_al_admin(self):
         """EC-812: igual que ``FacturaViewSet`` desde #753, quien no es admin sólo ve
@@ -1377,11 +1395,9 @@ class ProductoBusquedaTests(_GrupoPropioMixin, BusquedaGlobalBaseTestCase):
                 payload = self._buscar(user, q)
                 self.assertEqual(self._ids(payload, "producto"), [self.var_a.pk])
 
-    def test_superuser_ve_las_dos_empresas(self):
-        payload = self._buscar(self.superuser, "10808")
-        self.assertEqual(
-            sorted(self._ids(payload, "producto")), sorted([self.var_a.pk, self.var_b.pk])
-        )
+    def test_superuser_ve_solo_su_empresa_activa(self):
+        self.assertEqual(self._ids(self._buscar(self.superuser_a, "10808"), "producto"), [self.var_a.pk])
+        self.assertEqual(self._ids(self._buscar(self.superuser, "10808"), "producto"), [])
 
     def test_no_hay_sub_alcance_por_sucursal(self):
         """Igual que ``ProductoVarianteViewSet``: el alcance es la empresa."""
@@ -1482,7 +1498,10 @@ class CotizacionQFiltroNoRegresionTests(BusquedaGlobalBaseTestCase):
         self.assertEqual(resp.json(), [])
 
     def test_usuario_sin_empresa_con_estatus_invalido_sigue_devolviendo_200(self):
-        """Sale antes de ``_apply_filters``: antes daba 200 [] y debe seguir igual."""
+        """Sale antes de ``_apply_filters``: antes daba 200 [] y debe seguir igual.
+        Con permiso de lectura (#1020); sin él es 403 antes de llegar aquí."""
+        self.assertEqual(self._cotizaciones(self.sin_empresa, "?estatus=abc").status_code, 403)
+        _grant_sin_empresa(self.sin_empresa, ["R-CRM-COTIZACIONES"])
         resp = self._cotizaciones(self.sin_empresa, "?estatus=abc")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), [])
@@ -1513,6 +1532,8 @@ class MesaControlUsaElAlcanceCanonicoTests(BusquedaGlobalBaseTestCase):
         self.assertEqual([r["id"] for r in resp.json()], [self.a["cliente"].pk])
 
     def test_clientes_mesa_control_no_da_nada_a_usuario_sin_empresa(self):
+        # Con permiso de lectura (#1020); sin él es 403 antes de llegar al alcance.
+        _grant_sin_empresa(self.sin_empresa, ["R-MESACONTROL-CLIENTES"])
         resp = self._get(self.sin_empresa, "/api/v1/terceros/clientes-mesa-control/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), [])
@@ -1652,7 +1673,7 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         op = self._oportunidad(self.a, self.vendedor_a, "", cliente=cliente, nombre_contacto="Luis Playero")
 
         self.assertEqual(self._fila(self.a["admin"], "playero", op), ("Comercial Acme Norte", "Luis Playero"))
-        self.assertEqual(self._fila(self.superuser, "playero", op), ("Comercial Acme Norte", "Luis Playero"))
+        self.assertEqual(self._fila(self.superuser_a, "playero", op), ("Comercial Acme Norte", "Luis Playero"))
         self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Luis Playero", None))
         cliente.vendedores.add(self.vendedor_a)
         self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Comercial Acme Norte", "Luis Playero"))
@@ -1754,7 +1775,8 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
 
         self.assertEqual(self._ids(self._buscar(self.vendedor_a, "norte"), "oportunidad"), [])
         self.assertCountEqual(self._ids(self._buscar(self.a["admin"], "norte"), "oportunidad"), [op.pk, del_admin.pk])
-        self.assertCountEqual(self._ids(self._buscar(self.superuser, "norte"), "oportunidad"), [op.pk, del_admin.pk])
+        self.assertCountEqual(self._ids(self._buscar(self.superuser_a, "norte"), "oportunidad"), [op.pk, del_admin.pk])
+        self.assertEqual(self._ids(self._buscar(self.superuser, "norte"), "oportunidad"), [])
         # Por el contacto sí la encuentra, nombrada por el contacto.
         self.assertEqual(self._fila(self.vendedor_a, "luis", op), ("Luis", None))
 
@@ -2077,12 +2099,12 @@ class CambiarEmpresaTests(TestCase):
         cls.dep_a = Departamento.objects.create(
             empresa=cls.a, sucursal=cls.suc_a, codigo="VTA", nombre="Ventas",
         )
-        # Destino con varias sucursales: gana la primera ACTIVA por ``codigo``,
-        # no la primera creada ni una inactiva que ordena antes.
+        # Destino con varias sucursales: gana la ACTIVA más antigua (id más bajo,
+        # #1050 en de6086c), no la primera por ``codigo`` ni una inactiva.
         cls.b = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
-        Sucursal.objects.create(empresa=cls.b, codigo="Z01", nombre="Zacatecas")
-        Sucursal.objects.create(empresa=cls.b, codigo="A02", nombre="Aguascalientes", activo=False)
-        cls.suc_b = Sucursal.objects.create(empresa=cls.b, codigo="M03", nombre="Mérida")
+        Sucursal.objects.create(empresa=cls.b, codigo="A01", nombre="Aguascalientes", activo=False)
+        cls.suc_b = Sucursal.objects.create(empresa=cls.b, codigo="Z02", nombre="Zacatecas")
+        Sucursal.objects.create(empresa=cls.b, codigo="M03", nombre="Mérida")
         cls.sin_sucursales = Empresa.objects.create(codigo="vacia", razon_social="VACIA SA")
         cls.inactiva = Empresa.objects.create(codigo="baja", razon_social="BAJA SA", activo=False)
 
@@ -2318,17 +2340,20 @@ class MisEmpresasActivasTests(TestCase):
         # cambiar-empresa no acepta la inactiva; mis-empresas = lo que acepta + la actual.
         self.assertEqual(ids, self._todas_las_que_acepta_cambiar_empresa(root) | {self.baja_actual.pk})
 
-    def test_m2m_excluye_inactivas_y_conserva_la_actual(self):
+    # #1049 (de6086c): solo el superusuario puede cambiarse de empresa, así que a
+    # los demás el M2M ``empresas`` ya no se les ofrece (eran opciones que daban 403).
+
+    def test_m2m_no_se_ofrece_y_conserva_la_actual(self):
         user = Usuario.objects.create(
             username="multi", email="multi@cerrada.test", empresa=self.baja_actual,
         )
         user.empresas.set([self.a, self.baja, self.baja_actual])
-        self.assertEqual(self._ids(user), {self.a.pk, self.baja_actual.pk})
+        self.assertEqual(self._ids(user), {self.baja_actual.pk})
 
-    def test_m2m_sin_empresa_actual_solo_activas(self):
+    def test_m2m_sin_empresa_actual_no_ofrece_nada(self):
         user = Usuario.objects.create(username="libre", email="libre@acme.test")
         user.empresas.set([self.b, self.baja])
-        self.assertEqual(self._ids(user), {self.b.pk})
+        self.assertEqual(self._ids(user), set())
 
     def test_sin_m2m_solo_su_empresa(self):
         user = Usuario.objects.create(username="op", email="op@acme.test", empresa=self.a)

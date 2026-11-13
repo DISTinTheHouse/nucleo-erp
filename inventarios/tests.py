@@ -31,7 +31,9 @@ from inventarios.api.serializers import ExistenciaSerializer
 from inventarios.models import (
     AjusteInventario,
     Almacen,
+    CostoInventario,
     Existencia,
+    HistorialCostoInventario,
     MovimientoInventario,
     MovimientoInventarioDetalle,
     TipoAlmacen,
@@ -55,7 +57,18 @@ from wms.models import Transferencia
 
 def _tipo_producto():
     """Tipo de producto obligatorio (#871); PT tiene pk=3 como en producción."""
-    return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
+    tipo, creado = TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})
+    if creado:
+        # El pk fijo no avanza la secuencia: sin esto, el siguiente tipo creado por
+        # secuencia (p. ej. MP en ``ExistenciasPorAlmacenTests``) recibe el 3 en
+        # cuanto la secuencia de la BD de pruebas llega ahí y choca con
+        # ``tipo_producto_pkey``.
+        from django.core.management.color import no_style
+
+        with connection.cursor() as cursor:
+            for sql in connection.ops.sequence_reset_sql(no_style(), [TipoProducto]):
+                cursor.execute(sql)
+    return tipo
 
 
 MOVIMIENTOS_URL = "/api/v1/inventarios/movimientos/"
@@ -900,9 +913,14 @@ class ReporteExistenciasProduccionComprasTests(TestCase):
             [r["producto_id"] for r in self._get(self.b["regular"])], [self.b["producto"].pk],
         )
 
-    def test_superusuario_ve_ambas_empresas(self):
-        ids = {r["producto_id"] for r in self._get(self.superuser)}
-        self.assertEqual(ids, {self.a["producto"].pk, self.b["producto"].pk})
+    def test_superusuario_ve_solo_su_empresa_activa(self):
+        # #1035 (299e64f): el reporte acota al superusuario a su empresa activa
+        # (``empresa_ids_lectura``); sin empresa, nada.
+        root_a = Usuario.objects.create(
+            username="root-rs-a", email="root-a@acme-rs.test", is_superuser=True, empresa=self.a["empresa"],
+        )
+        self.assertEqual({r["producto_id"] for r in self._get(root_a)}, {self.a["producto"].pk})
+        self.assertEqual(list(self._get(self.superuser)), [])
 
     def test_almacen_invalido_es_400_con_la_clave_almacen(self):
         # EC-822: antes ``almacen=abc`` se ignoraba y salían todos los almacenes PT.
@@ -1786,11 +1804,19 @@ class ReportesPeriodoBase(TestCase):
         mov = MovimientoInventario.objects.create(
             empresa=empresa, sucursal=matriz, tipo_movimiento="ENTRADA", usuario=usuario,
         )
-        MovimientoInventarioDetalle.objects.create(
+        detalle = MovimientoInventarioDetalle.objects.create(
             movimiento_inventario=mov, producto=producto, producto_variante=variante,
             ubicacion_destino=ubicacion, cantidad="10", costo_unitario="5",
         )
         MovimientoInventario.objects.filter(pk=mov.pk).update(fecha_movimiento=_fecha_reporte(2026, 2, 1))
+        # EC-815 (b5460e3): el costo del reporte es el promedio ponderado al cierre
+        # del periodo (``CostoInventario`` + su historial), no el del último
+        # movimiento. Se siembra lo que habría dejado ``costear()`` con esa entrada;
+        # ``fecha`` es ``auto_now_add`` y se lleva a la fecha de la entrada.
+        costo = CostoInventario.objects.create(
+            empresa=empresa, producto=producto, producto_variante=variante, costo_promedio="5",
+        )
+        cls._cambio_de_costo(costo, "0", "5", _fecha_reporte(2026, 2, 1), movimiento_detalle=detalle)
 
         for fecha, delta in ((_fecha_reporte(2026, 3, 1), "3"), (_fecha_reporte(2026, 8, 1), "-1")):
             evento = AuditoriaEvento.objects.create(
@@ -1805,8 +1831,18 @@ class ReportesPeriodoBase(TestCase):
         return {
             "empresa": empresa, "matriz": matriz, "norte": norte, "almacen": almacen,
             "almacen_norte": almacen_norte, "ubicacion": ubicacion, "usuario": usuario,
-            "producto": producto, "variante": variante,
+            "producto": producto, "variante": variante, "costo": costo,
         }
+
+    @staticmethod
+    def _cambio_de_costo(costo, anterior, nuevo, fecha, movimiento_detalle=None):
+        cambio = HistorialCostoInventario.objects.create(
+            costo_inventario=costo, origen="ENTRADA", costo_anterior=anterior, costo_nuevo=nuevo,
+            existencia_previa="0", cantidad_entrada="10", costo_entrada=nuevo,
+            movimiento_detalle=movimiento_detalle,
+        )
+        HistorialCostoInventario.objects.filter(pk=cambio.pk).update(fecha=fecha)
+        return cambio
 
     @classmethod
     def setUpTestData(cls):
@@ -1814,7 +1850,14 @@ class ReportesPeriodoBase(TestCase):
         cls.talla = Talla.objects.create(nombre="M-RP")
         cls.a = cls._tenant("acme-rp")
         cls.b = cls._tenant("globex-rp")
-        cls.superuser = Usuario.objects.create(username="root-rp", email="root@rp.test", is_superuser=True)
+        # #1035 (299e64f): el superusuario ve todos los almacenes de su empresa
+        # activa (sin recorte por sucursal) y nada de otra; sin empresa, nada.
+        cls.superuser = Usuario.objects.create(
+            username="root-rp", email="root@rp.test", is_superuser=True, empresa=cls.a["empresa"],
+        )
+        cls.superuser_sin_empresa = Usuario.objects.create(
+            username="root-rp-se", email="root-se@rp.test", is_superuser=True,
+        )
 
     def _get(self, user, url, params=None):
         client = APIClient()
@@ -1901,11 +1944,16 @@ class ReporteExistenciasPeriodoTests(ReportesPeriodoBase):
         self.assertEqual([r["almacen_codigo"] for r in data["resumen_por_almacen"]], ["acme-rp-PT"])
         self.assertEqual((data["fecha_inicio"], data["fecha_final"]), ("2026-01-01", "2026-06-30"))
 
-    def test_superusuario_ve_todos_los_almacenes(self):
+    def test_superusuario_ve_todos_los_almacenes_de_su_empresa(self):
         data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL).json()
-        self.assertEqual(data["count"], 4)
+        self.assertEqual(data["count"], 2)
+        self.assertEqual({f[0] for f in self._filas(data)}, {"acme-rp-PT", "acme-rp-NT"})
         norte = [f for f in self._filas(data) if f[0] == "acme-rp-NT"]
-        self.assertEqual(norte, [("acme-rp-NT", "acme-rp-AZ-M", "Azul RP", "M-RP", "7.0000", "0.0000", "0.0000", "7.0000", "0.00", "0.00")])
+        # El costo promedio es por artículo, no por almacén: norte también vale 5.
+        self.assertEqual(norte, [("acme-rp-NT", "acme-rp-AZ-M", "Azul RP", "M-RP", "7.0000", "0.0000", "0.0000", "7.0000", "5.00", "35.00")])
+
+        data = self._get(self.superuser_sin_empresa, REPORTE_EXISTENCIAS_PERIODO_URL).json()
+        self.assertEqual((data["count"], data["results"]), (0, []))
 
     def test_almacen_o_empresa_ajenos_no_abren_el_alcance(self):
         for params in ({"almacen_id": self.b["almacen"].pk}, {"empresa": self.b["empresa"].pk}, {"almacen": self.a["almacen_norte"].pk}):
@@ -1922,34 +1970,43 @@ class ReporteExistenciasPeriodoTests(ReportesPeriodoBase):
         self.assertIn("fecha_final", resp.json())
 
     def test_paginacion_recorta_el_reporte_completo(self):
-        data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL, {"page_size": 1, "page": 2}).json()
-        self.assertEqual((data["count"], len(data["results"])), (4, 1))
+        data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL, {"page_size": 1, "page": 1}).json()
+        self.assertEqual((data["count"], len(data["results"])), (2, 1))
         self.assertIsNotNone(data["next"])
-        self.assertEqual(data["resumen"]["existencia_final"], "36.0000")  # 11 + 7 por empresa
+        self.assertEqual(data["resumen"]["existencia_final"], "18.0000")  # 11 + 7 de su empresa
 
-    def test_costo_unitario_del_ultimo_movimiento_costeado_hasta_fecha_final(self):
-        # Entrada por ajuste (sin ubicación: el almacén sale del ajuste) más
-        # reciente que la de 5 → gana 4. Una de 9 después del periodo no cuenta,
-        # y un renglón sin costo tampoco.
-        self._entrada_por_ajuste(self.a)
-        tardio = self._entrada_por_ajuste(self.a)
-        tardio.detalles.update(costo_unitario="9")
-        MovimientoInventario.objects.filter(pk=tardio.pk).update(fecha_movimiento=_fecha_reporte(2026, 7, 15))
-        sin_costo = self._entrada_por_ajuste(self.a)
-        sin_costo.detalles.update(costo_unitario="0")
-        MovimientoInventario.objects.filter(pk=sin_costo.pk).update(fecha_movimiento=_fecha_reporte(2026, 6, 1))
-
+    def _costos(self):
         data = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL).json()
-        self.assertEqual(
-            [(f["costo_unitario_final"], f["costo_existencia_final"]) for f in data["results"]],
-            [("4.00", "44.00")],
-        )
+        return [(f["costo_unitario_final"], f["costo_existencia_final"]) for f in data["results"]]
+
+    def test_costo_promedio_vigente_al_cierre_del_periodo(self):
+        """EC-815 (b5460e3): el costo es el promedio ponderado tal como estaba en
+        ``fecha_final`` (``costos_promedio_al``), no el del último movimiento."""
+        costo = self.a["costo"]
+        # Un cambio dentro del periodo (5 -> 4) gana; uno posterior (4 -> 9) no cuenta.
+        self._cambio_de_costo(costo, "5", "4", _fecha_reporte(2026, 5, 1))
+        self._cambio_de_costo(costo, "4", "9", _fecha_reporte(2026, 7, 15))
+        CostoInventario.objects.filter(pk=costo.pk).update(costo_promedio="9")
+        self.assertEqual(self._costos(), [("4.00", "44.00")])
+
+    def test_con_solo_cambios_posteriores_toma_el_costo_anterior(self):
+        costo = self.a["costo"]
+        costo.historial.all().delete()
+        self._cambio_de_costo(costo, "3", "9", _fecha_reporte(2026, 7, 15))
+        CostoInventario.objects.filter(pk=costo.pk).update(costo_promedio="9")
+        self.assertEqual(self._costos(), [("3.00", "33.00")])
+
+    def test_sin_historial_toma_el_costo_vigente(self):
+        costo = self.a["costo"]
+        costo.historial.all().delete()
+        CostoInventario.objects.filter(pk=costo.pk).update(costo_promedio="6")
+        self.assertEqual(self._costos(), [("6.00", "66.00")])
 
     def test_filtros_almacen_id_es_el_filtro_pedido(self):
         # Antes del EC-814 traía el almacén de la última fila cuando no se
         # filtraba por almacén; ahora ``null``.
         data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL, {"page_size": 100}).json()
-        self.assertEqual(data["count"], 4)
+        self.assertEqual(data["count"], 2)
         self.assertEqual(data["filtros"], {"almacen_id": None})
         data = self._get(self.a["usuario"], REPORTE_EXISTENCIAS_PERIODO_URL, {"almacen_id": self.a["almacen"].pk}).json()
         self.assertEqual(data["filtros"], {"almacen_id": self.a["almacen"].pk})
@@ -2138,12 +2195,11 @@ class ReporteMovimientosPeriodoTests(ReportesPeriodoBase):
         self._movimiento(self.a, "ENTRADA")
         for user in (self.a["usuario"], self.superuser):
             self.assertEqual(self._filas_mov(user, "SALIDA")[0], [])
-        # Solo las entradas por ubicación de la base (la de B la ve el superusuario).
+        # Solo las entradas por ubicación de la base; la de B no (#1035: el
+        # superusuario solo ve su empresa activa, y sin empresa nada).
         self.assertEqual(self._filas_mov(self.a["usuario"], "ENTRADA")[0], [("acme-rp-PT", "10.0000")])
-        self.assertEqual(
-            sorted(self._filas_mov(self.superuser, "ENTRADA")[0]),
-            [("acme-rp-PT", "10.0000"), ("globex-rp-PT", "10.0000")],
-        )
+        self.assertEqual(self._filas_mov(self.superuser, "ENTRADA")[0], [("acme-rp-PT", "10.0000")])
+        self.assertEqual(self._filas_mov(self.superuser_sin_empresa, "ENTRADA")[0], [])
 
     def test_sin_n_mas_1_con_transferencias_y_detalle_almacen(self):
         def consultas(tipo):

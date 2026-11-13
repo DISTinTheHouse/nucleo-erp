@@ -442,7 +442,11 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
             if p["id"] == self.a["proveedor"].pk
         )
         self.assertEqual((prov["moneda_id"], prov["moneda__codigo_iso"]), (self.moneda_global.pk, "USD"))
-        cuerpo = {"orden_compra": {"proveedor": self.a["proveedor"].pk}, "detalle": [self._linea(self.a["producto"])]}
+        # #809 (379d5f0): fuera de MXN el tipo de cambio es obligatorio.
+        cuerpo = {
+            "orden_compra": {"proveedor": self.a["proveedor"].pk, "tipo_cambio": "17.50"},
+            "detalle": [self._linea(self.a["producto"])],
+        }
         resp = api.post(f"{ORDENES_URL}onboarding/", cuerpo, format="json")
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(OrdenCompra.objects.latest("pk").moneda_id, self.moneda_global.pk)
@@ -459,13 +463,14 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
             if p["id"] == self.a["proveedor"].pk
         )
         self.assertIsNone(prov["moneda_id"])
-        resp = api.post(f"{ORDENES_URL}onboarding/", {"orden_compra": {"proveedor": self.a["proveedor"].pk}, "detalle": [self._linea(self.a["producto"])]}, format="json")
+        resp = api.post(f"{ORDENES_URL}onboarding/", {"orden_compra": {"proveedor": self.a["proveedor"].pk, "tipo_cambio": "17.50"}, "detalle": [self._linea(self.a["producto"])]}, format="json")
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(OrdenCompra.objects.latest("pk").moneda_id, self.a["moneda"].pk)
         Proveedor.objects.filter(pk=self.a["proveedor"].pk).update(moneda=self.moneda_global)
         # La moneda elegida en el body manda sobre la del proveedor.
         cuerpo["orden_compra"]["moneda"] = self.a["moneda"].pk
-        api.post(f"{ORDENES_URL}onboarding/", cuerpo, format="json")
+        resp = api.post(f"{ORDENES_URL}onboarding/", cuerpo, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(OrdenCompra.objects.latest("pk").moneda_id, self.a["moneda"].pk)
 
 
@@ -554,7 +559,9 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
     def test_moneda_global_o_propia_se_acepta(self):
         client = self._client(self.usuario)
         for moneda in (self.moneda_global, self.a["moneda"]):
-            resp = client.put(f"{ORDENES_URL}{self.oc.pk}/", {"orden_compra": {"moneda": moneda.pk}}, format="json")
+            resp = client.put(
+                f"{ORDENES_URL}{self.oc.pk}/", {"orden_compra": {"moneda": moneda.pk, "tipo_cambio": "17.50"}}, format="json"
+            )
             self.assertEqual(resp.status_code, 200, resp.content)
             self.oc.refresh_from_db()
             self.assertEqual(self.oc.moneda_id, moneda.pk)
@@ -563,7 +570,8 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
         client = self._client(self.usuario)
         crea = client.post(
             f"{ORDENES_URL}onboarding/",
-            {"orden_compra": {"proveedor": self.a["proveedor"].pk}, "detalle": [self._linea(self.a["producto"], 4)]},
+            {"orden_compra": {"proveedor": self.a["proveedor"].pk, "tipo_cambio": "17.50"},
+             "detalle": [self._linea(self.a["producto"], 4)]},
             format="json",
         )
         self.assertEqual(crea.status_code, 200, crea.content)
@@ -2293,12 +2301,20 @@ class OrdenCompraPedidosSeriesRendimientoTests(TestCase):
         chico = self._queries(lambda: self._crear({"pedidos": ids}, n=2))
         grande = self._queries(lambda: self._crear({"pedidos": ids}, n=20))
         self.assertEqual(chico, grande)
-        # Antes de la optimización: ~47 con 10 renglones.
-        self.assertLessEqual(grande, 20)
+        # Antes de la optimización: ~47 con 10 renglones. 23 hoy: el ``codigo_iso`` de
+        # la moneda para ``tipo_cambio`` (379d5f0, #809) y el evento ``crear`` en la
+        # bitácora (savepoint + INSERT + release; 28e6211). Medido igual con 2 y 20.
+        self.assertLessEqual(grande, 23)
 
-        oc_id = self._crear({}, n=20).json()["orden_compra"]["id"]
-        aceptar = self._queries(lambda: self.client_api.post(f"{ORDENES_URL}{oc_id}/aceptar/", {}, format="json"))
-        self.assertLessEqual(aceptar, 12)  # antes: 16
+        def aceptar(n):
+            oc_id = self._crear({}, n=n).json()["orden_compra"]["id"]
+            return self._queries(lambda: self.client_api.post(f"{ORDENES_URL}{oc_id}/aceptar/", {}, format="json"))
+
+        aceptar_chico, aceptar_grande = aceptar(2), aceptar(20)
+        self.assertEqual(aceptar_chico, aceptar_grande)
+        # Costo fijo de 16: los 12 de la optimización más el evento de estatus en la
+        # bitácora (3; 28e6211) y ``necesidades.exists()`` de las pre-órdenes (1; d155e00).
+        self.assertLessEqual(aceptar_grande, 16)
 
     def test_queries_de_edicion_no_crecen_con_los_pedidos(self):
         oc_id = self._crear({}, n=5).json()["orden_compra"]["id"]
@@ -3169,9 +3185,16 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
         sin_empresa = APIClient()
         sin_empresa.force_authenticate(Usuario.objects.create(username="sin778", email="sin778@ec778.test"))
         self.assertEqual(sin_empresa.get(self.URL_ENCUADRES).json(), [])
+        # EC-798 (2ad952c): el superusuario ve solo su empresa activa; sin empresa, nada.
         root = APIClient()
         root.force_authenticate(Usuario.objects.create(username="su778", email="su778@ec778.test", is_superuser=True))
-        self.assertLessEqual({self.e_b.pk, *self.ids_a}, {e["id"] for e in root.get(self.URL_ENCUADRES).json()})
+        self.assertEqual(root.get(self.URL_ENCUADRES).json(), [])
+        root_a = APIClient()
+        root_a.force_authenticate(Usuario.objects.create(
+            username="su778a", email="su778a@ec778.test", is_superuser=True, empresa=self.t["a"]["empresa"],
+        ))
+        self.assertEqual([e["id"] for e in root_a.get(self.URL_ENCUADRES).json()], self.ids_a)
+        self.assertEqual(root_a.get(f"{self.URL_ENCUADRES}{self.e_b.pk}/").status_code, 404)
 
 
 class RecepcionRetrieveOrigenTallaTests(TestCase):

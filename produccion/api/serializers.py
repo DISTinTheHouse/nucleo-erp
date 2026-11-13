@@ -607,14 +607,22 @@ class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSeri
     def get_pedidos(self, obj):
         return pedidos_de_op(obj, con_cliente=self.context.get("pedidos_con_cliente", False))
 
+    def _pedidos_ligados(self):
+        """Pedidos ya ligados a la OP (``op_pedidos``): una consulta por request,
+        la primera vez que alguien los pide (``validate_pedidos_ids`` o
+        ``validate``); vacío al crear."""
+        if self.instance is None:
+            return set()
+        if not hasattr(self, '_pedidos_ligados_cache'):
+            self._pedidos_ligados_cache = set(self.instance.op_pedidos.values_list('pedido_id', flat=True))
+        return self._pedidos_ligados_cache
+
     def validate_pedidos_ids(self, ids):
         ids = list(dict.fromkeys(ids))
         request = self.context.get('request')
         empresa_id = getattr(getattr(request, 'user', None), 'empresa_id', None)
         encontrados = {p.pk: p for p in Pedido.objects.filter(pk__in=ids, empresa_id=empresa_id)}
-        ligados = (
-            set(self.instance.op_pedidos.values_list('pedido_id', flat=True)) if self.instance is not None else set()
-        )
+        ligados = self._pedidos_ligados()
         pedidos = []
         for pk in ids:
             if pk not in encontrados:
@@ -712,29 +720,40 @@ class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSeri
         # Varios pedidos: sin principal explícito, el principal es el primero.
         if pedido is None and attrs.get('pedidos_ids'):
             pedido = attrs['pedido'] = attrs['pedidos_ids'][0]
-        if 'pedidos_ids' in attrs:
-            permitidos = {p.pk for p in attrs['pedidos_ids']}
-        elif self.instance is not None:
-            permitidos = set(self.instance.op_pedidos.values_list('pedido_id', flat=True))
-        else:
-            permitidos = set()
         if pedido is not None:
-            permitidos.add(pedido.pk)
+            # Pedidos de la OP tras este request: los del body o, sin
+            # ``pedidos_ids``, los ya ligados (consulta solo si hace falta).
+            if 'pedidos_ids' in attrs:
+                permitidos = {p.pk for p in attrs['pedidos_ids']} | {pedido.pk}
+            else:
+                permitidos = None
+            renglones = attrs.get('orden_produccion_detalle', [])
+            # Al fijar o cambiar el ``pedido`` de una OP existente, o el conjunto
+            # ``pedidos_ids`` (también al reducirlo), los renglones YA guardados
+            # entran en la misma regla: sin esto bastaba crear la OP sin pedido y
+            # ligarla después para evadirla. Un PATCH que no cambia los pedidos
+            # no se bloquea por renglones heredados (e2ada88).
+            cambian_pedidos = self.instance is not None and (
+                ('pedido' in attrs and pedido.pk != self.instance.pedido_id)
+                or (
+                    permitidos is not None
+                    and permitidos != (self._pedidos_ligados() | {self.instance.pedido_id}) - {None}
+                )
+            )
+            if permitidos is None and (renglones or cambian_pedidos):
+                permitidos = self._pedidos_ligados() | {pedido.pk}
             errores = {}
             errores_renglones = [
                 {'pedido_detalle': ['El renglón no pertenece a los pedidos de la orden de producción.']}
                 if renglon.get('pedido_detalle') is not None
                 and renglon['pedido_detalle'].pedido_id not in permitidos
                 else {}
-                for renglon in attrs.get('orden_produccion_detalle', [])
+                for renglon in renglones
             ]
             if any(errores_renglones):
                 errores['orden_produccion_detalle'] = errores_renglones
-            # Al fijar o cambiar el ``pedido`` de una OP existente, los
-            # renglones YA guardados entran en la misma regla: sin esto bastaba
-            # crear la OP sin pedido y ligarla después para evadirla.
             if (
-                self.instance is not None
+                cambian_pedidos
                 and self.instance.orden_produccion_detalle
                 .filter(pedido_detalle__isnull=False)
                 .exclude(pedido_detalle__pedido_id__in=permitidos)

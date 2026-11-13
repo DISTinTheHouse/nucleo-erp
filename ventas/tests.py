@@ -44,7 +44,7 @@ from produccion.models import (
     OrdenProduccion,
     OrdenProduccionRutaCritica,
 )
-from seguridad.models import Rol, UsuarioRol
+from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
 from terceros.models import Cliente, DireccionCliente
 from usuarios.models import Usuario
 from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle, Picking, PickingDetalle
@@ -62,6 +62,34 @@ from ventas.models import (
 )
 from ventas.servicios_bordado import TipoServicioBordado, validar_tipos_servicio_array
 from ventas.utils.helpers import _save_cotizacion_detalle
+
+
+#: Lecturas del CRM (#1020, e960112): ``LecturaPorCodigo`` exige uno de estos
+#: códigos en list/retrieve/kpis/embudo. Son las claves R-* que tienen los roles
+#: reales "Ventas" y "Mesa-de-control"; los fixtures los imitan.
+CLAVES_LECTURA_VENTAS = ("R-CRM", "R-CRM-CLIENTES", "R-CRM-COTIZACIONES", "R-CRM-PEDIDOS")
+CLAVES_LECTURA_MESA = ("R-MESACONTROL", "R-MESACONTROL-COTI", "R-MESACONTROL-CLIENTES", "R-MESACONTROL-PEDIDOS")
+
+
+def _permiso(clave):
+    return Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})[0]
+
+
+def _con_claves(rol, claves):
+    """Le da a ``rol`` esas claves del catálogo (solo vive en la BD)."""
+    for clave in claves:
+        RolPermiso.objects.get_or_create(rol=rol, permiso=_permiso(clave))
+    return rol
+
+
+def _grant_sin_empresa(usuario, claves):
+    """GRANT con ``empresa=NULL``: la única forma de que un usuario sin empresa
+    activa tenga permisos (#1038). Sirve para probar que, pasado el permiso, el
+    alcance por empresa sigue sin devolverle filas."""
+    for clave in claves:
+        UsuarioPermiso.objects.create(
+            usuario=usuario, permiso=_permiso(clave), tipo=UsuarioPermiso.TIPO_GRANT, empresa=None
+        )
 
 
 def _tipo_producto():
@@ -852,6 +880,7 @@ class PedidoMesaControlUpdateTests(TestCase):
             estatus=Rol.Estatus.ACTIVO,
             clave_departamento=None,
         )
+        _con_claves(cls.rol_mesa_control, CLAVES_LECTURA_MESA)
         UsuarioRol.objects.create(
             usuario=cls.mesa_no_admin,
             rol=cls.rol_mesa_control,
@@ -1893,6 +1922,14 @@ class MesaControlListScopeTests(TestCase):
             estatus=Rol.Estatus.ACTIVO,
             clave_departamento=None,
         )
+        _con_claves(cls.rol_mesa, CLAVES_LECTURA_MESA)
+        _con_claves(cls.rol_mesa_b, CLAVES_LECTURA_MESA)
+        # El vendedor lee cotizaciones (rol Ventas) pero no es de mesa de control.
+        rol_ventas = _con_claves(
+            Rol.objects.create(empresa=cls.empresa, codigo="ventas-mc", nombre="Ventas", estatus=Rol.Estatus.ACTIVO),
+            CLAVES_LECTURA_VENTAS,
+        )
+        UsuarioRol.objects.create(usuario=cls.vendedor, rol=rol_ventas, empresa=cls.empresa)
         UsuarioRol.objects.create(
             usuario=cls.mesa_no_admin, rol=cls.rol_mesa, empresa=cls.empresa
         )
@@ -1951,7 +1988,13 @@ class MesaControlListScopeTests(TestCase):
         self.assertNotIn(self.cot_autorizada.pk, self._ids(self.mesa_no_admin))
 
     def test_mesa_control_sin_empresa_no_ve_nada(self):
-        """Se falla cerrado aunque tenga el rol asignado."""
+        """Se falla cerrado aunque tenga el rol asignado: sin empresa activa el
+        rol no le da permisos (#1038) y es 403; con un GRANT sin empresa pasa el
+        permiso, pero el alcance sigue sin devolverle filas."""
+        client = APIClient()
+        client.force_authenticate(user=self.mesa_sin_empresa)
+        self.assertEqual(client.get(MESA_CONTROL_URL).status_code, 403)
+        _grant_sin_empresa(self.mesa_sin_empresa, CLAVES_LECTURA_MESA)
         self.assertEqual(self._ids(self.mesa_sin_empresa), set())
 
     # --- no regresión en las ramas que ya eran correctas ----------------------
@@ -4664,12 +4707,13 @@ class PedidoKpisTests(TestCase):
         self.assertEqual(activos["total"], 3)
         self.assertEqual({d["moneda"] for d in activos["drill_down"]}, {"MXN", "USD"})
 
-    def test_otros_tres_kpis_declaran_no_disponible(self):
+    def test_otif_y_lead_time_declaran_no_disponible(self):
+        # ``pedidos_en_riesgo`` ya se calcula (EC-818, b5460e3): solo quedan estos dos.
         resp = self._get(self.vendedor_a)
 
         self.assertFalse(resp.data["otif"]["disponible"])
         self.assertFalse(resp.data["lead_time_promedio"]["disponible"])
-        self.assertFalse(resp.data["pedidos_en_riesgo"]["disponible"])
+        self.assertTrue(resp.data["pedidos_en_riesgo"]["disponible"])
 
     def test_otro_vendedor_no_ve_nada_del_vendedor_a(self):
         resp = self._get(self.vendedor_b)
@@ -4732,7 +4776,18 @@ class PedidoReglasEstatusTests(TestCase):
         self.assertEqual(self._cancelar(self.mesa).status_code, 200)
         self.pedido.refresh_from_db()
         self.assertEqual((self.pedido.estatus, self.pedido.activo), (5, False))
-        self.assertEqual(self._client(self.mesa).get(self.url).status_code, 404)
+        # #1118 (5eb29df): el detalle lee el cancelado, con su motivo; para otra
+        # empresa sigue siendo 404 (``pedidos_visibles``).
+        detalle = self._client(self.mesa).get(self.url)
+        self.assertEqual(detalle.status_code, 200, detalle.content)
+        self.assertEqual(
+            (detalle.data["estatus"], detalle.data["motivo_cancelacion"]), (5, "Cliente canceló la compra"),
+        )
+        otra = Empresa.objects.create(codigo="globex-250", razon_social="GLOBEX SA")
+        ajeno = Usuario.objects.create(
+            username="mesa-globex", email="m@globex-250.test", empresa=otra, is_admin_empresa=True,
+        )
+        self.assertEqual(self._client(ajeno).get(self.url).status_code, 404)
 
     def test_cancelar_sin_motivo_responde_400_y_no_cambia_nada(self):
         """EC-583: ``motivo`` es obligatorio; vacío o solo espacios también se rechaza."""
@@ -4825,10 +4880,14 @@ class PedidoReglasEstatusTests(TestCase):
             estado=inventario_reservas.Estado.ACTIVA, usuario=self.mesa,
         )
 
-        # 21 con inventario que devolver: los 16 de cancelar sin inventario más el
+        # 35 con inventario que devolver: los 22 de cancelar sin inventario más el
         # bloqueo de las existencias, su UPDATE en lote, el movimiento, su detalle y la
-        # auditoría ENTRADA. Sin cargar ``empresa`` ni ``sucursal`` (EC-803).
-        with self.assertNumQueries(21):
+        # auditoría ENTRADA (5); el evento ``crear`` del movimiento en la bitácora
+        # (savepoint + INSERT + release, 3; 28e6211) y el costeo promedio en bloque
+        # (5; 379d5f0, #809: 3 cuando el artículo ya tiene costo). Medido igual con
+        # 2 y con 8 productos (y 1 y 5 reservas): no crece con los renglones. Sin
+        # cargar ``empresa`` ni ``sucursal`` (EC-803).
+        with self.assertNumQueries(35):
             resp = self._cancelar(self.mesa)
 
         self.assertEqual(resp.status_code, 200, resp.content)
@@ -4863,10 +4922,12 @@ class PedidoReglasEstatusTests(TestCase):
 
     def test_cancelar_es_rapido(self):
         inicio = time.perf_counter()
-        # 16: bloqueo, documentos vivos, lectura de la auditoría de inventario (sin nada
+        # 22: bloqueo, documentos vivos, lectura de la auditoría de inventario (sin nada
         # que devolver: no hay bloqueo, UPDATE ni movimiento), reservas y auditoría
-        # (EC-583), sin cargar ``pedido.empresa`` para la auditoría (EC-803).
-        with self.assertNumQueries(16):
+        # (EC-583), sin cargar ``pedido.empresa`` para la auditoría (EC-803); más los
+        # eventos ``estatus`` y ``baja`` del pedido en la bitácora (3 + 3; 28e6211).
+        # Medido igual con 0 y con 5 reservas.
+        with self.assertNumQueries(22):
             self._cancelar(self.mesa)
         self.assertLess(time.perf_counter() - inicio, 0.5)
 
@@ -5435,6 +5496,7 @@ class OportunidadesBase(TestCase):
         cls.cliente_ajeno = Cliente.objects.create(empresa=cls.otra, nombre="Cliente Globex")
         # Ana y Beto son de Ventas: solo a ellos se transfiere una oportunidad (#709).
         ventas = Rol.objects.create(empresa=cls.empresa, codigo="VENTAS-01", nombre="Ventas", estatus=Rol.Estatus.ACTIVO)
+        _con_claves(ventas, CLAVES_LECTURA_VENTAS)
         for vendedor in (cls.ana, cls.beto):
             UsuarioRol.objects.create(usuario=vendedor, rol=ventas, empresa=cls.empresa)
 
@@ -5458,7 +5520,20 @@ class OportunidadesTests(OportunidadesBase):
         mia = self._op(self.ana)
         ajena = self._op(self.beto)
 
-        ids = lambda user: {o["id"] for o in self._client(user).get(OPORTUNIDADES_URL).data}
+        def ids(user):
+            resp = self._client(user).get(OPORTUNIDADES_URL)
+            self.assertEqual(resp.status_code, 200, resp.data)
+            return {o["id"] for o in resp.data}
+
+        # Con permiso de lectura (#1020), el alcance sigue sin darles filas ajenas:
+        # Ventas de otra empresa y un GRANT sin empresa (#1038).
+        rol_globex = _con_claves(
+            Rol.objects.create(empresa=self.otra, codigo="VENTAS-GX", nombre="Ventas", estatus=Rol.Estatus.ACTIVO),
+            CLAVES_LECTURA_VENTAS,
+        )
+        UsuarioRol.objects.create(usuario=self.ajeno, rol=rol_globex, empresa=self.otra)
+        _grant_sin_empresa(self.sin_empresa, CLAVES_LECTURA_VENTAS)
+
         self.assertEqual(ids(self.ana), {mia.pk})
         self.assertEqual(ids(self.jefe), {mia.pk, ajena.pk})
         self.assertEqual(ids(self.ajeno), set())
@@ -5976,8 +6051,13 @@ class OportunidadSeguimientosTests(OportunidadesBase):
         self.cliente.soft_delete()  # dado de baja: el vendedor deja de verlo; el admin, no
         self.assertEqual(nombres(self.ana), (None, None, None))
         self.assertEqual(nombres(self.jefe), ("Cliente Acme",) * 3)
-        superusuario = Usuario.objects.create(username="root", email="root@x.test", is_superuser=True)
+        # EC-798 (0c9a960): el superusuario ve su empresa activa; sin empresa, nada.
+        superusuario = Usuario.objects.create(
+            username="root", email="root@x.test", is_superuser=True, empresa=self.empresa
+        )
         self.assertEqual(nombres(superusuario), ("Cliente Acme",) * 3)
+        sin_empresa = Usuario.objects.create(username="root2", email="root2@x.test", is_superuser=True)
+        self.assertEqual(self._client(sin_empresa).get(SEGUIMIENTOS_URL).data, [])
 
     def test_el_listado_con_contexto_no_hace_consultas_por_fila(self):
         self.cliente.vendedores.add(self.ana)
@@ -6354,6 +6434,12 @@ class RechazoCotizacionComentarioTests(TestCase):
         cls.vendedor = Usuario.objects.create(
             username="vend@acme-mc.test", email="vend@acme-mc.test", empresa=cls.empresa,
         )
+        # El vendedor consulta su cotización: lectura del CRM (#1020).
+        rol = _con_claves(
+            Rol.objects.create(empresa=cls.empresa, codigo="ventas-rc", nombre="Ventas", estatus=Rol.Estatus.ACTIVO),
+            CLAVES_LECTURA_VENTAS,
+        )
+        UsuarioRol.objects.create(usuario=cls.vendedor, rol=rol, empresa=cls.empresa)
 
     def setUp(self):
         self.cotizacion = Cotizacion.objects.create(
@@ -6403,14 +6489,24 @@ class RechazoCotizacionComentarioTests(TestCase):
         self.assertFalse(Notificacion.objects.filter(tipo="cotizacion_rechazada").exists())
 
     def test_rechazar_cotizacion_sin_empresa_no_truena(self):
+        """Desde EC-798 (0c9a960) nadie alcanza por la API una cotización sin
+        empresa: el superusuario sin empresa recibe 404. La protección contra el
+        500 vive en ``crear_notificacion_usuario`` y se prueba directo."""
+        from notificaciones.services.notificacion_service import crear_notificacion_usuario
+
         su = Usuario.objects.create(
             username="su@acme-mc.test", email="su@acme-mc.test", is_superuser=True, is_staff=True
         )
         Cotizacion.objects.filter(pk=self.cotizacion.pk).update(empresa=None)
         resp = self._como(su).post(self.url + "rechazar/", {"comentario": "x"}, format="json")
-        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.status_code, 404, resp.content)
         self.cotizacion.refresh_from_db()
-        self.assertEqual(self.cotizacion.estatus, 4)
+        self.assertEqual(self.cotizacion.estatus, 2)
+
+        notificacion = crear_notificacion_usuario(
+            None, self.vendedor.pk, "Cotización rechazada", "x", "ventas", "cotizacion_rechazada",
+        )
+        self.assertIsNone(notificacion)
         self.assertFalse(Notificacion.objects.exists())
 
     def test_vendedor_reenvia_y_queda_historial(self):
@@ -6689,6 +6785,12 @@ class CotizacionFlujoEndurecidoTests(TestCase):
         cls.vendedor = Usuario.objects.create(
             username="vend@acme-fl.test", email="vend@acme-fl.test", empresa=cls.empresa,
         )
+        # El vendedor consulta el listado: lectura del CRM (#1020).
+        rol = _con_claves(
+            Rol.objects.create(empresa=cls.empresa, codigo="ventas-fl", nombre="Ventas", estatus=Rol.Estatus.ACTIVO),
+            CLAVES_LECTURA_VENTAS,
+        )
+        UsuarioRol.objects.create(usuario=cls.vendedor, rol=rol, empresa=cls.empresa)
 
     def setUp(self):
         self.cotizacion = Cotizacion.objects.create(
@@ -8460,8 +8562,8 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
         cotizacion = pedido.cotizacion
         self._cotizacion_con_importes(cotizacion)
         # El mismo constructor que ``autorizar``, ``aceptar-cambios`` y
-        # ``editar-mesa-control``, dos veces: la segunda anida la primera, como en
-        # una cotización re-autorizada.
+        # ``editar-mesa-control``, dos veces, como en una cotización re-autorizada:
+        # desde EC-801 (e4cd3c7) la segunda ya no anida la primera.
         vista = CotizacionViewSet()
         for _ in range(2):
             cotizacion.refresh_from_db()
@@ -8474,7 +8576,7 @@ class ImportesPedidoPorPerfilTests(ImportesPedidoFixture, TestCase):
         self.assertEqual(snapshot["cotizacion"]["gran_total"], "232.00")
         self.assertEqual(snapshot["detalles"][0]["tallas"][0]["precio_unitario"], "10.00")
         self.assertEqual(snapshot["servicios_extras"][0]["monto"], "5.00")
-        self.assertEqual(snapshot["cotizacion"]["aprobado_snapshot"]["cotizacion"]["gran_total"], "232.00")
+        self.assertNotIn("aprobado_snapshot", snapshot["cotizacion"])
 
         for usuario, ve in self.perfiles:
             with self.subTest(usuario=usuario.username):
@@ -9207,6 +9309,16 @@ class _CotizacionesModoServidorBase:
             username="adm-b@811.test", email="adm-b@811.test", empresa=cls.empresa_b, is_admin_empresa=True,
         )
         cls.sin_empresa = Usuario.objects.create(username="se@811.test", email="se@811.test")
+        # Lectura del CRM (#1020): los vendedores con el rol de Ventas; el usuario
+        # sin empresa con un GRANT sin empresa, para que las pruebas sigan viendo
+        # que el alcance por empresa no le devuelve nada.
+        rol = _con_claves(
+            Rol.objects.create(empresa=cls.empresa, codigo="ventas-811", nombre="Ventas", estatus=Rol.Estatus.ACTIVO),
+            CLAVES_LECTURA_VENTAS,
+        )
+        for vendedor in (cls.ana, cls.beto):
+            UsuarioRol.objects.create(usuario=vendedor, rol=rol, empresa=cls.empresa)
+        _grant_sin_empresa(cls.sin_empresa, CLAVES_LECTURA_VENTAS)
         cls.base = timezone.make_aware(datetime(2026, 3, 10, 12, 0))
         cls.c = {}
         # nombre: (vendedor, cliente, moneda, estatus, gran_total, horas antes de ``base``)
@@ -9437,7 +9549,13 @@ class CotizacionKpisTests(_CotizacionesModoServidorBase, TestCase):
         return {"moneda": moneda.codigo_iso if moneda else None, "total": total, "gran_total": gran_total}
 
     def test_agrupa_por_codigo_aunque_cada_empresa_tenga_su_moneda(self):
-        """``Moneda`` es por empresa: dos "MXN" con distinto id son un solo grupo."""
+        """``Moneda`` es por empresa: dos "MXN" con distinto id son un solo grupo.
+
+        Desde EC-798 (0c9a960) el superusuario solo ve su empresa activa, así que
+        las dos "MXN" conviven dentro de la empresa A (la global y la propia) y lo
+        de la empresa B (999.00 y la nueva de 1.00) no entra."""
+        mxn_propia = Moneda.objects.create(codigo_iso="MXN", nombre="Peso A", empresa=self.empresa)
+        self._cotizacion(self.empresa, self.admin, self.acme, mxn_propia, 3, "1.00", self.base)
         mxn_b = Moneda.objects.create(codigo_iso="MXN", nombre="Peso B", empresa=self.empresa_b)
         self._cotizacion(self.empresa_b, self.admin_b, self.secreto, mxn_b, 3, "1.00", self.base)
         superusuario = Usuario.objects.create(
@@ -9445,12 +9563,12 @@ class CotizacionKpisTests(_CotizacionesModoServidorBase, TestCase):
         )
         data = self._kpis(user=superusuario)
         self.assertEqual(data["por_moneda"], [
-            self._moneda(self.mxn, 6, "1160.00"),
+            self._moneda(self.mxn, 5, "161.00"),
             self._moneda(self.usd, 1, "50.00"),
             self._moneda(None, 1, "7.00"),
         ])
         autorizadas = data["por_estatus"][2]
-        self.assertEqual(autorizadas["por_moneda"], [self._moneda(self.mxn, 4, "1040.00"), self._moneda(None, 1, "7.00")])
+        self.assertEqual(autorizadas["por_moneda"], [self._moneda(self.mxn, 3, "41.00"), self._moneda(None, 1, "7.00")])
         for bloque in [*data["por_moneda"], *(m for e in data["por_estatus"] for m in e["por_moneda"])]:
             self.assertNotIn("moneda_id", bloque)
 
