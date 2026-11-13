@@ -495,9 +495,12 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
             qs = qs.filter(pk__in=ids)
         else:
             qs = self._filtrar(qs).filter(activo=True, producto__activo=True)
-        # Sólo ``producto`` (por su ``cod_proscai``); color y talla no se publican.
-        qs = qs.select_related(None).select_related('producto')
-        qs = qs.annotate(tiene_bom=Exists(self._bom_activo()))
+        # Sólo las columnas que se publican: del producto basta su ``cod_proscai``,
+        # anotado; sin JOIN que traiga la fila completa de producto, color y talla.
+        qs = qs.select_related(None).only('id', 'sku', 'nombre', 'activo').annotate(
+            tiene_bom=Exists(self._bom_activo()),
+            producto_cod_proscai=F('producto__cod_proscai'),
+        )
         if ids is None:
             tiene_bom = booleano_param(request, 'tiene_bom', None)
             if tiene_bom is not None:
