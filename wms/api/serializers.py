@@ -18,7 +18,7 @@ from wms.models import (
     Transferencia,
     TransferenciaDetalle,
 )
-from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
+from ventas.services.pedido_vinculado import armar_pedido_vinculado
 from wms.services.rfid_label_service import zpl_rfid_vigente
 
 class TransferenciaDetalleSerializer(serializers.ModelSerializer):
