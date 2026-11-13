@@ -4,6 +4,7 @@ from decimal import Decimal
 from django.db.models import Sum, Count, Exists, F, IntegerField, OuterRef, Prefetch, Q, Subquery, Value, prefetch_related_objects
 from django.db.models.functions import Coalesce
 from django.db import IntegrityError, transaction
+from collections import defaultdict
 from django.utils import timezone
 from rest_framework import status, viewsets, mixins
 from rest_framework.decorators import action
@@ -3235,6 +3236,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 Prefetch("detalles", queryset=PreOrdenProduccionDetalle.objects.select_related(
                     "variante_produccion__talla", "variante_produccion__color",
                     "producto_variante__talla", "producto_variante__color").order_by("id")),
+                Prefetch("detalles__necesidades", queryset=NecesidadCompra.objects.select_related("orden_compra").order_by("id")),
                 Prefetch("necesidades", queryset=NecesidadCompra.objects.select_related(
                     "producto", "unidad", "pedido", "orden_compra").order_by("fecha_requerida", "id")),
                 "ordenes_compra",
@@ -3324,9 +3326,9 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                     {"variante_produccion_id": d.variante_produccion_id, "pedido_detalle": d.pedido_detalle_id,
                      "cantidad": str(d.cantidad), "unidad": pieza.pk}
                     if d.variante_produccion_id else
-                    # Resurtido: variante de catálogo, sin pedido; el PT entra a stock.
+                    # Resurtido: una sola OP con todos los SKUs fabricados (los de compra no).
                     {"producto_variante_id": d.producto_variante_id, "cantidad": str(d.cantidad), "unidad": pieza.pk}
-                    for d in pre.detalles.all()
+                    for d in pre.detalles.all() if d.tipo_linea == "fabricado"
                 ],
             }
             if request.data.get("prioridad") not in (None, ""):
@@ -3340,14 +3342,52 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             return respuesta
         return Response({**respuesta.data, "pre_orden": pre.pk, "estatus": pre.estatus}, status=status.HTTP_201_CREATED)
 
+    def _resolver_variantes(self, empresa, lineas_in):
+        """Cada renglón trae ``variante`` (id) o ``sku``. Devuelve
+        ``(variantes_por_renglon, errores)``; 2 consultas para toda la lista."""
+        from catalogo.models import ProductoVariante
+        ids, skus = set(), set()
+        for t in lineas_in:
+            if not isinstance(t, dict):
+                continue
+            if str(t.get("variante") or "").isdigit():
+                ids.add(int(t["variante"]))
+            elif t.get("sku"):
+                skus.add(str(t["sku"]).strip())
+        base = ProductoVariante.objects.filter(empresa=empresa, activo=True).select_related("producto__tipo")
+        por_id = {v.pk: v for v in base.filter(pk__in=ids)} if ids else {}
+        por_sku = defaultdict(list)
+        if skus:
+            for v in base.filter(sku__in=skus):
+                por_sku[v.sku].append(v)
+        out, errs = [], [{} for _ in lineas_in]
+        for i, t in enumerate(lineas_in):
+            v = None
+            if not isinstance(t, dict):
+                errs[i]["variante"] = "Renglón inválido."
+            elif str(t.get("variante") or "").isdigit():
+                v = por_id.get(int(t["variante"]))
+                if v is None:
+                    errs[i]["variante"] = "Variante no encontrada."
+            elif t.get("sku"):
+                encontradas = por_sku.get(str(t["sku"]).strip(), [])
+                if len(encontradas) == 1:
+                    v = encontradas[0]
+                else:
+                    errs[i]["sku"] = "SKU no encontrado." if not encontradas else "SKU repetido en el catálogo; usa la variante."
+            else:
+                errs[i]["variante"] = "Indica variante o sku."
+            out.append(v)
+        return out, errs
+
     def create(self, request, *args, **kwargs):
-        """Alta manual de resurtido de stock (sin pedido):
-        ``{origen: "resurtido", producto, sucursal, fecha_compromiso, tallas: [{variante, cantidad}], notas?}``.
-        Requiere ``C-PRODUCCION-OP``. Cada talla debe tener BOM vigente."""
+        """Alta de resurtido de planeación (sin pedido), muchos SKUs de una sucursal:
+        ``{origen: "resurtido", sucursal, fecha_compromiso, lineas: [{variante | sku, cantidad}], notas?}``.
+        Cada SKU se clasifica: con BOM → fabricado; sin BOM y de compra → compra;
+        si no, error en su renglón. Nace en Pendiente de aceptar. Requiere ``C-PRODUCCION-OP``."""
         from datetime import date
-        from catalogo.models import Producto, ProductoVariante
         from nucleo.models import Sucursal
-        from produccion.services.pre_orden_service import crear_resurtido
+        from produccion.services.pre_orden_service import clasificar_variantes, crear_resurtido
         user = request.user
         empresa = getattr(user, "empresa", None)
         if empresa is None:
@@ -3358,9 +3398,6 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         if d.get("origen", "resurtido") != "resurtido":
             raise ValidationError({"origen": "El alta manual solo es para resurtido; las de pedido nacen solas con el BOM."})
         errores = {}
-        producto = Producto.objects.filter(pk=d.get("producto"), empresa=empresa).first() if str(d.get("producto") or "").isdigit() else None
-        if producto is None:
-            errores["producto"] = "Producto no válido."
         sucursal = Sucursal.objects.filter(pk=d.get("sucursal"), empresa=empresa).first() if str(d.get("sucursal") or "").isdigit() else None
         if sucursal is None:
             errores["sucursal"] = "Sucursal no válida."
@@ -3369,45 +3406,71 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             fecha = date.fromisoformat(str(d.get("fecha_compromiso")))
         except (TypeError, ValueError):
             errores["fecha_compromiso"] = "Fecha compromiso requerida (AAAA-MM-DD)."
-        tallas_in = d.get("tallas") or []
-        if not isinstance(tallas_in, list) or not tallas_in:
-            errores["tallas"] = "Indica al menos una talla."
+        if fecha and fecha < timezone.localdate():
+            errores["fecha_compromiso"] = "La fecha compromiso no puede ser pasada."
+        lineas_in = d.get("lineas") or d.get("tallas") or []
+        if not isinstance(lineas_in, list) or not lineas_in:
+            errores["lineas"] = "Indica al menos un SKU."
         if errores:
             raise ValidationError(errores)
-        ids = []
-        for t in tallas_in:
+        variantes, errs = self._resolver_variantes(empresa, lineas_in)
+        tipos = clasificar_variantes(empresa.pk, [v for v in variantes if v is not None])
+        vistos, lineas = {}, []
+        for i, (t, v) in enumerate(zip(lineas_in, variantes)):
             try:
-                ids.append(int(t.get("variante")))
-            except (TypeError, ValueError, AttributeError):
-                raise ValidationError({"tallas": "Cada talla lleva variante y cantidad."})
-        if len(set(ids)) != len(ids):
-            raise ValidationError({"tallas": "Una variante aparece más de una vez."})
-        variantes = {v.pk: v for v in ProductoVariante.objects.filter(pk__in=ids, producto=producto)}
-        con_bom = set(
-            ListaMaterialBom.objects.filter(
-                empresa=empresa, activo=True, producto_variante_id__in=ids, variante_produccion__isnull=True,
-                materia_prima_detalle__activo=True, materia_prima_detalle__componente__isnull=False,
-            ).values_list("producto_variante_id", flat=True)
-        )
-        tallas, errs = [], [{} for _ in tallas_in]
-        for i, t in enumerate(tallas_in):
-            v = variantes.get(ids[i])
-            try:
-                cant = Decimal(str(t.get("cantidad")))
+                cant = Decimal(str(t.get("cantidad"))) if isinstance(t, dict) else None
             except Exception:
                 cant = None
-            if v is None:
-                errs[i]["variante"] = "La variante no es de este producto."
-            elif v.pk not in con_bom:
-                errs[i]["variante"] = f"{v.sku} no tiene BOM con materiales."
             if cant is None or cant <= 0:
                 errs[i]["cantidad"] = "La cantidad debe ser mayor a 0."
+            if v is not None:
+                if v.pk in vistos:
+                    errs[i]["variante"] = f"SKU repetido (renglón {vistos[v.pk] + 1})."
+                elif tipos.get(v.pk) is None:
+                    errs[i]["variante"] = f"{v.sku}: no tiene BOM y no es de compra."
+                vistos.setdefault(v.pk, i)
             if not errs[i]:
-                tallas.append((v, cant))
+                lineas.append((v, cant, tipos[v.pk]))
         if any(errs):
-            raise ValidationError({"tallas": errs})
-        pre, avisos = crear_resurtido(user, producto, sucursal, tallas, fecha, d.get("notas") or "")
-        return self._respuesta(pre, status_code=status.HTTP_201_CREATED, extra={"avisos": avisos})
+            raise ValidationError({"lineas": errs})
+        pre = crear_resurtido(user, sucursal, lineas, fecha, d.get("notas") or "")
+        return self._respuesta(pre, status_code=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="aceptar")
+    def aceptar(self, request, pk=None):
+        """Producción acepta el resurtido (Pendiente de aceptar → Pendiente de validar)."""
+        from produccion.services.pre_orden_service import aceptar
+        return self._respuesta(aceptar(self.get_object().pk, request.user))
+
+    @action(detail=True, methods=["post"], url_path="rechazar")
+    def rechazar(self, request, pk=None):
+        """Producción rechaza el resurtido: ``{motivo}``; avisa a quien lo creó."""
+        from produccion.services.pre_orden_service import rechazar
+        return self._respuesta(rechazar(self.get_object().pk, request.user, request.data.get("motivo")))
+
+    @action(detail=False, methods=["post"], url_path="disponibilidad")
+    def disponibilidad(self, request):
+        """``{sucursal, variantes: [ids]}`` → una fila por variante con existencia,
+        por_fabricar, por_comprar, comprometido y disponible. 5 consultas."""
+        from catalogo.models import ProductoVariante
+        from nucleo.models import Sucursal
+        from produccion.services.pre_orden_service import disponibilidad
+        empresa = getattr(request.user, "empresa", None)
+        if empresa is None:
+            return Response([])
+        suc = request.data.get("sucursal")
+        if not str(suc or "").isdigit() or not Sucursal.objects.filter(pk=suc, empresa=empresa).exists():
+            raise ValidationError({"sucursal": "Sucursal no válida."})
+        try:
+            ids = [int(x) for x in (request.data.get("variantes") or [])]
+        except (TypeError, ValueError):
+            raise ValidationError({"variantes": "Lista de ids de variantes."})
+        validas = dict(ProductoVariante.objects.filter(pk__in=ids, empresa=empresa).values_list("pk", "sku"))
+        datos = disponibilidad(empresa.pk, int(suc), [i for i in ids if i in validas])
+        return Response([
+            {"variante": vid, "sku": validas[vid], **{k: float(v) for k, v in datos[vid].items()}}
+            for vid in ids if vid in validas
+        ])
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):

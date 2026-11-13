@@ -230,6 +230,9 @@ class NecesidadCompra(models.Model):
     sobrante = models.DecimalField(max_digits=14, decimal_places=4, default=0)
     pre_orden = models.ForeignKey('produccion.PreOrdenProduccion', on_delete=models.CASCADE, related_name='necesidades')
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name='necesidades_compra', null=True, blank=True)
+    # Compra directa de un SKU de resurtido (sin BOM): su variante y su renglón.
+    producto_variante = models.ForeignKey('catalogo.ProductoVariante', on_delete=models.PROTECT, null=True, blank=True, related_name='+')
+    pre_orden_detalle = models.ForeignKey('produccion.PreOrdenProduccionDetalle', on_delete=models.CASCADE, null=True, blank=True, related_name='necesidades')
     fecha_requerida = models.DateField(null=True, blank=True)
     estatus = models.CharField(max_length=10, choices=Estatus.choices, default=Estatus.PENDIENTE, db_index=True)
     orden_compra = models.ForeignKey('OrdenCompra', on_delete=models.SET_NULL, null=True, blank=True, related_name='necesidades')
