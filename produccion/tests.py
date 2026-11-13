@@ -49,6 +49,7 @@ from produccion.models import (
     OrdenesCorteManga,
     OrdenesReflejante,
     OrdenProduccion,
+    OrdenProduccionPedido,
     OrdenProduccionDetalle,
     SalidaMaquila,
     OrdenProduccionRutaCritica,
@@ -4035,6 +4036,63 @@ class PedidoEspecialViewSetTests(TestCase):
             filas = self._filas_por_id()
         self.assertEqual(len(filas), 3)
         self.assertEqual(len(tres), self.CONSULTAS_LISTADO)
+
+
+    # --- #1093: horas_en_produccion y OP que cuentan como avance ---
+
+    def _op_ligada(self, pedido, principal=None, activo=True, folio="OP-PE-1"):
+        """OP cuyo principal es ``principal`` (o el propio ``pedido``) con
+        ``pedido`` ligado en ``OrdenProduccionPedido`` (como lo hace ``pedidos_ids``)."""
+        op = OrdenProduccion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, folio_op=folio,
+            pedido=principal or pedido, activo=activo,
+        )
+        OrdenProduccionPedido.objects.get_or_create(op=op, pedido=principal or pedido)
+        OrdenProduccionPedido.objects.get_or_create(op=op, pedido=pedido)
+        return op
+
+    def test_horas_en_produccion_son_horas_completas_desde_la_creacion(self):
+        # Se cuenta desde ``created_at`` (no desde la confirmación), truncado.
+        pedido = self._pedido_listado(horas_desde_creacion=30)
+        Pedido.objects.filter(pk=pedido.pk).update(
+            created_at=timezone.now() - timedelta(hours=30, minutes=40),
+        )
+        self.assertEqual(self._filas_por_id()[pedido.pk]["horas_en_produccion"], 30)
+
+    def test_op_activa_quita_sin_avance_y_atrasado(self):
+        pedido = self._pedido_listado(horas_desde_creacion=48)
+        op = self._op_ligada(pedido)
+        fila = self._filas_por_id()[pedido.pk]
+        self.assertIs(fila["sin_avance"], False)
+        self.assertIs(fila["atrasado"], False)
+        self.assertEqual([o["op_id"] for o in fila["ordenes_produccion"]], [op.pk])
+
+    def test_op_que_lo_liga_como_secundario_tambien_cuenta(self):
+        principal = self._pedido_listado(horas_desde_creacion=1)
+        secundario = self._pedido_listado(horas_desde_creacion=48)
+        self._op_ligada(secundario, principal=principal)
+        fila = self._filas_por_id()[secundario.pk]
+        self.assertIs(fila["sin_avance"], False)
+        self.assertIs(fila["atrasado"], False)
+
+    def test_op_dada_de_baja_no_cuenta_como_avance(self):
+        pedido = self._pedido_listado(horas_desde_creacion=48)
+        self._op_ligada(pedido, activo=False)
+        fila = self._filas_por_id()[pedido.pk]
+        self.assertEqual(fila["ordenes_produccion"], [])
+        self.assertIs(fila["sin_avance"], True)
+        self.assertIs(fila["atrasado"], True)
+
+    def test_listado_con_op_y_pre_orden_sigue_en_una_consulta(self):
+        from produccion.models import PreOrdenProduccion
+
+        for i in range(3):
+            pedido = self._pedido_listado(horas_desde_creacion=48)
+            self._op_ligada(pedido, folio=f"OP-PE-Q{i}")
+            PreOrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, pedido=pedido)
+        client = self._client()
+        with self.assertNumQueries(self.CONSULTAS_LISTADO):
+            client.get(self.URL)
 
 
 class PedidosEspecialesPorNombreExternoTests(TestCase):
