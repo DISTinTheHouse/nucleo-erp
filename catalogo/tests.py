@@ -1457,7 +1457,8 @@ class FiltrosServidorCatalogoBase(CatalogoSelectorBase):
             with self.subTest(url=url, param=nombre, valor=str(valor)[:20]):
                 resp = self._get(url, **{nombre: valor}, **extra)
                 self.assertEqual(resp.status_code, 400, resp.content)
-                self.assertIn(nombre, resp.json())
+                # ``{param: "mensaje"}``: texto en ids, booleanos y precios (EC-896).
+                self.assertIsInstance(resp.json().get(nombre), str, resp.content)
 
 
 IDS_INVALIDOS = ("x", "1,", "1,,2", "0", "-1", "1.5", ",".join(["1"] * 501))
@@ -1543,6 +1544,39 @@ class FiltrosServidorProductosTests(FiltrosServidorCatalogoBase):
         # ``categoria_producto`` sigue en la lista blanca (por id).
         por_id = self._ids(self._ok(PRODUCTOS_URL, categoria_producto=cats, ordering="categoria_producto"))
         self.assertEqual(por_id, de_a + de_a2)
+
+    def test_sin_categoria_al_final_en_ambas_direcciones(self):
+        # ``OrdenamientoNullsAlFinal``: sin filtro de categoría, los productos sin
+        # categoría cierran la lista en ASC y en DESC; dentro de cada grupo decide el
+        # ``id`` en la dirección del campo.
+        de_a = sorted([self.p_activo.pk, self.p_sin_precio.pk])
+        de_a2 = sorted([self.p_cat2.pk, self.p_caro.pk])
+        sin_categoria = sorted([self.p_otro.pk, self.p_500.pk])
+        for campo in ("categoria_producto__nombre", "categoria_producto__linea", "categoria_producto"):
+            with self.subTest(campo=campo):
+                for params in ({}, {"limit": 3, "offset": 3}):
+                    asc = self._ids(self._ok(PRODUCTOS_URL, ordering=campo, **params))
+                    desc = self._ids(self._ok(PRODUCTOS_URL, ordering=f"-{campo}", **params))
+                    esperado_asc = de_a + de_a2 + sin_categoria
+                    esperado_desc = de_a2[::-1] + de_a[::-1] + sin_categoria[::-1]
+                    if params:
+                        esperado_asc, esperado_desc = esperado_asc[3:6], esperado_desc[3:6]
+                    self.assertEqual(asc, esperado_asc, params)
+                    self.assertEqual(desc, esperado_desc, params)
+
+    def test_nulls_al_final_no_cambia_columnas_not_null(self):
+        # ``nombre`` es NOT NULL: mismo orden que antes, con desempate por ``id``.
+        for campo in ("nombre", "-nombre"):
+            with self.subTest(campo=campo):
+                esperado = list(
+                    Producto.objects.filter(empresa=self.empresa_a, activo=True)
+                    .order_by(campo, "-id" if campo.startswith("-") else "id").values_list("id", flat=True)
+                )
+                self.assertEqual(self._ids(self._ok(PRODUCTOS_URL, ordering=campo)), esperado)
+        # ``precio_base`` admite NULL: el producto sin precio va al final también en DESC.
+        for campo in ("precio_base", "-precio_base"):
+            with self.subTest(campo=campo):
+                self.assertEqual(self._ids(self._ok(PRODUCTOS_URL, ordering=campo))[-1], self.p_sin_precio.pk)
 
     def test_selector_aplica_categoria_pero_no_los_filtros_del_listado(self):
         sin_params = self._set(SELECTOR_PRODUCTOS_URL, limit=500)

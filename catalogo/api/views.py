@@ -1,10 +1,10 @@
 from django.db.models import F
 from django.db import IntegrityError, transaction
 from django.db.models import Exists, OuterRef, Q, Subquery
-from django.db.models.functions import Lower
+from django.db.models.functions import Lower, Trim
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
-from rest_framework import serializers, viewsets
+from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import OrderingFilter
@@ -16,7 +16,13 @@ from catalogo.validaciones import talla_permitida_para_producto
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso, VarianteProductoProduccion
 from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoSelectorSerializer,ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer, ProductoVarianteSelectorSerializer
 from nucleo.kpis import MENSAJE_ENTERO, entero_estricto, vacio
-from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, booleano_param
+from nucleo.listados import (
+    OrdenamientoEstableFilter,
+    OrdenamientoNullsAlFinal,
+    PaginacionOpcionalLimitOffset,
+    booleano_param,
+    filtrar_rango,
+)
 from produccion.models import ListaMaterialBom
 
 # Solo Producto Terminado exige talla en el onboarding de variante; materia
@@ -30,6 +36,14 @@ CODIGO_PRODUCTO_TERMINADO = "PT"
 FILTROS_CON_ORDEN_ESTABLE = [
     *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
     OrdenamientoEstableFilter,
+]
+# Productos (EC-896): el mismo orden estable, con los NULL al final en ambas
+# direcciones (``OrdenamientoNullsAlFinal``, EC-826): los productos sin categoría
+# (o sin ``codigo``/``precio_base``) cierran la lista al ordenar por esa columna,
+# también en DESC. En columnas NOT NULL y en el desempate por ``id`` no cambia nada.
+FILTROS_CON_NULLS_AL_FINAL = [
+    *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
+    OrdenamientoNullsAlFinal,
 ]
 
 # ``?linea=SIN_LINEA`` pide la línea vacía: materia prima (TELAS, AVIOS) (#923).
@@ -131,32 +145,11 @@ def _filtrar_por_ids(qs, request, nombre, campo=None):
     return qs.filter(**{f"{campo or nombre}_id__in": ids})
 
 
-def _precio_param(request, nombre, modelo):
-    """``precio_base_min``/``precio_base_max`` con la precisión de ``modelo.precio_base``
-    (el ``DecimalField`` de DRF que valida la escritura, como ``_importe`` del listado
-    de pedidos); vacío → ``None``; inválido o fuera de rango → 400."""
-    valor = (request.query_params.get(nombre) or "").strip()
-    if not valor:
-        return None
-    campo = modelo._meta.get_field("precio_base")
-    validador = serializers.DecimalField(max_digits=campo.max_digits, decimal_places=campo.decimal_places)
-    try:
-        return validador.run_validation(valor)
-    except ValidationError as error:
-        raise ValidationError({nombre: error.detail})
-
-
 def _filtrar_precio(qs, request):
-    """``?precio_base_min=`` (inclusivo) y ``?precio_base_max=`` (exclusivo), como los
-    rangos del listado de pedidos y ``matchesRangeFilter`` del front. Un precio NULL
-    no cae en ningún rango."""
-    minimo = _precio_param(request, "precio_base_min", qs.model)
-    maximo = _precio_param(request, "precio_base_max", qs.model)
-    if minimo is not None:
-        qs = qs.filter(precio_base__gte=minimo)
-    if maximo is not None:
-        qs = qs.filter(precio_base__lt=maximo)
-    return qs
+    """``?precio_base_min=`` (inclusivo) y ``?precio_base_max=`` (exclusivo) con la
+    precisión de ``precio_base`` del modelo: la misma regla que los importes del
+    listado de pedidos (``nucleo.listados.filtrar_rango``)."""
+    return filtrar_rango(request, qs, "precio_base")
 
 
 def _respuesta_selector(view, qs, serializer_class):
@@ -165,8 +158,12 @@ def _respuesta_selector(view, qs, serializer_class):
     return view.get_paginated_response(serializer_class(pagina, many=True).data)
 
 
-def _param_texto(nombre, descripcion):
-    return OpenApiParameter(nombre, OpenApiTypes.STR, OpenApiParameter.QUERY, description=descripcion)
+def _param_texto(nombre, descripcion, tipo=OpenApiTypes.STR):
+    return OpenApiParameter(nombre, tipo, OpenApiParameter.QUERY, description=descripcion)
+
+
+def _param_booleano(nombre, descripcion):
+    return _param_texto(nombre, descripcion, OpenApiTypes.BOOL)
 
 
 PARAM_IDS_SELECTOR = _param_texto(
@@ -183,19 +180,19 @@ def _param_ids(nombre, que):
 
 
 PARAMS_PRECIO = [
-    _param_texto("precio_base_min", "Precio base mínimo, inclusivo."),
-    _param_texto("precio_base_max", "Precio base máximo, exclusivo."),
+    _param_texto("precio_base_min", "Precio base mínimo, inclusivo.", OpenApiTypes.DECIMAL),
+    _param_texto("precio_base_max", "Precio base máximo, exclusivo.", OpenApiTypes.DECIMAL),
 ]
 # Filtros de producto compartidos por el listado y ``selector/``.
 PARAMS_PRODUCTO = [
-    _param_texto("tipo_id", "Uno o varios ids de tipo de producto, separados por comas."),
+    _param_ids("tipo_id", "tipo de producto"),
     _param_texto("linea", "Una o varias líneas de categoría, separadas por comas; SIN_LINEA = sin línea."),
     _param_texto("es_compras", "true o false."),
     _param_ids("categoria_producto", "categoría de producto"),
 ]
 # Filtros de variante compartidos por el listado y ``selector/``.
 PARAMS_VARIANTE = [
-    _param_texto("con_bom", "true: sólo variantes con BOM activo."),
+    _param_booleano("con_bom", "true: sólo variantes con BOM activo."),
     _param_ids("producto", "producto"),
     _param_ids("color", "color"),
     _param_ids("talla", "talla"),
@@ -368,14 +365,14 @@ class TallaViewSet(viewsets.ModelViewSet):
     PARAM_Q,
     *PARAMS_PRODUCTO,
     *PARAMS_PRECIO,
-    _param_texto("con_cod_proscai", "true: con código Proscai; false: sin él (vacío)."),
+    _param_booleano("con_cod_proscai", "true: con código Proscai; false: sin él (vacío o sólo espacios)."),
 ]))
 class ProductoViewSet(viewsets.ModelViewSet):
     queryset = Producto.objects.all()
     serializer_class = ProductoSerializer
     # Sin ``?limit=`` regresa la lista completa, como antes (EC-886).
     pagination_class = PaginacionOpcionalCatalogo
-    filter_backends = FILTROS_CON_ORDEN_ESTABLE
+    filter_backends = FILTROS_CON_NULLS_AL_FINAL
     # Sin ``?ordering=`` válido manda el orden de ``get_queryset`` (``-created_at, -id``).
     # ``categoria_producto`` ordena por id (se conserva por compatibilidad); las
     # columnas Categoría y Línea de la tabla ordenan por nombre y línea (EC-896).
@@ -436,12 +433,16 @@ class ProductoViewSet(viewsets.ModelViewSet):
     def _filtrar_listado(self, qs):
         """Filtros sólo del listado (EC-896): ``precio_base_min``/``precio_base_max`` y
         ``con_cod_proscai``. "Sin código" es vacío o sólo espacios (la columna es
-        NOT NULL), lo mismo que el filtro de presencia del front."""
+        NOT NULL), lo mismo que el filtro de presencia del front: ``TRIM`` comparado
+        con ``''``, una comparación simple por fila en vez de una regex."""
         qs = _filtrar_precio(qs, self.request)
         con_cod_proscai = booleano_param(self.request, "con_cod_proscai", None)
         if con_cod_proscai is not None:
-            sin_codigo = Q(cod_proscai__regex=r"^\s*$")
-            qs = qs.exclude(sin_codigo) if con_cod_proscai else qs.filter(sin_codigo)
+            qs = qs.alias(cod_proscai_recortado=Trim("cod_proscai"))
+            if con_cod_proscai:
+                qs = qs.exclude(cod_proscai_recortado="")
+            else:
+                qs = qs.filter(cod_proscai_recortado="")
         return qs
 
     @extend_schema(

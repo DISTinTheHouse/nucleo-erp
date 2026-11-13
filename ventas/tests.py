@@ -8972,6 +8972,9 @@ class PedidoListadoFiltrosColumnaTests(_PedidosModoServidorBase, TestCase):
                     resp = self._get(url, params)
                     self.assertEqual(resp.status_code, 400, resp.content)
                     self.assertEqual(set(resp.json()), {next(iter(params))})
+                    # Un solo mensaje de texto, como ``piezas_*`` y los demás filtros
+                    # (EC-896; antes una lista).
+                    self.assertIsInstance(resp.json()[next(iter(params))], str)
         # El máximo representable sigue valiendo.
         self.assertEqual(self._get(PEDIDOS_URL, {"gran_total_max": "99999999.99"}).status_code, 200)
 

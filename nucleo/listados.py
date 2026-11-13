@@ -1,7 +1,9 @@
 """Piezas de los listados paginados por servidor (#863): paginación opcional,
-``?ordering=`` con desempate estable y los filtros comunes de Compras."""
+``?ordering=`` con desempate estable, los filtros comunes de Compras y los rangos
+``*_min``/``*_max``."""
 from django.core.exceptions import FieldDoesNotExist
 from django.db.models import F
+from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import OrderingFilter
 from rest_framework.pagination import LimitOffsetPagination
@@ -150,3 +152,44 @@ def booleano_param(request, nombre, default):
     if valor in ("false", "0"):
         return False
     raise ValidationError({nombre: "Debe ser true o false."})
+
+
+def decimal_param(request, nombre, modelo, campo):
+    """Decimal del query param ``nombre`` con la precisión de ``modelo.{campo}``
+    (``max_digits``/``decimal_places``: el mismo ``DecimalField`` de DRF que valida
+    la escritura); vacío → ``None``. Inválido o fuera de rango → 400 ``{nombre:
+    "mensaje"}``, texto como ``entero_param`` y ``booleano_param`` (EC-896; antes
+    lista). Sin el tope, un valor que la columna no puede representar llegaba a
+    Postgres y respondía 500."""
+    valor = (request.query_params.get(nombre) or "").strip()
+    if not valor:
+        return None
+    campo_modelo = modelo._meta.get_field(campo)
+    validador = serializers.DecimalField(
+        max_digits=campo_modelo.max_digits, decimal_places=campo_modelo.decimal_places,
+    )
+    try:
+        return validador.run_validation(valor)
+    except ValidationError as error:
+        detalle = error.detail[0] if isinstance(error.detail, list) else error.detail
+        raise ValidationError({nombre: detalle})
+
+
+def filtrar_rango(request, qs, campo, lector=None):
+    """``?{campo}_min=`` (inclusivo) y ``?{campo}_max=`` (exclusivo) sobre ``campo``,
+    como ``matchesRangeFilter`` del front; un valor NULL no cae en ningún rango.
+
+    ``lector(request, nombre, campo)`` lee y valida cada extremo; por defecto,
+    ``decimal_param`` con la precisión de ``qs.model.{campo}``. Para un campo que no
+    es del modelo (una anotación) o no es decimal, pasa el tuyo. Lo usan los
+    importes del listado de pedidos y los precios del catálogo."""
+    if lector is None:
+        def lector(request, nombre, campo):
+            return decimal_param(request, nombre, qs.model, campo)
+    minimo = lector(request, f"{campo}_min", campo)
+    maximo = lector(request, f"{campo}_max", campo)
+    if minimo is not None:
+        qs = qs.filter(**{f"{campo}__gte": minimo})
+    if maximo is not None:
+        qs = qs.filter(**{f"{campo}__lt": maximo})
+    return qs
