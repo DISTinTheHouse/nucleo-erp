@@ -273,13 +273,20 @@ class ProductoViewSet(viewsets.ModelViewSet):
     ]
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        # ``selector/`` con ``?ids=`` también regresa inactivos (EC-886): lo ya
-        # elegido conserva su etiqueta. Lo demás, sólo activos, como siempre.
-        es_selector = self.action == 'selector'
-        if not (es_selector and _ids_param(self.request) is not None):
-            qs = qs.filter(activo=True)
-        qs = _alcance_empresa(qs.annotate(unidad_nombre=F('unidad_medida__nombre'), unidad_abreviatura=F('unidad_medida__clave')), self.request.user)
+        return self._filtrar(self._productos_de_la_empresa().filter(activo=True), buscar_en_descripcion=False)
+
+    def _productos_de_la_empresa(self):
+        """Productos de la empresa del usuario (activos o no), con ``unidad_*`` y el
+        orden del listado. Sin filtros de query string: los pone ``_filtrar``."""
+        qs = super().get_queryset().annotate(
+            unidad_nombre=F('unidad_medida__nombre'), unidad_abreviatura=F('unidad_medida__clave'),
+        )
+        return _alcance_empresa(qs, self.request.user).order_by("-created_at", "-id")
+
+    def _filtrar(self, qs, *, buscar_en_descripcion):
+        """``tipo_id``, ``linea``, ``es_compras`` y ``q`` del query string.
+        ``buscar_en_descripcion``: ``q`` busca también en ``descripcion`` (sólo el
+        selector, EC-886; el ``q`` del listado no cambia)."""
         # ``tipo_id`` acepta uno o varios: repetido (``?tipo_id=1&tipo_id=3``) o
         # separado por comas (``?tipo_id=1,3``). Un solo valor filtra igual que antes.
         tipo_ids = self.request.query_params.getlist('tipo_id')
@@ -304,12 +311,11 @@ class ProductoViewSet(viewsets.ModelViewSet):
         q = (self.request.query_params.get('q') or '').strip()
         if q:
             filtro_q = Q(nombre__icontains=q) | Q(codigo__icontains=q) | Q(cod_proscai__icontains=q)
-            if es_selector:
-                # Sólo en el selector (EC-886): el paso 1 del BOM también busca por
-                # descripción. El ``q`` del listado no cambia.
+            if buscar_en_descripcion:
+                # El paso 1 del BOM también busca por descripción.
                 filtro_q |= Q(descripcion__icontains=q)
             qs = qs.filter(filtro_q)
-        return qs.order_by("-created_at", "-id")
+        return qs
 
     @action(detail=False, methods=['get'])
     def selector(self, request):
@@ -322,10 +328,13 @@ class ProductoViewSet(viewsets.ModelViewSet):
         Sólo productos activos, salvo con ``?ids=1,2``: entonces regresa esos (activos
         o no, siempre de la empresa del usuario)."""
         ids = _ids_param(request)
-        qs = self.filter_queryset(self.get_queryset())
+        qs = self._productos_de_la_empresa()
+        if ids is None:
+            qs = qs.filter(activo=True)
+        qs = self._filtrar(qs, buscar_en_descripcion=True)
         if ids is not None:
             qs = qs.filter(pk__in=ids)
-        return _respuesta_selector(self, qs, ProductoSelectorSerializer)
+        return _respuesta_selector(self, self.filter_queryset(qs), ProductoSelectorSerializer)
 
     def perform_destroy(self, instance):
         # Baja lógica (#531): el DELETE físico arrastraba en cascada compras,
