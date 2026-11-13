@@ -866,18 +866,52 @@ class ScannerRFIDSeguridadTests(TestCase):
         self.assertEqual(resp.json(), {"status": "success", "deleted": 0})
         self.assertEqual(RfidScan.objects.count(), 6)
 
-    def test_clear_no_borra_lecturas_sin_empresa(self):
+    def _assert_clear_no_borra_huerfanas(self, user):
         """Las huérfanas no las purga nadie por la API (sólo el Django admin)."""
-        for user in (self.superuser, self.admin_a):
-            with self.subTest(user=user.username):
-                self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
-                self._sembrar_huerfanas(2)
+        self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
+        self._sembrar_huerfanas(2)
 
-                resp = self._api(user).post(self.CLEAR_URL)
+        resp = self._api(user).post(self.CLEAR_URL)
 
-                self.assertEqual(resp.json()["deleted"], 1)
-                self.assertEqual(RfidScan.objects.filter(empresa__isnull=True).count(), 2)
-                RfidScan.objects.all().delete()
+        self.assertEqual(resp.json()["deleted"], 1)
+        self.assertEqual(RfidScan.objects.filter(empresa__isnull=True).count(), 2)
+
+    def test_clear_superuser_no_borra_lecturas_sin_empresa(self):
+        self._assert_clear_no_borra_huerfanas(self.superuser)
+
+    def test_clear_admin_no_borra_lecturas_sin_empresa(self):
+        self._assert_clear_no_borra_huerfanas(self.admin_a)
+
+    def test_scans_no_admin_no_ve_huerfanas_por_la_rama_sin_lector(self):
+        """La rama ``lector NULL + etiqueta__impresion__sucursal`` de ``visibles_para``
+        sólo trae lecturas de la empresa activa: una huérfana ligada a una etiqueta
+        de la sucursal del usuario no se cuela."""
+        detalles = {}
+        for sucursal, epc in ((self.sucursal_a, "A1A1A1A1A1A1A1A1A1A10001"), (self.sucursal_a2, "A2A2A2A2A2A2A2A2A2A20001")):
+            impresion = EtiquetaRFIDImpresion.objects.create(
+                empresa=self.empresa_a, sucursal=sucursal, cantidad=1
+            )
+            detalles[sucursal.pk] = EtiquetaRFIDDetalle.objects.create(
+                impresion=impresion, epc=epc, barcode_value="X"
+            )
+        self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
+        RfidScan.objects.bulk_create([
+            # Sin lector, etiqueta de su sucursal: visible.
+            RfidScan(empresa=self.empresa_a, etiqueta=detalles[self.sucursal_a.pk], epc="A1A1A1A1A1A1A1A1A1A10001"),
+            # Sin lector, etiqueta de otra sucursal de su empresa: no visible.
+            RfidScan(empresa=self.empresa_a, etiqueta=detalles[self.sucursal_a2.pk], epc="A2A2A2A2A2A2A2A2A2A20001"),
+            # Huérfana ligada a una etiqueta de su sucursal: no visible.
+            RfidScan(empresa=None, etiqueta=detalles[self.sucursal_a.pk], epc="a1a1a1a1a1a1a1a1a1a10001"),
+        ])
+        self._sembrar_huerfanas(2)
+
+        resp = self._api(self.usuario_a).get(self.SCANS_URL)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            sorted(s["epc"] for s in resp.json()["scans"]),
+            ["A1A1A1A1A1A1A1A1A1A10001", "aaaa00000000"],
+        )
 
     def test_clear_es_un_solo_delete(self):
         from django.db import connection
