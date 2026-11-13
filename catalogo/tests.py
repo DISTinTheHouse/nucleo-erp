@@ -627,11 +627,23 @@ class ProductoFiltroTipoMultipleTests(TestCase):
         self.assertEqual(self._ids("tipo_id=1,3"), {self.por_tipo[1].pk, self.por_tipo[3].pk})
         self.assertEqual(self._ids("tipo_id=1,%203"), {self.por_tipo[1].pk, self.por_tipo[3].pk})
 
-    def test_valor_invalido_mezclado_da_400_con_el_mensaje_existente(self):
-        for query in ("tipo_id=1&tipo_id=x", "tipo_id=1,x", "tipo_id=1,", "tipo_id="):
+    def test_valor_invalido_mezclado_da_400_con_el_parser_estricto(self):
+        # EC-896: ``tipo_id`` pasa al parser estricto de EC-829 (antes ``int()``,
+        # con "Must be an integer.").
+        for query in ("tipo_id=1&tipo_id=x", "tipo_id=1,x", "tipo_id=1,", "tipo_id=1.5", "tipo_id=%2B3"):
             resp = self._get(query)
             self.assertEqual(resp.status_code, 400, query)
-            self.assertEqual(resp.json(), {"tipo_id": "Must be an integer."}, query)
+            self.assertEqual(resp.json(), {"tipo_id": "Debe ser un entero válido."}, query)
+        for query in ("tipo_id=0", "tipo_id=-3"):
+            resp = self._get(query)
+            self.assertEqual(resp.status_code, 400, query)
+            self.assertEqual(resp.json(), {"tipo_id": "Debe ser un entero mayor a 0."}, query)
+
+    def test_vacio_no_filtra(self):
+        # Vacío = ausente, como ``entero_param`` (antes era 400).
+        todos = self._ids("")
+        self.assertEqual(self._ids("tipo_id="), todos)
+        self.assertEqual(self._ids("tipo_id=3&tipo_id="), {self.por_tipo[3].pk})
 
     def test_varios_tipos_no_amplian_el_alcance_de_empresa(self):
         ids = self._ids("tipo_id=1&tipo_id=3")
@@ -1292,9 +1304,9 @@ class SchemaCatalogoSelectorTests(SimpleTestCase):
     def test_selectores_documentan_sobre_y_campos_ligeros(self):
         casos = (
             ("/api/v1/catalogo/producto/selector/", "ProductoSelector",
-             {"q", "ids", "limit", "offset", "ordering", "tipo_id", "linea", "es_compras"}),
+             {"q", "ids", "limit", "offset", "ordering", "tipo_id", "linea", "es_compras", "categoria_producto"}),
             ("/api/v1/catalogo/producto-variante/selector/", "ProductoVarianteSelector",
-             {"q", "ids", "limit", "offset", "ordering", "tiene_bom", "con_bom"}),
+             {"q", "ids", "limit", "offset", "ordering", "tiene_bom", "con_bom", "producto", "color", "talla"}),
         )
         for path, componente, parametros in casos:
             with self.subTest(path=path):
@@ -1314,6 +1326,29 @@ class SchemaCatalogoSelectorTests(SimpleTestCase):
                 self.assertEqual(arreglo["type"], "array")
                 self.assertEqual(arreglo["items"]["$ref"], f"#/components/schemas/{componente}")
                 self.assertEqual(set(sobre["properties"]), {"count", "next", "previous", "results"})
+
+    def test_listas_documentan_sus_filtros(self):
+        # EC-896: los filtros de servidor del listado, en el OpenAPI.
+        casos = (
+            ("/api/v1/catalogo/producto/", {
+                "q", "limit", "offset", "ordering", "tipo_id", "linea", "es_compras", "categoria_producto",
+                "precio_base_min", "precio_base_max", "con_cod_proscai",
+            }),
+            ("/api/v1/catalogo/producto-variante/", {
+                "q", "limit", "offset", "ordering", "con_bom", "producto", "color", "talla", "activo",
+                "precio_base_min", "precio_base_max",
+            }),
+        )
+        for path, parametros in casos:
+            with self.subTest(path=path):
+                self.assertLessEqual(parametros, self._parametros(path))
+        # Los de sólo listado no se anuncian en el selector.
+        self.assertTrue(
+            {"precio_base_min", "con_cod_proscai"}.isdisjoint(self._parametros("/api/v1/catalogo/producto/selector/"))
+        )
+        self.assertTrue(
+            {"activo", "precio_base_max"}.isdisjoint(self._parametros("/api/v1/catalogo/producto-variante/selector/"))
+        )
 
 
 class SelectorTopesTests(TestCase):
@@ -1375,3 +1410,315 @@ class SelectorTopesTests(TestCase):
 
                 resp = client.get(url, {"ids": ",".join(map(str, todos[:501]))})
                 self.assertEqual(resp.status_code, 400, resp.content)
+
+
+class FiltrosServidorCatalogoBase(CatalogoSelectorBase):
+    """Datos de EC-896 sobre los de EC-886: otro color, otra talla, categorías con y
+    sin línea (y una de otra empresa), precios en los bordes de los rangos y
+    ``cod_proscai`` con, sin y sólo con espacios."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.azul = Color.objects.create(nombre="Azul", codigo="AZU", codigo_hex="#0000ff")
+        cls.talla_ch = Talla.objects.create(nombre="CH")
+        cls.cat_a2 = CategoriaProducto.objects.create(
+            empresa=cls.empresa_a, nombre="Cat A2", codigo="CS2", linea=CategoriaProducto.Linea.INDUSTRIAL,
+        )
+        cls.cat_b = CategoriaProducto.objects.create(empresa=cls.empresa_b, nombre="Cat B", codigo="CSB")
+
+        def producto(nombre, codigo, precio, cod_proscai="", **extra):
+            return Producto.objects.create(
+                empresa=cls.empresa_a, nombre=nombre, codigo=codigo, precio_base=precio,
+                cod_proscai=cod_proscai, **extra,
+            )
+
+        cls.p_cat2 = producto("Gorra", "GO001", "100.00", "PX-1", categoria_producto=cls.cat_a2)
+        cls.p_caro = producto("Chamarra", "CH001", "499.99", "  ", categoria_producto=cls.cat_a2)
+        cls.p_500 = producto("Overol", "OV001", "500.00", "PX-2")
+        cls.p_sin_precio = producto("Bata", "BA001", None, "PX-3", categoria_producto=cls.cat_a)
+        cls.p_b_cat = Producto.objects.create(
+            empresa=cls.empresa_b, nombre="Tela B2", codigo="TB002", categoria_producto=cls.cat_b,
+        )
+
+        def variante(prod, sku, color, talla, precio, **extra):
+            return ProductoVariante.objects.create(
+                producto=prod, empresa=prod.empresa, color=color, talla=talla, sku=sku, precio_base=precio, **extra,
+            )
+
+        cls.v_azul = variante(cls.p_activo, "TA001-AZU-CH", cls.azul, cls.talla_ch, "250.00")
+        cls.v_sin_talla = variante(cls.p_otro, "PL001-AZU", cls.azul, None, "600.00")
+
+    def _set(self, url, user=None, **params):
+        return set(self._ids(self._ok(url, user, **params)))
+
+    def _assert_400(self, url, nombre, valores, **extra):
+        for valor in valores:
+            with self.subTest(url=url, param=nombre, valor=str(valor)[:20]):
+                resp = self._get(url, **{nombre: valor}, **extra)
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn(nombre, resp.json())
+
+
+IDS_INVALIDOS = ("x", "1,", "1,,2", "0", "-1", "1.5", ",".join(["1"] * 501))
+PRECIOS_INVALIDOS = ("abc", "1.234", "123456789012", "NaN", "1,5")
+
+
+class FiltrosServidorProductosTests(FiltrosServidorCatalogoBase):
+    """``producto/`` (EC-896): ``categoria_producto`` (también en ``selector/``),
+    ``precio_base_min``/``precio_base_max`` y ``con_cod_proscai`` (sólo listado)."""
+
+    def test_categoria_producto_uno_o_varios(self):
+        self.assertEqual(
+            self._set(PRODUCTOS_URL, categoria_producto=self.cat_a.pk), {self.p_activo.pk, self.p_sin_precio.pk},
+        )
+        varias = {self.p_activo.pk, self.p_sin_precio.pk, self.p_cat2.pk, self.p_caro.pk}
+        self.assertEqual(self._set(PRODUCTOS_URL, categoria_producto=f"{self.cat_a.pk},{self.cat_a2.pk}"), varias)
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        resp = client.get(f"{PRODUCTOS_URL}?categoria_producto={self.cat_a.pk}&categoria_producto={self.cat_a2.pk}")
+        self.assertEqual({f["id"] for f in resp.json()}, varias)
+
+    def test_categoria_de_otra_empresa_responde_vacio(self):
+        for user in (self.user_a, self.superuser):
+            with self.subTest(user=user.username):
+                self.assertEqual(self._ok(PRODUCTOS_URL, user, categoria_producto=self.cat_b.pk), [])
+                self.assertEqual(self._ok(PRODUCTOS_URL, user, categoria_producto=999999), [])
+                self.assertEqual(
+                    self._ok(SELECTOR_PRODUCTOS_URL, user, categoria_producto=self.cat_b.pk)["results"], [],
+                )
+        self.assertEqual(self._set(PRODUCTOS_URL, self.user_b, categoria_producto=self.cat_b.pk), {self.p_b_cat.pk})
+
+    def test_ids_invalidos_son_400(self):
+        for url in (PRODUCTOS_URL, SELECTOR_PRODUCTOS_URL):
+            self._assert_400(url, "categoria_producto", IDS_INVALIDOS)
+            self._assert_400(url, "tipo_id", IDS_INVALIDOS)
+
+    def test_rango_de_precio_minimo_inclusivo_maximo_exclusivo(self):
+        diez = {self.p_activo.pk, self.p_otro.pk}
+        self.assertEqual(
+            self._set(PRODUCTOS_URL, precio_base_min="100"), {self.p_cat2.pk, self.p_caro.pk, self.p_500.pk},
+        )
+        # Un precio NULL no cae en ningún rango.
+        self.assertEqual(self._set(PRODUCTOS_URL, precio_base_max="100"), diez)
+        self.assertEqual(
+            self._set(PRODUCTOS_URL, precio_base_min="100", precio_base_max="500"), {self.p_cat2.pk, self.p_caro.pk},
+        )
+        self.assertEqual(self._set(PRODUCTOS_URL, precio_base_min="-5", precio_base_max="10.01"), diez)
+        self.assertNotIn(self.p_sin_precio.pk, self._set(PRODUCTOS_URL, precio_base_min="-1000"))
+
+    def test_precios_invalidos_son_400(self):
+        for nombre in ("precio_base_min", "precio_base_max"):
+            self._assert_400(PRODUCTOS_URL, nombre, PRECIOS_INVALIDOS)
+
+    def test_con_cod_proscai(self):
+        con = {self.p_cat2.pk, self.p_500.pk, self.p_sin_precio.pk}
+        # Vacío o sólo espacios cuenta como "sin código".
+        sin = {self.p_activo.pk, self.p_otro.pk, self.p_caro.pk}
+        for valor in ("true", "1"):
+            self.assertEqual(self._set(PRODUCTOS_URL, con_cod_proscai=valor), con)
+        for valor in ("false", "0"):
+            self.assertEqual(self._set(PRODUCTOS_URL, con_cod_proscai=valor), sin)
+        self._assert_400(PRODUCTOS_URL, "con_cod_proscai", ("si", "x"))
+
+    def test_filtros_combinados(self):
+        self.assertEqual(
+            self._set(
+                PRODUCTOS_URL, categoria_producto=self.cat_a2.pk, con_cod_proscai="true", precio_base_min="50",
+            ),
+            {self.p_cat2.pk},
+        )
+
+    def test_ordenar_por_nombre_y_linea_de_categoria(self):
+        cats = f"{self.cat_a.pk},{self.cat_a2.pk}"
+        de_a = sorted([self.p_activo.pk, self.p_sin_precio.pk])
+        de_a2 = sorted([self.p_cat2.pk, self.p_caro.pk])
+        # "Cat A" < "Cat A2"; línea "" < "INDUSTRIAL". Desempate por id en la dirección del campo.
+        for campo in ("categoria_producto__nombre", "categoria_producto__linea"):
+            with self.subTest(campo=campo):
+                asc = self._ids(self._ok(PRODUCTOS_URL, categoria_producto=cats, ordering=campo))
+                self.assertEqual(asc, de_a + de_a2)
+                desc = self._ids(self._ok(PRODUCTOS_URL, categoria_producto=cats, ordering=f"-{campo}"))
+                self.assertEqual(desc, de_a2[::-1] + de_a[::-1])
+        # ``categoria_producto`` sigue en la lista blanca (por id).
+        por_id = self._ids(self._ok(PRODUCTOS_URL, categoria_producto=cats, ordering="categoria_producto"))
+        self.assertEqual(por_id, de_a + de_a2)
+
+    def test_selector_aplica_categoria_pero_no_los_filtros_del_listado(self):
+        sin_params = self._set(SELECTOR_PRODUCTOS_URL, limit=500)
+        self.assertEqual(
+            self._set(SELECTOR_PRODUCTOS_URL, categoria_producto=self.cat_a2.pk), {self.p_cat2.pk, self.p_caro.pk},
+        )
+        self.assertEqual(
+            self._set(SELECTOR_PRODUCTOS_URL, limit=500, precio_base_min="99999", con_cod_proscai="true"), sin_params,
+        )
+        # Ni siquiera se validan: no son parámetros del selector.
+        self.assertEqual(self._get(SELECTOR_PRODUCTOS_URL, precio_base_min="abc").status_code, 200)
+
+    def test_selector_ids_ignora_categoria(self):
+        data = self._ok(
+            SELECTOR_PRODUCTOS_URL, ids=f"{self.p_activo.pk},{self.p_500.pk}", categoria_producto=self.cat_b.pk,
+        )
+        self.assertEqual(set(self._ids(data)), {self.p_activo.pk, self.p_500.pk})
+
+    def test_detalle_edicion_y_baja_ignoran_los_filtros_del_listado(self):
+        # Antes ``?q=``/``?tipo_id=`` en el detalle daban 404 (o 400) sobre un producto visible.
+        params = (
+            "q=no-coincide&tipo_id=999&categoria_producto=999&linea=EPP&es_compras=true"
+            "&precio_base_min=99999&con_cod_proscai=true"
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        url = f"{PRODUCTOS_URL}{self.p_otro.pk}/"
+        self.assertEqual(client.get(f"{url}?{params}").status_code, 200)
+        self.assertEqual(client.get(f"{url}?tipo_id=x&precio_base_min=abc").status_code, 200)
+        resp = client.patch(f"{url}?{params}", {"nombre": "Playera 2"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["nombre"], "Playera 2")
+        resp = client.delete(f"{PRODUCTOS_URL}{self.p_500.pk}/?{params}")
+        self.assertEqual(resp.status_code, 204, resp.content)
+        self.assertFalse(Producto.objects.get(pk=self.p_500.pk).activo)
+        # Un producto ajeno sigue siendo 404 con o sin filtros.
+        self.assertEqual(client.get(f"{PRODUCTOS_URL}{self.p_b.pk}/?{params}").status_code, 404)
+
+    def test_consultas_constantes_con_filtros(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        params = {
+            "limit": 50, "categoria_producto": f"{self.cat_a.pk},{self.cat_a2.pk}", "precio_base_min": "0",
+            "con_cod_proscai": "false", "ordering": "-categoria_producto__nombre", "q": "a",
+        }
+        with self.assertNumQueries(2):
+            self.assertEqual(client.get(PRODUCTOS_URL, params).status_code, 200)
+        Producto.objects.bulk_create([
+            Producto(empresa=self.empresa_a, nombre=f"Mas {i}", codigo=f"M{i:03d}", precio_base="1.00",
+                     categoria_producto=self.cat_a2)
+            for i in range(30)
+        ])
+        with self.assertNumQueries(2):
+            data = client.get(PRODUCTOS_URL, params).json()
+        self.assertGreater(data["count"], 30)
+
+
+class FiltrosServidorVariantesTests(FiltrosServidorCatalogoBase):
+    """``producto-variante/`` (EC-896): ``producto``, ``color`` y ``talla`` (también en
+    ``selector/``), ``activo`` y ``precio_base_min``/``precio_base_max`` (sólo listado)."""
+
+    def test_producto_uno_o_varios(self):
+        self.assertEqual(self._set(VARIANTES_URL, producto=self.p_activo.pk), {self.v_sin_bom.pk, self.v_azul.pk})
+        self.assertEqual(
+            self._set(VARIANTES_URL, producto=f"{self.p_activo.pk},{self.p_inactivo.pk}"),
+            {self.v_sin_bom.pk, self.v_azul.pk, self.v_de_producto_inactivo.pk},
+        )
+
+    def test_color_y_talla(self):
+        self.assertEqual(self._set(VARIANTES_URL, color=self.azul.pk), {self.v_azul.pk, self.v_sin_talla.pk})
+        todas = self._set(VARIANTES_URL)
+        self.assertEqual(self._set(VARIANTES_URL, color=f"{self.color.pk},{self.azul.pk}"), todas)
+        self.assertEqual(self._set(VARIANTES_URL, talla=self.talla_ch.pk), {self.v_azul.pk})
+        # Ninguna talla coincide con una variante sin talla.
+        self.assertNotIn(self.v_sin_talla.pk, self._set(VARIANTES_URL, talla=f"{self.talla.pk},{self.talla_ch.pk}"))
+        self.assertEqual(self._set(VARIANTES_URL, producto=self.p_activo.pk, color=self.azul.pk), {self.v_azul.pk})
+
+    def test_ids_de_otra_empresa_responden_vacio(self):
+        for user in (self.user_a, self.superuser):
+            with self.subTest(user=user.username):
+                self.assertEqual(self._ok(VARIANTES_URL, user, producto=self.p_b.pk), [])
+                self.assertEqual(self._ok(VARIANTES_URL, user, producto=999999), [])
+                self.assertEqual(self._ok(SELECTOR_VARIANTES_URL, user, producto=self.p_b.pk)["results"], [])
+        # Color y talla son catálogos globales: B sólo ve las suyas.
+        self.assertEqual(self._set(VARIANTES_URL, self.user_b, color=self.color.pk), {self.v_b.pk})
+        self.assertEqual(self._ok(VARIANTES_URL, self.user_b, color=self.azul.pk), [])
+
+    def test_ids_invalidos_son_400(self):
+        for url in (VARIANTES_URL, SELECTOR_VARIANTES_URL):
+            for nombre in ("producto", "color", "talla"):
+                self._assert_400(url, nombre, IDS_INVALIDOS)
+
+    def test_activo(self):
+        todas = self._set(VARIANTES_URL)
+        self.assertIn(self.v_inactiva.pk, todas)
+        self.assertEqual(self._set(VARIANTES_URL, activo="false"), {self.v_inactiva.pk})
+        self.assertEqual(self._set(VARIANTES_URL, activo="true"), todas - {self.v_inactiva.pk})
+        self.assertEqual(self._set(VARIANTES_URL, activo=""), todas)
+        self._assert_400(VARIANTES_URL, "activo", ("si", "x"))
+
+    def test_rango_de_precio(self):
+        diez = {
+            self.v_con_bom.pk, self.v_sin_bom.pk, self.v_bom_inactivo.pk, self.v_bom_ajeno.pk,
+            self.v_inactiva.pk, self.v_de_producto_inactivo.pk,
+        }
+        self.assertEqual(self._set(VARIANTES_URL, precio_base_min="250"), {self.v_azul.pk, self.v_sin_talla.pk})
+        self.assertEqual(self._set(VARIANTES_URL, precio_base_max="250"), diez)
+        self.assertEqual(self._set(VARIANTES_URL, precio_base_min="250", precio_base_max="600"), {self.v_azul.pk})
+        for nombre in ("precio_base_min", "precio_base_max"):
+            self._assert_400(VARIANTES_URL, nombre, PRECIOS_INVALIDOS)
+
+    def test_ordenar_por_color_y_talla(self):
+        colores = [f["color_nombre"] for f in self._ok(VARIANTES_URL, ordering="color__nombre")]
+        self.assertEqual(colores, sorted(colores))
+        tallas = [f["talla"] for f in self._ok(VARIANTES_URL, producto=self.p_activo.pk, ordering="talla__nombre")]
+        self.assertEqual(tallas, [self.talla_ch.pk, self.talla.pk])
+
+    def test_selector_aplica_producto_color_y_talla(self):
+        self.assertEqual(
+            self._set(SELECTOR_VARIANTES_URL, color=self.azul.pk), {self.v_azul.pk, self.v_sin_talla.pk},
+        )
+        self.assertEqual(
+            self._set(SELECTOR_VARIANTES_URL, producto=self.p_activo.pk, talla=self.talla_ch.pk), {self.v_azul.pk},
+        )
+        # Sigue siendo sólo de activas de productos activos.
+        self.assertEqual(self._ok(SELECTOR_VARIANTES_URL, producto=self.p_inactivo.pk)["results"], [])
+
+    def test_selector_no_aplica_activo_ni_precio(self):
+        sin_params = self._set(SELECTOR_VARIANTES_URL, limit=500)
+        self.assertNotIn(self.v_inactiva.pk, sin_params)
+        self.assertEqual(self._set(SELECTOR_VARIANTES_URL, limit=500, activo="false"), sin_params)
+        self.assertEqual(self._set(SELECTOR_VARIANTES_URL, limit=500, precio_base_min="99999"), sin_params)
+
+    def test_selector_ids_ignora_producto_color_y_talla(self):
+        data = self._ok(
+            SELECTOR_VARIANTES_URL, ids=f"{self.v_con_bom.pk},{self.v_inactiva.pk}",
+            producto=self.p_activo.pk, color=self.azul.pk, talla=self.talla_ch.pk,
+        )
+        self.assertEqual(set(self._ids(data)), {self.v_con_bom.pk, self.v_inactiva.pk})
+
+    def test_detalle_edicion_y_baja_ignoran_los_filtros_del_listado(self):
+        # Antes ``?q=``/``?con_bom=`` en el detalle daban 404 sobre una variante visible.
+        params = (
+            f"q=no-coincide&con_bom=true&producto=999&color={self.azul.pk}&talla={self.talla_ch.pk}"
+            "&activo=false&precio_base_min=99999"
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        url = f"{VARIANTES_URL}{self.v_sin_bom.pk}/"
+        self.assertEqual(client.get(f"{url}?{params}").status_code, 200)
+        self.assertEqual(client.get(f"{url}?producto=x&precio_base_min=abc").status_code, 200)
+        resp = client.patch(f"{VARIANTES_URL}{self.v_con_bom.pk}/?{params}", {"precio_base": "11.00"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["precio_base"], "11.00")
+        efimera = ProductoVariante.objects.create(
+            producto=self.p_otro, empresa=self.empresa_a, color=self.azul, sku="PL001-EFI", precio_base="1.00",
+        )
+        self.assertEqual(client.delete(f"{VARIANTES_URL}{efimera.pk}/?{params}").status_code, 204)
+        self.assertEqual(client.get(f"{VARIANTES_URL}{self.v_b.pk}/?{params}").status_code, 404)
+
+    def test_consultas_constantes_con_filtros(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        params = {
+            "limit": 50, "producto": f"{self.p_activo.pk},{self.p_otro.pk}", "color": self.azul.pk,
+            "activo": "true", "precio_base_min": "0", "ordering": "talla__nombre", "q": "0",
+        }
+        with self.assertNumQueries(2):
+            self.assertEqual(client.get(VARIANTES_URL, params).status_code, 200)
+        ProductoVariante.objects.bulk_create([
+            ProductoVariante(
+                producto=self.p_otro, empresa=self.empresa_a, color=self.azul, talla=self.talla_ch,
+                sku=f"MAS-{i}0", precio_base="1.00",
+            )
+            for i in range(30)
+        ])
+        with self.assertNumQueries(2):
+            data = client.get(VARIANTES_URL, params).json()
+        self.assertGreater(data["count"], 30)
