@@ -6594,7 +6594,7 @@ El frontend (Next.js) NO habla directamente con el lector FX. El flujo es:
   - Acepta un evento suelto (`{"data": {"idHex": …}, "type": "SIMPLE"}`), un arreglo de eventos (lote) o NDJSON. Solo guarda EPCs en hex; heartbeats y eventos de gestión se ignoran.
   - Sin token válido o lector inactivo → `401`.
   - Cada lectura queda ligada a la empresa y al lector.
-- Next.js solo consume 3 endpoints del V1 (mismo Bearer token que el resto del ERP). Todos acotados a la empresa del usuario; superusuario ve todo:
+- Next.js solo consume 3 endpoints del V1 (mismo Bearer token que el resto del ERP). Todos acotados a la empresa activa del usuario, superusuario incluido (EC-884); sin empresa activa no se ve ni se borra nada. Las lecturas sin empresa (tags ajenos de `/api/receive-scan/` sin token) no aparecen en ninguno:
   1. `GET /api/v1/wms/etiquetas-rfid/scans/` → polling (últimas 50 lecturas de la empresa + MATCH)
   2. `GET /api/v1/wms/etiquetas-rfid/scanner-stats/` → debug (solo superusuario / admin de empresa)
   3. `POST /api/v1/wms/etiquetas-rfid/scans/clear/` → borra las lecturas de la empresa (solo superusuario / admin de empresa)
@@ -6921,6 +6921,7 @@ GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
 
 - **Endpoint**: `POST /api/v1/wms/etiquetas-rfid/scans/clear/`
 - **Body**: ninguno (vacío)
+- **Alcance**: solo superusuario o admin de empresa (otro usuario → `403`). Borra las lecturas de la empresa activa, todas sus sucursales; el superusuario no borra las de otras empresas (EC-884). Sin empresa activa → `deleted: 0`.
 - **Respuesta**:
   ```json
   { "status": "success", "deleted": 42 }

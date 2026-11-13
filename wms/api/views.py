@@ -707,7 +707,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
     def scans(self, request):
         """Polling endpoint p/ Next.js: últimas 50 lecturas del FX + match automático.
 
-        Acotado a la empresa del usuario; no admin: lectores de sus sucursales.
+        Acotado a la empresa activa del usuario, superusuario incluido (EC-884,
+        ``RfidScan.objects.visibles_para``); no admin: lectores de sus sucursales.
 
         Query params (debug opcional, sin auth):
             epc (opcional): si enviamos un EPC (hex), se busca directamente y en
@@ -822,8 +823,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
     def scanner_stats(self, request):
         """Endpoint 1-clic para saber si el lector FX esta vivo SIN entrar a Vercel.
 
-        Solo superusuario o administrador de empresa. Acotado a la empresa del
-        usuario (superusuario ve todo).
+        Solo superusuario o administrador de empresa. Acotado a la empresa activa
+        del usuario, superusuario incluido (EC-884); sin empresa, todo en cero.
 
         Query params:
             epc (opcional): buscar si un EPC (ej recién impreso) existe en RfidScan.
@@ -922,10 +923,12 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         url_name="scans_clear",
     )
     def scans_clear(self, request):
-        """Purge list: borra las lecturas de la empresa del usuario.
+        """Purge list: borra las lecturas de la empresa activa del usuario.
         Respuesta: {"status": "success", "deleted": N}
 
-        Solo superusuario o administrador de empresa. Superusuario borra todo.
+        Solo superusuario o administrador de empresa. El superusuario también
+        borra sólo las de su empresa activa (EC-884); sin empresa, ``deleted: 0``.
+        Las lecturas sin empresa no se borran aquí. Un solo ``DELETE`` filtrado.
         """
         user = request.user
         if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
