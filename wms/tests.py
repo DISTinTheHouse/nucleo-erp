@@ -2028,6 +2028,50 @@ class DocumentosWmsAlcanceSuperusuarioTests(TestCase):
             with self.subTest(recurso=recurso):
                 self.assertEqual(self._ids(self.ajena["usuario"], recurso), [self.ajena[clave].pk])
 
+    def _usuario_normal(self, sucursal, codigo):
+        """Usuario de la empresa B sin ``is_admin_empresa`` ni superusuario."""
+        return Usuario.objects.create(
+            username=f"wms-normal-{codigo}@example.com",
+            email=f"wms-normal-{codigo}@example.com",
+            empresa=self.ajena["empresa"],
+            sucursal_default=sucursal,
+        )
+
+    def test_usuario_normal_ve_su_sucursal_y_no_otra_empresa(self):
+        """Sin cambios para el usuario normal: su sucursal sí, la empresa A es 404 (también en trasladar)."""
+        user = self._usuario_normal(self.ajena["sucursal"], "b")
+        api = _api_de(user)
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(user, recurso), [self.ajena[clave].pk])
+                propio = api.get(f"/api/v1/wms/{recurso}/{self.ajena[clave].pk}/")
+                self.assertEqual(propio.status_code, 200, propio.content)
+                ajeno = api.get(f"/api/v1/wms/{recurso}/{self.propia[clave].pk}/")
+                self.assertEqual(ajeno.status_code, 404, ajeno.content)
+        resp = api.post(
+            f"/api/v1/wms/pickings/{self.propia['picking'].pk}/trasladar/",
+            {"almacen": self.propia["picking"].almacen_destino_id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_usuario_normal_de_otra_sucursal_no_ve_nada(self):
+        """Dentro de su empresa sigue acotado a ``sucursales_permitidas()``: otra sucursal es 404."""
+        otra = Sucursal.objects.create(empresa=self.ajena["empresa"], codigo="SB2", nombre="Sucursal B2")
+        user = self._usuario_normal(otra, "b2")
+        api = _api_de(user)
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(user, recurso), [])
+                resp = api.get(f"/api/v1/wms/{recurso}/{self.ajena[clave].pk}/")
+                self.assertEqual(resp.status_code, 404, resp.content)
+        resp = api.post(
+            f"/api/v1/wms/pickings/{self.ajena['picking'].pk}/trasladar/",
+            {"almacen": self.ajena["picking"].almacen_destino_id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
+
 
 class DocumentosWmsLineasVarianteTests(TestCase):
     """EC-882: SKU, color y talla en los renglones de picking, packing y transferencia.
