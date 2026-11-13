@@ -2140,15 +2140,76 @@ class DocumentosWmsLineasVarianteTests(TestCase):
         self._assert_lineas(packing["packing_detalle"])
 
     def test_packing_sin_talla_de_pedido_trae_talla_id_en_null(self):
-        """``talla_id`` viaja siempre en packing: sin talla de pedido ni muestra, ``null`` (antes se omitía)."""
+        """``talla_id`` viaja siempre en packing: sin variante ni talla de pedido, ``null`` (antes se omitía)."""
         from wms.models import PickingDetalle
 
-        PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(pedido_detalle_talla=None)
+        PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(
+            pedido_detalle_talla=None, producto_variante=None
+        )
         catalogo, muestra = self._detalle("packings", self.d["packing"])["packing_detalle"]
         self.assertIn("talla_id", catalogo)
         self.assertEqual((catalogo["talla_id"], catalogo["talla_nombre"]), (None, None))
         self.assertEqual(catalogo["producto_nombre"], self.d["variante"].producto.nombre)
         self.assertEqual(muestra["talla_id"], self.d["talla_muestra"].pk)
+
+    def _campos(self, linea):
+        return {k: linea[k] for k in ("sku", "color_id", "color_nombre", "talla_id", "talla_nombre", "sku_muestra")}
+
+    def _lineas_catalogo(self):
+        """El renglón de catálogo en el detalle de picking y en el de packing."""
+        return {
+            "picking": self._detalle("pickings", self.d["picking"])["picking_detalle"][0],
+            "packing": self._detalle("packings", self.d["packing"])["packing_detalle"][0],
+        }
+
+    def test_linea_de_catalogo_sin_variante_toma_la_talla_del_pedido(self):
+        """Sin ``producto_variante`` ni muestra, ``talla_*`` sale de ``PedidoDetalleTalla.talla``;
+        ``sku`` y ``color_*`` quedan en ``null`` (antes la talla también llegaba en ``null``)."""
+        from wms.models import PickingDetalle
+
+        PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(producto_variante=None)
+        for documento, linea in self._lineas_catalogo().items():
+            with self.subTest(documento=documento):
+                self.assertEqual(
+                    self._campos(linea),
+                    {
+                        "sku": None, "color_id": None, "color_nombre": None,
+                        "talla_id": self.d["talla"].pk, "talla_nombre": self.d["talla"].nombre,
+                        "sku_muestra": None,
+                    },
+                )
+                self.assertEqual(linea["producto_nombre"], self.d["variante"].producto.nombre)
+
+    def test_pedido_editado_despues_del_picking_no_cambia_el_renglon(self):
+        """SKU, color y talla salen de la variante surtida en la línea, no de la que hoy
+        tenga la talla del pedido: reasignarla o dejarla en ``null`` no mueve el renglón."""
+        from catalogo.models import Color, ProductoVariante, Talla
+        from ventas.models import PedidoDetalleTalla
+
+        otra = ProductoVariante.objects.create(
+            producto=self.d["variante"].producto, empresa=self.d["empresa"],
+            color=Color.objects.create(nombre="VERDE L", codigo="VER", codigo_hex="#00FF00"),
+            talla=Talla.objects.create(nombre="XGL"), nombre="Otra variante", sku="CHL-VER-XG",
+            precio_base=Decimal("100"),
+        )
+        esperado = self._esperado_catalogo()
+        talla_pedido = PedidoDetalleTalla.objects.filter(pk=self.d["pk_catalogo"].pedido_detalle_talla_id)
+        for variante_del_pedido in (otra, None):
+            talla_pedido.update(variante=variante_del_pedido)
+            for documento, linea in self._lineas_catalogo().items():
+                with self.subTest(variante_del_pedido=variante_del_pedido, documento=documento):
+                    self.assertEqual(self._campos(linea), esperado)
+
+    def test_linea_con_las_dos_variantes_da_dos_skus(self):
+        """Con variante de catálogo y muestra, ``sku`` es el de catálogo (lo surtido) y
+        ``sku_muestra`` el de la muestra: pueden diferir, como dice la documentación."""
+        from wms.models import PickingDetalle
+
+        PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(variante_produccion=self.d["muestra"])
+        for documento, linea in self._lineas_catalogo().items():
+            with self.subTest(documento=documento):
+                self.assertEqual(self._campos(linea), {**self._esperado_catalogo(), "sku_muestra": self.d["muestra"].sku})
+                self.assertNotEqual(linea["sku"], linea["sku_muestra"])
 
     def test_linea_sin_variante_deja_los_campos_en_null(self):
         from wms.models import TransferenciaDetalle
