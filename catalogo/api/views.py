@@ -12,7 +12,7 @@ from catalogo.codigos import siguiente_codigo_producto
 from catalogo.tallas import talla_sort_key
 from catalogo.validaciones import talla_permitida_para_producto
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso, VarianteProductoProduccion
-from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer, ProductoVarianteSelectorSerializer
+from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoSelectorSerializer,ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer, ProductoVarianteSelectorSerializer
 from nucleo.kpis import MENSAJE_ENTERO, entero_estricto, vacio
 from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, booleano_param
 from produccion.models import ListaMaterialBom
@@ -254,7 +254,13 @@ class ProductoViewSet(viewsets.ModelViewSet):
     ]
 
     def get_queryset(self):
-        qs = _alcance_empresa(super().get_queryset().filter(activo=True).annotate(unidad_nombre=F('unidad_medida__nombre'), unidad_abreviatura=F('unidad_medida__clave')), self.request.user)
+        qs = super().get_queryset()
+        # ``selector/`` con ``?ids=`` también regresa inactivos (EC-886): lo ya
+        # elegido conserva su etiqueta. Lo demás, sólo activos, como siempre.
+        es_selector = self.action == 'selector'
+        if not (es_selector and _ids_param(self.request) is not None):
+            qs = qs.filter(activo=True)
+        qs = _alcance_empresa(qs.annotate(unidad_nombre=F('unidad_medida__nombre'), unidad_abreviatura=F('unidad_medida__clave')), self.request.user)
         # ``tipo_id`` acepta uno o varios: repetido (``?tipo_id=1&tipo_id=3``) o
         # separado por comas (``?tipo_id=1,3``). Un solo valor filtra igual que antes.
         tipo_ids = self.request.query_params.getlist('tipo_id')
@@ -278,12 +284,29 @@ class ProductoViewSet(viewsets.ModelViewSet):
             qs = qs.filter(es_compras=es_compras in ('true', '1'))
         q = (self.request.query_params.get('q') or '').strip()
         if q:
-            qs = qs.filter(
-                Q(nombre__icontains=q)
-                | Q(codigo__icontains=q)
-                | Q(cod_proscai__icontains=q)
-            )
+            filtro_q = Q(nombre__icontains=q) | Q(codigo__icontains=q) | Q(cod_proscai__icontains=q)
+            if es_selector:
+                # Sólo en el selector (EC-886): el paso 1 del BOM también busca por
+                # descripción. El ``q`` del listado no cambia.
+                filtro_q |= Q(descripcion__icontains=q)
+            qs = qs.filter(filtro_q)
         return qs.order_by("-created_at", "-id")
+
+    @action(detail=False, methods=['get'])
+    def selector(self, request):
+        """Productos para selectores (EC-886), siempre paginado (``?limit``/``?offset``,
+        50 por defecto, tope 500). Mismo alcance, filtros (``tipo_id``, ``linea``,
+        ``es_compras``) y ``?ordering=`` que el listado; ``q`` busca además en
+        ``descripcion``. Publica ``id, nombre, codigo, descripcion, activo, unidad_id,
+        unidad_nombre, unidad_abreviatura, tipo, categoria_producto``.
+
+        Sólo productos activos, salvo con ``?ids=1,2``: entonces regresa esos (activos
+        o no, siempre de la empresa del usuario)."""
+        ids = _ids_param(request)
+        qs = self.filter_queryset(self.get_queryset())
+        if ids is not None:
+            qs = qs.filter(pk__in=ids)
+        return _respuesta_selector(self, qs, ProductoSelectorSerializer)
 
     def perform_destroy(self, instance):
         # Baja lógica (#531): el DELETE físico arrastraba en cascada compras,

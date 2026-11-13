@@ -117,6 +117,23 @@ class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerial
             )
         return attrs
 
+class ProductoSelectorSerializer(serializers.ModelSerializer):
+    """Fila de ``producto/selector/`` (EC-886): lo que leen los selectores. ``tipo`` y
+    ``categoria_producto`` son ids, como en ``ProductoSerializer``; ``unidad_*`` con
+    la misma forma (las anota ``ProductoViewSet.get_queryset``)."""
+    unidad_id = serializers.IntegerField(source='unidad_medida_id', read_only=True, allow_null=True)
+    unidad_nombre = serializers.CharField(read_only=True, allow_null=True, default=None)
+    unidad_abreviatura = serializers.CharField(read_only=True, allow_null=True, default=None)
+
+    class Meta:
+        model = Producto
+        fields = [
+            'id', 'nombre', 'codigo', 'descripcion', 'activo', 'unidad_id', 'unidad_nombre',
+            'unidad_abreviatura', 'tipo', 'categoria_producto',
+        ]
+        read_only_fields = fields
+
+
 class ProductoOnboardingSerializer(serializers.ModelSerializer):
     """Alta simplificada de Producto para producción: nombre + tipo + categoria + precio, sin descripcion."""
     tipo = serializers.PrimaryKeyRelatedField(
