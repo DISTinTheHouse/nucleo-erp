@@ -461,8 +461,9 @@ class PickingTrasladoSerializer(serializers.Serializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Un almacén de otra empresa responde igual que uno inexistente (no revela IDs).
+        # Superusuario incluido: se acota a su empresa activa (EC-798, #1154).
         user = getattr(self.context.get("request"), "user", None)
-        if user is not None and not getattr(user, "is_superuser", False):
+        if user is not None:
             empresa_id = getattr(user, "empresa_id", None)
             self.fields["almacen"].queryset = Almacen.objects.filter(empresa_id=empresa_id)
 
@@ -493,12 +494,21 @@ class PickingCreateSerializer(serializers.ModelSerializer):
         super().__init__(*args, **kwargs)
         # Mismo criterio que ``PickingTrasladoSerializer``: un id de otra empresa
         # responde igual que uno inexistente (#740).
+        # Superusuario incluido: se acota a su empresa activa (EC-798, #1154).
         user = getattr(self.context.get("request"), "user", None)
-        if user is not None and not getattr(user, "is_superuser", False):
+        if user is not None:
             empresa_id = getattr(user, "empresa_id", None)
             for campo in ("pedido", "operador", "almacen", "almacen_destino"):
                 qs = self.fields[campo].queryset
                 self.fields[campo].queryset = qs.filter(empresa_id=empresa_id)
+            # Oleada, zona y lote no tienen ``empresa``: se llega por su dueño.
+            for campo, ruta in (
+                ("zona_almacen", "almacen__empresa_id"),
+                ("lote", "almacen__empresa_id"),
+                ("oleada", "usuario__empresa_id"),
+            ):
+                qs = self.fields[campo].queryset
+                self.fields[campo].queryset = qs.filter(**{ruta: empresa_id})
 
     class Meta:
         model = Picking

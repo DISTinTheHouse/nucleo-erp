@@ -347,13 +347,12 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
             .order_by("-packing__created_at", "-id")
         )
 
-        if getattr(user, "is_superuser", False):
-            return qs
+        # Superusuario incluido: solo su empresa activa (EC-798, #1148).
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
         qs = qs.filter(packing__empresa=empresa)
-        if getattr(user, "is_admin_empresa", False):
+        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(packing__sucursal_id__in=user.sucursales_permitidas())
 
@@ -405,13 +404,12 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             .order_by("-created_at", "-id")
         )
 
-        if getattr(user, "is_superuser", False):
-            return qs
+        # Superusuario incluido: solo su empresa activa (EC-798, #1148).
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
         qs = qs.filter(empresa=empresa)
-        if getattr(user, "is_admin_empresa", False):
+        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(sucursal_id__in=user.sucursales_permitidas())
 
