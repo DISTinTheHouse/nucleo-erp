@@ -637,15 +637,19 @@ def crear_resurtido(user, sucursal, lineas, fecha_compromiso_, notas=""):
     """Resurtido de planeación (sin pedido): un documento con muchos SKUs de una
     sucursal. ``lineas`` = ``[(ProductoVariante, cantidad, tipo_linea)]``. Nace
     en Pendiente de aceptar; avisa a producción."""
-    productos = {pv.producto_id for pv, _, _ in lineas}
+    productos = {getattr(it, "producto_id", None) or it.pk for it, _, _ in lineas}
     pre = PreOrdenProduccion.objects.create(
         empresa_id=sucursal.empresa_id, sucursal=sucursal, origen=PreOrdenProduccion.Origen.RESURTIDO,
         producto_id=productos.pop() if len(productos) == 1 else None, usuario_crea=user if getattr(user, "pk", None) else None,
         fecha_compromiso=fecha_compromiso_, notas=notas or "", estatus=E.PENDIENTE_ACEPTAR, estatus_desde=timezone.now(),
     )
+    from catalogo.models import ProductoVariante
     PreOrdenProduccionDetalle.objects.bulk_create([
-        PreOrdenProduccionDetalle(pre_orden=pre, producto_variante=pv, cantidad=cant, tipo_linea=tipo)
-        for pv, cant, tipo in lineas
+        PreOrdenProduccionDetalle(
+            pre_orden=pre, cantidad=cant, tipo_linea=tipo,
+            **({"producto_variante": it} if isinstance(it, ProductoVariante) else {"producto": it}),
+        )
+        for it, cant, tipo in lineas
     ], batch_size=500)
     fab = sum(1 for _, _, t in lineas if t == "fabricado")
     evento(pre, EV.CREADA, user, f"Resurtido: {len(lineas)} SKU(s) ({fab} fabricado(s), {len(lineas) - fab} de compra), "
@@ -661,11 +665,15 @@ def aceptar(pre_id, user):
     pre = PreOrdenProduccion.objects.select_for_update(of=("self",)).select_related("empresa", "producto").get(pk=pre_id)
     if pre.estatus != E.PENDIENTE_ACEPTAR:
         raise ValidationError({"estatus": f"Solo se acepta una pre-orden Pendiente de aceptar (está {pre.get_estatus_display().lower()})."})
-    detalles = list(pre.detalles.select_related("producto_variante__producto"))
+    detalles = list(pre.detalles.select_related("producto_variante__producto", "producto"))
     compra = [d for d in detalles if d.tipo_linea == "compra"]
+
+    def prod(d):
+        return d.producto_variante.producto if d.producto_variante_id else d.producto
+
     N.objects.bulk_create([
-        N(empresa_id=pre.empresa_id, sucursal_id=pre.sucursal_id, producto_id=d.producto_variante.producto_id,
-          producto_variante_id=d.producto_variante_id, unidad_id=d.producto_variante.producto.unidad_medida_id,
+        N(empresa_id=pre.empresa_id, sucursal_id=pre.sucursal_id, producto_id=prod(d).pk,
+          producto_variante_id=d.producto_variante_id, unidad_id=prod(d).unidad_medida_id,
           cantidad=d.cantidad, pre_orden=pre, pre_orden_detalle=d, fecha_requerida=compromiso(pre))
         for d in compra
     ], batch_size=500)
@@ -718,7 +726,7 @@ def clasificar_variantes(empresa_id, variantes):
         p = v.producto
         if v.pk in con_bom:
             out[v.pk] = "fabricado"
-        elif p.es_compras or (p.tipo_id and p.tipo.codigo.upper() in ("MP", "COMPRAS")):
+        elif es_comprable(p):
             out[v.pk] = "compra"
         else:
             out[v.pk] = None
@@ -773,4 +781,61 @@ def disponibilidad(empresa_id, sucursal_id, variante_ids):
     for vid in ids:
         e, f, c, m = existencia.get(vid, CERO), por_fabricar.get(vid, CERO), por_comprar[vid], comprometido[vid]
         out[vid] = {"existencia": e, "por_fabricar": f, "por_comprar": c, "comprometido": m, "disponible": e + f + c - m}
+    return out
+
+
+def es_comprable(producto):
+    """De compra: marcado ``es_compras`` o tipo MP / COMPRAS. Un PT sin BOM no
+    se compra salvo que esté marcado ``es_compras``."""
+    return bool(producto.es_compras or (producto.tipo_id and producto.tipo.codigo.upper() in ("MP", "COMPRAS")))
+
+
+def disponibilidad_productos(empresa_id, sucursal_id, producto_ids):
+    """Como ``disponibilidad`` pero por producto (todas sus variantes y las
+    filas sin variante). 5 consultas sin importar cuántos productos."""
+    from django.db.models.functions import Coalesce as C
+    from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+    from produccion.models import OrdenProduccionDetalle
+    from ventas.models import Pedido
+    ids = list(producto_ids)
+    num = models.DecimalField(max_digits=18, decimal_places=4)
+
+    def suma(qs, campo_var, campo_prod, campo_cant):
+        filas = (qs.annotate(pid=C(campo_var, campo_prod)).filter(pid__in=ids).order_by()
+                 .values("pid").annotate(t=Sum(campo_cant)).values_list("pid", "t"))
+        return {k: Decimal(str(v or 0)) for k, v in filas}
+
+    existencia = suma(Existencia.objects.filter(almacen__sucursal_id=sucursal_id, almacen__empresa_id=empresa_id),
+                      "producto_variante__producto_id", "producto_id", "cantidad")
+    por_fabricar = suma(OrdenProduccionDetalle.objects.filter(
+        activo=True, op__empresa_id=empresa_id, op__sucursal_id=sucursal_id, op__estatus_op__in=[1, 2, 3, 4, 6],
+        producto_variante__producto_id__in=ids,
+    ), "producto_variante__producto_id", "producto_variante__producto_id", "cantidad")
+    recibido = Coalesce(Subquery(
+        RecepcionDetalle.objects.filter(orden_compra_detalle_id=OuterRef("pk"), recepcion__activo=True)
+        .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        .order_by().values("orden_compra_detalle_id").annotate(t=Sum("cantidad_recibida")).values("t")[:1],
+        output_field=num), Decimal("0"), output_field=num)
+    EC = OrdenCompra.EstatusOrdenCompra
+    por_comprar = defaultdict(lambda: CERO)
+    for pid, cant, rec in OrdenCompraDetalle.objects.filter(
+        producto_id__in=ids, orden_compra__empresa_id=empresa_id, orden_compra__sucursal_id=sucursal_id,
+        orden_compra__activo=True, orden_compra__estatus__in=[EC.AUTORIZADA, EC.PARCIALMENTE_RECIBIDA],
+    ).annotate(rec=recibido).values_list("producto_id", "cantidad", "rec"):
+        por_comprar[pid] += max(Decimal(str(cant)) - Decimal(str(rec or 0)), CERO)
+    comprometido = defaultdict(lambda: CERO)
+    for k, v in suma(PedidoDetalleTalla.objects.filter(
+        pedido_detalle__pedido__empresa_id=empresa_id, pedido_detalle__pedido__sucursal_id=sucursal_id,
+        pedido_detalle__pedido__estatus__in=[Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO],
+    ), "variante__producto_id", "pedido_detalle__producto_id", "cantidad").items():
+        comprometido[k] += v
+    for k, v in suma(PreOrdenProduccionDetalle.objects.filter(
+        pre_orden__empresa_id=empresa_id, pre_orden__sucursal_id=sucursal_id,
+        pre_orden__origen=PreOrdenProduccion.Origen.RESURTIDO, pre_orden__estatus__in=CANCELABLES,
+    ), "producto_variante__producto_id", "producto_id", "cantidad").items():
+        comprometido[k] += v
+    out = {}
+    for pid in ids:
+        e, f, c, m = existencia.get(pid, CERO), por_fabricar.get(pid, CERO), por_comprar[pid], comprometido[pid]
+        out[pid] = {"existencia": e, "por_fabricar": f, "por_comprar": c, "comprometido": m, "disponible": e + f + c - m}
     return out

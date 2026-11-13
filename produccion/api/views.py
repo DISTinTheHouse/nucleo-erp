@@ -3235,7 +3235,8 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             qs = qs.prefetch_related(
                 Prefetch("detalles", queryset=PreOrdenProduccionDetalle.objects.select_related(
                     "variante_produccion__talla", "variante_produccion__color",
-                    "producto_variante__talla", "producto_variante__color").order_by("id")),
+                    "producto_variante__talla", "producto_variante__color", "producto_variante__producto__unidad_medida",
+                    "producto__unidad_medida").order_by("id")),
                 Prefetch("detalles__necesidades", queryset=NecesidadCompra.objects.select_related("orden_compra").order_by("id")),
                 Prefetch("necesidades", queryset=NecesidadCompra.objects.select_related(
                     "producto", "unidad", "pedido", "orden_compra").order_by("fecha_requerida", "id")),
@@ -3343,10 +3344,11 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         return Response({**respuesta.data, "pre_orden": pre.pk, "estatus": pre.estatus}, status=status.HTTP_201_CREATED)
 
     def _resolver_variantes(self, empresa, lineas_in):
-        """Cada renglón trae ``variante`` (id) o ``sku``. Devuelve
-        ``(variantes_por_renglon, errores)``; 2 consultas para toda la lista."""
-        from catalogo.models import ProductoVariante
-        ids, skus = set(), set()
+        """Cada renglón trae ``variante`` (id), ``sku`` o ``producto`` (id, para
+        productos sin variante). Devuelve ``(items_por_renglon, errores)`` con
+        ``ProductoVariante`` o ``Producto``; 3 consultas para toda la lista."""
+        from catalogo.models import Producto, ProductoVariante
+        ids, skus, prods = set(), set(), set()
         for t in lineas_in:
             if not isinstance(t, dict):
                 continue
@@ -3354,12 +3356,20 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 ids.add(int(t["variante"]))
             elif t.get("sku"):
                 skus.add(str(t["sku"]).strip())
-        base = ProductoVariante.objects.filter(empresa=empresa, activo=True).select_related("producto__tipo")
+            elif str(t.get("producto") or "").isdigit():
+                prods.add(int(t["producto"]))
+        base = ProductoVariante.objects.filter(empresa=empresa, activo=True).select_related("producto__tipo", "producto__unidad_medida")
         por_id = {v.pk: v for v in base.filter(pk__in=ids)} if ids else {}
         por_sku = defaultdict(list)
         if skus:
             for v in base.filter(sku__in=skus):
                 por_sku[v.sku].append(v)
+        por_prod = {}
+        if prods:
+            por_prod = {
+                p.pk: p for p in Producto.objects.filter(pk__in=prods, empresa=empresa, activo=True)
+                .select_related("tipo", "unidad_medida").annotate(n_var=Count("variantes", filter=Q(variantes__activo=True)))
+            }
         out, errs = [], [{} for _ in lineas_in]
         for i, t in enumerate(lineas_in):
             v = None
@@ -3375,10 +3385,68 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                     v = encontradas[0]
                 else:
                     errs[i]["sku"] = "SKU no encontrado." if not encontradas else "SKU repetido en el catálogo; usa la variante."
+            elif str(t.get("producto") or "").isdigit():
+                v = por_prod.get(int(t["producto"]))
+                if v is None:
+                    errs[i]["producto"] = "Producto no encontrado."
             else:
-                errs[i]["variante"] = "Indica variante o sku."
+                errs[i]["variante"] = "Indica variante, sku o producto."
             out.append(v)
         return out, errs
+
+    @action(detail=False, methods=["get"], url_path="catalogo-resurtido")
+    def catalogo_resurtido(self, request):
+        """Buscador paginado para el alta de resurtido: ``?q=`` (nombre, código,
+        clave Proscai o SKU), ``?tipo=MP,PT,COMPRAS``, ``?limit=`` (50, tope 200)
+        y ``?offset=``. Un renglón por producto con sus variantes activas y el
+        ``tipo_linea`` de cada una (``fabricado``/``compra``/``null``). 4 consultas."""
+        from catalogo.models import Producto, ProductoVariante
+        from produccion.services.pre_orden_service import clasificar_variantes, es_comprable
+        empresa = getattr(request.user, "empresa", None)
+        if empresa is None:
+            return Response({"count": 0, "results": []})
+        p = request.query_params
+        qs = Producto.objects.filter(empresa=empresa, activo=True)
+        tipos = [t.strip().upper() for t in (p.get("tipo") or "").split(",") if t.strip()]
+        if tipos:
+            qs = qs.filter(tipo__codigo__in=tipos)
+        q = (p.get("q") or "").strip()
+        if q:
+            qs = qs.filter(
+                Q(nombre__icontains=q) | Q(codigo__icontains=q) | Q(cod_proscai__icontains=q)
+                | Exists(ProductoVariante.objects.filter(producto_id=OuterRef("pk"), activo=True, sku__icontains=q))
+            )
+        try:
+            limit = min(max(int(p.get("limit", 50)), 1), 200)
+            offset = max(int(p.get("offset", 0)), 0)
+        except ValueError:
+            raise ValidationError({"limit": "limit/offset deben ser enteros."})
+        total = qs.count()
+        pagina = list(
+            qs.select_related("tipo", "unidad_medida").order_by("nombre", "pk")[offset:offset + limit]
+            .prefetch_related(Prefetch("variantes", queryset=ProductoVariante.objects.filter(activo=True)
+                                       .select_related("talla", "color").order_by("sku"), to_attr="vars_activas"))
+        )
+        variantes = [v for pr in pagina for v in pr.vars_activas]
+        for v in variantes:
+            v.producto = next(pr for pr in pagina if pr.pk == v.producto_id)
+        tipo_var = clasificar_variantes(empresa.pk, variantes)
+        resultados = []
+        for pr in pagina:
+            u = pr.unidad_medida
+            resultados.append({
+                "producto": pr.pk, "nombre": pr.nombre, "codigo": pr.cod_proscai or pr.codigo or "",
+                "tipo": pr.tipo.codigo if pr.tipo_id else None,
+                "unidad": u.clave if u else None, "unidad_id": pr.unidad_medida_id,
+                # Pedir el producto sin variante: solo si es de compra.
+                "tipo_linea": "compra" if es_comprable(pr) else None,
+                "variantes": [
+                    {"id": v.pk, "sku": v.sku, "nombre": v.nombre, "talla": v.talla.nombre if v.talla_id else None,
+                     "color": v.color.nombre if v.color_id else None, "tipo_linea": tipo_var.get(v.pk)}
+                    for v in pr.vars_activas
+                ],
+            })
+        return Response({"count": total, "results": resultados})
 
     def create(self, request, *args, **kwargs):
         """Alta de resurtido de planeación (sin pedido), muchos SKUs de una sucursal:
@@ -3387,7 +3455,8 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         si no, error en su renglón. Nace en Pendiente de aceptar. Requiere ``C-PRODUCCION-OP``."""
         from datetime import date
         from nucleo.models import Sucursal
-        from produccion.services.pre_orden_service import clasificar_variantes, crear_resurtido
+        from catalogo.models import ProductoVariante
+        from produccion.services.pre_orden_service import clasificar_variantes, crear_resurtido, es_comprable
         user = request.user
         empresa = getattr(user, "empresa", None)
         if empresa is None:
@@ -3414,7 +3483,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         if errores:
             raise ValidationError(errores)
         variantes, errs = self._resolver_variantes(empresa, lineas_in)
-        tipos = clasificar_variantes(empresa.pk, [v for v in variantes if v is not None])
+        tipos = clasificar_variantes(empresa.pk, [v for v in variantes if isinstance(v, ProductoVariante)])
         vistos, lineas = {}, []
         for i, (t, v) in enumerate(zip(lineas_in, variantes)):
             try:
@@ -3423,14 +3492,30 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 cant = None
             if cant is None or cant <= 0:
                 errs[i]["cantidad"] = "La cantidad debe ser mayor a 0."
+            tipo = None
+            if isinstance(v, ProductoVariante):
+                llave, campo, nombre = ("v", v.pk), "variante", v.sku
+                tipo = tipos.get(v.pk)
+                if tipo is None:
+                    errs[i][campo] = f"{nombre}: no tiene BOM y no es de compra."
+            elif v is not None:  # producto sin variante
+                llave, campo, nombre = ("p", v.pk), "producto", v.nombre
+                if v.n_var and not es_comprable(v):
+                    errs[i][campo] = f"{nombre} tiene variantes: elige la variante (talla/color)."
+                elif es_comprable(v):
+                    tipo = "compra"
+                else:
+                    errs[i][campo] = f"{nombre}: no tiene BOM y no es de compra."
             if v is not None:
-                if v.pk in vistos:
-                    errs[i]["variante"] = f"SKU repetido (renglón {vistos[v.pk] + 1})."
-                elif tipos.get(v.pk) is None:
-                    errs[i]["variante"] = f"{v.sku}: no tiene BOM y no es de compra."
-                vistos.setdefault(v.pk, i)
+                if llave in vistos:
+                    errs[i][campo] = f"Renglón repetido (renglón {vistos[llave] + 1})."
+                vistos.setdefault(llave, i)
+                if tipo == "fabricado" and cant is not None and cant != cant.to_integral_value():
+                    errs[i]["cantidad"] = "Las piezas a fabricar van en enteros."
+                if cant is not None and cant.as_tuple().exponent < -4:
+                    errs[i]["cantidad"] = "Máximo 4 decimales."
             if not errs[i]:
-                lineas.append((v, cant, tipos[v.pk]))
+                lineas.append((v, cant, tipo))
         if any(errs):
             raise ValidationError({"lineas": errs})
         pre = crear_resurtido(user, sucursal, lineas, fecha, d.get("notas") or "")
@@ -3465,12 +3550,27 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             ids = [int(x) for x in (request.data.get("variantes") or [])]
         except (TypeError, ValueError):
             raise ValidationError({"variantes": "Lista de ids de variantes."})
-        validas = dict(ProductoVariante.objects.filter(pk__in=ids, empresa=empresa).values_list("pk", "sku"))
-        datos = disponibilidad(empresa.pk, int(suc), [i for i in ids if i in validas])
-        return Response([
-            {"variante": vid, "sku": validas[vid], **{k: float(v) for k, v in datos[vid].items()}}
+        try:
+            pids = [int(x) for x in (request.data.get("productos") or [])]
+        except (TypeError, ValueError):
+            raise ValidationError({"productos": "Lista de ids de productos."})
+        from catalogo.models import Producto
+        from produccion.services.pre_orden_service import disponibilidad_productos
+        validas = dict(ProductoVariante.objects.filter(pk__in=ids, empresa=empresa).values_list("pk", "sku")) if ids else {}
+        datos = disponibilidad(empresa.pk, int(suc), [i for i in ids if i in validas]) if validas else {}
+        filas = [
+            {"variante": vid, "producto": None, "sku": validas[vid], **{k: float(v) for k, v in datos[vid].items()}}
             for vid in ids if vid in validas
-        ])
+        ]
+        if pids:
+            prods = {pk: (cod or cod2 or "") for pk, cod, cod2 in Producto.objects.filter(pk__in=pids, empresa=empresa)
+                     .values_list("pk", "cod_proscai", "codigo")}
+            dp = disponibilidad_productos(empresa.pk, int(suc), list(prods))
+            filas += [
+                {"variante": None, "producto": pid, "sku": prods[pid], **{k: float(v) for k, v in dp[pid].items()}}
+                for pid in pids if pid in prods
+            ]
+        return Response(filas)
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):

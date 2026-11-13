@@ -265,9 +265,12 @@ class PreOrdenProduccionDetalle(models.Model):
     variante_produccion = models.ForeignKey(VarianteProductoProduccion, on_delete=models.PROTECT, related_name="+", null=True, blank=True)
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, related_name="+", null=True, blank=True)
     producto_variante = models.ForeignKey('catalogo.ProductoVariante', on_delete=models.PROTECT, related_name="+", null=True, blank=True)
+    # Resurtido de un producto sin variante (MP, compras o PT sin variante): siempre de compra.
+    producto = models.ForeignKey('catalogo.Producto', on_delete=models.PROTECT, related_name="+", null=True, blank=True)
     # Resurtido: ``fabricado`` (tiene BOM, va a OP) o ``compra`` (necesidad de compra directa del SKU).
     tipo_linea = models.CharField(max_length=10, default="fabricado", choices=[("fabricado", "Fabricado"), ("compra", "De compra")])
-    cantidad = models.DecimalField(max_digits=12, decimal_places=2)
+    # 4 decimales: la MP de compra va en metros/kilos (los fabricados, en piezas enteras).
+    cantidad = models.DecimalField(max_digits=14, decimal_places=4)
 
     class Meta:
         db_table = "pre_ordenes_produccion_detalles"
