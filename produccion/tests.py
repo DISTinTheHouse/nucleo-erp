@@ -8647,9 +8647,10 @@ class ConsultasDetalleYListadoOpEC880Tests(_OpRealEC880Base):
     """El detalle de la OP (onboarding/?op_id=) no crece en consultas con el
     número de pedidos, renglones o consumos, y el listado de OP no cambia."""
 
-    #: Consultas del detalle: 1 de alcance (``exists``) + OP con sus FK de
-    #: encabezado + renglones + BOM + consumos + pedidos ligados.
-    CONSULTAS_DETALLE = 7
+    #: Consultas del detalle: OP con sus FK de encabezado (el alcance va en la
+    #: misma consulta; antes era un ``exists`` aparte) + renglones + BOM +
+    #: consumos + sus renglones + pedidos ligados.
+    CONSULTAS_DETALLE = 6
     #: Listado: OPs + ``op_pedidos`` precargados (sin cambios en EC-880).
     CONSULTAS_LISTADO = 2
 

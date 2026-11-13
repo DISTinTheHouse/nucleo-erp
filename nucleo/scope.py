@@ -12,6 +12,8 @@ documentadas, p. ej. producción #361). Producción y WMS, donde el superusuario
 también se acota a la empresa activa, comparten ``visibles_en_empresa_activa``.
 """
 
+from django.db.models import Q
+
 
 def empresas_activas():
     """Empresas a las que se puede cambiar: las activas. Un solo criterio para lo
@@ -58,4 +60,22 @@ def visibles_en_empresa_activa(qs, user):
     qs = qs.filter(empresa_id__in=empresa_ids)
     if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
         return qs
-    return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+    return qs.filter(sucursales_permitidas_q(user))
+
+
+def sucursales_permitidas_q(user, campo="sucursal_id"):
+    """``Q`` equivalente a ``campo__in=user.sucursales_permitidas()`` sin consultar.
+
+    Mismo conjunto (M2M ``sucursales`` + ``sucursal_default``), pero como
+    subconsulta dentro de la consulta del llamador: evaluar
+    ``sucursales_permitidas()`` costaba un viaje a la BD aparte en cada petición
+    de un usuario que no es superusuario ni admin. Sin M2M ni sucursal por
+    defecto no coincide nada, igual que el ``__in`` de un conjunto vacío.
+    """
+    from usuarios.models import Usuario
+
+    m2m = Usuario.sucursales.through.objects.filter(usuario_id=user.pk).values("sucursal_id")
+    q = Q(**{f"{campo}__in": m2m})
+    if getattr(user, "sucursal_default_id", None):
+        q |= Q(**{campo: user.sucursal_default_id})
+    return q

@@ -213,7 +213,7 @@ class PermisosEfectivosEquivalenciaTests(BusquedaGlobalBaseTestCase):
 
     def _assert_equivalente(self, user, nota=""):
         # El resolutor se construye UNA vez y se consulta muchas: es justo lo que
-        # el módulo predica, y evita rehacer las 2 consultas por cada clave.
+        # el módulo predica, y evita rehacer la consulta por cada clave.
         permisos = permisos_efectivos(user)
         for clave in self.CLAVES:
             with self.subTest(usuario=user.username, clave=clave, caso=nota):
@@ -350,10 +350,10 @@ class PermisosEfectivosEquivalenciaTests(BusquedaGlobalBaseTestCase):
             with self.subTest(caso=nota), self.assertNumQueries(0):
                 permisos_efectivos(user)
 
-    def test_resolver_gasta_dos_consultas_pase_lo_que_pase(self):
+    def test_resolver_gasta_una_consulta_pase_lo_que_pase(self):
         """Coste constante: no depende de cuántas claves se consulten después."""
         user = self._usuario("coste", ["R-CRM-PEDIDOS"])
-        with self.assertNumQueries(2):
+        with self.assertNumQueries(1):
             permisos = permisos_efectivos(user)
         # Consultar las 16 claves no dispara ni una consulta más.
         with self.assertNumQueries(0):
@@ -364,7 +364,7 @@ class PermisosEfectivosEquivalenciaTests(BusquedaGlobalBaseTestCase):
         """Ancla el coste de la PETICIÓN, que es la métrica que motivó el cambio.
 
         Sin esto, mover ``permisos_efectivos()`` dentro del bucle del ``REGISTRO``
-        volvería a cobrar 2 consultas por entidad y las pruebas seguirían verdes:
+        volvería a cobrar la consulta por entidad y las pruebas seguirían verdes:
         la otra medición sólo cubre la función en aislamiento, nunca la vista.
 
         El usuario que ve UN grupo y el que ve TRES pagan los mismos permisos; lo
@@ -2543,3 +2543,46 @@ class MisEmpresasOrdenTests(TestCase):
         ids = [e["id"] for e in client.get("/api/v1/nucleo/mis-empresas/").data]
         esperados = [e.pk for e in sorted((a2, a1, m, z), key=lambda e: (e.razon_social, e.pk))]
         self.assertEqual([i for i in ids if i in set(esperados)], esperados)
+
+
+class SucursalesPermitidasQTests(TestCase):
+    """``nucleo.scope.sucursales_permitidas_q``: mismo conjunto que
+    ``Usuario.sucursales_permitidas()`` (M2M + ``sucursal_default``), pero como
+    subconsulta dentro de la consulta del llamador, sin viaje aparte a la BD."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-sq", razon_social="acme-sq SA")
+        cls.s1, cls.s2, cls.s3 = (
+            Sucursal.objects.create(empresa=cls.empresa, codigo=f"S{i}", nombre=f"S{i}") for i in (1, 2, 3)
+        )
+
+    def _usuario(self, nombre, m2m=(), default=None):
+        u = Usuario.objects.create(
+            username=nombre, email=f"{nombre}@acme-sq.test", empresa=self.empresa, sucursal_default=default,
+        )
+        u.sucursales.set(m2m)
+        return u
+
+    def test_mismo_conjunto_que_sucursales_permitidas(self):
+        from nucleo.scope import sucursales_permitidas_q
+
+        casos = (
+            self._usuario("m2m", m2m=[self.s1]),
+            self._usuario("default", default=self.s2),
+            self._usuario("ambas", m2m=[self.s1], default=self.s2),
+            self._usuario("ninguna"),
+        )
+        for u in casos:
+            with self.subTest(usuario=u.username):
+                q = Sucursal.objects.filter(empresa=self.empresa).filter(sucursales_permitidas_q(u, "pk"))
+                self.assertEqual(set(q.values_list("pk", flat=True)), u.sucursales_permitidas())
+
+    def test_no_consulta_hasta_evaluar_el_queryset(self):
+        from nucleo.scope import sucursales_permitidas_q
+
+        u = self._usuario("perezoso", m2m=[self.s1, self.s3])
+        with self.assertNumQueries(0):
+            qs = Sucursal.objects.filter(sucursales_permitidas_q(u, "pk"))
+        with self.assertNumQueries(1):
+            self.assertEqual(set(qs.values_list("pk", flat=True)), {self.s1.pk, self.s3.pk})

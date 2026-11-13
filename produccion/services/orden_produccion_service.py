@@ -333,12 +333,14 @@ class OrdenProduccionService:
         }
     
     @staticmethod
-    def get_formatted_op_detalle(op_id, request=None):
+    def get_formatted_op_detalle(op_id, request=None, base=None):
         # Consultas fijas, sin importar renglones, consumos ni pedidos (EC-880):
         # OP con sus FK de encabezado (las etiquetas y ``pedido_vinculado`` del
         # serializer) + renglones activos con sus FK + insumos del BOM +
         # consumos + sus renglones + pedidos ligados con su cliente.
-        op = OrdenProduccion.objects.filter(pk=op_id).select_related(
+        # ``base``: queryset ya acotado (alcance del usuario); ``None`` si la OP
+        # no está en él, en la misma consulta que la lee.
+        op = (OrdenProduccion.objects if base is None else base).filter(pk=op_id).select_related(
             'empresa', 'sucursal', 'pedido__cliente', 'usuario_asignado',
         ).prefetch_related(
             # Sólo renglones activos (EC-880), como el listado y los KPIs.
