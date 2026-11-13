@@ -2,23 +2,35 @@ from django.db.models import F
 from django.db import IntegrityError, transaction
 from django.db.models import Exists, OuterRef, Q, Subquery
 from django.db.models.functions import Lower
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
+from rest_framework.filters import OrderingFilter
 from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from catalogo.codigos import siguiente_codigo_producto
 from catalogo.tallas import talla_sort_key
 from catalogo.validaciones import talla_permitida_para_producto
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso, VarianteProductoProduccion
-from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer
-from nucleo.listados import booleano_param
+from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoSelectorSerializer,ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer, ProductoVarianteSelectorSerializer
+from nucleo.kpis import MENSAJE_ENTERO, entero_estricto, vacio
+from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset, booleano_param
 from produccion.models import ListaMaterialBom
 
 # Solo Producto Terminado exige talla en el onboarding de variante; materia
 # prima, compras, etc. no tienen tallas. Se resuelve por ``TipoProducto.codigo``
 # (único), no por id: el id depende del entorno (#910).
 CODIGO_PRODUCTO_TERMINADO = "PT"
+
+# Productos y variantes (EC-886): ``?ordering=`` con lista blanca y ``id`` como
+# desempate (``OrdenamientoEstableFilter``). Sin lista blanca, ``OrderingFilter``
+# aceptaba cualquier campo del serializer y sin desempate.
+FILTROS_CON_ORDEN_ESTABLE = [
+    *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
+    OrdenamientoEstableFilter,
+]
 
 # ``?linea=SIN_LINEA`` pide la línea vacía: materia prima (TELAS, AVIOS) (#923).
 SIN_LINEA = "SIN_LINEA"
@@ -32,6 +44,86 @@ def _alcance_empresa(qs, user):
     if empresa:
         return qs.filter(empresa=empresa)
     return qs.none()
+
+
+class PaginacionOpcionalCatalogo(PaginacionOpcionalLimitOffset):
+    """``PaginacionOpcionalLimitOffset`` con el schema real de ``producto/`` y
+    ``producto-variante/`` (EC-886): sin ``?limit=`` regresan el arreglo plano de
+    siempre; con él, ``{count, next, previous, results}``. drf-spectacular
+    documentaba sólo el sobre."""
+
+    def get_paginated_response_schema(self, schema):
+        return {
+            "oneOf": [schema, super().get_paginated_response_schema(schema)],
+            "description": "Arreglo plano sin ``limit``; sobre paginado con ``limit``.",
+        }
+
+
+class PaginacionSelector(PaginacionOpcionalLimitOffset):
+    """``selector/`` (EC-886) siempre pagina: sin ``?limit=`` usa ``default_limit``.
+    Mismas reglas que la paginación opcional (400 con valores inválidos, tope 500).
+    50 es el tamaño por defecto de la otra paginación opcional del ERP
+    (``produccion.api.views.PaginacionOpcional``); el selector puede pedir más."""
+
+    default_limit = 50
+
+    def get_limit(self, request):
+        # Con ``?ids=`` y sin ``?limit=``, una sola página con todos los pedidos
+        # (``TOPE_IDS_SELECTOR`` como máximo): el selector resuelve la etiqueta de
+        # todo lo ya elegido aunque pase de 50. Un ``limit`` explícito manda.
+        if vacio(request.query_params.get(self.limit_query_param)):
+            ids = _ids_param(request)
+            if ids is not None:
+                return len(ids)
+        return super().get_limit(request)
+
+
+# Tope de ``?ids=`` en ``selector/``: el mismo que ``limit``, una página llena.
+TOPE_IDS_SELECTOR = PaginacionSelector.max_limit
+
+
+def _ids_param(request):
+    """``?ids=1,2,3`` de ``selector/`` (EC-886); ausente o vacío → ``None``.
+
+    Se parsea una vez por petición y se guarda en el ``request``: la acción, el
+    queryset y ``PaginacionSelector.get_limit`` leen el mismo resultado."""
+    if not hasattr(request, "_ids_selector"):
+        request._ids_selector = _parsear_ids(request)
+    return request._ids_selector
+
+
+def _parsear_ids(request):
+    """Cada id con el parser estricto de EC-829 (``entero_estricto``, positivo): un
+    token inválido o vacío (``1,,2``) es 400, y también más de ``TOPE_IDS_SELECTOR``."""
+    crudo = request.query_params.get("ids")
+    if vacio(crudo):
+        return None
+    tokens = crudo.split(",")
+    if len(tokens) > TOPE_IDS_SELECTOR:
+        raise ValidationError({"ids": f"Máximo {TOPE_IDS_SELECTOR} ids."})
+    ids = [entero_estricto(token, "ids", positivo=True) for token in tokens]
+    if None in ids:
+        raise ValidationError({"ids": MENSAJE_ENTERO})
+    return ids
+
+
+def _respuesta_selector(view, qs, serializer_class):
+    # ``view.paginator`` es ``PaginacionSelector`` (``pagination_class`` de la acción).
+    pagina = view.paginate_queryset(qs)
+    return view.get_paginated_response(serializer_class(pagina, many=True).data)
+
+
+def _param_texto(nombre, descripcion):
+    return OpenApiParameter(nombre, OpenApiTypes.STR, OpenApiParameter.QUERY, description=descripcion)
+
+
+PARAM_IDS_SELECTOR = _param_texto(
+    "ids",
+    "Ids separados por comas (máx. 500), para resolver la etiqueta de lo ya elegido. "
+    "Regresa cada id de la empresa del usuario, activo o no, sin aplicar los demás "
+    "filtros; sin ``limit`` todos caben en una página.",
+)
+PARAM_Q = _param_texto("q", "Búsqueda por subcadena, sin distinguir mayúsculas.")
 
 
 def _lineas_param(request):
@@ -199,9 +291,30 @@ class TallaViewSet(viewsets.ModelViewSet):
 class ProductoViewSet(viewsets.ModelViewSet):
     queryset = Producto.objects.all()
     serializer_class = ProductoSerializer
+    # Sin ``?limit=`` regresa la lista completa, como antes (EC-886).
+    pagination_class = PaginacionOpcionalCatalogo
+    filter_backends = FILTROS_CON_ORDEN_ESTABLE
+    # Sin ``?ordering=`` válido manda el orden de ``get_queryset`` (``-created_at, -id``).
+    ordering_fields = [
+        "id", "nombre", "codigo", "cod_proscai", "descripcion", "precio_base", "activo",
+        "es_compras", "tipo", "categoria_producto", "created_at", "updated_at",
+    ]
 
     def get_queryset(self):
-        qs = _alcance_empresa(super().get_queryset().filter(activo=True).annotate(unidad_nombre=F('unidad_medida__nombre'), unidad_abreviatura=F('unidad_medida__clave')), self.request.user)
+        return self._filtrar(self._productos_de_la_empresa().filter(activo=True), buscar_en_descripcion=False)
+
+    def _productos_de_la_empresa(self):
+        """Productos de la empresa del usuario (activos o no), con ``unidad_*`` y el
+        orden del listado. Sin filtros de query string: los pone ``_filtrar``."""
+        qs = super().get_queryset().annotate(
+            unidad_nombre=F('unidad_medida__nombre'), unidad_abreviatura=F('unidad_medida__clave'),
+        )
+        return _alcance_empresa(qs, self.request.user).order_by("-created_at", "-id")
+
+    def _filtrar(self, qs, *, buscar_en_descripcion):
+        """``tipo_id``, ``linea``, ``es_compras`` y ``q`` del query string.
+        ``buscar_en_descripcion``: ``q`` busca también en ``descripcion`` (sólo el
+        selector, EC-886; el ``q`` del listado no cambia)."""
         # ``tipo_id`` acepta uno o varios: repetido (``?tipo_id=1&tipo_id=3``) o
         # separado por comas (``?tipo_id=1,3``). Un solo valor filtra igual que antes.
         tipo_ids = self.request.query_params.getlist('tipo_id')
@@ -225,12 +338,43 @@ class ProductoViewSet(viewsets.ModelViewSet):
             qs = qs.filter(es_compras=es_compras in ('true', '1'))
         q = (self.request.query_params.get('q') or '').strip()
         if q:
-            qs = qs.filter(
-                Q(nombre__icontains=q)
-                | Q(codigo__icontains=q)
-                | Q(cod_proscai__icontains=q)
-            )
-        return qs.order_by("-created_at", "-id")
+            filtro_q = Q(nombre__icontains=q) | Q(codigo__icontains=q) | Q(cod_proscai__icontains=q)
+            if buscar_en_descripcion:
+                # El paso 1 del BOM también busca por descripción.
+                filtro_q |= Q(descripcion__icontains=q)
+            qs = qs.filter(filtro_q)
+        return qs
+
+    @extend_schema(
+        summary="Productos para selectores (ligero y paginado)",
+        responses=ProductoSelectorSerializer(many=True),
+        parameters=[
+            PARAM_Q,
+            PARAM_IDS_SELECTOR,
+            _param_texto("tipo_id", "Uno o varios ids de tipo de producto, separados por comas."),
+            _param_texto("linea", "Una o varias líneas de categoría, separadas por comas; SIN_LINEA = sin línea."),
+            _param_texto("es_compras", "true o false."),
+        ],
+    )
+    @action(detail=False, methods=['get'], pagination_class=PaginacionSelector)
+    def selector(self, request):
+        """Productos para selectores (EC-886), siempre paginado (``?limit``/``?offset``,
+        50 por defecto, tope 500). Mismo alcance, filtros (``tipo_id``, ``linea``,
+        ``es_compras``) y ``?ordering=`` que el listado; ``q`` busca además en
+        ``descripcion``. Publica ``id, nombre, codigo, descripcion, activo, unidad_id,
+        unidad_nombre, unidad_abreviatura, tipo, categoria_producto``.
+
+        Sólo productos activos, salvo con ``?ids=1,2``: entonces regresa esos, activos o
+        no, sin aplicar ``q`` ni los demás filtros, siempre de la empresa del usuario."""
+        ids = _ids_param(request)
+        qs = self._productos_de_la_empresa()
+        if ids is not None:
+            # Sólo el alcance por empresa: lo ya elegido conserva su etiqueta aunque
+            # esté inactivo o no coincida con la búsqueda o los filtros actuales.
+            qs = qs.filter(pk__in=ids)
+        else:
+            qs = self._filtrar(qs.filter(activo=True), buscar_en_descripcion=True)
+        return _respuesta_selector(self, self.filter_queryset(qs), ProductoSelectorSerializer)
 
     def perform_destroy(self, instance):
         # Baja lógica (#531): el DELETE físico arrastraba en cascada compras,
@@ -315,8 +459,22 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
     # mismo JOIN -> una sola consulta, sin alterar la forma de la respuesta.
     queryset = ProductoVariante.objects.all().select_related("producto", "color", "talla")
     serializer_class = ProductoVarianteSerializer
+    # Sin ``?limit=`` regresa la lista completa, como antes (EC-886).
+    pagination_class = PaginacionOpcionalCatalogo
+    filter_backends = FILTROS_CON_ORDEN_ESTABLE
+    # Sin ``?ordering=`` válido manda ``-id`` (``get_queryset``). ``producto__cod_proscai``
+    # es el ``cod_proscai`` que publica el serializer; ``cod_proscai`` es el de la variante.
+    ordering_fields = [
+        "id", "sku", "nombre", "cod_proscai", "precio_base", "activo", "sku_produccion",
+        "producto", "producto__nombre", "producto__cod_proscai", "color__nombre", "talla__nombre",
+    ]
 
     def get_queryset(self):
+        return self._filtrar(self._variantes_de_la_empresa())
+
+    def _variantes_de_la_empresa(self):
+        """Variantes de la empresa del usuario con ``sku_produccion`` y orden ``-id``.
+        Sin filtros de query string: los pone ``_filtrar``."""
         # ``ProductoVariante.empresa`` es FK propia (el onboarding la copia de
         # ``producto.empresa``); se acota por ella, no por ``producto__empresa``.
         qs = _alcance_empresa(super().get_queryset(), self.request.user)
@@ -328,15 +486,13 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
                 color=OuterRef('color'), talla=OuterRef('talla'),
             ).values('sku')[:1]
         ))
+        # Antes sin ``order_by``: el orden dependía del plan de PostgreSQL (EC-886).
+        return qs.order_by("-id")
+
+    def _filtrar(self, qs):
+        """``con_bom`` y ``q`` del query string."""
         if self.request.query_params.get('con_bom', '').lower() == 'true':
-            bom_qs = ListaMaterialBom.objects.filter(
-                producto_variante=OuterRef('pk'),
-                activo=True,
-            )
-            empresa = getattr(self.request.user, 'empresa', None)
-            if empresa:
-                bom_qs = bom_qs.filter(empresa=empresa)
-            qs = qs.filter(Exists(bom_qs))
+            qs = qs.filter(Exists(self._bom_activo()))
         q = (self.request.query_params.get('q') or '').strip()
         if q:
             qs = qs.filter(
@@ -348,6 +504,58 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
                 | Q(sku_produccion__icontains=q)
             )
         return qs
+
+    def _bom_activo(self):
+        """BOM activo de la variante (``OuterRef('pk')``) en la empresa del usuario:
+        la misma subconsulta para ``?con_bom=`` y para ``tiene_bom`` del selector.
+
+        Sin empresa no coincide nada (``empresa IS NULL`` en una FK NOT NULL): nunca
+        cuenta BOM de otras empresas, aunque el queryset de fuera no esté acotado."""
+        return ListaMaterialBom.objects.filter(
+            producto_variante=OuterRef('pk'),
+            activo=True,
+            empresa=getattr(self.request.user, 'empresa', None),
+        )
+
+    @extend_schema(
+        summary="Variantes para selectores (ligero y paginado)",
+        responses=ProductoVarianteSelectorSerializer(many=True),
+        parameters=[
+            PARAM_Q,
+            PARAM_IDS_SELECTOR,
+            OpenApiParameter("tiene_bom", OpenApiTypes.BOOL, OpenApiParameter.QUERY,
+                             description="Sólo variantes con (true) o sin (false) BOM activo."),
+            _param_texto("con_bom", "true: sólo variantes con BOM activo (como en el listado)."),
+        ],
+    )
+    @action(detail=False, methods=['get'], pagination_class=PaginacionSelector)
+    def selector(self, request):
+        """Variantes para selectores (EC-886), siempre paginado (``?limit``/``?offset``,
+        50 por defecto, tope 500). Mismo alcance, filtros (``con_bom``, ``q``) y
+        ``?ordering=`` que el listado, con ``id, sku, nombre, cod_proscai,
+        sku_produccion, tiene_bom, activo``.
+
+        Sólo variantes activas de productos activos, salvo con ``?ids=1,2``: entonces
+        regresa esas, activas o no y sin aplicar ``q``, ``con_bom`` ni ``tiene_bom``,
+        siempre de la empresa del usuario, para que lo ya elegido conserve su etiqueta
+        (con su ``tiene_bom``). ``?tiene_bom=true|false`` filtra por BOM activo."""
+        ids = _ids_param(request)
+        qs = self._variantes_de_la_empresa()
+        if ids is not None:
+            qs = qs.filter(pk__in=ids)
+        else:
+            qs = self._filtrar(qs).filter(activo=True, producto__activo=True)
+        # Sólo las columnas que se publican: del producto basta su ``cod_proscai``,
+        # anotado; sin JOIN que traiga la fila completa de producto, color y talla.
+        qs = qs.select_related(None).only('id', 'sku', 'nombre', 'activo').annotate(
+            tiene_bom=Exists(self._bom_activo()),
+            producto_cod_proscai=F('producto__cod_proscai'),
+        )
+        if ids is None:
+            tiene_bom = booleano_param(request, 'tiene_bom', None)
+            if tiene_bom is not None:
+                qs = qs.filter(tiene_bom=tiene_bom)
+        return _respuesta_selector(self, self.filter_queryset(qs), ProductoVarianteSelectorSerializer)
 
     @action(detail=False, methods=['post'])
     def onboarding(self, request):

@@ -117,6 +117,23 @@ class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerial
             )
         return attrs
 
+class ProductoSelectorSerializer(serializers.ModelSerializer):
+    """Fila de ``producto/selector/`` (EC-886): lo que leen los selectores. ``tipo`` y
+    ``categoria_producto`` son ids, como en ``ProductoSerializer``; ``unidad_*`` con
+    la misma forma (las anota ``ProductoViewSet.get_queryset``)."""
+    unidad_id = serializers.IntegerField(source='unidad_medida_id', read_only=True, allow_null=True)
+    unidad_nombre = serializers.CharField(read_only=True, allow_null=True, default=None)
+    unidad_abreviatura = serializers.CharField(read_only=True, allow_null=True, default=None)
+
+    class Meta:
+        model = Producto
+        fields = [
+            'id', 'nombre', 'codigo', 'descripcion', 'activo', 'unidad_id', 'unidad_nombre',
+            'unidad_abreviatura', 'tipo', 'categoria_producto',
+        ]
+        read_only_fields = fields
+
+
 class ProductoOnboardingSerializer(serializers.ModelSerializer):
     """Alta simplificada de Producto para producción: nombre + tipo + categoria + precio, sin descripcion."""
     tipo = serializers.PrimaryKeyRelatedField(
@@ -171,6 +188,23 @@ class ProductoVarianteSerializer(EmpresaValidadaEnCreateMixin, serializers.Model
                 {"talla": "Esta talla no esta permitida para la categoria de este producto."}
             )
         return attrs
+
+
+class ProductoVarianteSelectorSerializer(serializers.ModelSerializer):
+    """Fila de ``producto-variante/selector/`` (EC-886): lo que leen los selectores.
+
+    ``cod_proscai`` es el del producto, igual que en ``ProductoVarianteSerializer``
+    (la vista lo anota como ``producto_cod_proscai``). ``sku_produccion`` y
+    ``tiene_bom`` también los anota la vista; ``tiene_bom`` sólo existe aquí, no en
+    el listado ni en el detalle de OP."""
+    cod_proscai = serializers.CharField(source='producto_cod_proscai', read_only=True)
+    sku_produccion = serializers.CharField(read_only=True, default=None)
+    tiene_bom = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = ProductoVariante
+        fields = ['id', 'sku', 'nombre', 'cod_proscai', 'sku_produccion', 'tiene_bom', 'activo']
+        read_only_fields = fields
 
 
 class CategoriaProductoProcesoSerializer(EmpresaValidadaEnCreateMixin, serializers.ModelSerializer):

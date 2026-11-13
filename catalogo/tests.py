@@ -922,3 +922,456 @@ class EscrituraCatalogoTests(TestCase):
             self.assertIn("nombre", resp.json())
         resp = api.post(self.TIPOS_URL, {"codigo": "NUEVO", "nombre": "Nuevo", "activo": False}, format="json")
         self.assertEqual((resp.status_code, resp.json()["activo"]), (201, True), resp.content)
+
+
+SELECTOR_PRODUCTOS_URL = PRODUCTOS_URL + "selector/"
+SELECTOR_VARIANTES_URL = VARIANTES_URL + "selector/"
+
+# Forma de los listados antes de EC-886: no cambia con paginación ni selector.
+CAMPOS_LISTA_PRODUCTO = {
+    "id", "unidad_id", "unidad_nombre", "unidad_abreviatura", "nombre", "descripcion", "activo",
+    "created_at", "updated_at", "precio_base", "cod_proscai", "codigo", "es_compras", "empresa",
+    "categoria_producto", "unidad_medida", "impuesto", "sat_prodserv", "sat_unidad", "tipo",
+}
+CAMPOS_LISTA_VARIANTE = {
+    "id", "producto_nombre", "color_nombre", "talla_nombre", "cod_proscai", "sku_produccion",
+    "nombre", "sku", "precio_base", "activo", "producto", "empresa", "color", "talla",
+}
+
+
+class CatalogoSelectorBase(TestCase):
+    """Datos de EC-886: dos empresas, productos y variantes activos e inactivos, BOM
+    activo, inactivo y de otra empresa."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from nucleo.models import UnidadMedida
+
+        cls.empresa_a = Empresa.objects.create(codigo="sel-a", razon_social="Sel A SA")
+        cls.empresa_b = Empresa.objects.create(codigo="sel-b", razon_social="Sel B SA")
+        cls.tipo_pt = TipoProducto.objects.create(codigo="PT")
+        cls.tipo_mp = TipoProducto.objects.create(codigo="MP")
+        cls.unidad = UnidadMedida.objects.create(clave="MTR-S", nombre="Metro")
+        cls.color = Color.objects.create(nombre="Rojo", codigo="ROJ", codigo_hex="#ff0000")
+        cls.talla = Talla.objects.create(nombre="G")
+        cls.cat_a = CategoriaProducto.objects.create(empresa=cls.empresa_a, nombre="Cat A", codigo="CSA")
+
+        def producto(empresa, nombre, codigo, **extra):
+            return Producto.objects.create(
+                empresa=empresa, nombre=nombre, codigo=codigo, precio_base="10.00", **extra,
+            )
+
+        cls.p_activo = producto(
+            cls.empresa_a, "Tela algodón", "TA001", tipo=cls.tipo_mp, categoria_producto=cls.cat_a,
+            unidad_medida=cls.unidad, descripcion="peinada 30/1",
+        )
+        cls.p_otro = producto(cls.empresa_a, "Playera", "PL001", tipo=cls.tipo_pt)
+        cls.p_inactivo = producto(cls.empresa_a, "Tela vieja", "TV001", tipo=cls.tipo_mp, activo=False)
+        cls.p_b = producto(cls.empresa_b, "Tela B", "TB001", tipo=cls.tipo_mp)
+
+        def variante(prod, sku, **extra):
+            return ProductoVariante.objects.create(
+                producto=prod, empresa=prod.empresa, color=cls.color, talla=cls.talla,
+                sku=sku, precio_base="10.00", **extra,
+            )
+
+        cls.v_con_bom = variante(cls.p_otro, "PL001-ROJ-G")
+        cls.v_sin_bom = variante(cls.p_activo, "TA001-ROJ-G")
+        cls.v_bom_inactivo = variante(cls.p_otro, "PL001-ROJ-X")
+        cls.v_bom_ajeno = variante(cls.p_otro, "PL001-ROJ-Y")
+        cls.v_inactiva = variante(cls.p_otro, "PL001-ROJ-Z", activo=False)
+        cls.v_de_producto_inactivo = variante(cls.p_inactivo, "TV001-ROJ-G")
+        cls.v_b = variante(cls.p_b, "TB001-ROJ-G")
+        ListaMaterialBom.objects.create(empresa=cls.empresa_a, producto_variante=cls.v_con_bom)
+        ListaMaterialBom.objects.create(empresa=cls.empresa_a, producto_variante=cls.v_bom_inactivo, activo=False)
+        # BOM de otra empresa sobre una variante de A: no cuenta.
+        ListaMaterialBom.objects.create(empresa=cls.empresa_b, producto_variante=cls.v_bom_ajeno)
+
+        cls.user_a = Usuario.objects.create(username="sa@sel.test", email="sa@sel.test", empresa=cls.empresa_a)
+        cls.user_b = Usuario.objects.create(username="sb@sel.test", email="sb@sel.test", empresa=cls.empresa_b)
+        cls.sin_empresa = Usuario.objects.create(username="sn@sel.test", email="sn@sel.test")
+        cls.superuser = Usuario.objects.create(
+            username="ss@sel.test", email="ss@sel.test", is_superuser=True, is_staff=True, empresa=cls.empresa_a,
+        )
+
+    def _get(self, url, user=None, **params):
+        client = APIClient()
+        client.force_authenticate(user=user or self.user_a)
+        return client.get(url, params)
+
+    def _ok(self, url, user=None, **params):
+        resp = self._get(url, user, **params)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def _ids(self, data):
+        filas = data["results"] if isinstance(data, dict) else data
+        return [fila["id"] for fila in filas]
+
+
+class ListadosCatalogoPaginacionOrdenTests(CatalogoSelectorBase):
+    """``producto/`` y ``producto-variante/``: sin parámetros, la misma lista de
+    siempre; con ``limit``/``offset``, sobre paginado; ``ordering`` en lista blanca."""
+
+    def test_sin_parametros_lista_plana_con_los_mismos_campos(self):
+        for url, campos in ((PRODUCTOS_URL, CAMPOS_LISTA_PRODUCTO), (VARIANTES_URL, CAMPOS_LISTA_VARIANTE)):
+            with self.subTest(url=url):
+                data = self._ok(url)
+                self.assertIsInstance(data, list)
+                self.assertTrue(data)
+                for fila in data:
+                    self.assertEqual(set(fila), campos)
+
+    def test_con_limit_regresa_sobre_paginado(self):
+        for url in (PRODUCTOS_URL, VARIANTES_URL):
+            with self.subTest(url=url):
+                todos = self._ids(self._ok(url))
+                data = self._ok(url, limit=2, offset=1)
+                self.assertEqual(set(data), {"count", "next", "previous", "results"})
+                self.assertEqual(data["count"], len(todos))
+                self.assertEqual(self._ids(data), todos[1:3])
+
+    def test_limit_u_offset_invalidos_son_400(self):
+        for url in (PRODUCTOS_URL, VARIANTES_URL):
+            for params in ({"limit": "abc"}, {"limit": "0"}, {"limit": "-1"}, {"limit": "2", "offset": "-1"}):
+                with self.subTest(url=url, params=params):
+                    self.assertEqual(self._get(url, **params).status_code, 400)
+
+    def test_variantes_salen_por_id_descendente(self):
+        ids = self._ids(self._ok(VARIANTES_URL))
+        self.assertEqual(ids, sorted(ids, reverse=True))
+
+    def test_productos_conservan_su_orden(self):
+        esperado = list(
+            Producto.objects.filter(empresa=self.empresa_a, activo=True)
+            .order_by("-created_at", "-id").values_list("id", flat=True)
+        )
+        self.assertEqual(self._ids(self._ok(PRODUCTOS_URL)), esperado)
+
+    def test_ordering_desempata_por_id(self):
+        # Todos los ``precio_base`` son iguales: decide el ``id``, en la dirección del campo.
+        for url in (PRODUCTOS_URL, VARIANTES_URL):
+            with self.subTest(url=url):
+                asc = self._ids(self._ok(url, ordering="precio_base"))
+                self.assertEqual(asc, sorted(asc))
+                desc = self._ids(self._ok(url, ordering="-precio_base"))
+                self.assertEqual(desc, sorted(desc, reverse=True))
+
+    def test_ordering_fuera_de_la_lista_blanca_se_ignora(self):
+        variantes = self._ids(self._ok(VARIANTES_URL))
+        self.assertEqual(self._ids(self._ok(VARIANTES_URL, ordering="empresa")), variantes)
+        productos = self._ids(self._ok(PRODUCTOS_URL))
+        self.assertEqual(self._ids(self._ok(PRODUCTOS_URL, ordering="sat_prodserv")), productos)
+
+    def test_ordering_por_campo_de_la_lista_blanca(self):
+        skus = [f["sku"] for f in self._ok(VARIANTES_URL, ordering="sku")]
+        self.assertEqual(skus, sorted(skus))
+
+    def test_q_del_listado_de_productos_no_busca_en_descripcion(self):
+        self.assertEqual(self._ok(PRODUCTOS_URL, q="peinada"), [])
+
+    def test_aislamiento_del_listado_con_y_sin_paginar(self):
+        casos = (
+            (PRODUCTOS_URL, {self.p_activo.pk, self.p_otro.pk}),
+            (VARIANTES_URL, {
+                self.v_con_bom.pk, self.v_sin_bom.pk, self.v_bom_inactivo.pk,
+                self.v_bom_ajeno.pk, self.v_inactiva.pk, self.v_de_producto_inactivo.pk,
+            }),
+        )
+        for url, propios in casos:
+            with self.subTest(url=url):
+                for user in (self.user_a, self.superuser):
+                    self.assertEqual(set(self._ids(self._ok(url, user))), propios)
+                    self.assertEqual(set(self._ids(self._ok(url, user, limit=500))), propios)
+                self.assertEqual(self._ok(url, self.sin_empresa), [])
+                self.assertEqual(self._ok(url, self.sin_empresa, limit=10)["results"], [])
+
+
+class SelectorVariantesTests(CatalogoSelectorBase):
+
+    CAMPOS = {"id", "sku", "nombre", "cod_proscai", "sku_produccion", "tiene_bom", "activo"}
+
+    def test_siempre_paginado_con_campos_ligeros(self):
+        data = self._ok(SELECTOR_VARIANTES_URL)
+        self.assertEqual(set(data), {"count", "next", "previous", "results"})
+        for fila in data["results"]:
+            self.assertEqual(set(fila), self.CAMPOS)
+
+    def test_solo_activas_de_productos_activos_por_id_descendente(self):
+        esperado = sorted(
+            [self.v_con_bom.pk, self.v_sin_bom.pk, self.v_bom_inactivo.pk, self.v_bom_ajeno.pk], reverse=True,
+        )
+        self.assertEqual(self._ids(self._ok(SELECTOR_VARIANTES_URL)), esperado)
+
+    def test_tiene_bom_solo_con_bom_activo_de_la_empresa(self):
+        filas = {f["id"]: f["tiene_bom"] for f in self._ok(SELECTOR_VARIANTES_URL)["results"]}
+        self.assertEqual(filas, {
+            self.v_con_bom.pk: True,
+            self.v_sin_bom.pk: False,
+            self.v_bom_inactivo.pk: False,
+            self.v_bom_ajeno.pk: False,
+        })
+
+    def test_filtro_tiene_bom(self):
+        self.assertEqual(self._ids(self._ok(SELECTOR_VARIANTES_URL, tiene_bom="true")), [self.v_con_bom.pk])
+        self.assertNotIn(self.v_con_bom.pk, self._ids(self._ok(SELECTOR_VARIANTES_URL, tiene_bom="0")))
+        self.assertEqual(self._get(SELECTOR_VARIANTES_URL, tiene_bom="si").status_code, 400)
+
+    def test_respeta_q_con_bom_y_ordering(self):
+        self.assertEqual(self._ids(self._ok(SELECTOR_VARIANTES_URL, q="TA001")), [self.v_sin_bom.pk])
+        self.assertEqual(self._ids(self._ok(SELECTOR_VARIANTES_URL, con_bom="true")), [self.v_con_bom.pk])
+        skus = [f["sku"] for f in self._ok(SELECTOR_VARIANTES_URL, ordering="sku")["results"]]
+        self.assertEqual(skus, sorted(skus))
+
+    def test_ids_regresa_inactivas_pero_no_ajenas(self):
+        ids = f"{self.v_inactiva.pk},{self.v_de_producto_inactivo.pk},{self.v_b.pk}"
+        data = self._ok(SELECTOR_VARIANTES_URL, ids=ids)
+        self.assertEqual(set(self._ids(data)), {self.v_inactiva.pk, self.v_de_producto_inactivo.pk})
+        self.assertFalse({f["id"]: f["activo"] for f in data["results"]}[self.v_inactiva.pk])
+
+    def test_ids_invalidos_son_400(self):
+        for valor in ("1,abc", "1,,2", "0", "-3", "1.5", ",".join(["1"] * 501)):
+            with self.subTest(ids=valor[:20]):
+                resp = self._get(SELECTOR_VARIANTES_URL, ids=valor)
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn("ids", resp.json())
+
+    def test_aislamiento(self):
+        self.assertEqual(self._ids(self._ok(SELECTOR_VARIANTES_URL, self.user_b)), [self.v_b.pk])
+        self.assertEqual(
+            set(self._ids(self._ok(SELECTOR_VARIANTES_URL, self.superuser))),
+            set(self._ids(self._ok(SELECTOR_VARIANTES_URL, self.user_a))),
+        )
+        self.assertEqual(self._ok(SELECTOR_VARIANTES_URL, self.sin_empresa)["results"], [])
+        self.assertEqual(self._ok(SELECTOR_VARIANTES_URL, self.user_b, ids=str(self.v_con_bom.pk))["results"], [])
+
+    def test_consultas_constantes(self):
+        # ``count`` + página, sin importar cuántas filas.
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        with self.assertNumQueries(2):
+            self.assertEqual(client.get(SELECTOR_VARIANTES_URL).status_code, 200)
+        ProductoVariante.objects.bulk_create([
+            ProductoVariante(
+                producto=self.p_otro, empresa=self.empresa_a, color=self.color, sku=f"MAS-{i}", precio_base="1.00",
+            )
+            for i in range(30)
+        ])
+        with self.assertNumQueries(2):
+            self.assertEqual(client.get(SELECTOR_VARIANTES_URL).status_code, 200)
+
+    def test_ids_ignora_q_filtros_e_inactivos_pero_no_la_empresa(self):
+        propias = [self.v_con_bom, self.v_sin_bom, self.v_inactiva, self.v_de_producto_inactivo]
+        ids = ",".join(str(v.pk) for v in [*propias, self.v_b])
+        data = self._ok(SELECTOR_VARIANTES_URL, ids=ids, q="no-coincide", tiene_bom="true", con_bom="true")
+        self.assertEqual(set(self._ids(data)), {v.pk for v in propias})
+        filas = {f["id"]: f["tiene_bom"] for f in data["results"]}
+        self.assertTrue(filas[self.v_con_bom.pk])
+        self.assertFalse(filas[self.v_sin_bom.pk])
+
+    def test_cod_proscai_es_el_del_producto(self):
+        Producto.objects.filter(pk=self.p_otro.pk).update(cod_proscai="PX-77")
+        filas = {f["id"]: f["cod_proscai"] for f in self._ok(SELECTOR_VARIANTES_URL)["results"]}
+        self.assertEqual(filas[self.v_con_bom.pk], "PX-77")
+        self.assertEqual(filas[self.v_sin_bom.pk], "")
+
+    def test_bom_activo_sin_empresa_no_cuenta_nada(self):
+        from django.db.models import Exists
+        from rest_framework.test import APIRequestFactory
+        from catalogo.api.views import ProductoVarianteViewSet
+
+        vista = ProductoVarianteViewSet()
+        vista.request = APIRequestFactory().get("/")
+        for usuario, esperado in ((self.sin_empresa, False), (self.user_a, True)):
+            with self.subTest(usuario=usuario.username):
+                vista.request.user = usuario
+                # Sobre todas las variantes, sin alcance: el BOM de A no cuenta sin empresa.
+                tiene = ProductoVariante.objects.annotate(t=Exists(vista._bom_activo())).get(pk=self.v_con_bom.pk).t
+                self.assertIs(tiene, esperado)
+        vista.request.user = self.sin_empresa
+        # Tampoco el BOM de la empresa B sobre ``v_bom_ajeno``.
+        self.assertFalse(
+            ProductoVariante.objects.filter(Exists(vista._bom_activo())).exists()
+        )
+
+    def test_detalle_de_op_sin_tiene_bom(self):
+        from produccion.api.serializers import OrdenProduccionDetalleSerializer
+
+        anidado = OrdenProduccionDetalleSerializer().fields["producto_variante"]
+        self.assertNotIn("tiene_bom", anidado.fields)
+        self.assertEqual(set(anidado.to_representation(self.v_con_bom)), CAMPOS_LISTA_VARIANTE)
+
+
+class SelectorProductosTests(CatalogoSelectorBase):
+
+    CAMPOS = {
+        "id", "nombre", "codigo", "descripcion", "activo", "unidad_id", "unidad_nombre",
+        "unidad_abreviatura", "tipo", "categoria_producto",
+    }
+
+    def test_siempre_paginado_con_campos_ligeros(self):
+        data = self._ok(SELECTOR_PRODUCTOS_URL)
+        self.assertEqual(set(data), {"count", "next", "previous", "results"})
+        fila = {f["id"]: f for f in data["results"]}[self.p_activo.pk]
+        self.assertEqual(set(fila), self.CAMPOS)
+        self.assertEqual(
+            (fila["unidad_id"], fila["unidad_nombre"], fila["unidad_abreviatura"], fila["tipo"], fila["categoria_producto"]),
+            (self.unidad.pk, "Metro", "MTR-S", self.tipo_mp.pk, self.cat_a.pk),
+        )
+
+    def test_solo_activos_y_filtros_del_listado(self):
+        self.assertEqual(set(self._ids(self._ok(SELECTOR_PRODUCTOS_URL))), {self.p_activo.pk, self.p_otro.pk})
+        self.assertEqual(self._ids(self._ok(SELECTOR_PRODUCTOS_URL, tipo_id=self.tipo_pt.pk)), [self.p_otro.pk])
+        nombres = [f["nombre"] for f in self._ok(SELECTOR_PRODUCTOS_URL, ordering="nombre")["results"]]
+        self.assertEqual(nombres, sorted(nombres))
+
+    def test_q_busca_tambien_en_descripcion(self):
+        self.assertEqual(self._ids(self._ok(SELECTOR_PRODUCTOS_URL, q="peinada")), [self.p_activo.pk])
+        self.assertEqual(self._ids(self._ok(SELECTOR_PRODUCTOS_URL, q="PL001")), [self.p_otro.pk])
+
+    def test_ids_regresa_inactivos_pero_no_ajenos(self):
+        data = self._ok(SELECTOR_PRODUCTOS_URL, ids=f"{self.p_inactivo.pk},{self.p_b.pk},{self.p_otro.pk}")
+        self.assertEqual(set(self._ids(data)), {self.p_inactivo.pk, self.p_otro.pk})
+        # El listado sigue sin inactivos.
+        self.assertNotIn(self.p_inactivo.pk, self._ids(self._ok(PRODUCTOS_URL)))
+
+    def test_ids_ignora_q_filtros_e_inactivos_pero_no_la_empresa(self):
+        propios = [self.p_activo, self.p_otro, self.p_inactivo]
+        ids = ",".join(str(p.pk) for p in [*propios, self.p_b])
+        data = self._ok(
+            SELECTOR_PRODUCTOS_URL, ids=ids, q="no-coincide", tipo_id=self.tipo_pt.pk,
+            linea="SIN_LINEA", es_compras="true",
+        )
+        self.assertEqual(set(self._ids(data)), {p.pk for p in propios})
+
+    def test_ids_invalidos_son_400(self):
+        for valor in ("x", "1,,2", "0", ",".join(["2"] * 501)):
+            with self.subTest(ids=valor[:20]):
+                self.assertEqual(self._get(SELECTOR_PRODUCTOS_URL, ids=valor).status_code, 400)
+
+    def test_aislamiento(self):
+        self.assertEqual(self._ids(self._ok(SELECTOR_PRODUCTOS_URL, self.user_b)), [self.p_b.pk])
+        self.assertEqual(
+            set(self._ids(self._ok(SELECTOR_PRODUCTOS_URL, self.superuser))), {self.p_activo.pk, self.p_otro.pk},
+        )
+        self.assertEqual(self._ok(SELECTOR_PRODUCTOS_URL, self.sin_empresa)["results"], [])
+
+    def test_consultas_constantes(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        with self.assertNumQueries(2):
+            self.assertEqual(client.get(SELECTOR_PRODUCTOS_URL).status_code, 200)
+        Producto.objects.bulk_create([
+            Producto(empresa=self.empresa_a, nombre=f"Más {i}", codigo=f"M{i:03d}", unidad_medida=self.unidad)
+            for i in range(30)
+        ])
+        with self.assertNumQueries(2):
+            self.assertEqual(client.get(SELECTOR_PRODUCTOS_URL).status_code, 200)
+
+
+class SchemaCatalogoSelectorTests(SimpleTestCase):
+    """drf-spectacular: los selectores con su sobre y campos ligeros; las listas,
+    arreglo plano u (opcional) sobre."""
+
+    databases = "__all__"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from drf_spectacular.generators import SchemaGenerator
+
+        cls.schema = SchemaGenerator().get_schema(request=None, public=True)
+
+    def _respuesta(self, path):
+        ref = self.schema["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+        return self.schema["components"]["schemas"][ref.rsplit("/", 1)[1]]
+
+    def _parametros(self, path):
+        return {p["name"] for p in self.schema["paths"][path]["get"]["parameters"]}
+
+    def test_selectores_documentan_sobre_y_campos_ligeros(self):
+        casos = (
+            ("/api/v1/catalogo/producto/selector/", "ProductoSelector",
+             {"q", "ids", "limit", "offset", "ordering", "tipo_id", "linea", "es_compras"}),
+            ("/api/v1/catalogo/producto-variante/selector/", "ProductoVarianteSelector",
+             {"q", "ids", "limit", "offset", "ordering", "tiene_bom", "con_bom"}),
+        )
+        for path, componente, parametros in casos:
+            with self.subTest(path=path):
+                sobre = self._respuesta(path)
+                self.assertEqual(set(sobre["properties"]), {"count", "next", "previous", "results"})
+                self.assertEqual(sobre["properties"]["results"]["items"]["$ref"], f"#/components/schemas/{componente}")
+                self.assertLessEqual(parametros, self._parametros(path))
+        self.assertIn("tiene_bom", self.schema["components"]["schemas"]["ProductoVarianteSelector"]["properties"])
+
+    def test_listas_documentan_arreglo_plano_o_sobre(self):
+        for path, componente in (
+            ("/api/v1/catalogo/producto/", "Producto"),
+            ("/api/v1/catalogo/producto-variante/", "ProductoVariante"),
+        ):
+            with self.subTest(path=path):
+                arreglo, sobre = self._respuesta(path)["oneOf"]
+                self.assertEqual(arreglo["type"], "array")
+                self.assertEqual(arreglo["items"]["$ref"], f"#/components/schemas/{componente}")
+                self.assertEqual(set(sobre["properties"]), {"count", "next", "previous", "results"})
+
+
+class SelectorTopesTests(TestCase):
+    """``limit`` por defecto (50) y tope (500) del selector; tope del listado."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="sel-tope", razon_social="Tope SA")
+        color = Color.objects.create(nombre="Azul", codigo="AZT", codigo_hex="#0000ff")
+        producto = Producto.objects.create(empresa=cls.empresa, nombre="Base", codigo="BT001")
+        Producto.objects.bulk_create([
+            Producto(empresa=cls.empresa, nombre=f"P{i}", codigo=f"T{i:03d}") for i in range(520)
+        ])
+        ProductoVariante.objects.bulk_create([
+            ProductoVariante(producto=producto, empresa=cls.empresa, color=color, sku=f"BT-{i}", precio_base="1.00")
+            for i in range(520)
+        ])
+        cls.user = Usuario.objects.create(username="t@sel.test", email="t@sel.test", empresa=cls.empresa)
+
+    def test_limit_por_defecto_y_tope(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        for url in (SELECTOR_PRODUCTOS_URL, SELECTOR_VARIANTES_URL):
+            with self.subTest(url=url):
+                data = client.get(url).json()
+                self.assertEqual(len(data["results"]), 50)
+                self.assertGreater(data["count"], 500)
+                self.assertEqual(len(client.get(url, {"limit": 1000}).json()["results"]), 500)
+        for url in (PRODUCTOS_URL, VARIANTES_URL):
+            with self.subTest(url=url):
+                self.assertGreater(len(client.get(url).json()), 500)
+                self.assertEqual(len(client.get(url, {"limit": 1000}).json()["results"]), 500)
+
+    def test_ids_sin_limit_regresa_todos_en_una_pagina(self):
+        """Con ``?ids=`` y sin ``limit`` la página mide lo que se pidió (hasta 500);
+        un ``limit`` explícito manda; sin ``ids`` sigue la página de 50."""
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        casos = (
+            (SELECTOR_PRODUCTOS_URL, Producto),
+            (SELECTOR_VARIANTES_URL, ProductoVariante),
+        )
+        for url, modelo in casos:
+            todos = list(modelo.objects.filter(empresa=self.empresa).order_by("id").values_list("id", flat=True))
+            with self.subTest(url=url):
+                ids_80 = ",".join(map(str, todos[:80]))
+                data = client.get(url, {"ids": ids_80}).json()
+                self.assertEqual((data["count"], len(data["results"]), data["next"]), (80, 80, None))
+                self.assertEqual({f["id"] for f in data["results"]}, set(todos[:80]))
+
+                data = client.get(url, {"ids": ids_80, "limit": 10}).json()
+                self.assertEqual((data["count"], len(data["results"])), (80, 10))
+                self.assertIsNotNone(data["next"])
+
+                self.assertEqual(len(client.get(url).json()["results"]), 50)
+
+                data = client.get(url, {"ids": ",".join(map(str, todos[:500]))}).json()
+                self.assertEqual((data["count"], len(data["results"]), data["next"]), (500, 500, None))
+
+                resp = client.get(url, {"ids": ",".join(map(str, todos[:501]))})
+                self.assertEqual(resp.status_code, 400, resp.content)
