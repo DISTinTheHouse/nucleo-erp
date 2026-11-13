@@ -1160,6 +1160,40 @@ class SelectorVariantesTests(CatalogoSelectorBase):
         with self.assertNumQueries(2):
             self.assertEqual(client.get(SELECTOR_VARIANTES_URL).status_code, 200)
 
+    def test_ids_ignora_q_filtros_e_inactivos_pero_no_la_empresa(self):
+        propias = [self.v_con_bom, self.v_sin_bom, self.v_inactiva, self.v_de_producto_inactivo]
+        ids = ",".join(str(v.pk) for v in [*propias, self.v_b])
+        data = self._ok(SELECTOR_VARIANTES_URL, ids=ids, q="no-coincide", tiene_bom="true", con_bom="true")
+        self.assertEqual(set(self._ids(data)), {v.pk for v in propias})
+        filas = {f["id"]: f["tiene_bom"] for f in data["results"]}
+        self.assertTrue(filas[self.v_con_bom.pk])
+        self.assertFalse(filas[self.v_sin_bom.pk])
+
+    def test_cod_proscai_es_el_del_producto(self):
+        Producto.objects.filter(pk=self.p_otro.pk).update(cod_proscai="PX-77")
+        filas = {f["id"]: f["cod_proscai"] for f in self._ok(SELECTOR_VARIANTES_URL)["results"]}
+        self.assertEqual(filas[self.v_con_bom.pk], "PX-77")
+        self.assertEqual(filas[self.v_sin_bom.pk], "")
+
+    def test_bom_activo_sin_empresa_no_cuenta_nada(self):
+        from django.db.models import Exists
+        from rest_framework.test import APIRequestFactory
+        from catalogo.api.views import ProductoVarianteViewSet
+
+        vista = ProductoVarianteViewSet()
+        vista.request = APIRequestFactory().get("/")
+        for usuario, esperado in ((self.sin_empresa, False), (self.user_a, True)):
+            with self.subTest(usuario=usuario.username):
+                vista.request.user = usuario
+                # Sobre todas las variantes, sin alcance: el BOM de A no cuenta sin empresa.
+                tiene = ProductoVariante.objects.annotate(t=Exists(vista._bom_activo())).get(pk=self.v_con_bom.pk).t
+                self.assertIs(tiene, esperado)
+        vista.request.user = self.sin_empresa
+        # Tampoco el BOM de la empresa B sobre ``v_bom_ajeno``.
+        self.assertFalse(
+            ProductoVariante.objects.filter(Exists(vista._bom_activo())).exists()
+        )
+
     def test_detalle_de_op_sin_tiene_bom(self):
         from produccion.api.serializers import OrdenProduccionDetalleSerializer
 
@@ -1201,6 +1235,15 @@ class SelectorProductosTests(CatalogoSelectorBase):
         # El listado sigue sin inactivos.
         self.assertNotIn(self.p_inactivo.pk, self._ids(self._ok(PRODUCTOS_URL)))
 
+    def test_ids_ignora_q_filtros_e_inactivos_pero_no_la_empresa(self):
+        propios = [self.p_activo, self.p_otro, self.p_inactivo]
+        ids = ",".join(str(p.pk) for p in [*propios, self.p_b])
+        data = self._ok(
+            SELECTOR_PRODUCTOS_URL, ids=ids, q="no-coincide", tipo_id=self.tipo_pt.pk,
+            linea="SIN_LINEA", es_compras="true",
+        )
+        self.assertEqual(set(self._ids(data)), {p.pk for p in propios})
+
     def test_ids_invalidos_son_400(self):
         for valor in ("x", "1,,2", "0", ",".join(["2"] * 501)):
             with self.subTest(ids=valor[:20]):
@@ -1224,6 +1267,53 @@ class SelectorProductosTests(CatalogoSelectorBase):
         ])
         with self.assertNumQueries(2):
             self.assertEqual(client.get(SELECTOR_PRODUCTOS_URL).status_code, 200)
+
+
+class SchemaCatalogoSelectorTests(SimpleTestCase):
+    """drf-spectacular: los selectores con su sobre y campos ligeros; las listas,
+    arreglo plano u (opcional) sobre."""
+
+    databases = "__all__"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from drf_spectacular.generators import SchemaGenerator
+
+        cls.schema = SchemaGenerator().get_schema(request=None, public=True)
+
+    def _respuesta(self, path):
+        ref = self.schema["paths"][path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+        return self.schema["components"]["schemas"][ref.rsplit("/", 1)[1]]
+
+    def _parametros(self, path):
+        return {p["name"] for p in self.schema["paths"][path]["get"]["parameters"]}
+
+    def test_selectores_documentan_sobre_y_campos_ligeros(self):
+        casos = (
+            ("/api/v1/catalogo/producto/selector/", "ProductoSelector",
+             {"q", "ids", "limit", "offset", "ordering", "tipo_id", "linea", "es_compras"}),
+            ("/api/v1/catalogo/producto-variante/selector/", "ProductoVarianteSelector",
+             {"q", "ids", "limit", "offset", "ordering", "tiene_bom", "con_bom"}),
+        )
+        for path, componente, parametros in casos:
+            with self.subTest(path=path):
+                sobre = self._respuesta(path)
+                self.assertEqual(set(sobre["properties"]), {"count", "next", "previous", "results"})
+                self.assertEqual(sobre["properties"]["results"]["items"]["$ref"], f"#/components/schemas/{componente}")
+                self.assertLessEqual(parametros, self._parametros(path))
+        self.assertIn("tiene_bom", self.schema["components"]["schemas"]["ProductoVarianteSelector"]["properties"])
+
+    def test_listas_documentan_arreglo_plano_o_sobre(self):
+        for path, componente in (
+            ("/api/v1/catalogo/producto/", "Producto"),
+            ("/api/v1/catalogo/producto-variante/", "ProductoVariante"),
+        ):
+            with self.subTest(path=path):
+                arreglo, sobre = self._respuesta(path)["oneOf"]
+                self.assertEqual(arreglo["type"], "array")
+                self.assertEqual(arreglo["items"]["$ref"], f"#/components/schemas/{componente}")
+                self.assertEqual(set(sobre["properties"]), {"count", "next", "previous", "results"})
 
 
 class SelectorTopesTests(TestCase):
