@@ -128,6 +128,7 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
             .get_queryset()
             .select_related(
                 "pedido",
+                "pedido__cliente",
                 "operador",
                 "almacen",
                 "almacen_destino",
@@ -234,7 +235,9 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
         qs = (
             super()
             .get_queryset()
-            .select_related("pedido", "picking", "picking__almacen", "operador", "usuario")
+            .select_related(
+                "pedido", "pedido__cliente", "picking", "picking__almacen", "operador", "usuario"
+            )
             .prefetch_related(
                 Prefetch(
                     "packing_detalle",

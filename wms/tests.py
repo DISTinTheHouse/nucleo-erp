@@ -2087,3 +2087,101 @@ class DocumentosWmsLineasVarianteTests(TestCase):
                 fila.pk = None
                 fila.save()
         self.assertEqual(consultas(), antes)
+
+
+class DocumentosWmsClienteTests(TestCase):
+    """EC-882: picking y packing traen ``pedido_vinculado`` con el cliente del pedido.
+
+    Misma forma y regla que los detalles de Producción (EC-880,
+    ``armar_pedido_vinculado``): ``{id, folio, cliente: {id, nombre, razon_social,
+    rfc}}``, con la foto del cliente del pedido o, sin foto, el cliente vivo.
+    """
+
+    RECURSOS = {"pickings": "picking", "packings": "packing"}
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.d = _documentos_wms("C")
+
+    def _vinculado(self, recurso):
+        documento = self.d[self.RECURSOS[recurso]]
+        resp = _api_de(self.d["usuario"]).get(f"/api/v1/wms/{recurso}/{documento.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        cuerpo = resp.json()
+        # Lo que ya había no cambia.
+        self.assertEqual((cuerpo["pedido"], cuerpo["pedido_folio"]), (self.d["pedido"].pk, self.d["pedido"].folio))
+        return cuerpo["pedido_vinculado"]
+
+    def test_sin_foto_sale_el_cliente_vivo(self):
+        cliente = self.d["cliente"]
+        for recurso in self.RECURSOS:
+            with self.subTest(recurso=recurso):
+                self.assertEqual(
+                    self._vinculado(recurso),
+                    {
+                        "id": self.d["pedido"].pk,
+                        "folio": self.d["pedido"].folio,
+                        "cliente": {
+                            "id": cliente.pk,
+                            "nombre": cliente.nombre,
+                            "razon_social": cliente.razon_social,
+                            "rfc": cliente.rfc,
+                        },
+                    },
+                )
+
+    def test_con_foto_sale_lo_que_se_vendio(self):
+        from ventas.models import Pedido
+
+        Pedido.objects.filter(pk=self.d["pedido"].pk).update(
+            cliente_nombre="Foto", cliente_razon_social="Foto SA", cliente_rfc=None
+        )
+        for recurso in self.RECURSOS:
+            with self.subTest(recurso=recurso):
+                self.assertEqual(
+                    self._vinculado(recurso)["cliente"],
+                    {"id": self.d["cliente"].pk, "nombre": "Foto", "razon_social": "Foto SA", "rfc": None},
+                )
+
+    def test_los_listados_lo_traen_sin_consultas_por_documento(self):
+        """Un segundo documento, de otro pedido y otro cliente, no agrega consultas al listado."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from terceros.models import Cliente
+        from ventas.models import Pedido
+        from wms.models import Packing, Picking
+
+        api = _api_de(self.d["usuario"])
+
+        def listar():
+            conteo, cuerpos = {}, {}
+            for recurso in self.RECURSOS:
+                with CaptureQueriesContext(connection) as ctx:
+                    resp = api.get(f"/api/v1/wms/{recurso}/")
+                conteo[recurso], cuerpos[recurso] = len(ctx.captured_queries), resp.json()
+            return conteo, cuerpos
+
+        antes, cuerpos = listar()
+        for recurso in self.RECURSOS:
+            (fila,) = cuerpos[recurso]
+            self.assertEqual(fila["pedido_vinculado"]["cliente"]["id"], self.d["cliente"].pk)
+
+        otro_cliente = Cliente.objects.create(empresa=self.d["empresa"], nombre="Otro cliente")
+        pedido = Pedido.objects.get(pk=self.d["pedido"].pk)
+        pedido.pk, pedido.folio, pedido.cliente = None, "P-C2", otro_cliente
+        pedido.save()
+        picking = Picking.objects.get(pk=self.d["picking"].pk)
+        picking.pk, picking.folio, picking.pedido = None, "PICK-C2", pedido
+        picking.save()
+        packing = Packing.objects.get(pk=self.d["packing"].pk)
+        packing.pk, packing.folio, packing.pedido, packing.picking = None, "PACK-C2", pedido, picking
+        packing.save()
+
+        despues, cuerpos = listar()
+        self.assertEqual(despues, antes)
+        for recurso in self.RECURSOS:
+            self.assertEqual(
+                {fila["pedido_vinculado"]["cliente"]["nombre"] for fila in cuerpos[recurso]},
+                {self.d["cliente"].nombre, "Otro cliente"},
+            )

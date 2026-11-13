@@ -18,6 +18,7 @@ from wms.models import (
     Transferencia,
     TransferenciaDetalle,
 )
+from produccion.services.orden_bordado_field_filter_service import armar_pedido_vinculado
 from wms.services.rfid_label_service import zpl_rfid_vigente
 
 class TransferenciaDetalleSerializer(serializers.ModelSerializer):
@@ -396,12 +397,19 @@ class PickingSerializer(serializers.ModelSerializer):
     ``ordenes_trabajo`` está nested y prefetchceado para que el GET recupere la
     trazabilidad contra producción; el POST además inyecta un arreglo plano
     ``ordenes_trabajo_generadas`` con resumen ``{tipo, id, folio}``.
+
+    ``pedido_vinculado`` (EC-882) es ``{id, folio, cliente}`` con la misma forma y
+    regla que los detalles de Producción (EC-880, ``armar_pedido_vinculado``): el
+    cliente sale de la foto que guarda el pedido o, sin foto, del ``Cliente`` vivo
+    (``pedido__cliente`` en el ``select_related`` del viewset). ``pedido`` y
+    ``pedido_folio`` no cambian.
     """
 
     picking_detalle = PickingDetalleSerializer(many=True)
     ordenes_trabajo = PickingOrdenTrabajoReadSerializer(many=True, read_only=True)
 
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
+    pedido_vinculado = serializers.SerializerMethodField()
     operador_nombre = serializers.SerializerMethodField()
     almacen_nombre = serializers.CharField(source="almacen.nombre", read_only=True)
     almacen_destino_nombre = serializers.CharField(
@@ -450,6 +458,9 @@ class PickingSerializer(serializers.ModelSerializer):
 
     def get_oleada_nombre(self, obj):
         return str(obj.oleada) if obj.oleada_id else None
+
+    def get_pedido_vinculado(self, obj):
+        return armar_pedido_vinculado(obj)
 
     def get_lote_nombre(self, obj):
         return str(obj.lote) if obj.lote_id else None
@@ -605,8 +616,15 @@ class PackingDetalleReadSerializer(_VarianteDeLineaWmsMixin, serializers.ModelSe
         return getattr(_talla_de_picking_detalle(obj.picking_detalle), "nombre", None)
 
 class PackingSerializer(serializers.ModelSerializer):
+    """Serializer compartido de packing (``list``, ``retrieve`` y respuesta del alta).
+
+    ``pedido_vinculado`` (EC-882): ``{id, folio, cliente}`` del pedido, misma forma
+    que en picking y en los detalles de Producción (``armar_pedido_vinculado``).
+    """
+
     packing_detalle = PackingDetalleReadSerializer(many=True, read_only=True)
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
+    pedido_vinculado = serializers.SerializerMethodField()
     picking_folio = serializers.CharField(source="picking.folio", read_only=True)
     picking_estado = serializers.CharField(source="picking.estado", read_only=True)
     picking_almacen = serializers.IntegerField(source="picking.almacen_id", read_only=True)
@@ -639,6 +657,9 @@ class PackingSerializer(serializers.ModelSerializer):
     def get_operador_nombre(self, obj):
         return self._nombre_usuario(obj.operador)
     
+    def get_pedido_vinculado(self, obj):
+        return armar_pedido_vinculado(obj)
+
     def get_usuario_nombre(self, obj):
         return self._nombre_usuario(obj.usuario)
 
