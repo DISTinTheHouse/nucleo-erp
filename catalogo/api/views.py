@@ -52,6 +52,16 @@ class PaginacionSelector(PaginacionOpcionalLimitOffset):
 
     default_limit = 50
 
+    def get_limit(self, request):
+        # Con ``?ids=`` y sin ``?limit=``, una sola página con todos los pedidos
+        # (``TOPE_IDS_SELECTOR`` como máximo): el selector resuelve la etiqueta de
+        # todo lo ya elegido aunque pase de 50. Un ``limit`` explícito manda.
+        if vacio(request.query_params.get(self.limit_query_param)):
+            ids = _ids_param(request)
+            if ids is not None:
+                return len(ids)
+        return super().get_limit(request)
+
 
 # Tope de ``?ids=`` en ``selector/``: el mismo que ``limit``, una página llena.
 TOPE_IDS_SELECTOR = PaginacionSelector.max_limit

@@ -1256,3 +1256,32 @@ class SelectorTopesTests(TestCase):
             with self.subTest(url=url):
                 self.assertGreater(len(client.get(url).json()), 500)
                 self.assertEqual(len(client.get(url, {"limit": 1000}).json()["results"]), 500)
+
+    def test_ids_sin_limit_regresa_todos_en_una_pagina(self):
+        """Con ``?ids=`` y sin ``limit`` la página mide lo que se pidió (hasta 500);
+        un ``limit`` explícito manda; sin ``ids`` sigue la página de 50."""
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        casos = (
+            (SELECTOR_PRODUCTOS_URL, Producto),
+            (SELECTOR_VARIANTES_URL, ProductoVariante),
+        )
+        for url, modelo in casos:
+            todos = list(modelo.objects.filter(empresa=self.empresa).order_by("id").values_list("id", flat=True))
+            with self.subTest(url=url):
+                ids_80 = ",".join(map(str, todos[:80]))
+                data = client.get(url, {"ids": ids_80}).json()
+                self.assertEqual((data["count"], len(data["results"]), data["next"]), (80, 80, None))
+                self.assertEqual({f["id"] for f in data["results"]}, set(todos[:80]))
+
+                data = client.get(url, {"ids": ids_80, "limit": 10}).json()
+                self.assertEqual((data["count"], len(data["results"])), (80, 10))
+                self.assertIsNotNone(data["next"])
+
+                self.assertEqual(len(client.get(url).json()["results"]), 50)
+
+                data = client.get(url, {"ids": ",".join(map(str, todos[:500]))}).json()
+                self.assertEqual((data["count"], len(data["results"]), data["next"]), (500, 500, None))
+
+                resp = client.get(url, {"ids": ",".join(map(str, todos[:501]))})
+                self.assertEqual(resp.status_code, 400, resp.content)
