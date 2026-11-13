@@ -25,6 +25,7 @@ from produccion.models import (
     OrdenesCorteManga,
     OrdenesReflejante,
     OrdenProduccion,
+    OrdenProduccionPedido,
     OrdenReflejanteDetalle,
     ReflejanteAvances,
 )
@@ -236,12 +237,17 @@ def _ordenes_trabajo(cfg, pedido_ids):
 
 
 def _ordenes_produccion(pedido_ids):
+    """OP de cada pedido, principal o ligado por ``pedidos_ids`` (#1086):
+    ``OrdenProduccionPedido`` siempre incluye al principal. Una consulta."""
     return (
-        OrdenProduccion.objects
-        .filter(pedido_id__in=pedido_ids, activo=True)
-        .exclude(estatus_op=_EstatusOP.CANCELADO)
-        .order_by("op_id")
-        .values("op_id", "pedido_id", "folio_op", "estatus_op", *[campo for _, campo in _HITOS_OP])
+        OrdenProduccionPedido.objects
+        .filter(pedido_id__in=pedido_ids, op__activo=True)
+        .exclude(op__estatus_op=_EstatusOP.CANCELADO)
+        .order_by("op_id", "pedido_id")
+        .values(
+            "op_id", "pedido_id", folio_op=F("op__folio_op"), estatus_op=F("op__estatus_op"),
+            **{campo: F(f"op__{campo}") for _, campo in _HITOS_OP},
+        )
     )
 
 

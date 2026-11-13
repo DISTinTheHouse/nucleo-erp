@@ -35,7 +35,11 @@ DOCUMENTOS_CONFIG = [
     {
         "tipo": "orden_produccion",
         "label": "Orden de Producción",
-        "related_name": "ordenproduccion_set",
+        # Principal o ligada por ``pedidos_ids`` (#1086): se lee por
+        # ``OrdenProduccionPedido`` (``op_pedidos``), que incluye al principal.
+        "related_name": "op_pedidos",
+        "via": "op",
+        "prefetch_attr": "_documentos_op",
         "is_single": False,
         "folio_field": "folio_op",
         "fecha_field": "fecha_inicio",
@@ -169,8 +173,34 @@ def _folio(doc, folio_field):
     return str(val)
 
 
+def _ops_del_pedido_qs():
+    from produccion.models import OrdenProduccionPedido
+
+    return OrdenProduccionPedido.objects.select_related("op").order_by("op_id")
+
+
 def documentos_related_prefetch_args():
-    return [c["related_name"] for c in DOCUMENTOS_CONFIG if not c["is_single"]]
+    from django.db.models import Prefetch
+
+    args = []
+    for c in DOCUMENTOS_CONFIG:
+        if c["is_single"]:
+            continue
+        if c.get("via"):
+            # ``to_attr``: no choca con otros prefetch de ``op_pedidos``.
+            args.append(Prefetch(c["related_name"], queryset=_ops_del_pedido_qs(), to_attr=c["prefetch_attr"]))
+        else:
+            args.append(c["related_name"])
+    return args
+
+
+def _docs_relacionados(pedido, cfg):
+    if cfg.get("via"):
+        filas = getattr(pedido, cfg["prefetch_attr"], None)
+        if filas is None:
+            filas = _ops_del_pedido_qs().filter(pedido=pedido)
+        return [getattr(f, cfg["via"]) for f in filas]
+    return getattr(pedido, cfg["related_name"]).all()
 
 
 # Documentos cuyo detalle se acota por sucursal: listarlos fuera del alcance
@@ -226,7 +256,7 @@ def listar_documentos_pedido(pedido, user=None, tipos=None):
             )
             continue
         try:
-            qs = getattr(pedido, cfg["related_name"]).all()
+            qs = _docs_relacionados(pedido, cfg)
         except Exception:
             continue
         # Iteración directa, NO ``.iterator()``: ``PedidoViewSet.retrieve()``

@@ -16,6 +16,7 @@ producción, superusuario o admin de empresa.
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import mixins, serializers, status
 from rest_framework.decorators import action
@@ -30,7 +31,11 @@ from terceros.models import Proveedor
 
 class SalidaMaquilaDetalleSerializer(serializers.ModelSerializer):
     descripcion = serializers.CharField(max_length=255, required=False, allow_blank=True)
-    precio_unitario = serializers.DecimalField(max_digits=14, decimal_places=4, min_value=0, required=False)
+    # > 0 (#1088): una maquila sin precio no es válida.
+    precio_unitario = serializers.DecimalField(
+        max_digits=14, decimal_places=4, min_value=Decimal("0.0001"), required=False,
+        error_messages={"min_value": "El precio de maquila debe ser mayor que 0."},
+    )
     cantidad = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal("0.01"))
 
     class Meta:
@@ -99,6 +104,33 @@ class SalidaMaquilaListSerializer(SalidaMaquilaSerializer):
         fields = [f for f in SalidaMaquilaSerializer.Meta.fields if f != "detalles"]
 
 
+TIPOS_SERIE_SM = ["Salida a Maquila", "SALIDA_MAQUILA", "SM"]
+
+
+def _serie_sm(empresa_id, sucursal_id):
+    """Serie SM de la sucursal (#1091: una por sucursal). Si la sucursal no
+    tiene, se da de alta al primer uso con el formato de la serie SM existente
+    de la empresa; el prefijo lleva el id de la sucursal (``SM61``) porque el
+    folio es único por empresa. Mismo patrón que la serie de pólizas."""
+    if SerieFolio.resolve(empresa_id, sucursal_id, TIPOS_SERIE_SM, lock=True) is not None:
+        return
+    molde = (
+        SerieFolio.objects.filter(empresa_id=empresa_id, tipo_documento__in=TIPOS_SERIE_SM)
+        .order_by("id_serie_folio").first()
+    )
+    serie, creada = SerieFolio.objects.get_or_create(
+        sucursal_id=sucursal_id, tipo_documento="Salida a Maquila", serie=f"SM{sucursal_id}",
+        defaults={
+            "empresa_id": empresa_id, "folio_actual": 0,
+            "relleno_ceros": molde.relleno_ceros if molde else 5,
+            "separador": molde.separador if molde else "-",
+        },
+    )
+    if not creada and not serie.activo:
+        serie.activo = True
+        serie.save(update_fields=["activo", "updated_at"])
+
+
 def _descripcion(det):
     v = det.producto_variante or det.variante_produccion
     if v is None:
@@ -146,7 +178,8 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
 
         user = self.request.user
         _require_produccion(user)
-        op = serializer.validated_data["op"]
+        # Bloquea la OP: dos SM simultáneas no rebasan juntas el tope (#1088).
+        op = OrdenProduccion.objects.select_for_update().get(pk=serializer.validated_data["op"].pk)
         renglones = serializer.validated_data.pop("detalles", None)
         precio_op = op.costo_maquila_unitario or Decimal("0")
         if not renglones:
@@ -157,9 +190,28 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
             ]
             if not renglones:
                 raise ValidationError({"detalles": "La OP no tiene renglones; captura los de la salida."})
+        if any((precio_op if r.get("precio_unitario") is None else r["precio_unitario"]) <= 0 for r in renglones):
+            raise ValidationError({"precio_unitario": (
+                "La OP no tiene costo de maquila: indica el precio_unitario de cada renglón (mayor que 0)."
+            )})
+        # Tope total por OP (#1088): Σ piezas de sus SM no canceladas + esta
+        # ≤ Σ piezas de los renglones activos de la OP. Dos agregados.
+        programado = op.orden_produccion_detalle.filter(activo=True).aggregate(t=Sum("cantidad"))["t"] or Decimal("0")
+        enviado = (
+            SalidaMaquilaDetalle.objects.filter(salida__op=op, salida__activo=True)
+            .exclude(salida__estatus=SalidaMaquila.Estatus.CANCELADA)
+            .aggregate(t=Sum("cantidad"))["t"] or Decimal("0")
+        )
+        nuevo = sum((r["cantidad"] for r in renglones), Decimal("0"))
+        if enviado + nuevo > programado:
+            raise ValidationError({"detalles": (
+                f"La salida excede las piezas de la OP: {programado:g} programadas, "
+                f"{enviado:g} ya enviadas a maquila; quedan {max(programado - enviado, Decimal('0')):g}."
+            )})
         try:
+            _serie_sm(op.empresa_id, op.sucursal_id)
             folio = SerieFolio.consumir_siguiente_folio(
-                op.empresa_id, op.sucursal_id, ["Salida a Maquila", "SALIDA_MAQUILA", "SM"],
+                op.empresa_id, op.sucursal_id, TIPOS_SERIE_SM,
                 descripcion_documento="Salida a Maquila",
             )
         except Exception as exc:  # serie no configurada / agotada
