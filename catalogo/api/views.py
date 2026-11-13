@@ -440,15 +440,15 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
 
     def _bom_activo(self):
         """BOM activo de la variante (``OuterRef('pk')``) en la empresa del usuario:
-        la misma subconsulta para ``?con_bom=`` y para ``tiene_bom`` del selector."""
-        bom_qs = ListaMaterialBom.objects.filter(
+        la misma subconsulta para ``?con_bom=`` y para ``tiene_bom`` del selector.
+
+        Sin empresa no coincide nada (``empresa IS NULL`` en una FK NOT NULL): nunca
+        cuenta BOM de otras empresas, aunque el queryset de fuera no esté acotado."""
+        return ListaMaterialBom.objects.filter(
             producto_variante=OuterRef('pk'),
             activo=True,
+            empresa=getattr(self.request.user, 'empresa', None),
         )
-        empresa = getattr(self.request.user, 'empresa', None)
-        if empresa:
-            bom_qs = bom_qs.filter(empresa=empresa)
-        return bom_qs
 
     @action(detail=False, methods=['get'])
     def selector(self, request):
