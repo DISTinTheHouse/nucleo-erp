@@ -396,8 +396,8 @@ class OrdenCompraRetrieveSerializer(OrdenCompraSerializer):
     documentos = serializers.SerializerMethodField()
 
     def get_pedido_vinculado(self, obj):
-        from compras.services.orden_compra_view_service import armar_pedido_vinculado
-        return armar_pedido_vinculado(obj)
+        from compras.services.orden_compra_view_service import pedido_vinculado_de_oc
+        return pedido_vinculado_de_oc(obj)
 
     def get_documentos(self, obj):
         from compras.services.orden_compra_view_service import listar_documentos_orden_compra

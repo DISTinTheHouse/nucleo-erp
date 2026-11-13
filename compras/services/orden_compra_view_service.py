@@ -280,8 +280,9 @@ def documentos_related_prefetch_args():
     ]
 
 
-def armar_pedido_vinculado(orden_compra):
-    """Helper minimalista: ``{id, folio}`` del pedido madre o ``None``.
+def pedido_vinculado_de_oc(orden_compra):
+    """``{id, folio}`` del pedido madre de una OC, o ``None``. Sin ``cliente``: no
+    confundir con ``armar_pedido_vinculado`` de producción (#1150).
 
     OrdenCompra.pedido es ``null=True`` (modelo compras.OrdenCompra#L119).
     """

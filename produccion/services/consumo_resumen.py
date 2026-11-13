@@ -59,15 +59,23 @@ def resumen_consumos(renglones):
     return resumen
 
 
-def resumen_consumos_api(renglones):
+def unidad_del_material(producto, unidad_bom=None):
+    """Unidad única de un material en el detalle de la OP (#1140): la del
+    producto (``unidad_medida``) y, si no tiene, la del renglón del BOM."""
+    return getattr(producto, "unidad_medida", None) or unidad_bom
+
+
+def resumen_consumos_api(renglones, unidad_bom=None):
     """``consumos_resumen`` del detalle de la OP: cantidades como texto con 4
     decimales (mismo formato que ``consumos[].detalles[].cantidad``) y
-    ``unidad`` = clave de ``Producto.unidad_medida`` en mayúsculas (como
-    ``productos[].habilitacion[].unidad``), ``None`` si el material no tiene."""
+    ``unidad`` = clave en mayúsculas de ``unidad_del_material`` (la misma que
+    ``productos[].habilitacion[].unidad``), ``None`` si no hay ninguna.
+    ``unidad_bom``: ``{producto_id: UnidadMedida}`` del BOM de la OP."""
+    unidad_bom = unidad_bom or {}
     salida = []
     for dato in resumen_consumos(renglones):
         producto = dato["renglon"].producto
-        unidad = getattr(producto, "unidad_medida", None)
+        unidad = unidad_del_material(producto, unidad_bom.get(dato["producto_id"]))
         salida.append({
             "producto": dato["producto_id"],
             "producto_nombre": getattr(producto, "nombre", None),

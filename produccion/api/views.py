@@ -22,6 +22,14 @@ from seguridad.role_identity import (
 )
 
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
+from nucleo.permisos import (
+    CODIGOS_PRODUCCION_CM,
+    CODIGOS_PRODUCCION_OB,
+    CODIGOS_PRODUCCION_OP,
+    CODIGOS_PRODUCCION_OR,
+    LecturaPorCodigo,
+)
+from rest_framework.permissions import IsAuthenticated
 from produccion.services.common import EPS_CANTIDAD, config_como_dict, pendientes_por_linea
 from produccion.scope import (
     ordenes_bordado_base,
@@ -370,6 +378,32 @@ def _componentes_bom():
     return Producto._base_manager.only('nombre')
 
 
+def _lectura(codigos, *acciones):
+    """``codigos_lectura`` de un ViewSet de producción (#1133): ``list``,
+    ``retrieve`` y las acciones GET extra, todas con los mismos códigos."""
+    return {accion: codigos for accion in ("list", "retrieve", *acciones)}
+
+
+class _EscrituraConCodigoMixin:
+    """PUT/PATCH exigen ``permiso_editar`` y DELETE ``permiso_borrar`` (#1133),
+    como la OP. Superusuario y admin de empresa pasan (``tiene_permiso``)."""
+
+    permiso_editar = None
+    permiso_borrar = None
+
+    def _exigir(self, clave, verbo):
+        if not self.request.user.tiene_permiso(clave):
+            raise PermissionDenied(f"No tienes permiso para {verbo} ({clave}).")
+
+    def update(self, request, *args, **kwargs):
+        self._exigir(self.permiso_editar, "editar")
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        self._exigir(self.permiso_borrar, "borrar")
+        return super().destroy(request, *args, **kwargs)
+
+
 class ListaMaterialBomViewSet(viewsets.ModelViewSet):
     serializer_class = ListaMaterialBomSerializer
 
@@ -535,6 +569,10 @@ class PaginacionOpcional(PageNumberPagination):
 class OrdenProduccionViewSet(viewsets.ModelViewSet):
     queryset = OrdenProduccion.objects.all()
     serializer_class = OrdenProduccionSerializer
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = _lectura(
+        CODIGOS_PRODUCCION_OP, "onboarding", "ruta_critica_bulk", "ruta_critica", "estatus", "kpis",
+    )
 
     def get_serializer_class(self):
         if getattr(self, "action", None) == "list":
@@ -703,7 +741,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         )
         if not es_propia:
             return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
-        res_data = OrdenProduccionService.get_formatted_op_detalle(op_id)
+        res_data = OrdenProduccionService.get_formatted_op_detalle(op_id, request=request)
         if res_data is None:
             return Response({'msg': 'Orden de producción no encontrada'}, status=status.HTTP_404_NOT_FOUND)
         return Response(res_data)
@@ -1235,9 +1273,13 @@ def _suma_avances(modelo, fk, campo, **filtro):
     )
 
 
-class OrdenBordadoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, mixins.DestroyModelMixin, GenericViewSet):
+class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, mixins.DestroyModelMixin, GenericViewSet):
     queryset = OrdenesBordado.objects.filter()
     serializer_class = OrdenBordadoSerializer
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = _lectura(CODIGOS_PRODUCCION_OB, "onboarding")
+    permiso_editar = "E-PRODUCCION-OB"
+    permiso_borrar = "D-PRODUCCION-OB"
 
     def get_serializer_class(self):
         action = getattr(self, "action", None)
@@ -1591,9 +1633,13 @@ def _estatus_por_avance(orden, avance_model, fk, campo, estatus_field, parcial, 
     orden.save(update_fields=campos)
 
 
-class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
+class BordadoAvancesViewSet(_EscrituraConCodigoMixin, _OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = BordadoAvances.objects.filter(activo=True)
     serializer_class = BordadoAvancesSerializer
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = _lectura(CODIGOS_PRODUCCION_OB)
+    permiso_editar = "E-PRODUCCION-OB"
+    permiso_borrar = "D-PRODUCCION-OB"
     orden_padre_field = "ob"
     filterset_fields = ["ob"]
 
@@ -1660,9 +1706,13 @@ class BordadoAvancesViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet)
             instance.soft_delete()
             self._ajustar_estatus(instance.ob_id)
 
-class BordadoIncidenciasViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
+class BordadoIncidenciasViewSet(_EscrituraConCodigoMixin, _OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = BordadoIncidencias.objects.filter(activo=True)
     serializer_class = BordadoIncidenciasSerializer
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = _lectura(CODIGOS_PRODUCCION_OB)
+    permiso_editar = "E-PRODUCCION-OB"
+    permiso_borrar = "D-PRODUCCION-OB"
     orden_padre_field = "ob"
 
     def perform_destroy(self, instance):
@@ -1694,6 +1744,8 @@ class OrdenReflejanteViewSet(
     queryset = OrdenesReflejante.objects.all()
     http_method_names = ['get', 'post', 'patch', 'delete']
     serializer_class = OrdenReflejanteSerializer
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = _lectura(CODIGOS_PRODUCCION_OR, "onboarding")
 
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.
@@ -2028,6 +2080,8 @@ class _AvancePiezasViewSetMixin:
 class ReflejanteAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = ReflejanteAvances.objects.filter(activo=True)
     serializer_class = ReflejanteAvancesSerializer
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = _lectura(CODIGOS_PRODUCCION_OR)
     orden_padre_field = "orden_r"
     filterset_fields = ["orden_r"]
     orden_model = OrdenesReflejante
@@ -2048,6 +2102,8 @@ class ReflejanteAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScope
 class CorteMangaAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = CorteMangaAvances.objects.filter(activo=True)
     serializer_class = CorteMangaAvancesSerializer
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = _lectura(CODIGOS_PRODUCCION_CM)
     orden_padre_field = "ocm"
     filterset_fields = ["ocm"]
     orden_model = OrdenesCorteManga
@@ -2067,6 +2123,8 @@ class CorteMangaAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScope
 class ReflejanteIncidenciasViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = ReflejanteIncidencias.objects.filter(activo=True)
     serializer_class = ReflejanteIncidenciasSerializer
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = _lectura(CODIGOS_PRODUCCION_OR)
     orden_padre_field = "orden_r"
 
     def perform_destroy(self, instance):
@@ -2084,6 +2142,8 @@ class OrdenesCorteMangaViewSet(
     queryset = OrdenesCorteManga.objects.all()
     http_method_names = ['get', 'post', 'patch', 'delete']
     serializer_class = OrdenesCorteMangaSerializer
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = _lectura(CODIGOS_PRODUCCION_CM, "onboarding")
 
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.

@@ -2876,8 +2876,18 @@ class OrdenReflejanteCoberturaParcialidadTests(OrdenReflejanteParcialidadesTests
         self.assertEqual([h["id"] for h in hermanas], [segunda.data["id"]])
         self.assertIn("folio_reflejante", hermanas[0])
         self.assertIn("fecha_inicio", hermanas[0])
+        # #1136: con su estatus.
+        self.assertEqual(hermanas[0]["estatus"], 1)
+        self.assertEqual(hermanas[0]["estatus_display"], "Pendiente")
         # No se incluye a sí misma.
         self.assertNotIn(primera.data["id"], [h["id"] for h in hermanas])
+
+    def test_hermana_cancelada_no_aparece(self):
+        """#1136: una OR cancelada (sin borrar) ya no se lista como hermana."""
+        primera = self._post([(self.pdt_ch, self.CANTIDAD_CH)])
+        segunda = self._post([(self.pdt_m, self.CANTIDAD_M)])
+        OrdenesReflejante.objects.filter(pk=segunda.data["id"]).update(estatus_reflejante=7)
+        self.assertEqual(self._detalle(primera.data["id"])["otras_ordenes_del_pedido"], [])
 
     def test_retrieve_sin_hermanas_devuelve_lista_vacia(self):
         resp = self._post([(self.pdt_ch, 4)])
@@ -8147,7 +8157,19 @@ class EditarOrdenServicioTests(TestCase):
         client.force_authenticate(user=user or self.admin)
         return client.patch(self.url, body, format="json")
 
+    def test_completar_sin_avances_rechaza(self):
+        """#1138: Completado exige avances que cubran lo programado."""
+        resp = self._patch({"estatus_reflejante": 5})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("0 de 10", str(resp.data))
+
+    def test_fecha_fin_no_se_escribe_por_patch(self):
+        resp = self._patch({"fecha_fin": "2020-01-01T00:00:00Z", "prioridad": 2})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsNone(resp.data["fecha_fin"])
+
     def test_completar_sella_fecha_fin_y_reabrir_la_limpia(self):
+        ReflejanteAvances.objects.create(orden_r=self.orden, cantidad_aplicada=10, usuario=self.admin)
         resp = self._patch({"estatus_reflejante": 5})
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertIsNotNone(resp.data["fecha_fin"])
@@ -8786,3 +8808,114 @@ class SalidaMaquilaReglasTests(TestCase):
         self.assertTrue(
             SerieFolio.objects.filter(sucursal=self.sucursal2, tipo_documento="Salida a Maquila").exists()
         )
+
+
+class PermisosProduccionTests(TestCase):
+    """#1133: leer OP/OB/OR/OCM (y sus avances/incidencias) exige ``R-PRODUCCION``
+    o el código de la sección; editar/borrar una OB, sus avances o incidencias
+    exige ``E-``/``D-PRODUCCION-OB``. #1135: el costo de maquila de la OP solo
+    viaja (y se cambia) con ``R-PRODUCCION-COSTOS``."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from seguridad.models import Permiso, Rol, RolPermiso, UsuarioRol
+
+        cls.empresa = Empresa.objects.create(codigo="acme-perm", razon_social="acme-perm SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Matriz")
+
+        def usuario(nombre, *claves):
+            u = Usuario.objects.create(
+                username=nombre, email=f"{nombre}@acme-perm.test", empresa=cls.empresa,
+                sucursal_default=cls.sucursal,
+            )
+            u.sucursales.add(cls.sucursal)
+            if claves:
+                rol = Rol.objects.create(empresa=cls.empresa, codigo=f"rol-{nombre}", nombre=f"rol-{nombre}")
+                for clave in claves:
+                    permiso = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})[0]
+                    RolPermiso.objects.create(rol=rol, permiso=permiso)
+                UsuarioRol.objects.create(usuario=u, rol=rol, empresa=cls.empresa)
+            return u
+
+        cls.modulo = usuario("modulo", "R-PRODUCCION")
+        cls.seccion_ob = usuario("seccionob", "R-PRODUCCION-OB")
+        cls.crm = usuario("crm", "R-CRM")
+        cls.costos = usuario("costos", "R-PRODUCCION", "R-PRODUCCION-COSTOS")
+        cls.op = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-PERM-1",
+            costo_maquila_unitario=Decimal("12"),
+        )
+
+    def _get(self, user, url):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(url)
+
+    def test_lectura_con_modulo_o_seccion(self):
+        urls = [
+            "/api/v1/produccion/orden-produccion/", "/api/v1/produccion/orden-bordado/",
+            "/api/v1/produccion/orden-reflejante/", "/api/v1/produccion/orden-corte-manga/",
+            "/api/v1/produccion/bordado-avances/", "/api/v1/produccion/orden-produccion/kpis/",
+        ]
+        for url in urls:
+            with self.subTest(url=url):
+                self.assertEqual(self._get(self.modulo, url).status_code, 200)
+                self.assertEqual(self._get(self.crm, url).status_code, 403)
+        self.assertEqual(self._get(self.seccion_ob, "/api/v1/produccion/orden-bordado/").status_code, 200)
+        self.assertEqual(self._get(self.seccion_ob, "/api/v1/produccion/orden-reflejante/").status_code, 403)
+
+    def test_editar_y_borrar_ob_exigen_codigos(self):
+        client = APIClient()
+        client.force_authenticate(user=self.modulo)
+        # La OB no existe: el 403 sale antes de buscarla.
+        self.assertEqual(client.patch("/api/v1/produccion/orden-bordado/999999/", {}, format="json").status_code, 403)
+        self.assertEqual(client.delete("/api/v1/produccion/orden-bordado/999999/").status_code, 403)
+        self.assertEqual(client.patch("/api/v1/produccion/bordado-avances/999999/", {}, format="json").status_code, 403)
+
+    def test_costo_de_maquila_solo_con_permiso_de_costos(self):
+        url = f"/api/v1/produccion/orden-produccion/{self.op.pk}/"
+        self.assertNotIn("costo_maquila_unitario", self._get(self.modulo, url).json())
+        self.assertEqual(self._get(self.costos, url).json()["costo_maquila_unitario"], "12.0000")
+
+    def test_sin_permiso_de_costos_no_cambia_el_costo(self):
+        client = APIClient()
+        client.force_authenticate(user=self.modulo)
+        with mock.patch.object(Usuario, "tiene_permiso", return_value=True):  # E-PRODUCCION-OP
+            resp = client.patch(
+                f"/api/v1/produccion/orden-produccion/{self.op.pk}/",
+                {"costo_maquila_unitario": "99"}, format="json",
+            )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.op.refresh_from_db()
+        self.assertEqual(self.op.costo_maquila_unitario, Decimal("12"))
+
+
+class BomUnidadPorcentajeTests(TestCase):
+    """#1140: ``%`` no es unidad de consumo en un renglón de BOM."""
+
+    def test_rechaza_unidad_porcentaje(self):
+        empresa = Empresa.objects.create(codigo="acme-pct", razon_social="acme-pct SA")
+        usuario = Usuario.objects.create(username="pct", email="pct@acme-pct.test", empresa=empresa)
+        pct = UnidadMedida.objects.create(clave="%", nombre="Porcentaje")
+        componente = Producto.objects.create(tipo=_tipo_producto(), empresa=empresa, nombre="Tela")
+        bom = ListaMaterialBom.objects.create(empresa=empresa, activo=True)
+        client = APIClient()
+        client.force_authenticate(user=usuario)
+        resp = client.post(
+            "/api/v1/produccion/bom-detalle/",
+            {"bom": bom.pk, "componente": componente.pk, "cantidad": "1", "unidad": pct.pk}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("unidad", resp.data)
+
+
+class RenglonSinColorTests(TestCase):
+    """#1141: ``color_nombre``/``talla_nombre`` vienen como ``null`` (no desaparecen)."""
+
+    def test_color_y_talla_nulos(self):
+        from produccion.api.serializers import OrdenReflejanteDetalleListSerializer
+
+        data = OrdenReflejanteDetalleListSerializer(OrdenReflejanteDetalle()).data
+        self.assertIn("color_nombre", data)
+        self.assertIsNone(data["color_nombre"])
+        self.assertIsNone(data["talla_nombre"])

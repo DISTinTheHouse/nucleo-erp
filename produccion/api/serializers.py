@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -201,6 +202,10 @@ def _fk_de_la_empresa_del_usuario(serializer, campo, obj, con_empresa=_EL_PROPIO
     return obj
 
 
+#: Claves de ``UnidadMedida`` que no miden cantidad de material (#1140).
+UNIDADES_NO_CONSUMO = {"%"}
+
+
 class BomDetalleSerializer(serializers.ModelSerializer):
     componente_nombre = serializers.SerializerMethodField()
     unidad_clave = serializers.SerializerMethodField()
@@ -218,6 +223,13 @@ class BomDetalleSerializer(serializers.ModelSerializer):
         attrs = super().validate(attrs)
         componente = attrs.get("componente", getattr(self.instance, "componente", None))
         unidad = attrs.get("unidad")
+        # #1140: ``%`` (desperdicio/rendimiento) no es unidad de consumo; el
+        # desperdicio va en ``desperdicio``.
+        for candidata in (unidad, getattr(componente, "unidad_medida", None) if componente else None):
+            if candidata is not None and (candidata.clave or "").strip() in UNIDADES_NO_CONSUMO:
+                raise serializers.ValidationError({"unidad": (
+                    f"«{candidata.clave}» no es unidad de consumo; captura el desperdicio en «desperdicio»."
+                )})
         if componente is not None and componente.unidad_medida_id:
             if unidad is not None and unidad.pk != componente.unidad_medida_id:
                 raise serializers.ValidationError(
@@ -572,6 +584,10 @@ def ligar_pedidos_op(op, pedidos=None):
         OrdenProduccionPedido.objects.bulk_create([OrdenProduccionPedido(op=op, pedido_id=i) for i in nuevos])
 
 
+#: Ver y capturar costos de producción (costo de maquila de la OP, #1135).
+PERMISO_COSTOS_PRODUCCION = "R-PRODUCCION-COSTOS"
+
+
 class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSerializer):
     orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
     estatus_op_display = serializers.CharField(source="get_estatus_op_display", read_only=True)
@@ -689,6 +705,30 @@ class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSeri
             return self.instance.sucursal_id
         sucursal = self.context.get('sucursal_op')
         return getattr(sucursal, 'pk', sucursal)
+
+    def _ve_costos(self):
+        """``R-PRODUCCION-COSTOS`` (#1135); sin petición no se muestra."""
+        request = self.context.get('request')
+        if request is None or not getattr(request, 'user', None):
+            return False
+        from nucleo.permisos import permisos_de_la_peticion
+        return PERMISO_COSTOS_PRODUCCION in permisos_de_la_peticion(request)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not self._ve_costos():
+            data.pop('costo_maquila_unitario', None)
+        return data
+
+    def validate_costo_maquila_unitario(self, value):
+        # Sin permiso de costos no se cambia; mandar el mismo valor (o nada en
+        # el alta) se tolera, para que un formulario que reenvía el campo no falle.
+        actual = getattr(self.instance, 'costo_maquila_unitario', None)
+        if not self._ve_costos() and value != actual:
+            raise serializers.ValidationError(
+                f'No tienes permiso para capturar el costo de maquila ({PERMISO_COSTOS_PRODUCCION}).'
+            )
+        return value
 
     def validate_ruta_produccion(self, ruta_produccion):
         return _fk_de_la_empresa_del_usuario(self, 'ruta_produccion', ruta_produccion)
@@ -891,8 +931,8 @@ class ProductoTerminadoEntradasSerializer(serializers.ModelSerializer):
 
 class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
-    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
-    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
     tipo_servicio_bordado_display = serializers.CharField(
         source="get_tipo_servicio_bordado_display",
         read_only=True,
@@ -1211,8 +1251,8 @@ class OrdenBordadoDetalleListSerializer(serializers.ModelSerializer):
     # el listado deja de crecer con el número de renglones.
 
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
-    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
-    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = OrdenBordadoDetalle
@@ -1406,6 +1446,12 @@ class OrdenBordadoHermanaSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True)
     folio_bordado = serializers.CharField(read_only=True)
     fecha_inicio = serializers.DateTimeField(read_only=True)
+    # #1136: estatus de la hermana (las canceladas ya no vienen).
+    estatus = serializers.IntegerField(read_only=True)
+    estatus_display = serializers.SerializerMethodField()
+
+    def get_estatus_display(self, obj):
+        return dict(OrdenesBordado.EstatusBordado.choices).get(obj.get("estatus"))
 
 
 class _OrdenBordadoAvanceReadSerializer(serializers.ModelSerializer):
@@ -2000,8 +2046,8 @@ class BordadoIncidenciasSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelS
 
 class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
-    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
-    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
     reflejante_config = serializers.SerializerMethodField()
     ubicaciones = serializers.SerializerMethodField()
     foto = serializers.SerializerMethodField()
@@ -2252,8 +2298,8 @@ class OrdenReflejanteDetalleListSerializer(serializers.ModelSerializer):
     # el listado tampoco ejecuta la extracción que los resuelve.
 
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
-    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
-    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = OrdenReflejanteDetalle
@@ -2393,6 +2439,12 @@ class OrdenReflejanteHermanaSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True)
     folio_reflejante = serializers.CharField(read_only=True)
     fecha_inicio = serializers.DateTimeField(read_only=True)
+    # #1136: estatus de la hermana (las canceladas ya no vienen).
+    estatus = serializers.IntegerField(read_only=True)
+    estatus_display = serializers.SerializerMethodField()
+
+    def get_estatus_display(self, obj):
+        return dict(OrdenesReflejante.EstatusReflejante.choices).get(obj.get("estatus"))
 
 
 class OrdenReflejanteRetrieveSerializer(OrdenReflejanteListSerializer):
@@ -2490,8 +2542,8 @@ class ReflejanteIncidenciasSerializer(_OrdenPadreWriteOnceMixin, serializers.Mod
 
 class OrdenCorteMangaDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
-    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
-    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
     corte_manga_config = serializers.SerializerMethodField()
     ubicaciones = serializers.SerializerMethodField()
     foto = serializers.SerializerMethodField()
@@ -2725,8 +2777,8 @@ class OrdenCorteMangaDetalleListSerializer(serializers.ModelSerializer):
     # listado (llega con ``fields = '__all__'``, sin query extra).
 
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
-    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True)
-    color_nombre = serializers.CharField(source='color.nombre', read_only=True)
+    talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
+    color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
 
     class Meta:
         model = OrdenCorteMangaDetalle
@@ -2781,6 +2833,12 @@ class OrdenCorteMangaHermanaSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True)
     folio_ocm = serializers.CharField(read_only=True)
     fecha_inicio = serializers.DateTimeField(read_only=True)
+    # #1136: estatus de la hermana (las canceladas ya no vienen).
+    estatus = serializers.IntegerField(read_only=True)
+    estatus_display = serializers.SerializerMethodField()
+
+    def get_estatus_display(self, obj):
+        return dict(OrdenesCorteManga.EstatusCorte.choices).get(obj.get("estatus"))
 
 
 class OrdenesCorteMangaRetrieveSerializer(_FechasPedidoListadoMixin, OrdenesCorteMangaSerializer):
@@ -3001,7 +3059,7 @@ class PedidoEspecialListSerializer(serializers.ModelSerializer):
 
 
 class PedidoDetalleTallaEspecialSerializer(serializers.ModelSerializer):
-    talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
+    talla_nombre = serializers.CharField(source="talla.nombre", read_only=True, allow_null=True, default=None)
     # Llenado en la vista (``PedidoEspecialViewSet.retrieve``) como atributo
     # ``variante_produccion`` -- evita un query por talla para saber si ya
     # tiene SKU de producción generado.
@@ -3132,7 +3190,7 @@ class AltaCatalogoInputSerializer(serializers.Serializer):
 
 
 class VarianteProduccionSerializer(serializers.ModelSerializer):
-    talla_nombre = serializers.CharField(source="talla.nombre", read_only=True)
+    talla_nombre = serializers.CharField(source="talla.nombre", read_only=True, allow_null=True, default=None)
     # SKU de la ``ProductoVariante`` de catálogo creada con ``alta_catalogo``; ``None`` si no.
     sku_catalogo = serializers.SerializerMethodField()
 
@@ -3150,6 +3208,8 @@ class _EditarOrdenServicioSerializer(serializers.ModelSerializer):
 
     estatus_field = None
     # Ambos enums comparten valores: 5 = Completado, 7 = Cancelado.
+    #: ``(modelo de avances, fk a la orden, campo de piezas)`` de cada subclase.
+    avances = None
 
     def validate_prioridad(self, value):
         # 1 Alta, 2 Media, 3 Baja (#776).
@@ -3160,40 +3220,56 @@ class _EditarOrdenServicioSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if getattr(self.instance, self.estatus_field) == 7:
             raise serializers.ValidationError({self.estatus_field: "La orden está cancelada: ya no se edita."})
+        nuevo = attrs.get(self.estatus_field)
+        if nuevo == 5 and getattr(self.instance, self.estatus_field) != 5:
+            # #1138: Completado solo si los avances cubren lo programado (mismo
+            # criterio que el ajuste por avances). Dos agregados.
+            from produccion.services.common import EPS_CANTIDAD
+            modelo, fk, campo = self.avances
+            programada = float(self.instance.detalles.aggregate(t=Sum("cantidad"))["t"] or 0)
+            realizada = float(
+                modelo.objects.filter(**{fk: self.instance}, activo=True).aggregate(t=Sum(campo))["t"] or 0
+            )
+            if programada <= 0 or realizada < programada - EPS_CANTIDAD:
+                raise serializers.ValidationError({self.estatus_field: (
+                    f"Para completar la orden registra sus avances: {realizada:g} de {programada:g} piezas."
+                )})
         return attrs
 
     def update(self, instance, validated_data):
+        # ``fecha_fin`` es de solo lectura (#1138): la sella el servidor.
         nuevo = validated_data.get(self.estatus_field)
-        if "fecha_fin" not in validated_data:
-            if nuevo == 5 and not instance.fecha_fin:
-                # Completado sin fecha de fin capturada: se sella ahora.
-                validated_data["fecha_fin"] = timezone.now()
-            elif nuevo is not None and nuevo not in (5, 7) and getattr(instance, self.estatus_field) == 5:
-                # Reabierta: deja de tener fecha de fin (#777). Cancelar la conserva.
-                validated_data["fecha_fin"] = None
+        if nuevo == 5 and not instance.fecha_fin:
+            # Completado sin fecha de fin: se sella ahora.
+            validated_data["fecha_fin"] = timezone.now()
+        elif nuevo is not None and nuevo not in (5, 7) and getattr(instance, self.estatus_field) == 5:
+            # Reabierta: deja de tener fecha de fin (#777). Cancelar la conserva.
+            validated_data["fecha_fin"] = None
         return super().update(instance, validated_data)
 
 
 class OrdenReflejanteEditarSerializer(_EditarOrdenServicioSerializer):
     estatus_field = "estatus_reflejante"
+    avances = (ReflejanteAvances, "orden_r", "cantidad_aplicada")
     estatus_reflejante_display = serializers.CharField(source="get_estatus_reflejante_display", read_only=True)
 
     class Meta:
         model = OrdenesReflejante
         fields = ["id", "folio_reflejante", "estatus_reflejante", "estatus_reflejante_display",
                   "prioridad", "fecha_fin", "observaciones"]
-        read_only_fields = ["id", "folio_reflejante"]
+        read_only_fields = ["id", "folio_reflejante", "fecha_fin"]
 
 
 class OrdenesCorteMangaEditarSerializer(_EditarOrdenServicioSerializer):
     estatus_field = "estatus_corte"
+    avances = (CorteMangaAvances, "ocm", "cantidad")
     estatus_corte_display = serializers.CharField(source="get_estatus_corte_display", read_only=True)
 
     class Meta:
         model = OrdenesCorteManga
         fields = ["id", "folio_ocm", "estatus_corte", "estatus_corte_display",
                   "prioridad", "fecha_fin", "observaciones"]
-        read_only_fields = ["id", "folio_ocm"]
+        read_only_fields = ["id", "folio_ocm", "fecha_fin"]
 
 
 class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
