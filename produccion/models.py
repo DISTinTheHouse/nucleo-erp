@@ -171,9 +171,19 @@ class PreOrdenProduccion(models.Model):
         CONVERTIDA = "convertida", "Convertida en OP"
         CANCELADA = "cancelada", "Cancelada"
 
+    class Origen(models.TextChoices):
+        PEDIDO = "pedido", "Pedido"
+        RESURTIDO = "resurtido", "Resurtido de stock"
+
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT)
-    pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="pre_ordenes_produccion")
+    # ``pedido`` solo en origen pedido; el resurtido de stock nace sin pedido.
+    pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="pre_ordenes_produccion", null=True, blank=True)
+    origen = models.CharField(max_length=10, choices=Origen.choices, default=Origen.PEDIDO, db_index=True)
+    # Resurtido: producto de catálogo, fecha compromiso capturada y notas.
+    producto = models.ForeignKey('catalogo.Producto', on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    fecha_compromiso = models.DateField(null=True, blank=True)
+    notas = models.TextField(blank=True, default="")
     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.PENDIENTE_VALIDAR, db_index=True)
     op = models.ForeignKey(
         OrdenProduccion, on_delete=models.SET_NULL, null=True, blank=True, related_name="pre_ordenes",
@@ -244,8 +254,11 @@ class PreOrdenProduccionDetalle(models.Model):
     """Talla de muestra con BOM: su variante de producción y las piezas."""
 
     pre_orden = models.ForeignKey(PreOrdenProduccion, on_delete=models.CASCADE, related_name="detalles")
-    variante_produccion = models.ForeignKey(VarianteProductoProduccion, on_delete=models.PROTECT, related_name="+")
-    pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, related_name="+")
+    # Pedido: variante de producción (muestra) + renglón del pedido.
+    # Resurtido: variante de catálogo (``producto_variante``) con su BOM.
+    variante_produccion = models.ForeignKey(VarianteProductoProduccion, on_delete=models.PROTECT, related_name="+", null=True, blank=True)
+    pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE, related_name="+", null=True, blank=True)
+    producto_variante = models.ForeignKey('catalogo.ProductoVariante', on_delete=models.PROTECT, related_name="+", null=True, blank=True)
     cantidad = models.DecimalField(max_digits=12, decimal_places=2)
 
     class Meta:

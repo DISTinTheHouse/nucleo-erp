@@ -57,13 +57,13 @@ def avisar(pre, tipo, mensaje):
     avisos = AVISOS.get(tipo)
     if not avisos:
         return
-    folio = getattr(pre.pedido, "folio", None) or pre.pedido_id
-    data = {"pre_orden": pre.pk, "pedido": pre.pedido_id, "url": f"/produccion/pre-ordenes/{pre.pk}"}
+    ref = referencia(pre)
+    data = {"pre_orden": pre.pk, "pedido": pre.pedido_id, "origen": pre.origen, "url": f"/produccion/pre-ordenes/{pre.pk}"}
 
     def _enviar():
         for area, titulo in avisos:
             crear_notificacion_por_rol(
-                pre.empresa, ROL_AREA[area], f"{titulo}: pedido {folio}", mensaje or titulo,
+                pre.empresa, ROL_AREA[area], f"{titulo}: {ref}", mensaje or titulo,
                 "produccion", f"pre_orden_{tipo}", data=data,
             )
     transaction.on_commit(_enviar)
@@ -89,7 +89,7 @@ def _semaforo_rojo(pre):
             .order_by("-orden_compra__fecha_entrega_estimada")
             .values_list("orden_compra__fecha_entrega_estimada", flat=True).first()
         )
-    return semaforo(pre.estatus, pre.materiales_faltantes, fem, fecha_compromiso(pre.pedido)) == "rojo"
+    return semaforo(pre.estatus, pre.materiales_faltantes, fem, compromiso(pre)) == "rojo"
 
 
 def revisar_semaforo(pre):
@@ -118,6 +118,19 @@ def _cambiar_estatus(pre, nuevo, campos=None):
 def fecha_compromiso(pedido):
     from ventas.services.clasificacion_service import rango_fecha_entrega
     return rango_fecha_entrega(pedido)[1] if pedido else None
+
+
+def compromiso(pre):
+    """Fecha compromiso de la pre-orden: la capturada (resurtido) o la del pedido."""
+    return pre.fecha_compromiso or fecha_compromiso(pre.pedido if pre.pedido_id else None)
+
+
+def referencia(pre):
+    """Texto para mostrar el origen: ``pedido P-…`` o ``Resurtido · SKU``."""
+    if pre.origen == PreOrdenProduccion.Origen.RESURTIDO:
+        p = pre.producto
+        return f"Resurtido · {(p.cod_proscai or p.codigo or p.nombre) if p else pre.pk}"
+    return f"pedido {getattr(pre.pedido, 'folio', None) or pre.pedido_id}"
 
 
 def semaforo(estatus, faltantes, fecha_estimada, compromiso):
@@ -154,30 +167,33 @@ def pre_orden_abierta(pedido_id, lock=False):
 def requeridos(pre_ids, empresa_id):
     """``{pre_id: {producto_id: {requerido, nombre, codigo, unidad, unidad_id}}}``
     para varias pre-órdenes en 2 consultas (renglones + BOM vigente)."""
+    # Llave de variante: ("vp", id) muestra de pedido o ("pv", id) catálogo (resurtido).
     piezas = defaultdict(dict)
-    for pid, vid, cant in PreOrdenProduccionDetalle.objects.filter(pre_orden_id__in=list(pre_ids)).values_list(
-        "pre_orden_id", "variante_produccion_id", "cantidad"
+    for pid, vid, pvid, cant in PreOrdenProduccionDetalle.objects.filter(pre_orden_id__in=list(pre_ids)).values_list(
+        "pre_orden_id", "variante_produccion_id", "producto_variante_id", "cantidad"
     ):
-        piezas[pid][vid] = Decimal(str(cant))
-    variantes = {v for d in piezas.values() for v in d}
+        piezas[pid][("vp", vid) if vid else ("pv", pvid)] = Decimal(str(cant))
+    vps = {v for d in piezas.values() for t, v in d if t == "vp"}
+    pvs = {v for d in piezas.values() for t, v in d if t == "pv"}
     filas = list(
         BomDetalle.objects.filter(
-            bom__variante_produccion_id__in=list(variantes), bom__activo=True, bom__empresa_id=empresa_id,
-            activo=True, componente__isnull=False,
+            Q(bom__variante_produccion_id__in=list(vps)) | Q(bom__producto_variante_id__in=list(pvs), bom__variante_produccion__isnull=True),
+            bom__activo=True, bom__empresa_id=empresa_id, activo=True, componente__isnull=False,
         ).values(
-            "bom_id", "bom__variante_produccion_id", "componente_id", "componente__nombre",
+            "bom_id", "bom__variante_produccion_id", "bom__producto_variante_id", "componente_id", "componente__nombre",
             "componente__codigo", "componente__cod_proscai", "unidad_id", "unidad__clave", "cantidad", "desperdicio",
         )
     )
+    for f in filas:
+        f["llave"] = ("vp", f["bom__variante_produccion_id"]) if f["bom__variante_produccion_id"] else ("pv", f["bom__producto_variante_id"])
     # BOM vigente por variante: el más reciente activo (mismo criterio que el onboarding de OP).
     vigente = {}
     for f in filas:
-        v = f["bom__variante_produccion_id"]
-        vigente[v] = max(vigente.get(v, 0), f["bom_id"])
+        vigente[f["llave"]] = max(vigente.get(f["llave"], 0), f["bom_id"])
     por_variante = defaultdict(list)
     for f in filas:
-        if f["bom_id"] == vigente[f["bom__variante_produccion_id"]]:
-            por_variante[f["bom__variante_produccion_id"]].append(f)
+        if f["bom_id"] == vigente[f["llave"]]:
+            por_variante[f["llave"]].append(f)
     out = {}
     for pid, vs in piezas.items():
         req = {}
@@ -249,23 +265,33 @@ def materiales(pre):
     piden las otras pre-órdenes abiertas de la sucursal), ``faltante`` =
     requerido − existencia y ``faltante_real`` = requerido − existencia −
     en tránsito. 6 consultas."""
-    otras = list(
-        PreOrdenProduccion.objects.filter(
-            empresa_id=pre.empresa_id, sucursal_id=pre.sucursal_id, estatus__in=ABIERTAS,
-        ).exclude(pk=pre.pk).values_list("pk", flat=True)
-    )
+    # Prioridad: las de pedido ganan. Una pre-orden de pedido no cuenta lo que
+    # piden los resurtidos; un resurtido descuenta de la existencia lo que piden
+    # las de pedido, así nunca queda Lista con material de un cliente.
+    resurtido = pre.origen == PreOrdenProduccion.Origen.RESURTIDO
+    otras_qs = PreOrdenProduccion.objects.filter(
+        empresa_id=pre.empresa_id, sucursal_id=pre.sucursal_id, estatus__in=ABIERTAS,
+    ).exclude(pk=pre.pk)
+    if not resurtido:
+        otras_qs = otras_qs.exclude(origen=PreOrdenProduccion.Origen.RESURTIDO)
+    otras = dict(otras_qs.values_list("pk", "origen"))
     reqs = requeridos([pre.pk, *otras], pre.empresa_id)
     req = reqs.get(pre.pk, {})
     comprometido = defaultdict(lambda: CERO)
-    for pid in otras:
+    de_pedidos = defaultdict(lambda: CERO)
+    for pid, origen in otras.items():
         for prod, m in reqs.get(pid, {}).items():
             if prod in req:
                 comprometido[prod] += m["requerido"]
+                if origen == PreOrdenProduccion.Origen.PEDIDO:
+                    de_pedidos[prod] += m["requerido"]
     ex = existencias(pre.empresa_id, req, pre.sucursal_id)
     tr = en_transito(pre.empresa_id, req, pre.sucursal_id)
     out = []
     for m in sorted(req.values(), key=lambda x: x["nombre"] or ""):
         e = max(ex.get(m["producto_id"], CERO), CERO)
+        if resurtido:
+            e = max(e - de_pedidos[m["producto_id"]], CERO)
         t = tr.get(m["producto_id"], CERO)
         out.append({
             **m, "existencia": e, "en_transito": t, "comprometido": comprometido[m["producto_id"]],
@@ -298,7 +324,7 @@ def _ajustar_necesidades(pre, mats, usuario=None):
         neto = n.cantidad - n.sobrante
         activo_por_prod[n.producto_id] += neto
         pendiente_por_prod[n.producto_id].append(n)
-    compromiso = fecha_compromiso(pre.pedido)
+    fecha_req = compromiso(pre)
     creadas = []
     faltante = {m["producto_id"]: m for m in mats}
     for prod in set(faltante) | set(activo_por_prod):
@@ -309,7 +335,7 @@ def _ajustar_necesidades(pre, mats, usuario=None):
             creadas.append(N.objects.create(
                 empresa_id=pre.empresa_id, sucursal_id=pre.sucursal_id, producto_id=prod,
                 unidad_id=m["unidad_id"], cantidad=diff.quantize(Q4), pre_orden=pre, pedido_id=pre.pedido_id,
-                fecha_requerida=compromiso,
+                fecha_requerida=fecha_req,
             ))
         elif diff < -EPS:
             sobra = -diff
@@ -551,7 +577,7 @@ def eventos_oc(oc_id, tipo, usuario=None):
 def confirmar_existencias(pre_id, user):
     """Almacén confirma. Sin faltantes → Lista para producir. Con faltantes →
     una necesidad de compra por material (sin duplicar las activas) → En compra."""
-    pre = PreOrdenProduccion.objects.select_for_update().select_related("empresa", "pedido").get(pk=pre_id)
+    pre = PreOrdenProduccion.objects.select_for_update(of=("self",)).select_related("empresa", "pedido").get(pk=pre_id)
     if pre.estatus not in ABIERTAS:
         raise ValidationError({"estatus": f"La pre-orden está {pre.get_estatus_display().lower()}."})
     if not pre.detalles.exists():
@@ -593,3 +619,30 @@ def marcar_convertida(pre, op, user):
     pre.op = op
     pre.save(update_fields=[*campos, "op", "updated_at"])
     evento(pre, EV.OP_CREADA, user, f"OP {op.folio_op}.")
+
+
+# --------------------------------------------------------------------------- resurtido
+
+@transaction.atomic
+def crear_resurtido(user, producto, sucursal, tallas, fecha_compromiso_, notas=""):
+    """Pre-orden de resurtido de stock (sin pedido): ``tallas`` =
+    ``[(ProductoVariante, cantidad)]`` con BOM vigente. Nace en Pendiente de
+    validar. Devuelve ``(pre, avisos)``; avisa (no bloquea) si ya hay un
+    resurtido abierto del mismo producto y sucursal."""
+    O = PreOrdenProduccion.Origen
+    avisos = []
+    abiertas = PreOrdenProduccion.objects.filter(
+        empresa_id=producto.empresa_id, sucursal=sucursal, producto=producto, origen=O.RESURTIDO, estatus__in=ABIERTAS,
+    ).values_list("pk", flat=True)
+    if abiertas:
+        avisos.append(f"Ya hay un resurtido abierto de este producto en la sucursal (pre-orden {', '.join(map(str, abiertas))}).")
+    pre = PreOrdenProduccion.objects.create(
+        empresa_id=producto.empresa_id, sucursal=sucursal, origen=O.RESURTIDO, producto=producto,
+        fecha_compromiso=fecha_compromiso_, notas=notas or "", estatus=E.PENDIENTE_VALIDAR, estatus_desde=timezone.now(),
+    )
+    PreOrdenProduccionDetalle.objects.bulk_create([
+        PreOrdenProduccionDetalle(pre_orden=pre, producto_variante=pv, cantidad=cant) for pv, cant in tallas
+    ])
+    pre.producto = producto
+    evento(pre, EV.CREADA, user, f"Resurtido de stock: {len(tallas)} talla(s), {sum(c for _, c in tallas)} pieza(s).")
+    return pre, avisos

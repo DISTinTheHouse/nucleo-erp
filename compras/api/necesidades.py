@@ -37,7 +37,9 @@ class NecesidadCompraSerializer(serializers.ModelSerializer):
     material_nombre = serializers.CharField(source="producto.nombre", read_only=True)
     material_codigo = serializers.SerializerMethodField()
     unidad = serializers.CharField(source="unidad.clave", read_only=True, allow_null=True, default=None)
-    pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
+    pedido_folio = serializers.CharField(source="pedido.folio", read_only=True, allow_null=True, default=None)
+    origen = serializers.CharField(source="pre_orden.origen", read_only=True)
+    referencia = serializers.SerializerMethodField()
     orden_compra_folio = serializers.CharField(source="orden_compra.folio", read_only=True, allow_null=True, default=None)
     estatus_display = serializers.CharField(source="get_estatus_display", read_only=True)
     cantidad = serializers.FloatField(read_only=True)
@@ -48,12 +50,22 @@ class NecesidadCompraSerializer(serializers.ModelSerializer):
         model = NecesidadCompra
         fields = [
             "id", "material", "material_nombre", "material_codigo", "cantidad", "unidad", "pre_orden",
-            "pedido", "pedido_folio", "fecha_requerida", "estatus", "estatus_display", "orden_compra",
+            "pedido", "pedido_folio", "origen", "referencia", "fecha_requerida", "estatus", "estatus_display", "orden_compra",
             "orden_compra_folio", "cantidad_recibida", "sobrante", "sucursal", "created_at",
         ]
 
     def get_material_codigo(self, obj):
         return obj.producto.cod_proscai or obj.producto.codigo or ""
+
+    def get_referencia(self, obj):
+        return _referencia(obj)
+
+
+def _referencia(n):
+    """``P-…`` (folio del pedido) o ``Resurtido · SKU`` para mostrar."""
+    from produccion.services.pre_orden_service import referencia
+    r = referencia(n.pre_orden)
+    return r[len("pedido "):] if r.startswith("pedido ") else r
 
 
 def _ultimas_compras(empresa_id, productos):
@@ -81,7 +93,7 @@ class NecesidadCompraViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, G
         if empresa is None:
             return NecesidadCompra.objects.none()
         qs = NecesidadCompra.objects.filter(empresa=empresa).select_related(
-            "producto", "unidad", "pedido", "orden_compra"
+            "producto", "unidad", "pedido", "orden_compra", "pre_orden__pedido", "pre_orden__producto"
         ).order_by("fecha_requerida", "id")
         p = self.request.query_params
         if p.get("estatus"):
@@ -139,7 +151,8 @@ class NecesidadCompraViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, G
                 "ultimo_costo": _f(u[2]) if u else None,
                 "necesidades": [
                     {"id": n.pk, "cantidad": _f(n.cantidad), "pre_orden": n.pre_orden_id, "pedido": n.pedido_id,
-                     "pedido_folio": n.pedido.folio, "fecha_requerida": n.fecha_requerida}
+                     "pedido_folio": n.pedido.folio if n.pedido_id else None, "origen": n.pre_orden.origen,
+                     "referencia": _referencia(n), "fecha_requerida": n.fecha_requerida}
                     for n in lista
                 ],
             })
@@ -208,7 +221,7 @@ def crear_oc_desde_necesidades(user, proveedor_id, necesidad_ids):
         fecha_oc=timezone.localdate(), total_piezas=sum(piezas.values()),
         observaciones="Consolidada desde necesidades de compra de pre-órdenes de producción.",
     )
-    oc.pedidos.set({n.pedido_id for n in necs})
+    oc.pedidos.set({n.pedido_id for n in necs if n.pedido_id})
     for prod, lista in por_material.items():
         det = OrdenCompraDetalle.objects.create(
             orden_compra=oc, producto_id=prod, descripcion=(lista[0].producto.nombre or "")[:200],
