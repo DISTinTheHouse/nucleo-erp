@@ -16,6 +16,7 @@ from produccion.models import (
     OrdenProduccionDetalle,
     OrdenProduccionPedido,
 )
+from produccion.services.consumo_resumen import unidad_del_material
 from produccion.utils.folios import generate_op_folio
 
 
@@ -332,7 +333,7 @@ class OrdenProduccionService:
         }
     
     @staticmethod
-    def get_formatted_op_detalle(op_id):
+    def get_formatted_op_detalle(op_id, request=None):
         # Consultas fijas, sin importar renglones, consumos ni pedidos (EC-880):
         # OP con sus FK de encabezado (las etiquetas y ``pedido_vinculado`` del
         # serializer) + renglones activos con sus FK + insumos del BOM +
@@ -353,7 +354,8 @@ class OrdenProduccionService:
                 ).prefetch_related(
                     models.Prefetch(
                         'bom__materia_prima_detalle',
-                        queryset=BomDetalle.objects.select_related('componente', 'unidad'),
+                        # ``componente__unidad_medida``: una sola unidad por material (#1140).
+                        queryset=BomDetalle.objects.select_related('componente__unidad_medida', 'unidad'),
                     ),
                 ),
             ),
@@ -373,6 +375,9 @@ class OrdenProduccionService:
             return None
 
         products_data = {}
+        # Unidad del BOM por material: respaldo de ``consumos_resumen`` cuando
+        # el producto no tiene ``unidad_medida`` (#1140).
+        unidad_bom = {}
 
         for detail in op.orden_produccion_detalle.all():
             variant = detail.producto_variante
@@ -420,7 +425,12 @@ class OrdenProduccionService:
                     comp = bom_det.componente
                     code = comp.cod_proscai if comp.cod_proscai else (comp.codigo if comp.codigo else "")
                     name = comp.nombre
-                    unit = bom_det.unidad.clave.upper() if bom_det.unidad else ""
+                    # Una sola unidad por material en todo el detalle (#1140):
+                    # la del producto y, si no tiene, la del renglón del BOM.
+                    unidad = unidad_del_material(comp, bom_det.unidad)
+                    unit = unidad.clave.upper() if unidad is not None and unidad.clave else ""
+                    if bom_det.unidad is not None:
+                        unidad_bom.setdefault(comp.pk, bom_det.unidad)
 
                     bom_qty = float(bom_det.cantidad)
                     needed = qty * bom_qty
@@ -475,7 +485,8 @@ class OrdenProduccionService:
             })
 
         from produccion.api.serializers import OrdenProduccionSerializer
-        res_data = OrdenProduccionSerializer(op, context={"pedidos_con_cliente": True}).data
+        # ``request``: el costo de maquila solo viaja con permiso de costos (#1135).
+        res_data = OrdenProduccionSerializer(op, context={"pedidos_con_cliente": True, "request": request}).data
         res_data.pop("orden_produccion_detalle", None)
         res_data["op_info"] = op.folio_op
         res_data["productos"] = productos_list
@@ -497,6 +508,7 @@ class OrdenProduccionService:
         # ``recalcular-consumos`` (``produccion.services.consumo_resumen``).
         from produccion.services.consumo_resumen import resumen_consumos_api
         res_data["consumos_resumen"] = resumen_consumos_api(
-            detalle for consumo in op.consumoproduccion_set.all() for detalle in consumo.detalles.all()
+            (detalle for consumo in op.consumoproduccion_set.all() for detalle in consumo.detalles.all()),
+            unidad_bom,
         )
         return res_data

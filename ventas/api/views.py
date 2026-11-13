@@ -2084,8 +2084,12 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 prioridad=1,
             )
 
-            # Crear el detalle de la Orden de Reflejante 
+            # Crear el detalle de la Orden de Reflejante. ``reflejante_config``
+            # llega como arreglo: se normaliza igual que en producción (#1138).
+            from produccion.services.orden_reflejante_service import config_reflejante_principal
+
             for dt in detalles_con_tallas_reflejante:
+                cfg = config_reflejante_principal(dt.reflejante_config)
                 OrdenReflejanteDetalle.objects.create(
                     orden_r=orden_r,
                     pedido_detalle=dt.pedido_detalle,
@@ -2094,16 +2098,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     talla=dt.talla,
                     color=dt.pedido_detalle.color,
                     # Configuración inicial
-                    tipo_reflejante=(
-                        dt.reflejante_config.get("tipo")
-                        if dt.reflejante_config
-                        else None
-                    ),
-                    posicion=(
-                        dt.reflejante_config.get("posicion")
-                        if dt.reflejante_config
-                        else None
-                    ),
+                    tipo_reflejante=cfg.get("tipo_reflejante") or cfg.get("tipo"),
+                    posicion=cfg.get("posicion"),
                     metros=0,
                 )
 

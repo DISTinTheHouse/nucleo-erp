@@ -2,7 +2,7 @@ import math
 
 from catalogo.compatibilidad import Proceso, exigir_compatibilidad
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Sum, F
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesReflejante, OrdenReflejanteDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
@@ -14,6 +14,16 @@ class OrdenReflejanteDuplicada409(APIException):
     status_code = 409
     default_detail = "Ya existe una orden de reflejante activa para este pedido."
     default_code = "orden_reflejante_duplicada"
+
+
+def config_reflejante_principal(cfg_raw):
+    """El ``reflejante_config`` de una talla como dict: el objeto tal cual o el
+    primer elemento si es un arreglo (la forma actual); ``{}`` si no hay."""
+    if isinstance(cfg_raw, dict):
+        return cfg_raw
+    if isinstance(cfg_raw, list) and cfg_raw and isinstance(cfg_raw[0], dict):
+        return cfg_raw[0]
+    return {}
 
 
 class OrdenReflejanteService:
@@ -309,8 +319,10 @@ class OrdenReflejanteService:
             OrdenesReflejante.objects
             .filter(pedido_id=orden.pedido_id, activo=True)
             .exclude(pk=orden.pk)
+            # Sin canceladas, y con su estatus para distinguir el resto (#1136).
+            .exclude(estatus_reflejante=OrdenesReflejante.EstatusReflejante.CANCELADO)
             .order_by("id")
-            .values("id", "folio_reflejante", "fecha_inicio")
+            .values("id", "folio_reflejante", "fecha_inicio", estatus=F("estatus_reflejante"))
         )
 
         reparto_aproximado = any(v > EPS_CANTIDAD for v in sin_talla.values())
@@ -548,12 +560,7 @@ class OrdenReflejanteService:
             # ``notas``: para reflejante ese dato no existe (ver
             # ``OrdenReflejanteDetalleSerializer._get_cfg_dict``).
             cfg_raw = getattr(dt, "reflejante_config", None)
-            if isinstance(cfg_raw, dict):
-                cfg = cfg_raw
-            elif isinstance(cfg_raw, list) and cfg_raw and isinstance(cfg_raw[0], dict):
-                cfg = cfg_raw[0]
-            else:
-                cfg = {}
+            cfg = config_reflejante_principal(cfg_raw)
             ubicaciones = cfg.get("ubicaciones") or []
             if isinstance(ubicaciones, list) and ubicaciones:
                 primera_ubic = ubicaciones[0] or {}

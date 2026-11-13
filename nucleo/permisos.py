@@ -254,3 +254,11 @@ CODIGOS_CLIENTES = (
 # clientes, existencias y BOM. Mismo código que la regla de módulo ``/manufacturing``
 # de ``routePermissions.ts``; el catálogo no tiene código de sección de Planeación.
 CODIGOS_PLANEACION = ("R-PRODUCCION",)
+
+# Lecturas de producción (#1133): el código de módulo ``R-PRODUCCION`` o el de la
+# sección. El de módulo basta para no dejar fuera a quien hoy entra al módulo sin
+# los códigos de sección (decisión de negocio, beta de producción).
+CODIGOS_PRODUCCION_OP = ("R-PRODUCCION", "R-PRODUCCION-OP")
+CODIGOS_PRODUCCION_OB = ("R-PRODUCCION", "R-PRODUCCION-OB")
+CODIGOS_PRODUCCION_OR = ("R-PRODUCCION", "R-PRODUCCION-OR")
+CODIGOS_PRODUCCION_CM = ("R-PRODUCCION", "R-PRODUCCION-CM")

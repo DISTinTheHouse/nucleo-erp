@@ -1,7 +1,7 @@
 import math
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Sum, F
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesBordado, OrdenBordadoDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
@@ -303,8 +303,10 @@ class OrdenBordadoService:
             OrdenesBordado.objects
             .filter(pedido_id=orden.pedido_id, activo=True)
             .exclude(pk=orden.pk)
+            # Sin canceladas, y con su estatus para distinguir el resto (#1136).
+            .exclude(estatus_bordado=OrdenesBordado.EstatusBordado.CANCELADO_LEGACY)
             .order_by("id")
-            .values("id", "folio_bordado", "fecha_inicio")
+            .values("id", "folio_bordado", "fecha_inicio", estatus=F("estatus_bordado"))
         )
 
         reparto_aproximado = any(v > EPS_CANTIDAD for v in sin_talla.values())

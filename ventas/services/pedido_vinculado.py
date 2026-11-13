@@ -53,6 +53,8 @@ def armar_pedido_vinculado(documento):
         return None
     return {
         "id": pedido.pk,
-        "folio": str(getattr(pedido, "folio", pedido.pk) or pedido.pk),
+        # El folio tal cual (``null`` si no tiene), igual que ``pedidos[].folio``
+        # y ``pedido_folio`` de la misma respuesta (#1137).
+        "folio": pedido.folio,
         "cliente": cliente_de_pedido(pedido),
     }
