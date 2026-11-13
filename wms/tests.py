@@ -1796,3 +1796,181 @@ class PackingDespachoEC574Tests(TestCase):
         self.assertIsNone(datos["embarque"]["motivo"])
         self.assertEqual(datos["embarque"]["piezas_por_empacar"], "0")
         self.assertTrue(all(d["disponible_para_despacho"] for d in datos["despacho_detalle"]))
+
+
+def _documentos_wms(codigo, *, superusuario=False):
+    """Una empresa con un picking, un packing y una transferencia con dos tipos de línea.
+
+    Fixture de EC-882, armado con el ORM y sin servicios: cada documento trae una
+    línea de catálogo (``ProductoVariante`` con color y talla) y una de muestra
+    (``VarianteProductoProduccion``, sin producto ni variante de catálogo), las
+    dos formas que el PDF de WMS tiene que poder imprimir.
+    """
+    from catalogo.models import Color, ProductoVariante, Talla, VarianteProductoProduccion
+    from inventarios.models import Almacen
+    from nucleo.models import Moneda
+    from terceros.models import Cliente
+    from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+    from wms.models import (
+        Packing,
+        PackingDetalle,
+        Picking,
+        PickingDetalle,
+        Transferencia,
+        TransferenciaDetalle,
+    )
+
+    d = {}
+    d["empresa"] = Empresa.objects.create(codigo=f"wms-{codigo}", razon_social=f"WMS {codigo} SA")
+    d["sucursal"] = Sucursal.objects.create(empresa=d["empresa"], codigo=f"S{codigo}", nombre=f"Sucursal {codigo}")
+    d["usuario"] = Usuario.objects.create(
+        username=f"wms-{codigo}@example.com",
+        email=f"wms-{codigo}@example.com",
+        empresa=d["empresa"],
+        sucursal_default=d["sucursal"],
+        is_superuser=superusuario,
+        is_admin_empresa=not superusuario,
+    )
+    origen = Almacen.objects.create(
+        empresa=d["empresa"], sucursal=d["sucursal"], codigo=f"PT{codigo}", nombre=f"Terminado {codigo}",
+        permite_salida=True, permite_entrada=True,
+    )
+    destino = Almacen.objects.create(
+        empresa=d["empresa"], sucursal=d["sucursal"], codigo=f"AP{codigo}", nombre=f"Apartados {codigo}",
+        permite_salida=True, permite_entrada=True,
+    )
+    d["color"] = Color.objects.create(nombre=f"MARINO {codigo}", codigo="MAR", codigo_hex="#000080")
+    d["talla"] = Talla.objects.create(nombre=f"M{codigo}")
+    d["color_muestra"] = Color.objects.create(nombre=f"ROJO {codigo}", codigo="ROJ", codigo_hex="#FF0000")
+    d["talla_muestra"] = Talla.objects.create(nombre=f"G{codigo}")
+    producto = Producto.objects.create(
+        tipo=_tipo_producto(), empresa=d["empresa"], nombre=f"Chamarra {codigo}", codigo=f"CH{codigo}"
+    )
+    d["variante"] = ProductoVariante.objects.create(
+        producto=producto, empresa=d["empresa"], color=d["color"], talla=d["talla"],
+        nombre=f"Chamarra {codigo} variante", sku=f"CH{codigo}-MAR-M", precio_base=Decimal("100"),
+    )
+    d["muestra"] = VarianteProductoProduccion.objects.create(
+        empresa=d["empresa"], color=d["color_muestra"], talla=d["talla_muestra"],
+        nombre=f"Muestra {codigo}", sku=f"MP-{codigo}-G",
+    )
+    moneda, _ = Moneda.objects.get_or_create(codigo_iso="MXN", defaults={"nombre": "Peso"})
+    d["cliente"] = Cliente.objects.create(
+        empresa=d["empresa"], nombre=f"Cliente {codigo}", razon_social=f"Cliente {codigo} SA de CV",
+        rfc=f"CLI{codigo}010101A",
+    )
+    d["pedido"] = Pedido.objects.create(
+        empresa=d["empresa"], sucursal=d["sucursal"], cliente=d["cliente"], moneda=moneda,
+        folio=f"P-{codigo}", estatus=3, persona_pagos="Pagos", correo_facturas="p@example.com",
+        telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+    )
+    linea = PedidoDetalle.objects.create(pedido=d["pedido"], producto=producto)
+    talla_catalogo = PedidoDetalleTalla.objects.create(
+        pedido_detalle=linea, talla=d["talla"], cantidad=2, variante=d["variante"]
+    )
+    linea_muestra = PedidoDetalle.objects.create(pedido=d["pedido"])
+    talla_muestra = PedidoDetalleTalla.objects.create(
+        pedido_detalle=linea_muestra, talla=d["talla_muestra"], cantidad=1, sku_muestra=d["muestra"].sku
+    )
+
+    d["transferencia"] = Transferencia.objects.create(
+        empresa=d["empresa"], sucursal=d["sucursal"], almacen_origen=origen, almacen_destino=destino,
+        folio=f"TR-{codigo}", usuario=d["usuario"],
+    )
+    d["tr_catalogo"] = TransferenciaDetalle.objects.create(
+        transferencia=d["transferencia"], producto=producto, producto_variante=d["variante"], cantidad=2
+    )
+    d["tr_muestra"] = TransferenciaDetalle.objects.create(
+        transferencia=d["transferencia"], variante_produccion=d["muestra"], cantidad=1
+    )
+    d["picking"] = Picking.objects.create(
+        folio=f"PICK-{codigo}", empresa=d["empresa"], sucursal=d["sucursal"], pedido=d["pedido"],
+        operador=d["usuario"], almacen=origen, almacen_destino=destino, transferencia=d["transferencia"],
+        usuario=d["usuario"],
+    )
+    d["pk_catalogo"] = PickingDetalle.objects.create(
+        picking=d["picking"], pedido_detalle=linea, pedido_detalle_talla=talla_catalogo, producto=producto,
+        producto_variante=d["variante"], cantidad_solicitada=2, cantidad_asignada=2, cantidad_surtida=2,
+    )
+    d["pk_muestra"] = PickingDetalle.objects.create(
+        picking=d["picking"], pedido_detalle=linea_muestra, pedido_detalle_talla=talla_muestra,
+        variante_produccion=d["muestra"], cantidad_solicitada=1, cantidad_asignada=1, cantidad_surtida=1,
+    )
+    d["packing"] = Packing.objects.create(
+        folio=f"PACK-{codigo}", empresa=d["empresa"], sucursal=d["sucursal"], pedido=d["pedido"],
+        picking=d["picking"], operador=d["usuario"], usuario=d["usuario"],
+    )
+    PackingDetalle.objects.create(packing=d["packing"], picking_detalle=d["pk_catalogo"], cantidad_empacada=2)
+    PackingDetalle.objects.create(packing=d["packing"], picking_detalle=d["pk_muestra"], cantidad_empacada=1)
+    return d
+
+
+def _api_de(user):
+    api = APIClient()
+    api.force_authenticate(user)
+    return api
+
+
+class DocumentosWmsAlcanceSuperusuarioTests(TestCase):
+    """EC-882: picking, packing y transferencia acotan al superusuario a su empresa activa.
+
+    Mismo criterio que Producción desde EC-880 (``wms/scope.py``): antes el
+    superusuario veía en list y retrieve los documentos de todas las empresas.
+    """
+
+    RECURSOS = {"pickings": "picking", "packings": "packing", "transferencias": "transferencia"}
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.propia = _documentos_wms("A", superusuario=True)
+        cls.ajena = _documentos_wms("B")
+        cls.superusuario = cls.propia["usuario"]
+
+    def _ids(self, user, recurso):
+        resp = _api_de(user).get(f"/api/v1/wms/{recurso}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return [fila["id"] for fila in resp.json()]
+
+    def test_superusuario_solo_lista_su_empresa_activa(self):
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(self.superusuario, recurso), [self.propia[clave].pk])
+
+    def test_superusuario_recibe_404_en_el_detalle_de_otra_empresa(self):
+        api = _api_de(self.superusuario)
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                propio = api.get(f"/api/v1/wms/{recurso}/{self.propia[clave].pk}/")
+                self.assertEqual(propio.status_code, 200, propio.content)
+                ajeno = api.get(f"/api/v1/wms/{recurso}/{self.ajena[clave].pk}/")
+                self.assertEqual(ajeno.status_code, 404, ajeno.content)
+
+    def test_superusuario_sigue_a_su_empresa_activa_al_cambiarla(self):
+        """Tras ``cambiar-empresa`` ve la nueva empresa (sin sucursal propia) y ya no la anterior."""
+        Usuario.objects.filter(pk=self.superusuario.pk).update(
+            empresa=self.ajena["empresa"], sucursal_default=None
+        )
+        user = Usuario.objects.get(pk=self.superusuario.pk)
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(user, recurso), [self.ajena[clave].pk])
+
+    def test_superusuario_sin_empresa_no_ve_nada(self):
+        Usuario.objects.filter(pk=self.superusuario.pk).update(empresa=None)
+        user = Usuario.objects.get(pk=self.superusuario.pk)
+        for recurso in self.RECURSOS:
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(user, recurso), [])
+
+    def test_trasladar_un_picking_de_otra_empresa_es_404(self):
+        resp = _api_de(self.superusuario).post(
+            f"/api/v1/wms/pickings/{self.ajena['picking'].pk}/trasladar/",
+            {"almacen": self.ajena["picking"].almacen_destino_id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_admin_de_empresa_conserva_su_alcance(self):
+        for recurso, clave in self.RECURSOS.items():
+            with self.subTest(recurso=recurso):
+                self.assertEqual(self._ids(self.ajena["usuario"], recurso), [self.ajena[clave].pk])

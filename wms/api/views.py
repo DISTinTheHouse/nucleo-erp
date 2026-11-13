@@ -33,6 +33,7 @@ from wms.models import (
     Transferencia,
     TransferenciaDetalle,
 )
+from wms.scope import documentos_wms_visibles
 from wms.services.despacho_service import DespachoService
 from wms.services.rfid_scan_service import (
     lector_desde_request,
@@ -81,30 +82,12 @@ class TransferenciaViewSet(
                 )
             )
 
-        # Aislamiento multi-tenant: sin empresa no se ve nada. list devuelve 200 []
-        # fuera de alcance; retrieve de otra empresa/sucursal devuelve 404 (no 403).
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-
-        # Scope por sucursal dentro de la empresa: el admin de empresa ve todas sus
-        # sucursales; el resto ve las asignadas en el M2M ``usuario.sucursales``
-        # más su ``sucursal_default`` —mismo criterio que
-        # ``PickingViewSet``/``PackingViewSet``/``DespachoViewSet.get_queryset()``,
-        # y que ``TransferenciaService.handle_store()`` ya exige del lado de
-        # escritura (la transferencia se timbra con ``user.sucursal_default``)—.
-        # Sin esto un usuario cuyo único acceso fuera la sucursal por defecto podía
-        # crear la transferencia pero no volver a verla en list/retrieve. Sin
-        # sucursales asignadas no ve nada, igual que un usuario sin empresa: se
-        # falla cerrado. Se filtra por ``Transferencia.sucursal`` (la dueña del
-        # documento), no por la sucursal de los almacenes origen/destino, que
-        # pueden diferir.
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        # Aislamiento multi-tenant (``wms/scope.py``): empresa activa, superusuario
+        # incluido (EC-882). Dentro de la empresa, los no admin solo ven las
+        # sucursales de ``sucursales_permitidas()`` —el mismo conjunto que
+        # ``TransferenciaService.handle_store()`` exige al escribir—, filtradas por
+        # ``Transferencia.sucursal`` (la dueña), no por la de los almacenes.
+        return documentos_wms_visibles(qs, user)
 
     def get_serializer_class(self):
         # retrieve → encabezado + renglones anidados; list → forma plana ligera;
@@ -177,30 +160,12 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
             .order_by("-created_at", "-id")
         )
 
-        # Aislamiento multi-tenant: sin empresa no se ve nada. list devuelve 200 []
-        # fuera de alcance; retrieve de otra empresa/sucursal devuelve 404 (no 403).
-        # Mismo criterio que TransferenciaViewSet.get_queryset().
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-
-        # Scope por sucursal dentro de la empresa: el admin de empresa ve todas sus
-        # sucursales; el resto ve las asignadas en el M2M ``usuario.sucursales``
-        # más su ``sucursal_default`` —mismo criterio que
-        # ``PackingViewSet``/``DespachoViewSet.get_queryset()``—. Sin esto un
-        # usuario cuyo único acceso fuera la sucursal por defecto podía completar
-        # el onboarding (que sí une ambos conjuntos, ver
-        # ``PickingService.onboarding_payload``) y crear el picking, pero no
-        # volver a verlo en list/retrieve. Sin sucursales asignadas no ve nada,
-        # igual que un usuario sin empresa: se falla cerrado. Se filtra por
-        # ``Picking.sucursal`` (la dueña del documento), no por la sucursal del
-        # almacén, que puede diferir.
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        # Aislamiento multi-tenant (``wms/scope.py``): empresa activa, superusuario
+        # incluido (EC-882). Los no admin ven las sucursales de
+        # ``sucursales_permitidas()``, el mismo conjunto que une el onboarding
+        # (``PickingService.onboarding_payload``): quien crea un picking lo vuelve a
+        # ver en list/retrieve. ``trasladar`` pasa por aquí vía ``get_object``.
+        return documentos_wms_visibles(qs, user)
 
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
@@ -284,15 +249,8 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
             .order_by("-created_at", "-id")
         )
 
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        # Mismo alcance que picking y transferencias (``wms/scope.py``, EC-882).
+        return documentos_wms_visibles(qs, user)
 
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
