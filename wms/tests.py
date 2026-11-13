@@ -948,6 +948,59 @@ class PickingGeneraTransferenciaTests(TestCase):
         resp = api.post("/api/v1/wms/pickings/onboarding/", cuerpo, format="json")
         self.assertEqual(resp.status_code, 400, resp.content)
 
+    def test_alta_responde_el_detalle_precargado(self):
+        """EC-882: el alta de picking y de packing responde lo mismo que su retrieve, y
+        la respuesta del packing no suma consultas por renglón (antes cada FK de cada
+        renglón era una consulta)."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from catalogo.models import Talla
+        from nucleo.models import SerieFolio
+        from ventas.models import PedidoDetalleTalla
+
+        SerieFolio.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, tipo_documento="Packing", serie="A", prefijo="PAK"
+        )
+        talla_l = PedidoDetalleTalla.objects.create(
+            pedido_detalle=self.talla_row.pedido_detalle, talla=Talla.objects.create(nombre="L"), cantidad=4
+        )
+        api = APIClient()
+        api.force_authenticate(self.usuario)
+        consultas_packing = []
+        for tallas in ([self.talla_row], [self.talla_row, talla_l]):
+            resp = api.post(
+                "/api/v1/wms/pickings/",
+                {
+                    "pedido": self.pedido.pk, "operador": self.usuario.pk, "almacen": self.origen.pk,
+                    "almacen_destino": self.destino.pk,
+                    "picking_detalle": [{"pedido_detalle_talla": t.pk, "cantidad_asignada": "1"} for t in tallas],
+                },
+                format="json",
+            )
+            self.assertEqual(resp.status_code, 201, resp.content)
+            picking = resp.json()
+            self.assertEqual(picking.pop("ordenes_trabajo_generadas"), [])
+            self.assertEqual(picking, api.get(f"/api/v1/wms/pickings/{picking['id']}/").json())
+
+            with CaptureQueriesContext(connection) as ctx:
+                resp = api.post(
+                    "/api/v1/wms/packings/",
+                    {
+                        "picking": picking["id"],
+                        "packing_detalle": [
+                            {"picking_detalle": linea["id"], "cantidad_empacada": "1"}
+                            for linea in picking["picking_detalle"]
+                        ],
+                    },
+                    format="json",
+                )
+            self.assertEqual(resp.status_code, 201, resp.content)
+            consultas_packing.append(len(ctx.captured_queries))
+            packing = resp.json()
+            self.assertEqual(packing, api.get(f"/api/v1/wms/packings/{packing['id']}/").json())
+        self.assertEqual(consultas_packing[1], consultas_packing[0])
+
     def test_picking_crea_transferencia_con_folio_tr_y_mueve_stock(self):
         from wms.services.picking_service import PickingService
 

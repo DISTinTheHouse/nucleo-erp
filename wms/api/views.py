@@ -174,6 +174,16 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
         # ver en list/retrieve. ``trasladar`` pasa por aquí vía ``get_object``.
         return documentos_wms_visibles(qs, user)
 
+    def _releer(self, documento):
+        """El documento recién creado, leído con las precargas de ``get_queryset``.
+
+        Serializar la instancia que devuelve el servicio resolvía cada FK de cada
+        renglón con su propia consulta; releerla deja la respuesta del alta con el
+        mismo costo fijo que el retrieve (EC-882), como ya hace ``trasladar``. El
+        servicio ya validó empresa y sucursal, así que el documento está en alcance.
+        """
+        return self.get_queryset().get(pk=documento.pk)
+
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
             return PickingCreateSerializer
@@ -197,7 +207,7 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         picking, ordenes_trabajo = PickingService.handle_store(serializer.validated_data, request.user)
-        response_data = PickingSerializer(picking).data
+        response_data = PickingSerializer(self._releer(picking)).data
         response_data["ordenes_trabajo_generadas"] = ordenes_trabajo
         return Response(response_data, status=status.HTTP_201_CREATED)
 
@@ -222,7 +232,7 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         picking, ordenes_trabajo = PickingService.handle_store(serializer.validated_data, request.user)
-        response_data = PickingSerializer(picking).data
+        response_data = PickingSerializer(self._releer(picking)).data
         response_data["ordenes_trabajo_generadas"] = ordenes_trabajo
         return Response(response_data, status=status.HTTP_201_CREATED)
 
@@ -263,6 +273,16 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
         # Mismo alcance que picking y transferencias (``wms/scope.py``, EC-882).
         return documentos_wms_visibles(qs, user)
 
+    def _releer(self, documento):
+        """El documento recién creado, leído con las precargas de ``get_queryset``.
+
+        Serializar la instancia que devuelve el servicio resolvía cada FK de cada
+        renglón con su propia consulta; releerla deja la respuesta del alta con el
+        mismo costo fijo que el retrieve (EC-882), como ya hace ``trasladar``. El
+        servicio ya validó empresa y sucursal, así que el documento está en alcance.
+        """
+        return self.get_queryset().get(pk=documento.pk)
+
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
             return PackingCreateSerializer
@@ -283,13 +303,13 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         packing_instance = PackingService.handle_store(serializer.validated_data, request.user)
-        return Response(PackingSerializer(packing_instance).data, status=status.HTTP_201_CREATED)
+        return Response(PackingSerializer(self._releer(packing_instance)).data, status=status.HTTP_201_CREATED)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         packing_instance = PackingService.handle_store(serializer.validated_data, request.user)
-        return Response(PackingSerializer(packing_instance).data, status=status.HTTP_201_CREATED)
+        return Response(PackingSerializer(self._releer(packing_instance)).data, status=status.HTTP_201_CREATED)
 
 
 class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
