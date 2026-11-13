@@ -65,9 +65,10 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
         empresa_id = getattr(getattr(self.context.get("request"), "user", None), "empresa_id", None)
         fields["op"].queryset = OrdenProduccion.objects.filter(empresa_id=empresa_id, activo=True)
         fields["centro_confeccion"].queryset = Proveedor.objects.filter(empresa_id=empresa_id)
-        fields["detalles"].child.fields["op_detalle"].queryset = OrdenProduccionDetalle.objects.filter(
-            op__empresa_id=empresa_id
-        )
+        if "detalles" in fields:
+            fields["detalles"].child.fields["op_detalle"].queryset = OrdenProduccionDetalle.objects.filter(
+                op__empresa_id=empresa_id
+            )
         return fields
 
     def validate(self, attrs):
@@ -88,6 +89,14 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
             if d.get("op_detalle") is not None and d["op_detalle"].op_id != op.pk:
                 raise ValidationError({"detalles": "Un renglón no pertenece a la OP."})
         return attrs
+
+
+class SalidaMaquilaListSerializer(SalidaMaquilaSerializer):
+    """Mismo renglón sin ``detalles``: serializarlos y descartarlos costaba una
+    consulta por salida."""
+
+    class Meta(SalidaMaquilaSerializer.Meta):
+        fields = [f for f in SalidaMaquilaSerializer.Meta.fields if f != "detalles"]
 
 
 def _descripcion(det):
@@ -127,10 +136,9 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
 
     def list(self, request, *args, **kwargs):
         # El listado no lleva renglones (sin consultas por fila).
-        data = SalidaMaquilaSerializer(self.get_queryset(), many=True, context=self.get_serializer_context()).data
-        for fila in data:
-            fila.pop("detalles", None)
-        return Response(data)
+        return Response(
+            SalidaMaquilaListSerializer(self.get_queryset(), many=True, context=self.get_serializer_context()).data
+        )
 
     @transaction.atomic
     def perform_create(self, serializer):

@@ -805,7 +805,9 @@ class ConsumoProduccionSerializer(serializers.ModelSerializer):
                 'producto_nombre': getattr(detalle.producto, 'nombre', None),
                 'cantidad': str(detalle.cantidad),
             }
-            for detalle in detalles.select_related('producto').all()
+            # ``.all()`` usa el prefetch ``detalles__producto`` de la vista; un
+            # ``select_related`` aquí lo descartaba y hacía 1 consulta por consumo.
+            for detalle in detalles.all()
         ]
 
 class ProductoTerminadoEntradasSerializer(serializers.ModelSerializer):
