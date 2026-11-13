@@ -1999,14 +1999,29 @@ class DocumentosWmsAlcanceSuperusuarioTests(TestCase):
                 self.assertEqual(ajeno.status_code, 404, ajeno.content)
 
     def test_superusuario_sigue_a_su_empresa_activa_al_cambiarla(self):
-        """Tras ``cambiar-empresa`` ve la nueva empresa (sin sucursal propia) y ya no la anterior."""
-        Usuario.objects.filter(pk=self.superusuario.pk).update(
-            empresa=self.ajena["empresa"], sucursal_default=None
+        """Tras ``POST /api/v1/nucleo/cambiar-empresa/`` (EC-843) list, retrieve y
+        ``trasladar`` siguen a la empresa nueva y ya no ven la anterior."""
+        resp = _api_de(self.superusuario).post(
+            "/api/v1/nucleo/cambiar-empresa/", {"empresa": self.ajena["empresa"].pk}, format="json"
         )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        # El JWT sólo lleva el id: cada petición vuelve a leer al usuario de la BD.
         user = Usuario.objects.get(pk=self.superusuario.pk)
+        self.assertEqual(user.empresa_id, self.ajena["empresa"].pk)
+        api = _api_de(user)
         for recurso, clave in self.RECURSOS.items():
             with self.subTest(recurso=recurso):
                 self.assertEqual(self._ids(user, recurso), [self.ajena[clave].pk])
+                nueva = api.get(f"/api/v1/wms/{recurso}/{self.ajena[clave].pk}/")
+                self.assertEqual(nueva.status_code, 200, nueva.content)
+                anterior = api.get(f"/api/v1/wms/{recurso}/{self.propia[clave].pk}/")
+                self.assertEqual(anterior.status_code, 404, anterior.content)
+        resp = api.post(
+            f"/api/v1/wms/pickings/{self.propia['picking'].pk}/trasladar/",
+            {"almacen": self.propia["picking"].almacen_destino_id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
 
     def test_superusuario_sin_empresa_no_ve_nada(self):
         Usuario.objects.filter(pk=self.superusuario.pk).update(empresa=None)
