@@ -47,6 +47,20 @@ from wms.services.packing_service import PackingService
 from wms.services.rfid_label_service import RFIDLabelService
 
 
+class _ReleerAltaMixin:
+    """``_releer``: el documento recién creado, leído con las precargas de ``get_queryset``.
+
+    Lo comparten ``PickingViewSet`` y ``PackingViewSet``. Serializar la instancia
+    que devuelve el servicio resolvía cada FK de cada renglón con su propia
+    consulta; releerla deja la respuesta del alta con el mismo costo fijo que el
+    retrieve (EC-882), como ya hace ``trasladar``. El servicio ya validó empresa y
+    sucursal, así que el documento está en alcance.
+    """
+
+    def _releer(self, documento):
+        return self.get_queryset().get(pk=documento.pk)
+
+
 class TransferenciaViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet
 ):
@@ -108,7 +122,7 @@ class TransferenciaViewSet(
         res = TransferenciaService.handle_store(serializer.validated_data, request.user, request=request)
         return Response(TransferenciaSerializer(res).data, status=status.HTTP_201_CREATED)
 
-class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericViewSet):
+class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericViewSet):
     queryset = Picking.objects.all()
     serializer_class = PickingSerializer
 
@@ -174,16 +188,6 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
         # ver en list/retrieve. ``trasladar`` pasa por aquí vía ``get_object``.
         return documentos_wms_visibles(qs, user)
 
-    def _releer(self, documento):
-        """El documento recién creado, leído con las precargas de ``get_queryset``.
-
-        Serializar la instancia que devuelve el servicio resolvía cada FK de cada
-        renglón con su propia consulta; releerla deja la respuesta del alta con el
-        mismo costo fijo que el retrieve (EC-882), como ya hace ``trasladar``. El
-        servicio ya validó empresa y sucursal, así que el documento está en alcance.
-        """
-        return self.get_queryset().get(pk=documento.pk)
-
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
             return PickingCreateSerializer
@@ -236,7 +240,7 @@ class PickingViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericVi
         response_data["ordenes_trabajo_generadas"] = ordenes_trabajo
         return Response(response_data, status=status.HTTP_201_CREATED)
 
-class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
+class PackingViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
     queryset = Packing.objects.all()
     serializer_class = PackingSerializer
 
@@ -272,16 +276,6 @@ class PackingViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericVi
 
         # Mismo alcance que picking y transferencias (``wms/scope.py``, EC-882).
         return documentos_wms_visibles(qs, user)
-
-    def _releer(self, documento):
-        """El documento recién creado, leído con las precargas de ``get_queryset``.
-
-        Serializar la instancia que devuelve el servicio resolvía cada FK de cada
-        renglón con su propia consulta; releerla deja la respuesta del alta con el
-        mismo costo fijo que el retrieve (EC-882), como ya hace ``trasladar``. El
-        servicio ya validó empresa y sucursal, así que el documento está en alcance.
-        """
-        return self.get_queryset().get(pk=documento.pk)
 
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
