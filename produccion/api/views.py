@@ -753,7 +753,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             )
 
         serializer = OrdenProduccionSerializer(
-            data=request.data if data is None else data, context={'request': request},
+            data=request.data if data is None else data,
+            # ``sucursal_op``: los pedidos ligados deben ser de esta sucursal (#1089).
+            context={'request': request, 'sucursal_op': sucursal},
         )
         serializer.is_valid(raise_exception=True)
         # ``empresa``/``sucursal`` son read-only en el serializer (no se

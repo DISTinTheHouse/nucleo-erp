@@ -635,13 +635,33 @@ class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSeri
     def _validar_pedido(self, pedido, ya_ligado=False):
         request = self.context.get('request')
         empresa_id = getattr(getattr(request, 'user', None), 'empresa_id', None)
+        user = getattr(request, 'user', None)
+        no_encontrado = serializers.ValidationError(
+            self.fields['pedido'].error_messages['does_not_exist'].format(pk_value=pedido.pk)
+        )
         if pedido.empresa_id != empresa_id:
             # Mismo mensaje que un pk inexistente: no revela que existe en otra empresa.
-            raise serializers.ValidationError(
-                self.fields['pedido'].error_messages['does_not_exist'].format(pk_value=pedido.pk)
-            )
+            raise no_encontrado
         if ya_ligado:
             return pedido
+        # #1089: los pedidos que se ligan (principal o secundarios) deben estar
+        # en el alcance de sucursales del usuario (mismo criterio que
+        # ``ordenes_produccion_visibles``), activos, no cancelados y de la
+        # sucursal de la OP. Los ya ligados no se revisan otra vez.
+        if not (getattr(user, 'is_superuser', False) or getattr(user, 'is_admin_empresa', False)):
+            if not hasattr(self, '_sucursales_usuario'):  # una consulta por petición
+                self._sucursales_usuario = set(user.sucursales_permitidas())
+            if pedido.sucursal_id not in self._sucursales_usuario:
+                raise no_encontrado
+        if not pedido.activo:
+            raise serializers.ValidationError(f'El pedido {pedido.folio or pedido.pk} está dado de baja.')
+        if pedido.estatus == Pedido.ESTATUS_CANCELADO:
+            raise serializers.ValidationError(f'El pedido {pedido.folio or pedido.pk} está cancelado.')
+        sucursal_op = self._sucursal_op_id()
+        if sucursal_op is not None and pedido.sucursal_id != sucursal_op:
+            raise serializers.ValidationError(
+                f'El pedido {pedido.folio or pedido.pk} es de otra sucursal; la OP solo agrupa pedidos de su sucursal.'
+            )
 
         from produccion.api.views import _detalles_especiales_qs
         if not _detalles_especiales_qs().filter(pedido=pedido).exists():
@@ -653,6 +673,14 @@ class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSeri
                 'El pedido debe estar clasificado y con fecha de confirmación antes de ligarlo a una OP.'
             )
         return pedido
+
+    def _sucursal_op_id(self):
+        """Sucursal de la OP: la guardada o, en el alta, la que resolvió la
+        vista (``context['sucursal_op']``); ``None`` si aún no se conoce."""
+        if self.instance is not None:
+            return self.instance.sucursal_id
+        sucursal = self.context.get('sucursal_op')
+        return getattr(sucursal, 'pk', sucursal)
 
     def validate_ruta_produccion(self, ruta_produccion):
         return _fk_de_la_empresa_del_usuario(self, 'ruta_produccion', ruta_produccion)

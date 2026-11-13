@@ -50,6 +50,7 @@ from produccion.models import (
     OrdenesReflejante,
     OrdenProduccion,
     OrdenProduccionDetalle,
+    SalidaMaquila,
     OrdenProduccionRutaCritica,
     OrdenReflejanteDetalle,
     ProductoTerminadoEntradas,
@@ -8316,3 +8317,122 @@ class ConsultasDetalleYListadoOpEC880Tests(_OpRealEC880Base):
         self.assertEqual(self._contar("/api/v1/produccion/orden-produccion/"), base)
         self.assertEqual(base, self.CONSULTAS_LISTADO)
 
+
+
+class OrdenProduccionPedidosLigadosTests(TestCase):
+    """#1089: ``pedidos_ids`` (y ``pedido``) solo ligan pedidos activos, no
+    cancelados, de la sucursal de la OP y dentro del alcance del usuario.
+    Reutiliza el escenario de ``OrdenProduccionPedidoOpcionalTests``."""
+
+    URL = OrdenProduccionPedidoOpcionalTests.URL
+    setUpTestData = OrdenProduccionPedidoOpcionalTests.setUpTestData
+    _client = OrdenProduccionPedidoOpcionalTests._client
+    _body = OrdenProduccionPedidoOpcionalTests._body
+    _pedido_muestra = OrdenProduccionPedidoOpcionalTests._pedido_muestra
+    _segunda_sucursal = OrdenProduccionPedidoOpcionalTests._segunda_sucursal
+
+    def _crear(self, *pedidos, client=None):
+        body = self._body()
+        body["pedidos_ids"] = [p.pk for p in pedidos]
+        return (client or self._client()).post(self.URL, body, format="json")
+
+    def test_dos_pedidos_de_la_sucursal_se_ligan(self):
+        resp = self._crear(self._pedido_muestra(), self._pedido_muestra())
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_pedido_inactivo_rechaza(self):
+        inactivo = self._pedido_muestra()
+        Pedido.objects.filter(pk=inactivo.pk).update(activo=False)
+        resp = self._crear(self._pedido_muestra(), inactivo)
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_pedido_cancelado_rechaza(self):
+        cancelado = self._pedido_muestra()
+        Pedido.objects.filter(pk=cancelado.pk).update(estatus=Pedido.ESTATUS_CANCELADO)
+        resp = self._crear(self._pedido_muestra(), cancelado)
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_pedido_de_otra_sucursal_rechaza_aunque_el_usuario_la_vea(self):
+        suc = self._segunda_sucursal()
+        resp = self._crear(self._pedido_muestra(), self._pedido_muestra(sucursal=suc))
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("otra sucursal", str(resp.data))
+
+    def test_no_admin_no_liga_pedido_fuera_de_su_alcance(self):
+        suc = self._segunda_sucursal()
+        limitado = Usuario.objects.create(
+            username="op-lim2", email="lim2@acme-op.test", empresa=self.empresa, sucursal_default=suc,
+        )
+        limitado.sucursales.add(suc)
+        client = APIClient()
+        client.force_authenticate(user=limitado)
+        body = self._body()
+        body["sucursal"] = suc.pk
+        body["pedidos_ids"] = [self._pedido_muestra().pk]  # de la sucursal 1, que no ve
+        resp = client.post(self.URL, body, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertNotIn("otra sucursal", str(resp.data))  # mismo mensaje que un pk inexistente
+
+
+class SalidaMaquilaReglasTests(TestCase):
+    """#1088: tope total de piezas por OP y precio > 0. #1091: serie SM por
+    sucursal, dada de alta al primer uso."""
+
+    URL = "/api/v1/produccion/salidas-maquila/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-sm", razon_social="acme-sm SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Matriz")
+        cls.sucursal2 = Sucursal.objects.create(empresa=cls.empresa, codigo="SLP", nombre="Segunda")
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="Salida a Maquila", serie="SM",
+            relleno_ceros=5, separador="-",
+        )
+        cls.usuario = Usuario.objects.create(
+            username="sm-user", email="sm@acme-sm.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        from terceros.models import Proveedor
+        cls.maquilero = Proveedor.objects.create(empresa=cls.empresa, nombre="Maquila SA", es_maquilero=True)
+        unidad = UnidadMedida.objects.create(clave="PZA", nombre="Pieza")
+        cls.op = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-SM-1",
+            centro_confeccion=cls.maquilero, costo_maquila_unitario=Decimal("10"),
+        )
+        cls.det = OrdenProduccionDetalle.objects.create(op=cls.op, cantidad=Decimal("5"), unidad=unidad)
+
+    def _post(self, **body):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client.post(self.URL, {"op": self.op.pk, **body}, format="json")
+
+    def test_tope_total_por_op(self):
+        self.assertEqual(self._post(detalles=[{"op_detalle": self.det.pk, "cantidad": "3"}]).status_code, 201)
+        resp = self._post(detalles=[{"cantidad": "3", "descripcion": "libre"}])
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("quedan 2", str(resp.data))
+
+    def test_canceladas_no_cuentan(self):
+        resp = self._post()
+        self.assertEqual(resp.status_code, 201, resp.data)
+        SalidaMaquila.objects.filter(pk=resp.data["id"]).update(estatus=SalidaMaquila.Estatus.CANCELADA)
+        self.assertEqual(self._post().status_code, 201)
+
+    def test_precio_cero_rechaza(self):
+        resp = self._post(detalles=[{"op_detalle": self.det.pk, "cantidad": "1", "precio_unitario": "0"}])
+        self.assertEqual(resp.status_code, 400, resp.data)
+
+    def test_op_sin_costo_y_sin_precio_rechaza(self):
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(costo_maquila_unitario=None)
+        resp = self._post()
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("precio_unitario", resp.data)
+
+    def test_sucursal_sin_serie_la_da_de_alta(self):
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(sucursal=self.sucursal2)
+        resp = self._post()
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertTrue(resp.data["folio"].startswith(f"SM{self.sucursal2.pk}-"))
+        self.assertTrue(
+            SerieFolio.objects.filter(sucursal=self.sucursal2, tipo_documento="Salida a Maquila").exists()
+        )

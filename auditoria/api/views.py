@@ -236,11 +236,22 @@ class BitacoraDocumentoViewSet(viewsets.ReadOnlyModelViewSet):
 
 def _derivados_sin_origen(docs):
     """Documentos ligados que no guardan origen en la bitácora (#1065): la
-    transferencia de cada picking y los cobros de cada factura."""
+    transferencia de cada picking, los cobros de cada factura y las OP que
+    cubren un pedido como secundario (#1086)."""
     from finanzas.models import CobroDetalle
+    from produccion.models import OrdenProduccionPedido
     from wms.models import Picking
 
     extra = set()
+    # OP que cubren el pedido como secundario (#1086): su origen en la
+    # bitácora es solo el pedido principal.
+    pedidos = [i for t, i in docs if t == "pedido"]
+    if pedidos:
+        extra |= {
+            ("orden_produccion", op)
+            for op in OrdenProduccionPedido.objects.filter(pedido_id__in=pedidos)
+            .values_list("op_id", flat=True).distinct()
+        }
     pickings = [i for t, i in docs if t == "picking"]
     if pickings:
         extra |= {
