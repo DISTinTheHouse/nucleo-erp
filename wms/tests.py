@@ -1974,3 +1974,116 @@ class DocumentosWmsAlcanceSuperusuarioTests(TestCase):
         for recurso, clave in self.RECURSOS.items():
             with self.subTest(recurso=recurso):
                 self.assertEqual(self._ids(self.ajena["usuario"], recurso), [self.ajena[clave].pk])
+
+
+class DocumentosWmsLineasVarianteTests(TestCase):
+    """EC-882: SKU, color y talla en los renglones de picking, packing y transferencia.
+
+    Una línea de catálogo los lee de su ``ProductoVariante``; una de muestra, de su
+    ``VarianteProductoProduccion``, y además trae un ``producto_nombre`` usable en
+    vez de ``null`` (antes una TR nacida de un picking con muestra llegaba con
+    producto, variante y los dos nombres vacíos).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.d = _documentos_wms("L")
+
+    def _detalle(self, recurso, documento):
+        resp = _api_de(self.d["usuario"]).get(f"/api/v1/wms/{recurso}/{documento.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def _esperado_catalogo(self):
+        d = self.d
+        return {
+            "sku": d["variante"].sku,
+            "color_id": d["color"].pk,
+            "color_nombre": d["color"].nombre,
+            "talla_id": d["talla"].pk,
+            "talla_nombre": d["talla"].nombre,
+            "sku_muestra": None,
+        }
+
+    def _esperado_muestra(self):
+        d = self.d
+        return {
+            "sku": d["muestra"].sku,
+            "color_id": d["color_muestra"].pk,
+            "color_nombre": d["color_muestra"].nombre,
+            "talla_id": d["talla_muestra"].pk,
+            "talla_nombre": d["talla_muestra"].nombre,
+            "sku_muestra": d["muestra"].sku,
+            "producto_nombre": d["muestra"].nombre,
+            "producto": None,
+            "producto_variante": None,
+            "producto_variante_nombre": None,
+            "variante_produccion": d["muestra"].pk,
+        }
+
+    def _assert_lineas(self, lineas):
+        catalogo, muestra = lineas
+        self.assertEqual({k: catalogo[k] for k in self._esperado_catalogo()}, self._esperado_catalogo())
+        self.assertEqual({k: muestra[k] for k in self._esperado_muestra()}, self._esperado_muestra())
+
+    def test_picking(self):
+        self._assert_lineas(self._detalle("pickings", self.d["picking"])["picking_detalle"])
+
+    def test_packing(self):
+        self._assert_lineas(self._detalle("packings", self.d["packing"])["packing_detalle"])
+
+    def test_transferencia(self):
+        self._assert_lineas(self._detalle("transferencias", self.d["transferencia"])["transferencia_detalle"])
+
+    def test_los_listados_de_picking_y_packing_traen_los_mismos_campos(self):
+        api = _api_de(self.d["usuario"])
+        (picking,) = api.get("/api/v1/wms/pickings/").json()
+        self._assert_lineas(picking["picking_detalle"])
+        (packing,) = api.get("/api/v1/wms/packings/").json()
+        self._assert_lineas(packing["packing_detalle"])
+
+    def test_linea_sin_variante_deja_los_campos_en_null(self):
+        from wms.models import TransferenciaDetalle
+
+        TransferenciaDetalle.objects.filter(pk=self.d["tr_catalogo"].pk).update(producto_variante=None)
+        catalogo, _ = self._detalle("transferencias", self.d["transferencia"])["transferencia_detalle"]
+        self.assertEqual(
+            {k: catalogo[k] for k in ("sku", "color_id", "color_nombre", "talla_id", "talla_nombre")},
+            dict.fromkeys(("sku", "color_id", "color_nombre", "talla_id", "talla_nombre")),
+        )
+        self.assertEqual(catalogo["producto_nombre"], self.d["tr_catalogo"].producto.nombre)
+
+    def test_las_consultas_no_crecen_con_los_renglones(self):
+        """Duplicar los renglones no agrega consultas en ningún detalle ni listado."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from wms.models import PackingDetalle, PickingDetalle, TransferenciaDetalle
+
+        rutas = (
+            f"/api/v1/wms/pickings/{self.d['picking'].pk}/",
+            f"/api/v1/wms/packings/{self.d['packing'].pk}/",
+            f"/api/v1/wms/transferencias/{self.d['transferencia'].pk}/",
+            "/api/v1/wms/pickings/",
+            "/api/v1/wms/packings/",
+        )
+        api = _api_de(self.d["usuario"])
+
+        def consultas():
+            conteo = {}
+            for ruta in rutas:
+                with CaptureQueriesContext(connection) as ctx:
+                    self.assertEqual(api.get(ruta).status_code, 200)
+                conteo[ruta] = len(ctx.captured_queries)
+            return conteo
+
+        antes = consultas()
+        for modelo, filtro in (
+            (PickingDetalle, {"picking": self.d["picking"]}),
+            (PackingDetalle, {"packing": self.d["packing"]}),
+            (TransferenciaDetalle, {"transferencia": self.d["transferencia"]}),
+        ):
+            for fila in list(modelo.objects.filter(**filtro)):
+                fila.pk = None
+                fila.save()
+        self.assertEqual(consultas(), antes)
