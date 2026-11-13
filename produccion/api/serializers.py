@@ -3371,17 +3371,30 @@ class PreOrdenProduccionDetalleSerializer(serializers.ModelSerializer):
     talla_nombre = serializers.SerializerMethodField()
     color_nombre = serializers.SerializerMethodField()
 
+    unidad = serializers.SerializerMethodField()
+
     @staticmethod
     def _v(obj):
         return obj.variante_produccion if obj.variante_produccion_id else obj.producto_variante
 
     def get_sku(self, obj):
+        if obj.producto_id and not obj.producto_variante_id:
+            return obj.producto.cod_proscai or obj.producto.codigo or None
         v = self._v(obj)
         return v.sku if v else None
 
     def get_nombre(self, obj):
+        if obj.producto_id and not obj.producto_variante_id:
+            return obj.producto.nombre or ""
         v = self._v(obj)
         return (v.nombre or "") if v else ""
+
+    def get_unidad(self, obj):
+        """Unidad de la cantidad: la del producto (m, kg, pz); los fabricados, piezas."""
+        if obj.variante_produccion_id or obj.tipo_linea == "fabricado":
+            return "pz"
+        p = obj.producto if obj.producto_id else (obj.producto_variante.producto if obj.producto_variante_id else None)
+        return p.unidad_medida.clave if p and p.unidad_medida_id else None
 
     def get_talla_nombre(self, obj):
         v = self._v(obj)
@@ -3395,7 +3408,7 @@ class PreOrdenProduccionDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = PreOrdenProduccionDetalle
         fields = ["id", "variante_produccion", "producto_variante", "sku", "nombre", "talla_nombre", "color_nombre",
-                  "pedido_detalle", "cantidad", "tipo_linea", "avance"]
+                  "producto", "pedido_detalle", "cantidad", "unidad", "tipo_linea", "avance"]
 
     def get_avance(self, obj):
         """Resurtido, por renglón: fabricado → ``pendiente``/``con_op``; de compra →
