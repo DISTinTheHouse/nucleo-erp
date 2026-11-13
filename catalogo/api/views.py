@@ -69,7 +69,16 @@ TOPE_IDS_SELECTOR = PaginacionSelector.max_limit
 
 def _ids_param(request):
     """``?ids=1,2,3`` de ``selector/`` (EC-886); ausente o vacío → ``None``.
-    Cada id con el parser estricto de EC-829 (``entero_estricto``, positivo): un
+
+    Se parsea una vez por petición y se guarda en el ``request``: la acción, el
+    queryset y ``PaginacionSelector.get_limit`` leen el mismo resultado."""
+    if not hasattr(request, "_ids_selector"):
+        request._ids_selector = _parsear_ids(request)
+    return request._ids_selector
+
+
+def _parsear_ids(request):
+    """Cada id con el parser estricto de EC-829 (``entero_estricto``, positivo): un
     token inválido o vacío (``1,,2``) es 400, y también más de ``TOPE_IDS_SELECTOR``."""
     crudo = request.query_params.get("ids")
     if vacio(crudo):
