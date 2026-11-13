@@ -77,17 +77,26 @@ def evento(pre, tipo, usuario=None, descripcion=""):
     avisar(pre, str(tipo), descripcion)
 
 
+def _semaforo_rojo(pre):
+    """``True`` si la pre-orden está en rojo. Usa ``pre.fem`` si viene anotada
+    (``PreOrdenProduccionViewSet.get_queryset``, mismo predicado); si no, la consulta."""
+    from compras.models import NecesidadCompra as N
+    if hasattr(pre, "fem"):
+        fem = pre.fem
+    else:
+        fem = (
+            N.objects.filter(pre_orden=pre, estatus=N.Estatus.EN_OC, orden_compra__fecha_entrega_estimada__isnull=False)
+            .order_by("-orden_compra__fecha_entrega_estimada")
+            .values_list("orden_compra__fecha_entrega_estimada", flat=True).first()
+        )
+    return semaforo(pre.estatus, pre.materiales_faltantes, fem, fecha_compromiso(pre.pedido)) == "rojo"
+
+
 def revisar_semaforo(pre):
     """Avisa una vez cuando la pre-orden entra a rojo; se rearma al salir."""
-    from compras.models import NecesidadCompra as N
     if pre.estatus not in RECALCULABLES:
         return
-    fem = (
-        N.objects.filter(pre_orden=pre, estatus=N.Estatus.EN_OC, orden_compra__fecha_entrega_estimada__isnull=False)
-        .order_by("-orden_compra__fecha_entrega_estimada")
-        .values_list("orden_compra__fecha_entrega_estimada", flat=True).first()
-    )
-    rojo = semaforo(pre.estatus, pre.materiales_faltantes, fem, fecha_compromiso(pre.pedido)) == "rojo"
+    rojo = _semaforo_rojo(pre)
     if rojo != pre.semaforo_rojo_avisado:
         pre.semaforo_rojo_avisado = rojo
         pre.save(update_fields=["semaforo_rojo_avisado", "updated_at"])
@@ -450,6 +459,21 @@ def recalcular(pre, mats=None, motivo_regreso=None, usuario=None):
         pre.save(update_fields=[*campos, "updated_at"])
     revisar_semaforo(pre)
     return pre
+
+
+def requiere_recalculo(pre, mats):
+    """``True`` si ``recalcular(pre, mats)`` escribiría algo (EC-890).
+
+    Lectura pura, con las mismas reglas que ``recalcular`` y ``revisar_semaforo``:
+    el GET del detalle la usa para no bloquear ni escribir cuando nada cambió.
+    """
+    if len(_faltan(mats)) != pre.materiales_faltantes:
+        return True
+    if pre.estatus not in RECALCULABLES:
+        return False
+    if _estatus_segun(pre, mats) != pre.estatus:
+        return True
+    return _semaforo_rojo(pre) != pre.semaforo_rojo_avisado
 
 
 def recalcular_ids(ids, motivo_regreso=None):

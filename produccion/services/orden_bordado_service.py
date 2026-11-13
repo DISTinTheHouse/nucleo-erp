@@ -346,7 +346,7 @@ class OrdenBordadoService:
 
         detalle_tallas_raw = list(
             OrdenBordadoService._tallas_bordado_qs(pedido.id).select_related(
-                "pedido_detalle", "talla"
+                "pedido_detalle__color", "talla"
             )
         )
 
