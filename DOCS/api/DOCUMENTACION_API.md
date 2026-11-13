@@ -1125,9 +1125,15 @@ Entidad principal que agrupa las variantes. Contiene la información general (no
 
 - **Listar**: `GET /api/v1/catalogo/producto/`
   - `q` (opcional): busca por coincidencia parcial en `nombre`, `codigo` o `cod_proscai`.
-  - `tipo_id` (opcional): filtra por `TipoProducto`.
+  - `tipo_id` (opcional): filtra por `TipoProducto`. Uno o varios ids (repetido o separado por comas), enteros positivos, máx. 500; vacío no filtra; un id inválido (`x`, `0`, `1,`) → `400` (EC-896: antes `int()` y el mensaje `Must be an integer.`).
+  - `categoria_producto` (opcional, EC-896): uno o varios ids de categoría, con las mismas reglas que `tipo_id` (máx. 500). Una categoría de otra empresa o inexistente responde lista vacía.
   - `linea` (opcional): filtra por la línea de su categoría (`INDUSTRIAL`, `EMPRESARIAL`, `ROPA_FRIO`, `EJECUTIVO`, `SERVICIOS`, `EPP`, `OTROS`). Acepta varios (repetido o separado por comas) y no distingue mayúsculas; `SIN_LINEA` = categoría con línea vacía (materia prima) o producto sin categoría; vacío no filtra; otro valor → `400` (#922, #923).
   - `es_compras` (opcional): `true`/`false`. Filtra el catálogo oficial de compras; otro valor → `400`.
+  - `precio_base_min` / `precio_base_max` (opcionales, EC-896): rango de `precio_base`, mínimo inclusivo y máximo exclusivo (como los rangos del listado de pedidos). Decimal con 2 decimales como máximo; inválido → `400 {"precio_base_min": "..."}` (texto, como los demás filtros). Un producto sin precio no cae en ningún rango. Misma regla que los importes del listado de pedidos (`nucleo.listados.filtrar_rango`).
+  - `con_cod_proscai` (opcional, EC-896): `true` = con código Proscai, `false` = sin él (vacío o sólo espacios); otro valor → `400`.
+  - `limit` / `offset` (opcionales, EC-886): sin `limit`, el arreglo plano de siempre; con él, `{count, next, previous, results}` (tope 500).
+  - `ordering` (opcional): lista blanca con desempate por `id`; incluye `categoria_producto__nombre` y `categoria_producto__linea` (EC-896) además de `categoria_producto` (por id). Los NULL van al final en ambas direcciones (`OrdenamientoNullsAlFinal`): los productos sin categoría, sin `codigo` o sin `precio_base` cierran la lista también en orden descendente.
+  - Los filtros sólo se aplican al listado: en detalle, edición y baja se ignoran (EC-896; antes un `?q=` en `GET /producto/{id}/` podía dar `404`). `selector/` comparte `tipo_id`, `categoria_producto`, `linea`, `es_compras` y `q`, pero no los de precio ni `con_cod_proscai`; con `?ids=` ignora todos.
 - **`es_compras`** (bool, default `false`): marca el producto (MP o PT) como parte del catálogo oficial de compras. Se lee y se escribe en `POST`/`PATCH`.
 - **`tipo` es opcional** (`null` = sin tipo); si se manda debe estar activo (`400` si no). El tipo es del producto, no de la variante.
 - **Respuesta**:
@@ -1161,6 +1167,11 @@ Gestiona las combinaciones específicas (SKU, color, talla, precio).
 - **Listar**: `GET /api/v1/catalogo/producto-variante/`
   - `q` (opcional): busca por coincidencia parcial en `sku`, `cod_proscai` (propio o del producto), `nombre` de la variante o `nombre` del producto.
   - `con_bom` (opcional, `true`/`false`): solo variantes con un BOM activo.
+  - `producto`, `color`, `talla` (opcionales, EC-896): uno o varios ids (repetido o separado por comas, máx. 500), enteros positivos; vacío no filtra; un id inválido → `400`. Un producto de otra empresa responde lista vacía; una variante sin talla no coincide con ningún `talla`.
+  - `activo` (opcional, EC-896): `true`/`false`; sin él salen activas e inactivas, como siempre. Otro valor → `400`.
+  - `precio_base_min` / `precio_base_max` (opcionales, EC-896): rango de `precio_base`, mínimo inclusivo y máximo exclusivo; inválido → `400 {"precio_base_max": "..."}`.
+  - `limit` / `offset` (opcionales, EC-886): sin `limit`, el arreglo plano de siempre; con él, `{count, next, previous, results}` (tope 500). Orden por defecto `-id`; `ordering` con lista blanca (`sku`, `producto__nombre`, `color__nombre`, `talla__nombre`, `precio_base`, `activo`, …) y desempate por `id`.
+  - Los filtros sólo se aplican al listado: en detalle, edición y baja se ignoran (EC-896). `selector/` comparte `con_bom`, `producto`, `color`, `talla` y `q`, pero no `activo` ni los de precio (sólo ofrece activas); con `?ids=` ignora todos.
 - **Respuesta**:
   ```json
   [
@@ -1763,7 +1774,7 @@ Se suman a los que ya había (`q`, `search`, `folio`, `cliente`, `vendedor`, `su
 
 Los rangos son como `matchesRangeFilter` del front: **mínimo inclusivo, máximo exclusivo** (`1 a 50 piezas` = `piezas_min=1&piezas_max=51`; `Hasta 10,000` = `subtotal_max=10000`).
 
-Los rangos de importe usan la precisión de la columna (`subtotal`/`gran_total`: 10 dígitos, 2 decimales): un valor con más dígitos o decimales (p. ej. `1e999999` o `1.234`) responde `400 {"gran_total_max": ["..."]}`, igual en `exportar/` y `kpis-mesa/`.
+Los rangos de importe usan la precisión de la columna (`subtotal`/`gran_total`: 10 dígitos, 2 decimales): un valor con más dígitos o decimales (p. ej. `1e999999` o `1.234`) responde `400 {"gran_total_max": "..."}` (un solo mensaje de texto, como los demás filtros; antes de EC-896 era una lista), igual en `exportar/` y `kpis-mesa/`.
 
 #### Orden por columnas — `?ordering=`
 

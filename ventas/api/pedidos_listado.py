@@ -34,11 +34,10 @@ from decimal import Decimal
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.db.models import CharField, Count, DateField, F, Func, IntegerField, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.functions import Coalesce, Concat, JSONObject, NullIf, Trim, Trunc
-from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param, vacio
-from nucleo.listados import OrdenamientoEstableFilter, booleano_param
+from nucleo.listados import OrdenamientoEstableFilter, booleano_param, filtrar_rango
 from nucleo.opciones_filtros import clave_orden, mes_param, opciones_meses
 from ventas.models import Pedido, PedidoDetalleTalla
 from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
@@ -152,34 +151,6 @@ def _entero_piezas(request, nombre, campo=None):
     return entero_param(request, nombre, con_signo=True)
 
 
-def _importe(request, nombre, campo):
-    """Importe del query string con la precisión de ``Pedido.{campo}``
-    (``max_digits``/``decimal_places``, el mismo ``DecimalField`` de DRF que valida la
-    escritura); vacío → ``None``. Fuera de rango → 400: sin esto, un valor que la
-    columna no puede representar llegaba a Postgres y respondía 500."""
-    valor = _texto(request, nombre)
-    if not valor:
-        return None
-    modelo = Pedido._meta.get_field(campo)
-    validador = serializers.DecimalField(max_digits=modelo.max_digits, decimal_places=modelo.decimal_places)
-    try:
-        return validador.run_validation(valor)
-    except ValidationError as error:
-        raise ValidationError({nombre: error.detail})
-
-
-def _rango(request, qs, campo, lector):
-    """``?{campo}_min=`` (inclusivo) y ``?{campo}_max=`` (exclusivo); ``lector(request,
-    nombre, campo)`` lee y valida cada uno."""
-    minimo = lector(request, f"{campo}_min", campo)
-    maximo = lector(request, f"{campo}_max", campo)
-    if minimo is not None:
-        qs = qs.filter(**{f"{campo}__gte": minimo})
-    if maximo is not None:
-        qs = qs.filter(**{f"{campo}__lt": maximo})
-    return qs
-
-
 def filtra_piezas(request):
     """``True`` si la petición filtra por piezas o muestras (necesita
     ``anotar_piezas`` aunque la acción no pinte columnas)."""
@@ -222,14 +193,16 @@ def filtrar(request, qs, ver_importes):
         raise ValidationError({"muestras": f"Usa uno de: {', '.join(MUESTRAS)}."})
 
     if ver_importes:
+        # Importes con la precisión de ``Pedido.{campo}`` (``decimal_param``); fuera de
+        # rango → 400, no un 500 de Postgres.
         for campo in CAMPOS_IMPORTE:
-            qs = _rango(request, qs, campo, _importe)
+            qs = filtrar_rango(request, qs, campo)
     return qs
 
 
 def filtrar_piezas(request, qs):
     """Rangos de ``piezas`` y ``?muestras=``; requiere ``anotar_piezas``."""
-    qs = _rango(request, qs, "piezas", _entero_piezas)
+    qs = filtrar_rango(request, qs, "piezas", _entero_piezas)
     muestras = _texto(request, "muestras")
     if muestras == "con":
         qs = qs.filter(piezas_muestra__gt=0)
