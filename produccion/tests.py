@@ -8812,6 +8812,44 @@ class SalidaMaquilaReglasTests(TestCase):
         )
 
 
+class SalidaMaquilaAlcanceTests(TestCase):
+    """EC-871: la SM se acota a las sucursales del usuario (como la OP) y sin
+    permiso de producción responde 403. Mismos datos que ``SalidaMaquilaReglasTests``."""
+
+    URL = SalidaMaquilaReglasTests.URL
+    setUpTestData = classmethod(SalidaMaquilaReglasTests.setUpTestData.__func__)
+    _post = SalidaMaquilaReglasTests._post
+
+    def _cliente(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _usuario_sucursal2(self, **extra):
+        u = Usuario.objects.create(username=f"sm-s2-{len(extra)}", email=f"s2-{len(extra)}@acme-sm.test",
+                                   empresa=self.empresa, sucursal_default=self.sucursal2, **extra)
+        return u
+
+    def test_otra_sucursal_no_ve_la_sm(self):
+        self.assertEqual(self._post().status_code, 201)
+        sm = SalidaMaquila.objects.get(op=self.op)
+        otro = self._cliente(self._usuario_sucursal2())
+        self.assertEqual(otro.get(self.URL).json(), [])
+        self.assertEqual(otro.get(f"{self.URL}{sm.pk}/").status_code, 404)
+
+    def test_alta_sobre_op_de_otra_sucursal_rechaza(self):
+        u = self._usuario_sucursal2(is_admin_empresa=False)
+        with mock.patch("produccion.api.views._require_produccion"):
+            resp = self._cliente(u).post(self.URL, {"op": self.op.pk}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("op", resp.data)
+
+    def test_sin_permiso_403(self):
+        u = self._usuario_sucursal2(is_admin_empresa=False)
+        resp = self._cliente(u).post(self.URL, {"op": self.op.pk}, format="json")
+        self.assertEqual(resp.status_code, 403, resp.data)
+
+
 class PermisosProduccionTests(TestCase):
     """#1133: leer OP/OB/OR/OCM (y sus avances/incidencias) exige ``R-PRODUCCION``
     o el código de la sección; editar/borrar una OB, sus avances o incidencias
