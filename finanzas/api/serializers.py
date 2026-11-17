@@ -870,6 +870,11 @@ class PolizaSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixi
 
 
 class FacturaProveedorDetalleSerializer(serializers.ModelSerializer):
+    # EC-904: nombre y código del producto (convención de los renglones de compras).
+    # ``FacturaProveedorViewSet`` une el producto al leer las líneas.
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    producto_codigo = serializers.CharField(source="producto.codigo", read_only=True, default=None)
+
     class Meta:
         model = FacturaProveedorDetalle
         fields = "__all__"

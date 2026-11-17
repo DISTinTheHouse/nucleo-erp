@@ -10946,3 +10946,64 @@ class PagoDatosPdfTests(DatosPdfBase):
         self.assertEqual(len(self._filas(resp.data)), 5)
         self.assertEqual(retrieve_muchas, retrieve_pocas)
         self.assertEqual(list_muchas, list_pocas)
+
+
+class FacturaProveedorDatosPdfTests(DatosPdfBase):
+    """Factura de proveedor: nombre y código del producto por línea, sin N+1."""
+
+    def setUp(self):
+        self.client_a = self._client(self.a["usuario"])
+        (self.proveedor, self.producto, self.oc, self.oc_detalle, self.recepcion,
+         self.recepcion_detalle, self.fp) = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+
+    def _factura(self, lineas):
+        fp = FacturaProveedor.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.proveedor,
+            oc=self.oc, recepcion=self.recepcion, moneda=self.moneda,
+        )
+        for i in range(lineas):
+            producto = Producto.objects.create(
+                empresa=self.a["empresa"], nombre=f"Insumo {fp.pk}-{i}", codigo=f"C{i}", tipo=self.tipo_producto,
+            )
+            FacturaProveedorDetalle.objects.create(
+                factura_proveedor=fp, oc_detalle=self.oc_detalle, recepcion_detalle=self.recepcion_detalle,
+                producto=producto, cantidad=1, precio_unitario=Decimal("10.00"),
+                subtotal=Decimal("10.00"), total=Decimal("10.00"),
+            )
+        return fp
+
+    def test_detalle_y_listado_traen_nombre_y_codigo_del_producto(self):
+        fp = self._factura(2)
+        detalle = self.client_a.get(f"{FACTURAS_PROVEEDOR_URL}{fp.pk}/").data
+        listado = {f["id"]: f for f in self._filas(self.client_a.get(FACTURAS_PROVEEDOR_URL).data)}
+        for fuente, data in (("detalle", detalle), ("listado", listado[fp.pk])):
+            with self.subTest(fuente=fuente):
+                self.assertEqual(
+                    sorted((l["producto_nombre"], l["producto_codigo"]) for l in data["factura_proveedor_detalles"]),
+                    [(f"Insumo {fp.pk}-0", "C0"), (f"Insumo {fp.pk}-1", "C1")],
+                )
+                self.assertNotIn("cfdi_uuid", data)
+
+    def test_producto_sin_codigo_trae_null(self):
+        FacturaProveedorDetalle.objects.create(
+            factura_proveedor=self.fp, oc_detalle=self.oc_detalle, recepcion_detalle=self.recepcion_detalle,
+            producto=self.producto, cantidad=1, precio_unitario=Decimal("10.00"),
+        )
+        linea = self.client_a.get(f"{FACTURAS_PROVEEDOR_URL}{self.fp.pk}/").data["factura_proveedor_detalles"][0]
+        self.assertEqual(linea["producto_nombre"], "Insumo Test")
+        self.assertIsNone(linea["producto_codigo"])
+
+    def test_consultas_constantes(self):
+        pocas = self._factura(1)
+        _, retrieve_pocas = self._consultas(self.client_a, f"{FACTURAS_PROVEEDOR_URL}{pocas.pk}/")
+        _, list_pocas = self._consultas(self.client_a, FACTURAS_PROVEEDOR_URL)
+        muchas = self._factura(5)
+        for _ in range(3):
+            self._factura(3)
+        _, retrieve_muchas = self._consultas(self.client_a, f"{FACTURAS_PROVEEDOR_URL}{muchas.pk}/")
+        resp, list_muchas = self._consultas(self.client_a, FACTURAS_PROVEEDOR_URL)
+        self.assertEqual(len(self._filas(resp.data)), 6)
+        self.assertEqual(retrieve_muchas, retrieve_pocas)
+        self.assertEqual(list_muchas, list_pocas)

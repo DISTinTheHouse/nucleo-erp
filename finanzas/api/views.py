@@ -1411,7 +1411,13 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
         qs = (
             super().get_queryset()
             .select_related("proveedor", "moneda", "oc", "recepcion")
-            .prefetch_related("factura_proveedor_detalles")
+            # EC-904: el producto de cada línea en la misma consulta de las líneas.
+            .prefetch_related(
+                Prefetch(
+                    "factura_proveedor_detalles",
+                    queryset=FacturaProveedorDetalle.objects.select_related("producto"),
+                )
+            )
             .defer("pdf_adjunto")
             .annotate(
                 _tiene_pdf=Case(
