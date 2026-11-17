@@ -3322,6 +3322,11 @@ class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True, allow_null=True, default=None)
     sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True, allow_null=True, default=None)
     referencia = serializers.SerializerMethodField()
+    # ``[{id, folio, cliente_nombre}]`` (anotado como ``pedidos_json`` en la vista).
+    pedidos_vinculados = serializers.SerializerMethodField()
+
+    def get_pedidos_vinculados(self, obj):
+        return getattr(obj, "pedidos_json", None) or []
     op_folio = serializers.CharField(source="op.folio_op", read_only=True, allow_null=True, default=None)
     piezas_total = serializers.FloatField(read_only=True, default=0.0)
     tallas_total = serializers.IntegerField(read_only=True, default=0)
@@ -3335,6 +3340,7 @@ class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
         model = PreOrdenProduccion
         fields = [
             "id", "origen", "origen_display", "referencia", "producto", "producto_nombre", "notas", "motivo_rechazo",
+            "pedidos_vinculados",
             "pedido", "pedido_folio", "cliente_nombre", "sucursal", "sucursal_nombre", "estatus", "estatus_display",
             "op", "op_folio", "piezas_total", "tallas_total", "fecha_confirmacion_existencias",
             "fecha_compromiso", "dias_en_estatus", "materiales_faltantes", "fecha_estimada_material",
