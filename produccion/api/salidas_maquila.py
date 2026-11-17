@@ -20,12 +20,13 @@ from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import mixins, serializers, status
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
 from nucleo.models import SerieFolio
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle, SalidaMaquila, SalidaMaquilaDetalle
+from produccion.scope import ordenes_produccion_visibles
 from terceros.models import Proveedor
 
 
@@ -67,8 +68,10 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
 
     def get_fields(self):
         fields = super().get_fields()
-        empresa_id = getattr(getattr(self.context.get("request"), "user", None), "empresa_id", None)
-        fields["op"].queryset = OrdenProduccion.objects.filter(empresa_id=empresa_id, activo=True)
+        user = getattr(self.context.get("request"), "user", None)
+        empresa_id = getattr(user, "empresa_id", None)
+        # EC-871: solo OP de las sucursales del usuario (mismo alcance que el listado de OP).
+        fields["op"].queryset = ordenes_produccion_visibles(OrdenProduccion.objects.filter(activo=True), user)
         fields["centro_confeccion"].queryset = Proveedor.objects.filter(empresa_id=empresa_id)
         if "detalles" in fields:
             fields["detalles"].child.fields["op_detalle"].queryset = OrdenProduccionDetalle.objects.filter(
@@ -138,16 +141,25 @@ def _descripcion(det):
     return getattr(v, "sku", None) or str(v)
 
 
+def _exigir_produccion(user):
+    """Mismo gate que el resto de producción, pero sin permiso responde 403
+    (EC-871), no el 400 ``{"permiso": ...}`` de ``_require_produccion``."""
+    from produccion.api.views import _require_produccion
+    try:
+        _require_produccion(user)
+    except ValidationError as exc:
+        raise PermissionDenied(exc.detail.get("permiso") if isinstance(exc.detail, dict) else None)
+
+
 class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin,
                            GenericViewSet):
     serializer_class = SalidaMaquilaSerializer
 
     def get_queryset(self):
-        empresa_id = getattr(self.request.user, "empresa_id", None)
-        if not empresa_id:
-            return SalidaMaquila.objects.none()
+        # EC-871: empresa activa + sucursales del usuario (la SM lleva la sucursal
+        # de su OP), el mismo alcance que la OP: lo que no ve en OP da 404 aquí.
         qs = (
-            SalidaMaquila.objects.filter(empresa_id=empresa_id, activo=True)
+            ordenes_produccion_visibles(SalidaMaquila.objects.filter(activo=True), self.request.user)
             .select_related("op", "centro_confeccion")
             .order_by("-id")
         )
@@ -174,10 +186,8 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
 
     @transaction.atomic
     def perform_create(self, serializer):
-        from produccion.api.views import _require_produccion
-
         user = self.request.user
-        _require_produccion(user)
+        _exigir_produccion(user)
         # Bloquea la OP: dos SM simultáneas no rebasan juntas el tope (#1088).
         op = OrdenProduccion.objects.select_for_update().get(pk=serializer.validated_data["op"].pk)
         renglones = serializer.validated_data.pop("detalles", None)
@@ -237,6 +247,7 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
         sm.save(update_fields=["total_piezas", "total", "updated_at"])
 
     def create(self, request, *args, **kwargs):
+        _exigir_produccion(request.user)  # 403 antes de validar el cuerpo
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
@@ -247,9 +258,7 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
                         status=status.HTTP_201_CREATED)
 
     def _cambiar(self, request, nuevo, permitido_desde):
-        from produccion.api.views import _require_produccion
-
-        _require_produccion(request.user)
+        _exigir_produccion(request.user)
         with transaction.atomic():
             sm = self.get_queryset().select_for_update(of=("self",)).get(pk=self.get_object().pk)
             if sm.estatus not in permitido_desde:
