@@ -10886,3 +10886,63 @@ class PolizaDatosPdfTests(DatosPdfBase):
         self.assertEqual(len(self._filas(resp.data)), 5)
         self.assertEqual(retrieve_muchas, retrieve_pocas)
         self.assertEqual(list_muchas, list_pocas)
+
+
+class PagoDatosPdfTests(DatosPdfBase):
+    """Pago: moneda de su cuenta bancaria y folio de la factura de proveedor por línea."""
+
+    def setUp(self):
+        self.client_a = self._client(self.a["usuario"])
+        self.proveedor, _, _, _, _, _, self.fp = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+
+    def _cxp(self, folio):
+        # Cada CxP en su propia factura de proveedor (copia de la base, otro folio).
+        fp = FacturaProveedor.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.proveedor,
+            oc=self.fp.oc, recepcion=self.fp.recepcion, moneda=self.moneda, folio=folio,
+        )
+        return CuentaPorPagar.objects.create(
+            empresa=self.a["empresa"], proveedor=self.proveedor, factura_proveedor=fp,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+
+    def _pago(self, cuenta, lineas):
+        pago = Pago.objects.create(
+            empresa=self.a["empresa"], proveedor=self.proveedor, cuenta_bancaria=cuenta,
+            sucursal=self.a["sucursal"], total_pagado=Decimal("10.00") * lineas,
+        )
+        for i in range(lineas):
+            PagoDetalle.objects.create(pago=pago, cxp=self._cxp(f"FP-{pago.pk}-{i}"), importe_aplicado=Decimal("10.00"))
+        return pago
+
+    def test_detalle_y_listado_traen_moneda_de_la_cuenta_y_folio_por_linea(self):
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        banco = Banco.objects.create(empresa=self.a["empresa"], nombre="Banco USD")
+        cuenta_usd = CuentaBancaria.objects.create(empresa=self.a["empresa"], banco=banco, moneda=usd, alias="USD")
+        pago = self._pago(cuenta_usd, 2)
+        detalle = self.client_a.get(f"{PAGOS_URL}{pago.pk}/").data
+        listado = {p["id"]: p for p in self._filas(self.client_a.get(PAGOS_URL).data)}
+        esperados = sorted(f"FP-{pago.pk}-{i}" for i in range(2))
+        for fuente, data in (("detalle", detalle), ("listado", listado[pago.pk])):
+            with self.subTest(fuente=fuente):
+                self.assertEqual(data["moneda"], usd.pk)
+                self.assertEqual(data["moneda_nombre"], "USD")
+                self.assertNotIn("tipo_cambio", data)
+                self.assertEqual(sorted(l["factura_proveedor_folio"] for l in data["pago_detalles"]), esperados)
+                self.assertTrue(all(isinstance(l["cxp"], int) for l in data["pago_detalles"]))
+
+    def test_consultas_constantes(self):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        pocas = self._pago(cuenta, 1)
+        _, retrieve_pocas = self._consultas(self.client_a, f"{PAGOS_URL}{pocas.pk}/")
+        _, list_pocas = self._consultas(self.client_a, PAGOS_URL)
+        muchas = self._pago(cuenta, 4)
+        for _ in range(3):
+            self._pago(self._crear_cuenta_bancaria(self.a["empresa"]), 2)
+        _, retrieve_muchas = self._consultas(self.client_a, f"{PAGOS_URL}{muchas.pk}/")
+        resp, list_muchas = self._consultas(self.client_a, PAGOS_URL)
+        self.assertEqual(len(self._filas(resp.data)), 5)
+        self.assertEqual(retrieve_muchas, retrieve_pocas)
+        self.assertEqual(list_muchas, list_pocas)

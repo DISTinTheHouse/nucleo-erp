@@ -2125,6 +2125,13 @@ class PagoViewSet(FinanzasBaseViewSet):
         if not empresa:
             return qs.none()
         qs = qs.filter(empresa=empresa)
+        if self.action in ("list", "retrieve"):
+            # EC-904: proveedor, cuenta (con su moneda) y líneas (con el folio de su
+            # factura de proveedor) en bloque; antes eran ~3 consultas por fila del
+            # listado. Sólo al leer, como en ``CobroViewSet``.
+            qs = qs.select_related("proveedor", "cuenta_bancaria__moneda").prefetch_related(
+                Prefetch("pago_detalles", queryset=PagoDetalle.objects.select_related("cxp__factura_proveedor"))
+            )
         qp = self.request.query_params
         proveedor = qp.get("proveedor") or qp.get("proveedor_id")
         metodo_pago = (qp.get("metodo_pago") or "").strip()

@@ -1227,6 +1227,10 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
 
 
 class PagoDetalleSerializer(serializers.ModelSerializer):
+    # EC-904: folio de la factura de proveedor de la CxP (mismo nombre que en
+    # ``CuentaPorPagarSerializer``). ``PagoViewSet`` la une al leer las líneas.
+    factura_proveedor_folio = serializers.CharField(source="cxp.factura_proveedor.folio", read_only=True, default=None)
+
     class Meta:
         model = PagoDetalle
         fields = "__all__"
@@ -1240,6 +1244,11 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
     pago_detalles = PagoDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)
+    # EC-904: el pago no guarda moneda; es la de su cuenta bancaria. Misma forma que en
+    # ``FacturaSerializer`` (id + código ISO). Sin tipo de cambio: el lado de
+    # proveedores no lo registra en ningún documento.
+    moneda = serializers.IntegerField(source="cuenta_bancaria.moneda_id", read_only=True)
+    moneda_nombre = serializers.CharField(source="cuenta_bancaria.moneda.codigo_iso", read_only=True)
 
     class Meta:
         model = Pago
