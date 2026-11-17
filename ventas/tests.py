@@ -6513,6 +6513,39 @@ class OportunidadesValidacionesTests(OportunidadesBase):
                 self.assertEqual(self._orden(user, ordering), ids_esperados)
                 self.assertEqual(del_admin(self._orden(self.jefe, ordering)), ids_esperados)
 
+    def test_un_solo_objeto_hace_las_mismas_consultas_que_antes_del_campo(self):
+        # Conteos de ``main`` antes de EC-902 (medidos con estas mismas peticiones). El
+        # campo nuevo no agrega viajes: la consulta de visibilidad sigue siendo una.
+        cliente = self._cliente_rs("N", "RS")
+        casos = {
+            "vendedor": (self.ana, {"detalle": 4, "onboarding": 8}),
+            "mesa": (self._por_departamento("MESACONTROL"), {"detalle": 4, "onboarding": 9}),
+            "contabilidad": (self._por_departamento("CONTABILIDAD"), {"detalle": 4, "onboarding": 9}),
+            "admin": (self.jefe, {"detalle": 1, "onboarding": 7}),
+        }
+        for quien, (user, esperado) in casos.items():
+            op = self._op(self.ana if quien == "admin" else user, cliente=cliente)
+            url = f"{OPORTUNIDADES_URL}{op.pk}/"
+            api = self._client(user)
+            api.get(url)  # calienta cachés de permisos
+            for nombre, ruta in (("detalle", url), ("onboarding", f"{url}onboarding/")):
+                with self.subTest(quien=quien, nombre=nombre):
+                    with CaptureQueriesContext(connection) as ctx:
+                        resp = api.get(ruta)
+                    self.assertEqual(resp.status_code, 200)
+                    self.assertEqual(len(ctx), esperado[nombre])
+                    visibilidad = [q for q in ctx.captured_queries if q["sql"].lstrip().startswith('SELECT "clientes"."id"')]
+                    self.assertEqual(len(visibilidad), 0 if quien == "admin" else 1)
+
+        # ``transferir`` solo lo hace el admin (403 para los demás), que no consulta visibilidad.
+        op = self._op(self.ana, cliente=cliente)
+        api = self._client(self.jefe)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = api.post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": self.beto.pk})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(ctx), 6)
+        self.assertEqual(resp.data["cliente_razon_social"], "RS")
+
     def test_contabilidad_ve_nombre_busca_y_ordena_por_clientes_no_asignados(self):
         self._revisar_ve_todos_por_departamento("CONTABILIDAD")
 
