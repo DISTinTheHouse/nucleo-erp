@@ -424,7 +424,12 @@ class ProductoViewSet(viewsets.ModelViewSet):
     ]
 
     def get_queryset(self):
-        qs = self._productos_de_la_empresa()
+        # ``categoria_producto_nombre``/``_linea`` del serializer (EC-905), activa o no
+        # la categoría, en la misma consulta. ``selector/`` no los publica.
+        qs = self._productos_de_la_empresa().annotate(
+            categoria_producto_nombre=F("categoria_producto__nombre"),
+            categoria_producto_linea=F("categoria_producto__linea"),
+        )
         # El detalle también lee productos dados de baja (lazzar-erp#401: editar la
         # variante de un producto inactivo); listado, edición y baja, solo activos.
         if self.action != "retrieve":

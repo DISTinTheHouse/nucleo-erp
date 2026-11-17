@@ -75,11 +75,44 @@ class TallaSerializer(serializers.ModelSerializer):
         model = Talla
         exclude = ['activo']
 
+class _CampoCategoriaMixin:
+    """Campo de sólo lectura de la categoría del producto (EC-905). Lee la anotación
+    del mismo nombre (``ProductoViewSet.get_queryset``, un LEFT JOIN de dos columnas:
+    ``select_related`` instanciaba una categoría por fila y duplicaba el tiempo del
+    listado completo); sin ella (alta, onboarding, tras editar) sigue la FK."""
+
+    def __init__(self, atributo, **kwargs):
+        self.atributo = atributo
+        super().__init__(read_only=True, allow_null=True, **kwargs)
+
+    def get_attribute(self, instance):
+        if self.field_name in instance.__dict__:
+            return instance.__dict__[self.field_name]
+        categoria = instance.categoria_producto
+        return getattr(categoria, self.atributo) if categoria is not None else None
+
+
+class _CampoCategoriaCharField(_CampoCategoriaMixin, serializers.CharField):
+    pass
+
+
+class _CampoCategoriaChoiceField(_CampoCategoriaMixin, serializers.ChoiceField):
+    pass
+
+
 class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     # Unidad de inventario (``unidad_medida``) legible; el BOM la toma de aquí.
     unidad_id = serializers.IntegerField(source='unidad_medida_id', read_only=True, allow_null=True)
     unidad_nombre = serializers.CharField(read_only=True, allow_null=True, default=None)
     unidad_abreviatura = serializers.CharField(read_only=True, allow_null=True, default=None)
+    # Nombre y línea de la categoría aunque esté inactiva (EC-905): el catálogo de
+    # categorías sólo trae activas y la tabla mostraba "—". ``null`` sin categoría;
+    # la línea vacía (``""``) tal cual la guarda el modelo, la misma que ``?linea=``
+    # trata como ``SIN_LINEA``. Los anota ``ProductoViewSet.get_queryset``.
+    categoria_producto_nombre = _CampoCategoriaCharField('nombre')
+    categoria_producto_linea = _CampoCategoriaChoiceField(
+        'linea', choices=CategoriaProducto.Linea.choices, allow_blank=True,
+    )
 
     # ``perform_create`` de ``ProductoViewSet`` ya inyecta ``user.empresa``, que es
     # justo el contrato de ``EmpresaResueltaEnServidorMixin``: sólo lectura en update
@@ -116,6 +149,13 @@ class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerial
                 {"categoria_producto": "La categoria no pertenece a la empresa del producto."}
             )
         return attrs
+
+    def update(self, instance, validated_data):
+        instance = super().update(instance, validated_data)
+        # Las anotaciones de EC-905 son de antes del cambio: la respuesta lee la FK.
+        for campo in ('categoria_producto_nombre', 'categoria_producto_linea'):
+            instance.__dict__.pop(campo, None)
+        return instance
 
 class ProductoSelectorSerializer(serializers.ModelSerializer):
     """Fila de ``producto/selector/`` (EC-886): lo que leen los selectores. ``tipo`` y

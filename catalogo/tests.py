@@ -944,6 +944,8 @@ CAMPOS_LISTA_PRODUCTO = {
     "id", "unidad_id", "unidad_nombre", "unidad_abreviatura", "nombre", "descripcion", "activo",
     "created_at", "updated_at", "precio_base", "cod_proscai", "codigo", "es_compras", "empresa",
     "categoria_producto", "unidad_medida", "impuesto", "sat_prodserv", "sat_unidad", "tipo",
+    # EC-905
+    "categoria_producto_nombre", "categoria_producto_linea",
 }
 CAMPOS_LISTA_VARIANTE = {
     "id", "producto_nombre", "color_nombre", "talla_nombre", "cod_proscai", "sku_produccion",
@@ -1756,3 +1758,153 @@ class FiltrosServidorVariantesTests(FiltrosServidorCatalogoBase):
         with self.assertNumQueries(2):
             data = client.get(VARIANTES_URL, params).json()
         self.assertGreater(data["count"], 30)
+
+
+class ProductoCategoriaListadoTests(CatalogoSelectorBase):
+    """``producto/`` publica ``categoria_producto_nombre`` y ``categoria_producto_linea``
+    (EC-905) aunque la categoría esté inactiva, en el mismo JOIN; ``selector/`` no."""
+
+    CAMPOS_NUEVOS = {"categoria_producto_nombre", "categoria_producto_linea"}
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.cat_inactiva = CategoriaProducto.objects.create(
+            empresa=cls.empresa_a, nombre="Cat vieja", codigo="CSV",
+            linea=CategoriaProducto.Linea.EPP, activo=False,
+        )
+        cls.cat_industrial = CategoriaProducto.objects.create(
+            empresa=cls.empresa_a, nombre="Cat Ind", codigo="CSI", linea=CategoriaProducto.Linea.INDUSTRIAL,
+        )
+        cls.p_cat_inactiva = Producto.objects.create(
+            empresa=cls.empresa_a, nombre="Guante", codigo="GU001", categoria_producto=cls.cat_inactiva,
+        )
+        cls.p_industrial = Producto.objects.create(
+            empresa=cls.empresa_a, nombre="Overol", codigo="OV001", categoria_producto=cls.cat_industrial,
+        )
+
+    def _filas(self, user=None, **params):
+        data = self._ok(PRODUCTOS_URL, user, **params)
+        filas = data["results"] if isinstance(data, dict) else data
+        return {f["id"]: f for f in filas}
+
+    def _campos(self, fila):
+        return fila["categoria_producto_nombre"], fila["categoria_producto_linea"]
+
+    def test_nombre_y_linea_con_y_sin_limit(self):
+        for params in ({}, {"limit": 50}):
+            with self.subTest(**params):
+                filas = self._filas(**params)
+                # Activa con línea, activa con línea vacía (tal cual), inactiva, sin categoría.
+                self.assertEqual(self._campos(filas[self.p_industrial.pk]), ("Cat Ind", "INDUSTRIAL"))
+                self.assertEqual(self._campos(filas[self.p_activo.pk]), ("Cat A", ""))
+                self.assertEqual(self._campos(filas[self.p_cat_inactiva.pk]), ("Cat vieja", "EPP"))
+                self.assertEqual(self._campos(filas[self.p_otro.pk]), (None, None))
+                # El id sigue igual.
+                self.assertEqual(filas[self.p_cat_inactiva.pk]["categoria_producto"], self.cat_inactiva.pk)
+
+    def test_detalle_tambien_los_publica(self):
+        fila = self._ok(f"{PRODUCTOS_URL}{self.p_cat_inactiva.pk}/")
+        self.assertEqual(self._campos(fila), ("Cat vieja", "EPP"))
+
+    def test_son_de_solo_lectura(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        resp = client.patch(
+            f"{PRODUCTOS_URL}{self.p_industrial.pk}/",
+            {"categoria_producto_nombre": "Otro", "categoria_producto_linea": "EPP"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(self._campos(resp.json()), ("Cat Ind", "INDUSTRIAL"))
+        self.cat_industrial.refresh_from_db()
+        self.assertEqual((self.cat_industrial.nombre, self.cat_industrial.linea), ("Cat Ind", "INDUSTRIAL"))
+
+    def test_cambiar_de_categoria_responde_la_nueva(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        url = f"{PRODUCTOS_URL}{self.p_industrial.pk}/"
+        resp = client.patch(url, {"categoria_producto": self.cat_inactiva.pk}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(self._campos(resp.json()), ("Cat vieja", "EPP"))
+        resp = client.patch(url, {"categoria_producto": None}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(self._campos(resp.json()), (None, None))
+
+    def test_alta_y_onboarding_los_responden(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        resp = client.post(PRODUCTOS_URL, {
+            "nombre": "Nuevo", "categoria_producto": self.cat_industrial.pk, "precio_base": "1.00",
+        }, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(self._campos(resp.json()), ("Cat Ind", "INDUSTRIAL"))
+        resp = client.post(PRODUCTOS_URL, {"nombre": "Sin cat", "codigo": "SC001", "precio_base": "1.00"}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(self._campos(resp.json()), (None, None))
+        resp = client.post(f"{PRODUCTOS_URL}onboarding/", {
+            "nombre": "Onb", "categoria_producto": self.cat_a.pk, "precio_base": "1.00",
+        }, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(self._campos(resp.json()), ("Cat A", ""))
+
+    def test_filtro_linea_y_columna_coinciden(self):
+        # La columna y ``?linea=`` hablan de la misma línea, también con categoría inactiva.
+        filas = self._filas(linea="EPP")
+        self.assertEqual(set(filas), {self.p_cat_inactiva.pk})
+        self.assertEqual({f["categoria_producto_linea"] for f in filas.values()}, {"EPP"})
+        sin_linea = self._filas(linea="SIN_LINEA")
+        self.assertEqual({f["categoria_producto_linea"] for f in sin_linea.values()}, {"", None})
+
+    def test_consultas_constantes(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        for params, consultas in (({}, 1), ({"limit": 50}, 2)):
+            with self.subTest(**params):
+                with self.assertNumQueries(consultas):
+                    self.assertEqual(client.get(PRODUCTOS_URL, params).status_code, 200)
+        Producto.objects.bulk_create([
+            Producto(
+                empresa=self.empresa_a, nombre=f"Más {i}", codigo=f"M{i:03d}",
+                categoria_producto=(self.cat_a, self.cat_inactiva, self.cat_industrial, None)[i % 4],
+            )
+            for i in range(30)
+        ])
+        for params, consultas in (({}, 1), ({"limit": 50}, 2)):
+            with self.subTest(**params, filas="+30"):
+                with self.assertNumQueries(consultas):
+                    self.assertEqual(client.get(PRODUCTOS_URL, params).status_code, 200)
+
+    def test_selector_no_cambia(self):
+        data = self._ok(SELECTOR_PRODUCTOS_URL)
+        for fila in data["results"]:
+            self.assertEqual(set(fila), SelectorProductosTests.CAMPOS)
+
+    def test_aislamiento(self):
+        self.assertEqual(set(self._filas(self.user_b)), {self.p_b.pk})
+        self.assertEqual(self._filas(self.sin_empresa), {})
+        filas_super = self._filas(self.superuser)
+        self.assertNotIn(self.p_b.pk, filas_super)
+        self.assertEqual(self._campos(filas_super[self.p_cat_inactiva.pk]), ("Cat vieja", "EPP"))
+        # Detalle de otra empresa: 404.
+        self.assertEqual(self._get(f"{PRODUCTOS_URL}{self.p_cat_inactiva.pk}/", self.user_b).status_code, 404)
+
+
+class SchemaProductoCategoriaTests(SimpleTestCase):
+    """drf-spectacular: los campos de EC-905 en ``Producto``, de sólo lectura y
+    nulables; no en ``ProductoSelector``."""
+
+    databases = "__all__"
+
+    def test_campos_en_el_schema(self):
+        from drf_spectacular.generators import SchemaGenerator
+
+        componentes = SchemaGenerator().get_schema(request=None, public=True)["components"]["schemas"]
+        props = componentes["Producto"]["properties"]
+        nombre = props["categoria_producto_nombre"]
+        self.assertEqual((nombre["type"], nombre.get("nullable"), nombre.get("readOnly")), ("string", True, True))
+        linea = props["categoria_producto_linea"]
+        self.assertTrue(linea.get("readOnly"))
+        self.assertTrue(linea.get("nullable"))
+        self.assertNotIn("categoria_producto_nombre", componentes["ProductoSelector"]["properties"])
+        self.assertNotIn("categoria_producto_linea", componentes["ProductoSelector"]["properties"])
+        self.assertNotIn("categoria_producto_nombre", componentes.get("PatchedProducto", {}).get("required", []))
