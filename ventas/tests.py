@@ -6457,6 +6457,68 @@ class OportunidadesValidacionesTests(OportunidadesBase):
         self.assertEqual(pocas, muchas)
         self.assertEqual(muchas, {"vendedor": (pocas["vendedor"][0], True), "admin": (pocas["admin"][0], False)})
 
+    # -- quien ve todos los clientes sin ser admin (por departamento) --------
+    # ``ve_clientes_sin_asignacion`` es solo superusuario y admin de empresa. Los que no
+    # son admin y ven todos los clientes de la empresa lo hacen por departamento (Mesa de
+    # Control, Contabilidad: ``DEPARTAMENTOS_TODOS_LOS_CLIENTES``) y pasan por el EXISTS.
+
+    def _por_departamento(self, clave):
+        user = Usuario.objects.create(username=f"u-{clave}", email=f"{clave.lower()}@acme.test", empresa=self.empresa)
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo=f"{clave}-0901", nombre=clave, estatus=Rol.Estatus.ACTIVO,
+            clave_departamento=clave,
+        )
+        _con_claves(rol, ("R-CRM",))
+        UsuarioRol.objects.create(usuario=user, rol=rol, empresa=self.empresa)
+        return user
+
+    def _revisar_ve_todos_por_departamento(self, clave):
+        user = self._por_departamento(clave)
+        # Ninguno de estos clientes está asignado al usuario.
+        ops = {
+            "a": self._op(user, cliente=self._cliente_rs("Alfa", "Zeta SA")).pk,
+            "b": self._op(user, cliente=self._cliente_rs("Beta", "Alfa SA")).pk,
+            "c": self._op(user, cliente=self._cliente_rs("Gama", "Media SA")).pk,
+            "n": self._op(user).pk,
+        }
+        suyas = set(ops.values())
+
+        def ids(*claves):
+            return [ops[c] for c in claves]
+
+        def del_admin(lista):
+            return [i for i in lista if i in suyas]
+
+        # Nombre y razón social, con valor y no en null.
+        filas = {o["id"]: o for o in self._client(user).get(OPORTUNIDADES_URL).data}
+        detalle = self._client(user).get(f"{OPORTUNIDADES_URL}{ops['b']}/").data
+        for fila in (filas[ops["b"]], detalle):
+            self.assertEqual((fila["cliente_nombre"], fila["cliente_razon_social"]), ("Beta", "Alfa SA"))
+
+        # ``?q=`` por razón social y por nombre corto, igual que el admin.
+        for q, esperado in (("alfa sa", {ops["b"]}), ("beta", {ops["b"]}), ("media", {ops["c"]}), ("gama", {ops["c"]})):
+            with self.subTest(q=q):
+                self.assertEqual(self._busca(user, q), esperado)
+                self.assertEqual(self._busca(self.jefe, q) & suyas, esperado)
+
+        # Orden por el valor real del cliente, no como NULL; el mismo que ve el admin.
+        esperado = {
+            "cliente__razon_social,-id": ids("b", "c", "a", "n"),
+            "-cliente__razon_social,-id": ids("n", "a", "c", "b"),
+            "cliente__nombre,-id": ids("a", "b", "c", "n"),
+            "-cliente__nombre,-id": ids("n", "c", "b", "a"),
+        }
+        for ordering, ids_esperados in esperado.items():
+            with self.subTest(ordering=ordering):
+                self.assertEqual(self._orden(user, ordering), ids_esperados)
+                self.assertEqual(del_admin(self._orden(self.jefe, ordering)), ids_esperados)
+
+    def test_contabilidad_ve_nombre_busca_y_ordena_por_clientes_no_asignados(self):
+        self._revisar_ve_todos_por_departamento("CONTABILIDAD")
+
+    def test_mesa_de_control_ve_nombre_busca_y_ordena_por_clientes_no_asignados(self):
+        self._revisar_ve_todos_por_departamento("MESACONTROL")
+
     def test_transferir_pasa_las_cotizaciones_al_nuevo_dueno(self):
         op = self._op(self.ana, cliente=self.cliente)
         resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
