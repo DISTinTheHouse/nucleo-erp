@@ -8920,3 +8920,136 @@ class RenglonSinColorTests(TestCase):
         self.assertIn("color_nombre", data)
         self.assertIsNone(data["color_nombre"])
         self.assertIsNone(data["talla_nombre"])
+
+
+class ConsultasAltaYPatchOrdenServicioTests(TestCase):
+    """EC-889: el PATCH y el alta de OB/OR/OCM no crecen con los renglones.
+
+    Cada caso corre con 1 y con ``N_GRANDE`` renglones y exige el MISMO número
+    de consultas: se compara contra sí mismo en vez de fijar totales, porque el
+    costo fijo (folio, bitácora, savepoints) cambia con otros issues y aquí solo
+    importa que no haya trabajo por renglón. Cada renglón lleva su propio
+    producto y su propio color para que un acceso por renglón a cualquiera de
+    los dos se note (el alta de OCM leía ``colores`` una vez por renglón).
+
+    El usuario es admin de empresa, como en ``EditarOrdenServicioTests``: pasa
+    ``LecturaPorCodigo``, ``E-PRODUCCION-OB`` y ``_require_produccion`` sin
+    sembrar roles; el alcance por sucursal de los no admin es una subconsulta
+    constante (``sucursales_permitidas_q``), así que no cambia la comparación.
+    """
+
+    N_GRANDE = 30
+
+    #: destino → (segmento de URL, tipo_documento, serie, bandera y config de la talla, body del PATCH)
+    TIPOS = {
+        "BORDADO": ("orden-bordado", "ORDEN_BORDADO", "OB", "lleva_bordado", "bordado_config",
+                    {"observaciones": "ajuste"}),
+        "REFLEJANTE": ("orden-reflejante", "ORDEN_REFLEJANTE", "OR", "lleva_reflejante", "reflejante_config",
+                       {"prioridad": 2, "observaciones": "ajuste"}),
+        "CORTE_MANGA": ("orden-corte-manga", "ORDEN_CORTE_MANGA", "OCM", "lleva_corte_manga", "corte_manga_config",
+                        {"prioridad": 2, "observaciones": "ajuste"}),
+    }
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="acme-889", razon_social="ACME 889 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
+        for _url, tipo_documento, serie, *_resto in cls.TIPOS.values():
+            SerieFolio.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento=tipo_documento, serie=serie,
+            )
+        cls.usuario = Usuario.objects.create(
+            username="op-889", email="op@acme-889.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 889")
+        cls.tallas = [Talla.objects.create(nombre=f"T889-{i}") for i in range(3)]
+
+    def setUp(self):
+        self.client_api = APIClient()
+        self.client_api.force_authenticate(user=self.usuario)
+        self._consecutivo = 0
+
+    def _pedido(self, destino, n):
+        """Pedido programado hacia ``destino`` con ``n`` renglones, cada uno con
+        producto y color propios; devuelve ``(pedido, [PedidoDetalleTalla])``."""
+        *_r, flag, config_field, _patch = self.TIPOS[destino]
+        pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
+            persona_pagos="Pagos", correo_facturas="pagos@acme-889.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        tallas = []
+        for i in range(n):
+            self._consecutivo += 1
+            producto = Producto.objects.create(
+                tipo=_tipo_producto(), empresa=self.empresa, nombre=f"Prenda {self._consecutivo}",
+            )
+            color = Color.objects.create(
+                nombre=f"Color {self._consecutivo}", codigo=f"{self._consecutivo % 1000:03d}", codigo_hex="#000000",
+            )
+            detalle = PedidoDetalle.objects.create(pedido=pedido, producto=producto, color=color)
+            tallas.append(PedidoDetalleTalla.objects.create(
+                pedido_detalle=detalle, talla=self.tallas[i % len(self.tallas)], cantidad=10,
+                sku_muestra=f"SKU-889-{self._consecutivo}",
+                **{flag: True, config_field: {"ubicaciones": [{"nombre": "Pecho"}]}},
+            ))
+        pedido.programacion_conf = {"programaciones": [{"destino": destino, "cantidad": 10 * n}]}
+        pedido.save(update_fields=["programacion_conf"])
+        return pedido, tallas
+
+    def _alta(self, destino, n, modo):
+        """Alta de una orden de ``destino`` con ``n`` renglones; ``modo`` es
+        ``create`` (POST a la colección), ``onboarding`` (POST de onboarding con
+        ``detalles_override``) u ``onboarding-completo`` (sin override: el pedido
+        entero). Devuelve ``(respuesta, consultas)``."""
+        url = self.TIPOS[destino][0]
+        pedido, tallas = self._pedido(destino, n)
+        body = {"pedido": pedido.pk}
+        if modo != "onboarding-completo":
+            body["detalles_override"] = [
+                {"pedido_detalle_talla_id": pdt.pk, "cantidad": 10} for pdt in tallas
+            ]
+        ruta = f"/api/v1/produccion/{url}/" if modo == "create" else f"/api/v1/produccion/{url}/onboarding/"
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self.client_api.post(ruta, body, format="json")
+        self.assertIn(resp.status_code, (200, 201), resp.data)
+        self.assertEqual(len(resp.data["detalles"]), n)
+        return resp, len(ctx)
+
+    def _patch(self, destino, n):
+        """PATCH de una orden de ``destino`` con ``n`` renglones; devuelve las consultas."""
+        url, *_r, body = self.TIPOS[destino]
+        resp, _ = self._alta(destino, n, "onboarding")
+        with CaptureQueriesContext(connection) as ctx:
+            patch = self.client_api.patch(f"/api/v1/produccion/{url}/{resp.data['id']}/", body, format="json")
+        self.assertEqual(patch.status_code, 200, patch.data)
+        return len(ctx)
+
+    def _sin_crecer(self, medir):
+        """Consultas con 1 y con ``N_GRANDE`` renglones. Se mide una vez antes
+        sin comparar para que cachés de primera petición (tipos de contenido,
+        permisos) no inflen sólo el caso chico."""
+        medir(1)
+        return medir(1), medir(self.N_GRANDE)
+
+    def test_alta_no_crece_con_los_renglones(self):
+        for destino in self.TIPOS:
+            for modo in ("create", "onboarding", "onboarding-completo"):
+                with self.subTest(destino=destino, modo=modo):
+                    chico, grande = self._sin_crecer(lambda n: self._alta(destino, n, modo)[1])
+                    self.assertEqual(
+                        grande, chico,
+                        f"alta {modo} de {destino}: {chico} consultas con 1 renglón, "
+                        f"{grande} con {self.N_GRANDE}",
+                    )
+
+    def test_patch_no_crece_con_los_renglones(self):
+        for destino in self.TIPOS:
+            with self.subTest(destino=destino):
+                chico, grande = self._sin_crecer(lambda n: self._patch(destino, n))
+                self.assertEqual(
+                    grande, chico,
+                    f"PATCH de {destino}: {chico} consultas con 1 renglón, {grande} con {self.N_GRANDE}",
+                )
