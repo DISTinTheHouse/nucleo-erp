@@ -1663,21 +1663,21 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         del_admin = self._oportunidad(self.a, self.a["admin"], "Chamarras", cliente=cliente, nombre_contacto="Ana")
         del_vendedor = self._oportunidad(self.a, self.vendedor_a, "Chamarras", cliente=cliente, nombre_contacto="Ana")
 
-        self.assertEqual(self._fila(self.a["admin"], "chamarras", del_admin), ("Chamarras", "Comercial Acme Norte"))
+        self.assertEqual(self._fila(self.a["admin"], "chamarras", del_admin), ("Chamarras", "COMERCIAL ACME Norte SA DE CV"))
         self.assertEqual(self._fila(self.vendedor_a, "chamarras", del_vendedor), ("Chamarras", "Ana"))
         cliente.vendedores.add(self.vendedor_a)
-        self.assertEqual(self._fila(self.vendedor_a, "chamarras", del_vendedor), ("Chamarras", "Comercial Acme Norte"))
+        self.assertEqual(self._fila(self.vendedor_a, "chamarras", del_vendedor), ("Chamarras", "COMERCIAL ACME Norte SA DE CV"))
 
     def test_sin_titulo_se_nombra_por_el_cliente_si_lo_ve_y_si_no_por_el_contacto(self):
         self._dar_permiso_crm(self.vendedor_a)
         cliente = self.a["cliente"]
         op = self._oportunidad(self.a, self.vendedor_a, "", cliente=cliente, nombre_contacto="Luis Playero")
 
-        self.assertEqual(self._fila(self.a["admin"], "playero", op), ("Comercial Acme Norte", "Luis Playero"))
-        self.assertEqual(self._fila(self.superuser_a, "playero", op), ("Comercial Acme Norte", "Luis Playero"))
+        self.assertEqual(self._fila(self.a["admin"], "playero", op), ("COMERCIAL ACME Norte SA DE CV", "Luis Playero"))
+        self.assertEqual(self._fila(self.superuser_a, "playero", op), ("COMERCIAL ACME Norte SA DE CV", "Luis Playero"))
         self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Luis Playero", None))
         cliente.vendedores.add(self.vendedor_a)
-        self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Comercial Acme Norte", "Luis Playero"))
+        self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("COMERCIAL ACME Norte SA DE CV", "Luis Playero"))
 
     def test_el_admin_ve_el_nombre_del_cliente_aunque_este_de_baja(self):
         self._dar_permiso_crm(self.vendedor_a)
@@ -1686,7 +1686,7 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         op = self._oportunidad(self.a, self.vendedor_a, "", cliente=cliente, nombre_contacto="Luis Playero")
         cliente.soft_delete()
 
-        self.assertEqual(self._fila(self.a["admin"], "playero", op), ("Comercial Acme Norte", "Luis Playero"))
+        self.assertEqual(self._fila(self.a["admin"], "playero", op), ("COMERCIAL ACME Norte SA DE CV", "Luis Playero"))
         self.assertEqual(self._fila(self.vendedor_a, "playero", op), ("Luis Playero", None))
 
     def test_sin_titulo_ni_cliente_se_nombra_por_el_contacto(self):
@@ -1715,22 +1715,22 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
 
                 self.assertEqual(len(ctx), 0)
                 self.assertEqual(filas[sin_nada.pk], (f"Oportunidad #{sin_nada.pk}", None))
-                self.assertEqual(filas[con_cliente.pk], ("Comercial Acme Norte", None))
+                self.assertEqual(filas[con_cliente.pk], ("COMERCIAL ACME Norte SA DE CV", None))
 
     def test_el_subtitulo_nunca_repite_el_titulo(self):
         # Título igual al nombre del cliente: el subtítulo pasa al contacto, y si no hay, queda vacío.
         con_contacto = self._oportunidad(
-            self.a, self.a["admin"], "Comercial Acme Norte", cliente=self.a["cliente"], nombre_contacto="Ana"
+            self.a, self.a["admin"], "COMERCIAL ACME Norte SA DE CV", cliente=self.a["cliente"], nombre_contacto="Ana"
         )
-        sin_contacto = self._oportunidad(self.a, self.a["admin"], "comercial acme norte ", cliente=self.a["cliente"])
+        sin_contacto = self._oportunidad(self.a, self.a["admin"], "comercial acme norte sa de cv ", cliente=self.a["cliente"])
         # Sin título, con el contacto igual al nombre del cliente.
         contacto_igual = self._oportunidad(
-            self.a, self.a["admin"], "", cliente=self.a["cliente"], nombre_contacto="Comercial Acme Norte"
+            self.a, self.a["admin"], "", cliente=self.a["cliente"], nombre_contacto="COMERCIAL ACME Norte SA DE CV"
         )
 
-        self.assertEqual(self._fila(self.a["admin"], "comercial", con_contacto), ("Comercial Acme Norte", "Ana"))
-        self.assertEqual(self._fila(self.a["admin"], "comercial", sin_contacto), ("comercial acme norte", None))
-        self.assertEqual(self._fila(self.a["admin"], "comercial", contacto_igual), ("Comercial Acme Norte", None))
+        self.assertEqual(self._fila(self.a["admin"], "comercial", con_contacto), ("COMERCIAL ACME Norte SA DE CV", "Ana"))
+        self.assertEqual(self._fila(self.a["admin"], "comercial", sin_contacto), ("comercial acme norte sa de cv", None))
+        self.assertEqual(self._fila(self.a["admin"], "comercial", contacto_igual), ("COMERCIAL ACME Norte SA DE CV", None))
 
     def test_el_nombre_del_cliente_no_crece_las_consultas(self):
         self._dar_permiso_crm(self.vendedor_a)
@@ -1739,7 +1739,7 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
             self._oportunidad(self.a, user, "", cliente=self.a["cliente"], nombre_contacto="Contacto Uniformes")
         # Títulos que debe ver vendedor_a: el nombre de cada cliente asignado y el contacto
         # de las oportunidades con cliente ajeno.
-        esperados = [self.a["cliente"].nombre]
+        esperados = [self.a["cliente"].razon_social]  # razón social; sin ella, el nombre (#1201)
 
         def consultas(user):
             with CaptureQueriesContext(connection) as ctx:
@@ -1770,7 +1770,7 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
 
     def test_se_encuentra_por_el_nombre_del_cliente_solo_si_lo_ve(self):
         self._dar_permiso_crm(self.vendedor_a)
-        cliente = self.a["cliente"]  # "Comercial Acme Norte"; vendedor_a NO lo tiene asignado
+        cliente = self.a["cliente"]  # "COMERCIAL ACME Norte SA DE CV"; vendedor_a NO lo tiene asignado
         op = self._oportunidad(self.a, self.vendedor_a, "", cliente=cliente, nombre_contacto="Luis")
         del_admin = self._oportunidad(self.a, self.a["admin"], "", cliente=cliente)
 
@@ -1783,12 +1783,22 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
 
         cliente.vendedores.add(self.vendedor_a)
         self.assertEqual(self._ids(self._buscar(self.vendedor_a, "norte"), "oportunidad"), [op.pk])
-        self.assertEqual(self._fila(self.vendedor_a, "norte", op), ("Comercial Acme Norte", "Luis"))
+        self.assertEqual(self._fila(self.vendedor_a, "norte", op), ("COMERCIAL ACME Norte SA DE CV", "Luis"))
 
         # Dado de baja: el vendedor ya no lo ve; el admin sí, igual que en el nombre.
         cliente.soft_delete()
         self.assertEqual(self._ids(self._buscar(self.vendedor_a, "norte"), "oportunidad"), [])
         self.assertCountEqual(self._ids(self._buscar(self.a["admin"], "norte"), "oportunidad"), [op.pk, del_admin.pk])
+
+    def test_se_encuentra_y_se_nombra_por_la_razon_social_del_cliente(self):
+        # #1201: la razón social es la etiqueta principal; sin ella, el nombre corto.
+        cliente = Cliente.objects.create(
+            empresa=self.a["empresa"], nombre="Zeta", razon_social="Industrias Ómega SA de CV",
+        )
+        op = self._oportunidad(self.a, self.a["admin"], "", cliente=cliente)
+        self.assertEqual(self._ids(self._buscar(self.a["admin"], "ómega"), "oportunidad"), [op.pk])
+        self.assertEqual(self._fila(self.a["admin"], "ómega", op), ("Industrias Ómega SA de CV", None))
+        self.assertEqual(self._ids(self._buscar(self.a["admin"], "zeta"), "oportunidad"), [op.pk])
 
     def test_buscar_por_cliente_no_cruza_empresas_ni_crece_las_consultas(self):
         self._dar_permiso_crm(self.vendedor_a)

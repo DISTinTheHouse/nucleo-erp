@@ -35,9 +35,7 @@ def _d(valor):
 
 def variantes_scope(user):
     qs = ProductoVariante.objects.all()
-    if user.is_superuser:
-        return qs
-    if getattr(user, "empresa_id", None):
+    if getattr(user, "empresa_id", None):  # superusuario incluido: su empresa activa (#1131)
         return qs.filter(empresa_id=user.empresa_id)
     return qs.none()
 
@@ -117,8 +115,7 @@ def _deltas_ajuste(user, ajuste_ids):
         modulo="inventarios", tabla="existencias", accion="AJUSTE",
         despues_json__ajuste_id__in=sorted(ajuste_ids),
     ).order_by("id_evento")
-    if not user.is_superuser:
-        eventos = eventos.filter(empresa_id=user.empresa_id)
+    eventos = eventos.filter(empresa_id=user.empresa_id)
     for despues in eventos.values_list("despues_json", flat=True):
         for item in (despues or {}).get("items") or []:
             clave = (despues.get("ajuste_id"), item.get("producto_variante_id"), item.get("ubicacion_id"))
@@ -189,8 +186,7 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, al
             "movimiento_inventario__factura__folio",
         )
     )
-    if not user.is_superuser:
-        detalles = detalles.filter(movimiento_inventario__empresa_id=user.empresa_id)
+    detalles = detalles.filter(movimiento_inventario__empresa_id=user.empresa_id)
     detalles = list(detalles)
     deltas_ajuste = _deltas_ajuste(user, {
         m["movimiento_inventario__ajuste_inventario_id"] for m in detalles
@@ -321,8 +317,7 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, al
     # como saldo de arranque por almacén para que el saldo final cuadre con
     # la existencia real.
     existencias = Existencia.objects.filter(producto_variante_id=variante_id)
-    if not user.is_superuser:
-        existencias = existencias.filter(almacen__empresa_id=user.empresa_id)
+    existencias = existencias.filter(almacen__empresa_id=user.empresa_id)
     if alcance is not None:
         existencias = existencias.filter(almacen_id__in=alcance[0])
     real = {e["almacen_id"]: _d(e["t"]) for e in existencias.values("almacen_id").annotate(t=Sum("cantidad"))}

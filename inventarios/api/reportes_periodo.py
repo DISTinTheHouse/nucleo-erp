@@ -583,12 +583,11 @@ def reporte_movimientos(user, query_params):
         .order_by("-movimiento_inventario__fecha_movimiento", "-id")
     )
 
-    if not user.is_superuser:
-        # Defensa: además del almacén, el movimiento debe ser de la empresa
-        # activa del usuario (como el auxiliar).
-        from nucleo.scope import empresa_ids_lectura
+    # Defensa: además del almacén, el movimiento debe ser de la empresa activa del
+    # usuario, superusuario incluido (como el auxiliar).
+    from nucleo.scope import empresa_ids_lectura
 
-        detalles_qs = detalles_qs.filter(movimiento_inventario__empresa_id__in=empresa_ids_lectura(user))
+    detalles_qs = detalles_qs.filter(movimiento_inventario__empresa_id__in=empresa_ids_lectura(user))
 
     # Un renglón entra si alguno de sus lados está en alcance, y se muestra con
     # el primero que lo esté (origen antes que destino): en la transferencia,

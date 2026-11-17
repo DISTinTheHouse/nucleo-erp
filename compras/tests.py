@@ -359,13 +359,24 @@ class RecepcionOnboardingRenglonesTests(TestCase):
 
     MSG_SIN_RENGLONES = "La recepción debe tener al menos un renglón con cantidad recibida."
 
-    @staticmethod
-    def _msg_cantidad(renglon):
-        return f"El renglón #{renglon} debe tener cantidad_recibida > 0."
+    def _ref(self, origen, renglon, etiqueta=True):
+        """``#N (campo pk[, etiqueta])`` como lo arma ``_ref_renglon`` (#1188): el segundo
+        renglón del payload (``renglon=2``) es el ``*_detalle_2``."""
+        segundo = renglon == 2
+        if origen == "oc":
+            detalle = self.oc_detalle_2 if segundo else self.oc_detalle
+            campo, nombre = "orden_compra_detalle", detalle.producto.nombre
+        else:
+            detalle = self.op_detalle_2 if segundo else self.op_detalle
+            campo, nombre = "orden_produccion_detalle", f"SKU {detalle.producto_variante.sku}"
+        return f"#{renglon} ({campo} {detalle.pk}" + (f", {nombre})" if etiqueta else ")")
 
-    @staticmethod
-    def _msg_excede(renglon):
-        return f"El renglón #{renglon} excede la cantidad pendiente por recibir."
+    def _msg_cantidad(self, origen, renglon):
+        # El serializer valida antes y no conoce el producto: solo la referencia.
+        return f"El renglón {self._ref(origen, renglon, etiqueta=False)} debe tener cantidad_recibida > 0."
+
+    def _msg_excede(self, origen, renglon):
+        return f"El renglón {self._ref(origen, renglon)} excede la cantidad pendiente por recibir."
 
     @classmethod
     def setUpTestData(cls):
@@ -482,7 +493,7 @@ class RecepcionOnboardingRenglonesTests(TestCase):
             for cantidad in ("0", "-1", "0.0000"):
                 with self.subTest(origen=origen, cantidad=cantidad):
                     self._assert_400_sin_escrituras(
-                        origen, [self._renglon(origen, cantidad)], {"detalle": [self._msg_cantidad(1)]},
+                        origen, [self._renglon(origen, cantidad)], {"detalle": [self._msg_cantidad(origen, 1)]},
                     )
 
     def test_segundo_renglon_en_cero_es_400_sin_escrituras(self):
@@ -491,7 +502,7 @@ class RecepcionOnboardingRenglonesTests(TestCase):
                 self._assert_400_sin_escrituras(
                     origen,
                     [self._renglon(origen, "1"), self._renglon(origen, "0", segundo=True)],
-                    {"detalle": [self._msg_cantidad(2)]},
+                    {"detalle": [self._msg_cantidad(origen, 2)]},
                 )
 
     def test_cantidad_minima_representable_se_acepta(self):
@@ -506,7 +517,7 @@ class RecepcionOnboardingRenglonesTests(TestCase):
         for origen, cantidad in casos.items():
             with self.subTest(origen=origen):
                 self._assert_400_sin_escrituras(
-                    origen, [self._renglon(origen, cantidad)], {"detalle": self._msg_excede(1)},
+                    origen, [self._renglon(origen, cantidad)], {"detalle": [self._msg_excede(origen, 1)]},
                 )
 
     def test_segundo_renglon_excede_lo_pendiente_es_400_sin_escrituras(self):
@@ -518,7 +529,7 @@ class RecepcionOnboardingRenglonesTests(TestCase):
                 self._assert_400_sin_escrituras(
                     origen,
                     [self._renglon(origen, "1"), self._renglon(origen, cantidad, segundo=True)],
-                    {"detalle": self._msg_excede(2)},
+                    {"detalle": [self._msg_excede(origen, 2)]},
                 )
 
     # --- regresión: recepción válida ----------------------------------------------

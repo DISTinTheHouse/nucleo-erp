@@ -517,12 +517,12 @@ class UsuarioViewSetAlcanceTests(_DosEmpresasMixin, TestCase):
         self.assertEqual(set(response.data), {"sucursales"})
 
     def test_empresa_nula_con_sucursales_falla(self):
-        """``empresa: null`` deja al usuario sin empresa: ninguna sucursal es
-        suya, aunque fuera de la empresa que tenía."""
+        """``empresa: null`` no se acepta (#1048): el usuario desaparecería de la lista
+        del superusuario, así que ni se llega a revisar las sucursales."""
         antes = self._alcance()
         response = self._patch({"empresa": None, "sucursales": [self.sucursal.pk]}, self.superusuario)
         self.assertEqual(response.status_code, 400, getattr(response, "data", None))
-        self.assertIn("sucursales", response.data)
+        self.assertIn("empresa", response.data)
         self.assertEqual(self._alcance(), antes)
 
     def test_patch_sin_alcance_no_consulta_empresa(self):
@@ -618,19 +618,21 @@ class SuperusuarioEmpresaActivaTests(_DosEmpresasMixin, TestCase):
         self.assertEqual(self.client.get(f"{self.URL}{self.objetivo.pk}/").status_code, 404)
 
     def test_no_cambia_su_propia_empresa_aqui(self):
-        """Ni con el alcance de la empresa destino ni dejándose sin empresa: 403
-        y nada cambia. Las reglas de alcance (400) se revisan antes, como el
-        resto de validaciones de ``UsuarioSerializer``."""
+        """Con el alcance de la empresa destino: 403 y nada cambia. Dejarse sin
+        empresa ni llega ahí: ``UsuarioSerializer`` lo rechaza con 400 (#1048)."""
         antes = self._alcance(self.root)
         cuerpos = (
-            {"empresa": self.ajena.pk, "sucursal_default": self.sucursal_ajena.pk},
-            {"empresa": None, "sucursal_default": None},
+            ({"empresa": self.ajena.pk, "sucursal_default": self.sucursal_ajena.pk}, 403),
+            ({"empresa": None, "sucursal_default": None}, 400),
         )
-        for body in cuerpos:
+        for body, estatus in cuerpos:
             with self.subTest(body=body):
                 response = self.client.patch(f"{self.URL}{self.root.pk}/", body, format="json")
-                self.assertEqual(response.status_code, 403, response.data)
-                self.assertIn("cambiar-empresa", str(response.data["detail"]))
+                self.assertEqual(response.status_code, estatus, response.data)
+                if estatus == 403:
+                    self.assertIn("cambiar-empresa", str(response.data["detail"]))
+                else:
+                    self.assertIn("empresa", response.data)
                 self.assertEqual(self._alcance(self.root), antes)
 
     def test_editarse_sin_cambiar_de_empresa_sigue_funcionando(self):

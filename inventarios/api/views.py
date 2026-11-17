@@ -38,7 +38,7 @@ from nucleo.listados import PaginacionOpcionalLimitOffset
 from . import auxiliar as auxiliar_mod
 from . import existencias_por_almacen as por_almacen_mod
 from . import reportes_periodo as reportes_mod
-from .reportes_periodo import almacenes_en_alcance
+from .reportes_periodo import _almacenes_en_alcance as _almacenes_visibles
 from .serializers import (
     AlmacenSerializer,
     UbicacionSerializer,
@@ -102,10 +102,9 @@ class AlmacenViewSet(viewsets.ModelViewSet):
         user = self.request.user
         # Listado más reciente primero; el desempate usa la PK real (``id_almacen``).
         qs = self.queryset.order_by(models.F('created_at').desc(nulls_last=True), '-id_almacen')
-        if user.is_superuser:
-            return qs
-        # Filtrar por empresas y sucursales permitidas
         empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
+        if user.is_superuser:  # toda su empresa activa, sin sub-alcance (EC-798, #1131)
+            return qs.filter(empresa_id__in=empresa_ids)
         sucursal_ids = list(user.sucursales_permitidas())
         return qs.filter(
             models.Q(empresa_id__in=empresa_ids) &
@@ -119,9 +118,9 @@ class AlmacenViewSet(viewsets.ModelViewSet):
         if not user.is_superuser:
             if instance.sucursal_id and not user.sucursales.filter(pk=instance.sucursal_id).exists():
                 raise PermissionDenied("No tiene acceso a esta sucursal")
-            if instance.empresa_id:
-                if instance.empresa_id != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
-                    raise PermissionDenied("No tiene acceso a esta empresa")
+        if instance.empresa_id:
+            if instance.empresa_id != user.empresa_id:  # sin empresa activa no se escribe (EC-816, #1131)
+                raise PermissionDenied("No tiene acceso a esta empresa")
 
 class UbicacionViewSet(viewsets.ModelViewSet):
     queryset = Ubicacion.objects.all().select_related('almacen__empresa', 'almacen__sucursal')
@@ -133,9 +132,9 @@ class UbicacionViewSet(viewsets.ModelViewSet):
         user = self.request.user
         # Listado más reciente primero; el desempate usa la PK real (``id_ubicacion``).
         qs = self.queryset.order_by(models.F('created_at').desc(nulls_last=True), '-id_ubicacion')
-        if user.is_superuser:
-            return qs
         empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
+        if user.is_superuser:  # toda su empresa activa, sin sub-alcance (EC-798, #1131)
+            return qs.filter(almacen__empresa_id__in=empresa_ids)
         sucursal_ids = list(user.sucursales_permitidas())
         return qs.filter(
             models.Q(almacen__empresa_id__in=empresa_ids) &
@@ -147,13 +146,13 @@ class UbicacionViewSet(viewsets.ModelViewSet):
         # Obtener el almacén del validated_data
         almacen = serializer.validated_data.get('almacen')
         
-        if not user.is_superuser and almacen:
+        if almacen:
             sucursal = almacen.sucursal
             empresa = almacen.empresa
-            
-            if sucursal and not user.sucursales.filter(pk=sucursal.pk).exists():
+
+            if not user.is_superuser and sucursal and not user.sucursales.filter(pk=sucursal.pk).exists():
                 raise PermissionDenied("No tiene acceso a esta sucursal")
-            
+
             if empresa:
                 if empresa.pk != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
                     raise PermissionDenied("No tiene acceso a esta empresa")
@@ -249,8 +248,9 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticatedAndScoped]
 
     def _almacenes_en_alcance(self):
-        # ``Existencia`` no tiene ``empresa`` propia: la hereda del almacén.
-        return almacenes_en_alcance(self.request.user)
+        # ``Existencia`` no tiene ``empresa`` propia: la hereda del almacén. El superusuario
+        # queda en su empresa activa, sin sub-alcance por sucursal (EC-798, #1131).
+        return _almacenes_visibles(self.request.user, Almacen.objects.all())
 
     def get_queryset(self):
         def to_int(v):
@@ -263,9 +263,8 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
         qs = self.queryset
         # Aislamiento multi-tenant ANTES de los filtros del cliente y del recorte
         # por ``limit``: ningún query param (``empresa_id``, ``almacen_id``...)
-        # abre el alcance. Superusuario ve todo.
-        if not self.request.user.is_superuser:
-            qs = qs.filter(almacen__in=self._almacenes_en_alcance())
+        # abre el alcance. El superusuario también se limita a su empresa activa.
+        qs = qs.filter(almacen__in=self._almacenes_en_alcance())
         qp = self.request.query_params
 
         empresa_id = to_int(qp.get("empresa_id") or qp.get("empresa"))
@@ -323,12 +322,12 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
 
     def _validar_acceso_almacen(self, almacen):
         # Antes del save(): el almacén destino debe estar en el alcance del
-        # usuario (el mismo de ``get_queryset``). Superusuario sin restricción.
+        # usuario (el mismo de ``get_queryset``), superusuario incluido (#1131).
         user = self.request.user
-        if user.is_superuser or almacen is None:
+        if almacen is None:
             return
         if not self._almacenes_en_alcance().filter(pk=almacen.pk).exists():
-            if not user.sucursales.filter(pk=almacen.sucursal_id).exists():
+            if almacen.empresa_id == user.empresa_id and not user.sucursales.filter(pk=almacen.sucursal_id).exists():
                 raise PermissionDenied("No tiene acceso a la sucursal de este almacén")
             raise PermissionDenied("No tiene acceso a la empresa de este almacén")
 
@@ -350,8 +349,7 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
         almacen_id = por_almacen_mod.almacen_id_requerido(request)
         qs = Existencia.objects.filter(almacen_id=almacen_id)
         # Mismo alcance que ``get_queryset``: un almacén ajeno da vacío, no 403.
-        if not request.user.is_superuser:
-            qs = qs.filter(almacen__in=self._almacenes_en_alcance())
+        qs = qs.filter(almacen__in=self._almacenes_en_alcance())
         maximo = por_almacen_mod.max_stock(qs)
         return almacen_id, maximo, por_almacen_mod.anotar(qs, maximo)
 
@@ -771,8 +769,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         # Aislamiento multi-tenant: mismo alcance que existencias. Un almacén
         # fuera de alcance se trata como no encontrado (igual que un pedido de
         # otra empresa en ``_get_pedido``), sin revelar que existe.
-        if not request.user.is_superuser:
-            qs = qs.filter(pk__in=almacenes_en_alcance(request.user))
+        qs = qs.filter(pk__in=_almacenes_visibles(request.user, Almacen.objects.all()))
         almacen = qs.filter(pk=almacen_id).first()
         if not almacen:
             raise ValidationError({"almacen": "Almacén no encontrado."})
@@ -1241,10 +1238,9 @@ class SkuMuestraViewSet(viewsets.ViewSet):
         user = request.user
         qs = VarianteProductoProduccion.objects.filter(activo=True, sku__isnull=False)
         empresa_id = getattr(user, "empresa_id", None)
-        if empresa_id:
-            qs = qs.filter(empresa_id=empresa_id)
-        elif not user.is_superuser:
+        if not empresa_id:  # sin empresa activa no se ve nada, superusuario incluido (#1131)
             return Response([])
+        qs = qs.filter(empresa_id=empresa_id)
         filas = (
             qs.filter(models.Q(sku__icontains=texto) | models.Q(pedido_detalle__pedido__folio__icontains=texto))
             .order_by("sku")
@@ -1465,14 +1461,12 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
         # El aislamiento multi-tenant vive AQUÍ, no en la permission class:
         # ``IsAuthenticatedAndScoped`` sólo cierra las escrituras y deja pasar
         # toda lectura autenticada. Es la capa que usa el resto del proyecto.
-        # El superusuario se evalúa PRIMERO —igual que ``AlmacenViewSet``,
-        # ``PedidoViewSet`` o ``EmpleadoViewSet``—: ve todo aunque tenga una
-        # empresa asignada. Sin empresa no se ve nada: se falla cerrado.
-        if not user.is_superuser:
-            empresa_ids = self._empresa_ids_permitidas(user)
-            if not empresa_ids:
-                return qs.none()
-            qs = qs.filter(empresa_id__in=empresa_ids)
+        # Todos, superusuario incluido, ven solo su empresa activa (EC-798, #1131).
+        # Sin empresa no se ve nada: se falla cerrado.
+        empresa_ids = self._empresa_ids_permitidas(user)
+        if not empresa_ids:
+            return qs.none()
+        qs = qs.filter(empresa_id__in=empresa_ids)
 
         # ``empresa_id`` es un filtro ADICIONAL dentro del universo ya acotado
         # arriba, nunca la fuente del tenant: antes el scope salía sólo de este
@@ -1521,10 +1515,9 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
             "empresa", "sucursal", "usuario", "pedido", "recepcion",
             "transferencia", "op", "ajuste_inventario",
         )
+        qs = qs.filter(empresa_id__in=self._empresa_ids_permitidas(user))
         if not user.is_superuser:
-            empresa_ids = self._empresa_ids_permitidas(user)
-            sucursal_ids = list(user.sucursales_permitidas())
-            qs = qs.filter(empresa_id__in=empresa_ids, sucursal_id__in=sucursal_ids)
+            qs = qs.filter(sucursal_id__in=list(user.sucursales_permitidas()))
         mov = qs.filter(pk=movimiento_id).first()
         if not mov:
             return Response(
@@ -1704,12 +1697,11 @@ class MovimientoInventarioViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = self.queryset
-        if user.is_superuser:
-            return qs
-        
         empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
+        if user.is_superuser:  # toda su empresa activa, sin sub-alcance (EC-798, #1131)
+            return qs.filter(empresa_id__in=empresa_ids)
         sucursal_ids = list(user.sucursales_permitidas())
-        
+
         return qs.filter(
             models.Q(empresa_id__in=empresa_ids) &
             models.Q(sucursal_id__in=sucursal_ids)
@@ -1740,12 +1732,11 @@ class MovimientoInventarioDetalleViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = self.queryset
-        if user.is_superuser:
-            return qs
-        
         empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
+        if user.is_superuser:  # toda su empresa activa, sin sub-alcance (EC-798, #1131)
+            return qs.filter(movimiento_inventario__empresa_id__in=empresa_ids)
         sucursal_ids = list(user.sucursales_permitidas())
-        
+
         return qs.filter(
             models.Q(movimiento_inventario__empresa_id__in=empresa_ids) &
             models.Q(movimiento_inventario__sucursal_id__in=sucursal_ids)
@@ -1753,14 +1744,13 @@ class MovimientoInventarioDetalleViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         user = self.request.user
-        if not user.is_superuser:
-            movimiento = serializer.validated_data.get('movimiento_inventario')
-            if movimiento:
-                if movimiento.sucursal_id and not user.sucursales.filter(pk=movimiento.sucursal_id).exists():
-                    raise PermissionDenied("No tiene acceso a la sucursal del movimiento de inventario")
-                if movimiento.empresa_id:
-                    if movimiento.empresa_id != user.empresa_id:  # sin empresa activa no se escribe (EC-816)
-                        raise PermissionDenied("No tiene acceso a la empresa del movimiento de inventario")
+        movimiento = serializer.validated_data.get('movimiento_inventario')
+        if movimiento:
+            if not user.is_superuser and movimiento.sucursal_id and not user.sucursales.filter(pk=movimiento.sucursal_id).exists():
+                raise PermissionDenied("No tiene acceso a la sucursal del movimiento de inventario")
+            if movimiento.empresa_id:
+                if movimiento.empresa_id != user.empresa_id:  # sin empresa activa no se escribe (EC-816, #1131)
+                    raise PermissionDenied("No tiene acceso a la empresa del movimiento de inventario")
         serializer.save()
 
 class AjusteInventarioViewSet(viewsets.ModelViewSet):
@@ -1771,12 +1761,11 @@ class AjusteInventarioViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = self.queryset
-        if user.is_superuser:
-            return qs
-        
         empresa_ids = empresa_ids_lectura(user)  # solo la empresa activa (EC-816)
+        if user.is_superuser:  # toda su empresa activa, sin sub-alcance (EC-798, #1131)
+            return qs.filter(empresa_id__in=empresa_ids)
         sucursal_ids = list(user.sucursales_permitidas())
-        
+
         return qs.filter(
             models.Q(empresa_id__in=empresa_ids) &
             models.Q(sucursal_id__in=sucursal_ids)
@@ -1794,6 +1783,6 @@ class AjusteInventarioViewSet(viewsets.ModelViewSet):
         if not user.is_superuser and sucursal and not user.sucursales.filter(pk=sucursal.pk).exists():
             raise PermissionDenied("No tiene acceso a esta sucursal")
         serializer.save(empresa=user.empresa)
-    
+
     def perform_destroy(self, instance):
         instance.soft_delete()

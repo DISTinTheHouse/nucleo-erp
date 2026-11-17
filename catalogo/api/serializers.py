@@ -118,15 +118,11 @@ class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerial
 
     def _empresa_id_resuelta(self, attrs):
         # Misma resolución que el ViewSet: en update ``empresa`` es de sólo
-        # lectura (sale de la instancia); en create la manda el superusuario o
-        # ``perform_create`` inyecta ``user.empresa`` para el resto.
-        if 'empresa' in attrs:
-            return attrs['empresa'].pk
+        # lectura (sale de la instancia); en create ``perform_create`` inyecta
+        # ``user.empresa`` a todos, superusuario incluido (EC-798), y ahí se compara.
         if self.instance is not None:
             return self.instance.empresa_id
         user = getattr(self.context.get("request"), "user", None)
-        if getattr(user, "is_superuser", False):
-            return None
         return getattr(getattr(user, "empresa", None), "pk", None)
 
     def validate(self, attrs):

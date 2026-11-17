@@ -42,6 +42,7 @@ from produccion.models import (
     OrdenesBordado,
     OrdenesCorteManga,
     OrdenProduccion,
+    OrdenProduccionPedido,
     OrdenProduccionRutaCritica,
 )
 from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
@@ -5150,6 +5151,8 @@ class PedidoTrazabilidadTests(TestCase):
             empresa=self.empresa, sucursal=self.sucursal, pedido=pedido, folio_op="OP-1",
             estatus_op=OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
         )
+        # La trazabilidad lee ``OrdenProduccionPedido`` (#1086); la API lo crea con el principal.
+        OrdenProduccionPedido.objects.create(op=op, pedido=pedido)
         OrdenProduccionRutaCritica.objects.create(
             op=op, kit_completo=True, fecha_trazo=timezone.localdate(),
         )
@@ -9412,6 +9415,14 @@ class PedidoListadoOrdenColumnasTests(_PedidosModoServidorBase, TestCase):
     def _orden(self, ordering, user=None, **extra):
         return self._ids({"ordering": ordering, **extra}, user)
 
+    def test_fecha_confirmacion_deja_los_sin_confirmar_al_final(self):
+        # #1194: en Postgres un DESC pone los NULL primero y tapaba las confirmaciones recientes.
+        for ordering in ("fecha_confirmacion", "-fecha_confirmacion"):
+            with self.subTest(ordering=ordering):
+                ids = self._orden(ordering)
+                self.assertEqual(set(ids[:2]), {self.p1.pk, self.p4.pk})  # los confirmados, en ambos sentidos
+                self.assertEqual(set(ids[2:]), {self.p2.pk, self.p3.pk})
+
     def test_orden_por_columnas_anotadas(self):
         p1, p2, p3, p4 = self.p1.pk, self.p2.pk, self.p3.pk, self.p4.pk
         casos = [
@@ -9531,7 +9542,8 @@ class PedidoKpisMesaTests(_PedidosModoServidorBase, TestCase):
         """``total`` + ``cancelados`` = ``count`` del listado con los mismos filtros; los
         cancelados (estatus 5) no entran en ``total`` ni en ``por_moneda``."""
         # Cancelado en USD (moneda sin vigentes con estos filtros) y uno dado de baja
-        # por ``POST /cancelar/`` (``activo=False``): fuera del listado y de los KPIs.
+        # por ``POST /cancelar/`` (``activo=False``): solo con ``?estatus=5`` entra al
+        # listado y a los KPIs (#1144), igual que el ``count``.
         self._pedido("P-782-C1", self.cliente_b, self.usd, estatus=Pedido.ESTATUS_CANCELADO, gran_total="999")
         baja = self._pedido("P-782-C2", self.cliente_b, self.mxn, estatus=Pedido.ESTATUS_CANCELADO)
         Pedido.objects.filter(pk=baja.pk).update(activo=False)
@@ -9540,7 +9552,7 @@ class PedidoKpisMesaTests(_PedidosModoServidorBase, TestCase):
             ({"confirmado": "false"}, (2, 1)),              # p2, p3 + C1
             ({"confirmado": "true"}, (1, 1)),               # p1 + p4
             ({"cliente": self.cliente_b.pk, "moneda": self.mxn.pk}, (0, 1)),  # p4
-            ({"estatus": "5"}, (0, 2)),
+            ({"estatus": "5"}, (0, 3)),                     # p4, C1 y C2 (dado de baja)
         ]
         for params, (total, cancelados) in casos:
             with self.subTest(params=params):
@@ -9554,7 +9566,7 @@ class PedidoKpisMesaTests(_PedidosModoServidorBase, TestCase):
         self.assertEqual(Decimal(str(data["por_moneda"][0]["valor"])), Decimal("23200"))
         data = self._get(self.URL, {"estatus": "5"}).json()
         self.assertEqual(data["por_moneda"], [])
-        self.assertEqual(self._get(self.URL, {"estatus": "5"}, self.sin_importes).json()["cancelados"], 2)
+        self.assertEqual(self._get(self.URL, {"estatus": "5"}, self.sin_importes).json()["cancelados"], 3)
 
     def test_sin_permiso_sin_valor(self):
         data = self._get(self.URL, {"gran_total_min": "1000000"}, self.sin_importes).json()
@@ -9614,6 +9626,18 @@ class PedidoOpcionesFiltrosTests(_PedidosModoServidorBase, TestCase):
         ])
         self.assertEqual([c["value"] for c in data["clasificacion"]], ["A", "B"])
         self.assertEqual(data["clasificacion"][0]["label"], "A - 2 a 5 días")
+
+    def test_opciones_incluyen_meses_y_clasificaciones_de_cancelados(self):
+        # #1195: un cancelado queda ``activo=False``, pero el filtro «Cancelado» debe poder elegir su mes.
+        cancelado = self._pedido(
+            "P-782-C9", self.cliente_a, self.mxn, clasificacion="D", creado=datetime(2026, 6, 3, 9, 0),
+            estatus=Pedido.ESTATUS_CANCELADO,
+        )
+        Pedido.objects.filter(pk=cancelado.pk).update(activo=False)
+        data = self._get(self.URL).json()
+        self.assertIn("2026-06", [m["value"] for m in data["mes"]])
+        self.assertIn("D", [c["value"] for c in data["clasificacion"]])
+        self.assertEqual(self._ids({"estatus": 5, "mes": "2026-06"}), [cancelado.pk])
 
     def test_solo_la_empresa_del_usuario(self):
         data = self._get(self.URL, user=self.admin_b).json()
