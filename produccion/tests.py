@@ -8755,7 +8755,9 @@ class OrdenProduccionPedidosLigadosTests(TestCase):
     Reutiliza el escenario de ``OrdenProduccionPedidoOpcionalTests``."""
 
     URL = OrdenProduccionPedidoOpcionalTests.URL
-    setUpTestData = OrdenProduccionPedidoOpcionalTests.setUpTestData
+    # Se reutiliza la función, no el classmethod ya ligado: ligado a la otra clase,
+    # sembraba los atributos en ella y aquí faltaban (``self.empresa``).
+    setUpTestData = classmethod(OrdenProduccionPedidoOpcionalTests.setUpTestData.__func__)
     _client = OrdenProduccionPedidoOpcionalTests._client
     _body = OrdenProduccionPedidoOpcionalTests._body
     _pedido_muestra = OrdenProduccionPedidoOpcionalTests._pedido_muestra
@@ -8823,13 +8825,28 @@ class SalidaMaquilaReglasTests(TestCase):
             username="sm-user", email="sm@acme-sm.test", empresa=cls.empresa, is_admin_empresa=True,
         )
         from terceros.models import Proveedor
-        cls.maquilero = Proveedor.objects.create(empresa=cls.empresa, nombre="Maquila SA", es_maquilero=True)
+        from nucleo.models import SatFormaPago, SatMetodoPago, SatRegimenFiscal
+
+        # Moneda y catálogos SAT son NOT NULL en ``proveedores``.
+        cls.maquilero = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="Maquila SA", es_maquilero=True,
+            moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"),
+            sat_regimen_fiscal=SatRegimenFiscal.objects.get_or_create(
+                codigo="601", defaults={"descripcion": "General de Ley"})[0],
+            sat_forma_pago=SatFormaPago.objects.get_or_create(
+                codigo="03", defaults={"descripcion": "Transferencia"})[0],
+            sat_metodo_pago=SatMetodoPago.objects.get_or_create(
+                codigo="PUE", defaults={"descripcion": "Pago en una sola exhibición"})[0],
+        )
         unidad = UnidadMedida.objects.create(clave="PZA", nombre="Pieza")
         cls.op = OrdenProduccion.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-SM-1",
             centro_confeccion=cls.maquilero, costo_maquila_unitario=Decimal("10"),
         )
-        cls.det = OrdenProduccionDetalle.objects.create(op=cls.op, cantidad=Decimal("5"), unidad=unidad)
+        cls.det = OrdenProduccionDetalle.objects.create(
+            op=cls.op, bom=ListaMaterialBom.objects.create(empresa=cls.empresa),  # bom_id es NOT NULL
+            cantidad=Decimal("5"), unidad=unidad,
+        )
 
     def _post(self, **body):
         client = APIClient()
