@@ -7,10 +7,11 @@ from django.db.models import Sum
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import Factura, FacturaDetalle
+from finanzas.services.facturama.cfdi_payload import receptor_fiscal
 from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.utils.folios import TIPOS_DOCUMENTO_FACTURA, generate_factura_folio
 from nucleo.models import SerieFolio
-from ventas.models import PedidoDetalleTalla, PedidoServicioExtra
+from ventas.models import Pedido, PedidoDetalleTalla, PedidoServicioExtra
 
 CENTAVO = Decimal('0.01')
 
@@ -130,6 +131,58 @@ class FacturaService:
         ]
 
     @staticmethod
+    def pedido_de_la_factura(factura):
+        """El pedido de la factura, o ``None`` si no tiene o es de otra empresa
+        (datos previos al candado de escritura): ese no se lee."""
+        pedido = factura.pedido
+        if pedido is not None and pedido.empresa_id != factura.empresa_id:
+            return None
+        return pedido
+
+    @staticmethod
+    def datos_fiscales(factura, pedido):
+        """Receptor fiscal y forma de pago, método de pago y uso de CFDI de la
+        factura, para ``desglose/`` y el detalle (EC-904).
+
+        ``pedido`` es el de ``pedido_de_la_factura`` (``None`` sin pedido o si es
+        de otra empresa). Receptor y uso de CFDI salen de
+        ``cfdi_payload.receptor_fiscal``, la misma regla (y el mismo recorte de
+        espacios) del timbrado: datos congelados en el pedido o, vacíos, los del
+        cliente; uso del pedido o, si no trae, del cliente (``""`` si ninguno).
+        Forma y método de pago solo existen en el pedido.
+
+        Devuelve ``(receptor, datos_pago)``.
+        """
+        cliente = factura.cliente
+        datos = receptor_fiscal(pedido, cliente)
+        receptor = {
+            'cliente': cliente.pk,
+            'nombre': cliente.nombre,
+            'razon_social': datos.razon_social,
+            'rfc': datos.rfc,
+            'regimen_fiscal': _codigo_y_descripcion(datos.regimen),
+            'codigo_postal': datos.codigo_postal,
+            'correo_facturas': (getattr(pedido, 'correo_facturas', None) or cliente.correo or None),
+        }
+
+        # Nombre: la etiqueta del pedido para ese código; si viene del cliente y el
+        # pedido no lo tiene entre sus opciones, la descripción del catálogo SAT; si
+        # no, el código (como ``get_uso_cfdi_display``).
+        uso = datos.uso_cfdi
+        uso_nombre = dict(Pedido._meta.get_field('uso_cfdi').flatchoices).get(uso)
+        if uso_nombre is None:
+            uso_nombre = (datos.uso_cfdi_del_cliente and uso and cliente.sat_uso_cfdi.descripcion) or uso
+        datos_pago = {
+            'forma_pago': pedido.forma_pago if pedido else None,
+            'forma_pago_nombre': pedido.get_forma_pago_display() if pedido else None,
+            'metodo_pago': pedido.metodo_pago if pedido else None,
+            'metodo_pago_nombre': pedido.get_metodo_pago_display() if pedido else None,
+            'uso_cfdi': uso,
+            'uso_cfdi_nombre': uso_nombre,
+        }
+        return receptor, datos_pago
+
+    @staticmethod
     def desglose(factura):
         """Factura completa para consulta: emisor, receptor, pedido, conceptos
         por producto con las piezas de cada talla, importes, avance de
@@ -149,10 +202,7 @@ class FacturaService:
             .order_by('pedido_detalle_id', 'pedido_detalle_talla_id', 'id')
         )
 
-        # Un pedido de otra empresa (datos previos al candado de escritura) no se lee.
-        pedido = factura.pedido
-        if pedido is not None and pedido.empresa_id != factura.empresa_id:
-            pedido = None
+        pedido = FacturaService.pedido_de_la_factura(factura)
         piezas_pedido = {}
         if pedido is not None:
             piezas_pedido = {
@@ -226,20 +276,7 @@ class FacturaService:
             for campo in ('subtotal', 'descuento', 'impuesto', 'total'):
                 concepto[campo] = _texto(concepto[campo])
 
-        cliente = factura.cliente
-        # Datos fiscales del receptor: los congelados en el pedido (los que se
-        # usarán al timbrar) y, si no hay pedido o vienen vacíos, los del cliente.
-        regimen = (getattr(pedido, 'cliente_regimen_fiscal', None)
-                   or cliente.sat_regimen_fiscal)
-        receptor = {
-            'cliente': cliente.pk,
-            'nombre': cliente.nombre,
-            'razon_social': getattr(pedido, 'cliente_razon_social', None) or cliente.razon_social,
-            'rfc': getattr(pedido, 'cliente_rfc', None) or cliente.rfc,
-            'regimen_fiscal': _codigo_y_descripcion(regimen),
-            'codigo_postal': getattr(pedido, 'cliente_codigo_postal', None) or cliente.codigo_postal,
-            'correo_facturas': (getattr(pedido, 'correo_facturas', None) or cliente.correo or None),
-        }
+        receptor, datos_pago = FacturaService.datos_fiscales(factura, pedido)
 
         datos_pedido = None
         avance_pedido = None
@@ -249,12 +286,7 @@ class FacturaService:
                 'id': pedido.pk,
                 'folio': pedido.folio,
                 'oc': pedido.oc,
-                'forma_pago': pedido.forma_pago,
-                'forma_pago_nombre': pedido.get_forma_pago_display(),
-                'metodo_pago': pedido.metodo_pago,
-                'metodo_pago_nombre': pedido.get_metodo_pago_display(),
-                'uso_cfdi': pedido.uso_cfdi,
-                'uso_cfdi_nombre': pedido.get_uso_cfdi_display(),
+                **datos_pago,
             }
             avance_pedido = {
                 'piezas_pedidas': int(sum(p['cantidad_pedida'] for p in piezas_pedido.values())),
