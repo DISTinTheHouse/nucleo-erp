@@ -6,7 +6,7 @@ from django.db.models import Sum, F
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesReflejante, OrdenReflejanteDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
-from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas, crear_orden_con_guardia_duplicado, exigir_producto_en_tallas, payload_duplicada, pendientes_por_linea, revisar_empresa, tallas_orden_trabajo_qs
+from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas, crear_orden_con_guardia_duplicado, exigir_producto_en_tallas, payload_duplicada, pendientes_por_linea, revisar_empresa, tallas_orden_trabajo_qs, tallas_para_alta
 from produccion.utils.folios import generate_or_folio
 
 
@@ -367,9 +367,7 @@ class OrdenReflejanteService:
         Pedido.objects.select_for_update().filter(pk=pedido.pk).first()
 
         detalle_tallas_raw = list(
-            OrdenReflejanteService._tallas_reflejante_qs(pedido.id).select_related(
-                "pedido_detalle__color", "talla"
-            )
+            tallas_para_alta(OrdenReflejanteService._tallas_reflejante_qs(pedido.id))
         )
 
         # Matriz prenda/proceso (EC-572): la orden solo revisa su propio proceso (EC-575).

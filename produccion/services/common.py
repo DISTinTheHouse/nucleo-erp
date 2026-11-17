@@ -194,6 +194,16 @@ def tallas_orden_trabajo_qs(pedido_id, lleva_field):
     )
 
 
+def tallas_para_alta(qs):
+    """``qs`` de tallas (``tallas_orden_trabajo_qs`` o derivado) listo para el
+    ``save`` de OB/OR/OCM: cada renglón del ``bulk_create`` lee
+    ``dt.pedido_detalle`` (producto y color) y ``dt.talla``, así que van en el
+    mismo JOIN. Sin ``pedido_detalle__color`` era una consulta por renglón
+    (EC-889). Sólo agrega JOINs: no cambia filtros ni el alcance de ``qs``.
+    """
+    return qs.select_related("pedido_detalle__color", "talla")
+
+
 def payload_duplicada(existente, *, folio_field, estatus_display, estatus_field,
                       payload_key, tipo_label, dividir_label):
     """Payload del 409 de orden duplicada, uniforme para los tres tipos

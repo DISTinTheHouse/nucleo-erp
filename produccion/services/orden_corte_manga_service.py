@@ -14,6 +14,7 @@ from produccion.services.common import (
     pendientes_por_linea,
     revisar_empresa,
     tallas_orden_trabajo_qs,
+    tallas_para_alta,
 )
 from produccion.utils.folios import generate_ocm_folio
 from ventas.models import Pedido, PedidoDetalleTalla
@@ -257,9 +258,7 @@ class OrdenCorteMangaService:
         Pedido.objects.select_for_update().filter(pk=pedido.pk).first()
 
         detalle_tallas_raw = list(
-            OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id).select_related(
-                "pedido_detalle", "talla"
-            )
+            tallas_para_alta(OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id))
         )
 
         # Matriz prenda/proceso (EC-572): la orden solo revisa su propio proceso (EC-575).
