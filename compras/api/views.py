@@ -84,8 +84,10 @@ from hr.models import Empleado
 from inventarios.models import (
     Almacen,
     Existencia,
+    Lote,
     MovimientoInventario,
     MovimientoInventarioDetalle,
+    Serie,
     Ubicacion,
 )
 from nucleo.middleware import ip_auditoria
@@ -1554,6 +1556,14 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             ],
         }
 
+def _ids_orden_log(data):
+    """Solo los ids de la orden para el log; nunca el body completo."""
+    cab = data.get("recepcion") if hasattr(data, "get") else None
+    if not hasattr(cab, "get"):
+        return None
+    return {k: cab.get(k) for k in ("orden_compra", "orden_produccion")}
+
+
 @extend_schema_view(list=extend_schema(parameters=PARAMETROS_LISTADO_RECEPCIONES))
 class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Recepcion.objects.all().select_related(
@@ -1806,6 +1816,14 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         {"ubicacion": "La ubicación no pertenece al almacén seleccionado."}
                     )
 
+            for campo, modelo in (("lote", Lote), ("serie", Serie)):
+                if item.get(campo) and not modelo.objects.filter(
+                    pk=item[campo], producto_id=item["producto"].pk
+                ).exists():
+                    raise ValidationError(
+                        {campo: f"El {campo} no existe o no pertenece al producto del renglón."}
+                    )
+
             detalle = RecepcionDetalle.objects.create(
                 recepcion=recepcion,
                 orden_compra_detalle=item.get("orden_compra_detalle"),
@@ -1826,14 +1844,20 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             return
 
         total_pendiente = Decimal("0")
+        total_recibido = Decimal("0")
         for detalle in detalles:
             ordered = Decimal(str(detalle.cantidad or 0))
             recibido = self._cantidad_recibida_oc(detalle.pk)
+            if recibido > 0:
+                total_recibido += recibido
             pendiente = ordered - recibido
             if pendiente > 0:
                 total_pendiente += pendiente
 
-        if total_pendiente > 0:
+        if total_pendiente > 0 and total_recibido <= 0:
+            # Recibido neto 0 (p. ej. Calidad rechazó todo): vuelve a Autorizada.
+            oc.estatus = OrdenCompra.EstatusOrdenCompra.AUTORIZADA
+        elif total_pendiente > 0:
             oc.estatus = OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA
         else:
             oc.estatus = OrdenCompra.EstatusOrdenCompra.RECIBIDA
@@ -2213,7 +2237,9 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 if almacen.sucursal_id is None or almacen.sucursal_id != sucursal_origen.pk:
                     raise ValidationError({"almacen": "El almacén no pertenece a la sucursal de la orden."})
                 transportista_id = header.get("transportista")
-                if transportista_id and not Transportista.objects.filter(pk=transportista_id).exists():
+                if transportista_id and not Transportista.objects.filter(
+                    pk=transportista_id, empresa_id=empresa_origen.pk
+                ).exists():
                     raise ValidationError({"transportista": "Transportista no encontrado."})
 
                 if oc:
@@ -2421,11 +2447,11 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             )
         except ValidationError as exc:
             logger.warning(
-                "Recepcion onboarding validation error | user=%s | superuser=%s | empresa=%s | body=%s | detail=%s",
+                "Recepcion onboarding validation error | user=%s | superuser=%s | empresa=%s | ids=%s | detail=%s",
                 getattr(user, "username", None),
                 getattr(user, "is_superuser", False),
                 getattr(empresa, "pk", None),
-                request.data,
+                _ids_orden_log(request.data),
                 getattr(exc, "detail", exc),
             )
             raise
