@@ -14,6 +14,7 @@ producción en solo lectura o dentro de una transacción con rollback (ver
 """
 
 import json
+from collections import namedtuple
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
@@ -8929,52 +8930,95 @@ class ConsultasAltaYPatchOrdenServicioTests(TestCase):
     de consultas: se compara contra sí mismo en vez de fijar totales, porque el
     costo fijo (folio, bitácora, savepoints) cambia con otros issues y aquí solo
     importa que no haya trabajo por renglón. Cada renglón lleva su propio
-    producto y su propio color para que un acceso por renglón a cualquiera de
-    los dos se note (el alta de OCM leía ``colores`` una vez por renglón).
+    producto y su propio color, así que un acceso por renglón a cualquiera de
+    los dos se nota desde 2 renglones (el alta de OCM leía ``colores`` una vez
+    por renglón); por eso ``N_GRANDE`` es chico.
 
-    El usuario es admin de empresa, como en ``EditarOrdenServicioTests``: pasa
-    ``LecturaPorCodigo``, ``E-PRODUCCION-OB`` y ``_require_produccion`` sin
-    sembrar roles; el alcance por sucursal de los no admin es una subconsulta
-    constante (``sucursales_permitidas_q``), así que no cambia la comparación.
+    Se mide con dos usuarios: admin de empresa (pasa los permisos sin rol) y un
+    usuario normal de Producción, que resuelve ``R-PRODUCCION``/``E-PRODUCCION-OB``
+    por rol, se acota con ``sucursales_permitidas_q`` y pasa
+    ``_require_produccion`` por su rol de departamento.
     """
 
-    N_GRANDE = 30
+    N_GRANDE = 5
 
-    #: destino → (segmento de URL, tipo_documento, serie, bandera y config de la talla, body del PATCH)
+    TipoOrden = namedtuple(
+        "TipoOrden", "url tipo_documento flag config_field detalle_model fk_orden body_patch",
+    )
+    #: destino (``DESTINOS``) → datos del tipo de orden; ``tipo_documento`` es la
+    #: clave de ``SERIES``.
     TIPOS = {
-        "BORDADO": ("orden-bordado", "ORDEN_BORDADO", "OB", "lleva_bordado", "bordado_config",
-                    {"observaciones": "ajuste"}),
-        "REFLEJANTE": ("orden-reflejante", "ORDEN_REFLEJANTE", "OR", "lleva_reflejante", "reflejante_config",
-                       {"prioridad": 2, "observaciones": "ajuste"}),
-        "CORTE_MANGA": ("orden-corte-manga", "ORDEN_CORTE_MANGA", "OCM", "lleva_corte_manga", "corte_manga_config",
-                        {"prioridad": 2, "observaciones": "ajuste"}),
+        "BORDADO": TipoOrden(
+            url="orden-bordado", tipo_documento="ORDEN_BORDADO", flag="lleva_bordado",
+            config_field="bordado_config", detalle_model=OrdenBordadoDetalle, fk_orden="ob",
+            body_patch={"observaciones": "ajuste"},
+        ),
+        "REFLEJANTE": TipoOrden(
+            url="orden-reflejante", tipo_documento="ORDEN_REFLEJANTE", flag="lleva_reflejante",
+            config_field="reflejante_config", detalle_model=OrdenReflejanteDetalle, fk_orden="orden_r",
+            body_patch={"prioridad": 2, "observaciones": "ajuste"},
+        ),
+        "CORTE_MANGA": TipoOrden(
+            url="orden-corte-manga", tipo_documento="ORDEN_CORTE_MANGA", flag="lleva_corte_manga",
+            config_field="corte_manga_config", detalle_model=OrdenCorteMangaDetalle, fk_orden="ocm",
+            body_patch={"prioridad": 2, "observaciones": "ajuste"},
+        ),
+    }
+
+    #: modo de alta → (ruta relativa a la orden, status del contrato).
+    ALTAS = {
+        "create": ("", 200),
+        "onboarding": ("onboarding/", 201),
+        "onboarding-completo": ("onboarding/", 201),
     }
 
     @classmethod
     def setUpTestData(cls):
+        from seguridad.models import Rol, UsuarioRol
+        from seguridad.role_identity import CLAVE_DEPARTAMENTO_PRODUCCION
+
+        series = dict(SERIES)
+        assert set(cls.TIPOS) == set(DESTINOS)
+        assert {t.tipo_documento for t in cls.TIPOS.values()} == set(series)
         cls.empresa = Empresa.objects.create(codigo="acme-889", razon_social="ACME 889 SA")
         cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Monterrey")
-        for _url, tipo_documento, serie, *_resto in cls.TIPOS.values():
+        for tipo_documento, serie in SERIES:
             SerieFolio.objects.create(
                 empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento=tipo_documento, serie=serie,
             )
-        cls.usuario = Usuario.objects.create(
-            username="op-889", email="op@acme-889.test", empresa=cls.empresa,
+        cls.admin = Usuario.objects.create(
+            username="admin-889", email="admin@acme-889.test", empresa=cls.empresa,
             sucursal_default=cls.sucursal, is_admin_empresa=True,
         )
+        # Usuario normal de Producción: rol de departamento (``_require_produccion``)
+        # y rol con los códigos de lectura/edición (``LecturaPorCodigo``,
+        # ``E-PRODUCCION-OB``), como en ``ReflejanteAvancesContratoTenantTests``.
+        cls.operador = Usuario.objects.create(
+            username="op-889", email="op@acme-889.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
+        rol_depto = Rol.objects.create(
+            empresa=cls.empresa, codigo="PRODUCCION-889", nombre="Producción",
+            clave_departamento=CLAVE_DEPARTAMENTO_PRODUCCION,
+        )
+        UsuarioRol.objects.create(usuario=cls.operador, rol=rol_depto, empresa=cls.empresa)
+        _conceder_permisos(cls.operador, cls.empresa, ["R-PRODUCCION", "E-PRODUCCION-OB"])
         cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
         cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 889")
         cls.tallas = [Talla.objects.create(nombre=f"T889-{i}") for i in range(3)]
 
     def setUp(self):
-        self.client_api = APIClient()
-        self.client_api.force_authenticate(user=self.usuario)
         self._consecutivo = 0
+
+    def _client(self, usuario):
+        client = APIClient()
+        client.force_authenticate(user=usuario)
+        return client
 
     def _pedido(self, destino, n):
         """Pedido programado hacia ``destino`` con ``n`` renglones, cada uno con
         producto y color propios; devuelve ``(pedido, [PedidoDetalleTalla])``."""
-        *_r, flag, config_field, _patch = self.TIPOS[destino]
+        tipo = self.TIPOS[destino]
         pedido = Pedido.objects.create(
             empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
             persona_pagos="Pagos", correo_facturas="pagos@acme-889.test", telefono_pagos="8100000000",
@@ -8993,37 +9037,55 @@ class ConsultasAltaYPatchOrdenServicioTests(TestCase):
             tallas.append(PedidoDetalleTalla.objects.create(
                 pedido_detalle=detalle, talla=self.tallas[i % len(self.tallas)], cantidad=10,
                 sku_muestra=f"SKU-889-{self._consecutivo}",
-                **{flag: True, config_field: {"ubicaciones": [{"nombre": "Pecho"}]}},
+                **{tipo.flag: True, tipo.config_field: {"ubicaciones": [{"nombre": "Pecho"}]}},
             ))
-        pedido.programacion_conf = {"programaciones": [{"destino": destino, "cantidad": 10 * n}]}
-        pedido.save(update_fields=["programacion_conf"])
+        _programar(pedido, destinos=(destino,))
         return pedido, tallas
 
-    def _alta(self, destino, n, modo):
-        """Alta de una orden de ``destino`` con ``n`` renglones; ``modo`` es
-        ``create`` (POST a la colección), ``onboarding`` (POST de onboarding con
-        ``detalles_override``) u ``onboarding-completo`` (sin override: el pedido
-        entero). Devuelve ``(respuesta, consultas)``."""
-        url = self.TIPOS[destino][0]
+    def _alta(self, usuario, destino, n, modo):
+        """Alta de una orden de ``destino`` con ``n`` renglones; ``modo`` es una
+        clave de ``ALTAS``: ``create`` (POST a la colección), ``onboarding`` (POST
+        de onboarding con ``detalles_override``) u ``onboarding-completo`` (sin
+        override: el pedido entero). Comprueba el status del contrato y que cada
+        renglón conserve el color de su ``pedido_detalle``, en la respuesta y en
+        la BD. Devuelve ``(respuesta, consultas)``."""
+        tipo = self.TIPOS[destino]
+        sufijo, status_esperado = self.ALTAS[modo]
         pedido, tallas = self._pedido(destino, n)
         body = {"pedido": pedido.pk}
         if modo != "onboarding-completo":
             body["detalles_override"] = [
                 {"pedido_detalle_talla_id": pdt.pk, "cantidad": 10} for pdt in tallas
             ]
-        ruta = f"/api/v1/produccion/{url}/" if modo == "create" else f"/api/v1/produccion/{url}/onboarding/"
+        client = self._client(usuario)
         with CaptureQueriesContext(connection) as ctx:
-            resp = self.client_api.post(ruta, body, format="json")
-        self.assertIn(resp.status_code, (200, 201), resp.data)
+            resp = client.post(f"/api/v1/produccion/{tipo.url}/{sufijo}", body, format="json")
+        self.assertEqual(resp.status_code, status_esperado, resp.data)
         self.assertEqual(len(resp.data["detalles"]), n)
+
+        # Cada renglón conserva el color de su ``pedido_detalle``: en la respuesta
+        # (``color`` y ``color_nombre``) y en la BD.
+        color_por_detalle = {pdt.pedido_detalle_id: pdt.pedido_detalle.color for pdt in tallas}
+        self.assertEqual(
+            {d["pedido_detalle"]: (d["color"], d["color_nombre"]) for d in resp.data["detalles"]},
+            {pd_id: (c.pk, c.nombre) for pd_id, c in color_por_detalle.items()},
+        )
+        self.assertEqual(
+            dict(tipo.detalle_model.objects.filter(**{tipo.fk_orden: resp.data["id"]})
+                 .values_list("pedido_detalle_id", "color_id")),
+            {pd_id: c.pk for pd_id, c in color_por_detalle.items()},
+        )
         return resp, len(ctx)
 
-    def _patch(self, destino, n):
+    def _patch(self, usuario, destino, n):
         """PATCH de una orden de ``destino`` con ``n`` renglones; devuelve las consultas."""
-        url, *_r, body = self.TIPOS[destino]
-        resp, _ = self._alta(destino, n, "onboarding")
+        tipo = self.TIPOS[destino]
+        resp, _ = self._alta(self.admin, destino, n, "onboarding")
+        client = self._client(usuario)
         with CaptureQueriesContext(connection) as ctx:
-            patch = self.client_api.patch(f"/api/v1/produccion/{url}/{resp.data['id']}/", body, format="json")
+            patch = client.patch(
+                f"/api/v1/produccion/{tipo.url}/{resp.data['id']}/", tipo.body_patch, format="json",
+            )
         self.assertEqual(patch.status_code, 200, patch.data)
         return len(ctx)
 
@@ -9034,22 +9096,28 @@ class ConsultasAltaYPatchOrdenServicioTests(TestCase):
         medir(1)
         return medir(1), medir(self.N_GRANDE)
 
+    def _usuarios(self):
+        return (("admin", self.admin), ("operador", self.operador))
+
     def test_alta_no_crece_con_los_renglones(self):
-        for destino in self.TIPOS:
-            for modo in ("create", "onboarding", "onboarding-completo"):
-                with self.subTest(destino=destino, modo=modo):
-                    chico, grande = self._sin_crecer(lambda n: self._alta(destino, n, modo)[1])
-                    self.assertEqual(
-                        grande, chico,
-                        f"alta {modo} de {destino}: {chico} consultas con 1 renglón, "
-                        f"{grande} con {self.N_GRANDE}",
-                    )
+        for nombre, usuario in self._usuarios():
+            for destino in self.TIPOS:
+                for modo in self.ALTAS:
+                    with self.subTest(usuario=nombre, destino=destino, modo=modo):
+                        chico, grande = self._sin_crecer(lambda n: self._alta(usuario, destino, n, modo)[1])
+                        self.assertEqual(
+                            grande, chico,
+                            f"alta {modo} de {destino} ({nombre}): {chico} consultas con 1 renglón, "
+                            f"{grande} con {self.N_GRANDE}",
+                        )
 
     def test_patch_no_crece_con_los_renglones(self):
-        for destino in self.TIPOS:
-            with self.subTest(destino=destino):
-                chico, grande = self._sin_crecer(lambda n: self._patch(destino, n))
-                self.assertEqual(
-                    grande, chico,
-                    f"PATCH de {destino}: {chico} consultas con 1 renglón, {grande} con {self.N_GRANDE}",
-                )
+        for nombre, usuario in self._usuarios():
+            for destino in self.TIPOS:
+                with self.subTest(usuario=nombre, destino=destino):
+                    chico, grande = self._sin_crecer(lambda n: self._patch(usuario, destino, n))
+                    self.assertEqual(
+                        grande, chico,
+                        f"PATCH de {destino} ({nombre}): {chico} consultas con 1 renglón, "
+                        f"{grande} con {self.N_GRANDE}",
+                    )
