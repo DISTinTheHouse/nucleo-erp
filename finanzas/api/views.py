@@ -2470,6 +2470,19 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
             return NotaCredito.objects.none()
         qs = NotaCredito.objects.filter(factura__empresa=empresa)
         qs = por_sucursal(qs, user, "factura__sucursal")
+        if self.action in ("list", "retrieve"):
+            # EC-904: cliente, factura (moneda) y líneas con su renglón de factura en
+            # bloque. Antes el listado hacía ~3 consultas por nota.
+            qs = qs.select_related("cliente", "factura__moneda").prefetch_related(
+                Prefetch(
+                    "nota_credito_detalles",
+                    queryset=NotaCreditoDetalle.objects.select_related(
+                        "factura_detalle__producto",
+                        "factura_detalle__pedido_servicio_extra",
+                        "factura_detalle__pedido_detalle_talla__talla",
+                    ),
+                )
+            )
         qp = self.request.query_params
         cliente = qp.get("cliente") or qp.get("cliente_id")
         estatus = (qp.get("estatus") or "").strip()

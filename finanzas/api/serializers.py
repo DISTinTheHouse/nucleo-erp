@@ -310,10 +310,15 @@ class FacturaDetalleSerializer(serializers.ModelSerializer):
         }
 
     def get_producto_nombre(self, obj):
-        if obj.producto_id:
-            return obj.producto.nombre
-        servicio = obj.pedido_servicio_extra
-        return servicio.nombre if servicio else None
+        return nombre_producto_o_servicio(obj)
+
+
+def nombre_producto_o_servicio(factura_detalle):
+    """Producto del renglón de piezas, o nombre del servicio extra (#744)."""
+    if factura_detalle.producto_id:
+        return factura_detalle.producto.nombre
+    servicio = factura_detalle.pedido_servicio_extra
+    return servicio.nombre if servicio else None
 
 
 class FacturaSerializer(serializers.ModelSerializer):
@@ -1361,6 +1366,16 @@ class ConciliacionBancariaSerializer(serializers.ModelSerializer):
 
 
 class NotaCreditoDetalleSerializer(serializers.ModelSerializer):
+    # EC-904: lo que se acredita, del renglón de la factura (misma regla que
+    # ``FacturaDetalleSerializer``): producto, o servicio extra con talla ``null``.
+    producto_nombre = serializers.SerializerMethodField()
+    talla_nombre = serializers.CharField(
+        source="factura_detalle.pedido_detalle_talla.talla.nombre", read_only=True, default=None
+    )
+
+    def get_producto_nombre(self, obj) -> str | None:
+        return nombre_producto_o_servicio(obj.factura_detalle)
+
     class Meta:
         model = NotaCreditoDetalle
         fields = "__all__"
@@ -1374,6 +1389,15 @@ class NotaCreditoSerializer(CreateOnlyNestedLinesMixin, serializers.ModelSeriali
     nota_credito_detalles = NotaCreditoDetalleSerializer(many=True, required=False)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     factura_folio = serializers.CharField(source="factura.folio", read_only=True)
+    # EC-904: la nota no guarda moneda ni tipo de cambio; son los de su factura.
+    # Moneda con la forma de ``FacturaSerializer`` (id + código ISO). El tipo de
+    # cambio es ``1`` en MXN y ``null`` si la factura en otra moneda no lo tiene.
+    moneda = serializers.IntegerField(source="factura.moneda_id", read_only=True)
+    moneda_nombre = serializers.CharField(source="factura.moneda.codigo_iso", read_only=True)
+    tipo_cambio = serializers.DecimalField(
+        source="factura.tipo_cambio_mxn", max_digits=18, decimal_places=6, read_only=True, allow_null=True
+    )
+    factura_uuid = serializers.CharField(source="factura.cfdi_uuid", read_only=True, default=None)
 
     class Meta:
         model = NotaCredito

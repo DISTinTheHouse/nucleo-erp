@@ -11061,3 +11061,85 @@ class CobroDatosPdfTests(DatosPdfBase):
         self.assertEqual(len(self._filas(resp.data)), 5)
         self.assertEqual(retrieve_muchas, retrieve_pocas)
         self.assertEqual(list_muchas, list_pocas)
+
+
+class NotaCreditoDatosPdfTests(DatosPdfBase):
+    """Nota de crédito: moneda, tipo de cambio y UUID de su factura; producto y talla por línea."""
+
+    def setUp(self):
+        from ventas.models import PedidoServicioExtra
+
+        self.client_a = self._client(self.a["usuario"])
+        self.servicio = PedidoServicioExtra.objects.create(pedido=self.a["pedido"], nombre="Flete", monto=Decimal("50"))
+
+    def _factura(self, folio, moneda=None, tipo_cambio=None, uuid=None):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            pedido=self.a["pedido"], moneda=moneda or self.moneda, folio=folio,
+            tipo_cambio=tipo_cambio, cfdi_uuid=uuid,
+        )
+        pieza = FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle=self.a["detalle"], pedido_detalle_talla=self.a["talla_pedido"],
+            producto=self.a["producto"], cantidad=Decimal("2"), precio_unitario=Decimal("100.00"),
+        )
+        servicio = FacturaDetalle.objects.create(
+            factura=factura, pedido_servicio_extra=self.servicio, cantidad=Decimal("1"),
+            precio_unitario=Decimal("50.00"),
+        )
+        return factura, pieza, servicio
+
+    def _nota(self, factura, renglones):
+        nota = NotaCredito.objects.create(factura=factura, cliente=self.a["cliente"], folio=f"NC-{factura.folio}")
+        for renglon in renglones:
+            NotaCreditoDetalle.objects.create(
+                nota_credito=nota, factura_detalle=renglon, cantidad=Decimal("1"), precio_unitario=Decimal("10.00"),
+            )
+        return nota
+
+    def test_detalle_y_listado_traen_moneda_tipo_cambio_uuid_y_lineas(self):
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        factura, pieza, servicio = self._factura(
+            "F-USD", moneda=usd, tipo_cambio=Decimal("17.25"), uuid="11111111-2222-3333-4444-555555555555",
+        )
+        nota = self._nota(factura, [pieza, servicio])
+        detalle = self.client_a.get(f"{NOTAS_CREDITO_URL}{nota.pk}/").data
+        listado = {n["id"]: n for n in self._filas(self.client_a.get(NOTAS_CREDITO_URL).data)}
+        for fuente, data in (("detalle", detalle), ("listado", listado[nota.pk])):
+            with self.subTest(fuente=fuente):
+                self.assertEqual(data["moneda"], usd.pk)
+                self.assertEqual(data["moneda_nombre"], "USD")
+                self.assertEqual(data["tipo_cambio"], "17.250000")
+                self.assertEqual(data["factura_uuid"], "11111111-2222-3333-4444-555555555555")
+                self.assertEqual(data["factura_folio"], "F-USD")
+                lineas = {l["factura_detalle"]: l for l in data["nota_credito_detalles"]}
+                self.assertEqual(
+                    (lineas[pieza.pk]["producto_nombre"], lineas[pieza.pk]["talla_nombre"]), ("Prod acme", "M"),
+                )
+                self.assertEqual(
+                    (lineas[servicio.pk]["producto_nombre"], lineas[servicio.pk]["talla_nombre"]), ("Flete", None),
+                )
+
+    def test_tipo_cambio_uno_en_mxn_y_null_sin_capturar(self):
+        mxn, _, _ = self._factura("F-MXN")
+        usd_sin_tc, _, _ = self._factura("F-USD-SIN", moneda=Moneda.objects.create(codigo_iso="USD", nombre="Dólar"))
+        for factura, esperado in ((mxn, "1.000000"), (usd_sin_tc, None)):
+            nota = self._nota(factura, [])
+            data = self.client_a.get(f"{NOTAS_CREDITO_URL}{nota.pk}/").data
+            with self.subTest(factura=factura.folio):
+                self.assertEqual(data["tipo_cambio"], esperado)
+                self.assertIsNone(data["factura_uuid"])
+
+    def test_consultas_constantes(self):
+        factura, pieza, servicio = self._factura("F-1")
+        pocas = self._nota(factura, [pieza])
+        _, retrieve_pocas = self._consultas(self.client_a, f"{NOTAS_CREDITO_URL}{pocas.pk}/")
+        _, list_pocas = self._consultas(self.client_a, NOTAS_CREDITO_URL)
+        muchas = self._nota(factura, [pieza, servicio, pieza, servicio])
+        for n in range(2, 5):
+            otra, p, s = self._factura(f"F-{n}")
+            self._nota(otra, [p, s])
+        _, retrieve_muchas = self._consultas(self.client_a, f"{NOTAS_CREDITO_URL}{muchas.pk}/")
+        resp, list_muchas = self._consultas(self.client_a, NOTAS_CREDITO_URL)
+        self.assertEqual(len(self._filas(resp.data)), 5)
+        self.assertEqual(retrieve_muchas, retrieve_pocas)
+        self.assertEqual(list_muchas, list_pocas)
