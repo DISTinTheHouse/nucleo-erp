@@ -104,6 +104,22 @@ PERMISO_EDITAR_RUTA_CRITICA_OC = "E-COMPRAS-OC"
 _ip_auditoria = ip_auditoria
 
 
+
+def _error_detalle(errores):
+    """400 del onboarding de recepciones: ``detalle`` siempre en lista, como lo deja el
+    serializer (#1189). Las demás claves no cambian de forma."""
+    return ValidationError({k: [v] if k == "detalle" and isinstance(v, str) else v for k, v in errores.items()})
+
+
+def _ref_renglon(idx, detalle):
+    """``#N (orden_compra_detalle 4812, SKU X)``: posición en el payload más una referencia
+    estable que el usuario reconoce (#1188). Sin consultas: el renglón ya viene cargado."""
+    campo = "orden_compra_detalle" if isinstance(detalle, OrdenCompraDetalle) else "orden_produccion_detalle"
+    variante = getattr(detalle, "producto_variante", None) if campo == "orden_produccion_detalle" else None
+    etiqueta = (f"SKU {variante.sku}" if variante is not None and variante.sku
+                else getattr(getattr(detalle, "producto", None), "nombre", None))
+    return f"#{idx + 1} ({campo} {detalle.pk}" + (f", {etiqueta}" if etiqueta else "") + ")"
+
 class OrdenamientoSinMontosFilter(OrdenamientoEstableFilter):
     """``?ordering=`` sin los importes que el usuario no puede ver (#837).
 
@@ -2171,15 +2187,15 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
 
             # Superusuario incluido, igual que el GET (#875).
             if not empresa:
-                raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
+                raise _error_detalle({"empresa": "El usuario no tiene empresa asignada."})
             if serie_codigo not in {"RC", "RT", "RZ"}:
-                raise ValidationError({"serie_codigo": "serie_codigo debe ser RC, RT o RZ."})
+                raise _error_detalle({"serie_codigo": "serie_codigo debe ser RC, RT o RZ."})
 
             with transaction.atomic():
                 orden_compra_id = header.get("orden_compra")
                 orden_produccion_id = header.get("orden_produccion")
                 if bool(orden_compra_id) == bool(orden_produccion_id):
-                    raise ValidationError(
+                    raise _error_detalle(
                         {"recepcion": "Debes enviar exactamente uno de orden_compra u orden_produccion."}
                     )
 
@@ -2197,13 +2213,13 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         .first()
                     )
                     if not oc:
-                        raise ValidationError({"orden_compra": "Orden de compra no encontrada."})
+                        raise _error_detalle({"orden_compra": "Orden de compra no encontrada."})
                     if oc.empresa_id != empresa.pk:
-                        raise ValidationError({"orden_compra": "No tienes acceso a esta orden de compra."})
+                        raise _error_detalle({"orden_compra": "No tienes acceso a esta orden de compra."})
                     if oc.estatus not in self.ESTATUS_OC_RECIBIBLES:
-                        raise ValidationError({"estatus": "La orden de compra no está disponible para recepción."})
+                        raise _error_detalle({"estatus": "La orden de compra no está disponible para recepción."})
                     if not oc.proveedor_id:
-                        raise ValidationError({"proveedor": "La orden de compra no tiene proveedor asignado."})
+                        raise _error_detalle({"proveedor": "La orden de compra no tiene proveedor asignado."})
                 else:
                     op = (
                         OrdenProduccion.objects.select_for_update()
@@ -2212,16 +2228,16 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         .first()
                     )
                     if not op:
-                        raise ValidationError({"orden_produccion": "Orden de producción no encontrada."})
+                        raise _error_detalle({"orden_produccion": "Orden de producción no encontrada."})
                     if op.empresa_id != empresa.pk:
-                        raise ValidationError({"orden_produccion": "No tienes acceso a esta orden de producción."})
+                        raise _error_detalle({"orden_produccion": "No tienes acceso a esta orden de producción."})
                     if op.estatus_op not in {
                         OrdenProduccion.EstatusOrdenProduccion.PENDIENTE,
                         OrdenProduccion.EstatusOrdenProduccion.PREPARACION,
                         OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
                         OrdenProduccion.EstatusOrdenProduccion.REVISION,
                     }:
-                        raise ValidationError({"estatus": "La orden de producción no está disponible para recepción."})
+                        raise _error_detalle({"estatus": "La orden de producción no está disponible para recepción."})
 
                 almacen = (
                     Almacen.objects.select_related("empresa", "sucursal")
@@ -2229,21 +2245,21 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     .first()
                 )
                 if not almacen:
-                    raise ValidationError({"almacen": "Almacén no encontrado."})
+                    raise _error_detalle({"almacen": "Almacén no encontrado."})
                 empresa_origen = oc.empresa if oc else op.empresa
                 sucursal_origen = oc.sucursal if oc else op.sucursal
                 proveedor_origen = oc.proveedor if oc else None
                 # Un almacén sin empresa se rechaza: antes la guarda era
                 # ``... and almacen.empresa_id and ...`` y sin empresa se saltaba.
                 if almacen.empresa_id is None or almacen.empresa_id != empresa_origen.pk:
-                    raise ValidationError({"almacen": "El almacén no pertenece a la empresa de la orden."})
+                    raise _error_detalle({"almacen": "El almacén no pertenece a la empresa de la orden."})
                 if almacen.sucursal_id is None or almacen.sucursal_id != sucursal_origen.pk:
-                    raise ValidationError({"almacen": "El almacén no pertenece a la sucursal de la orden."})
+                    raise _error_detalle({"almacen": "El almacén no pertenece a la sucursal de la orden."})
                 transportista_id = header.get("transportista")
                 if transportista_id and not Transportista.objects.filter(
                     pk=transportista_id, empresa_id=empresa_origen.pk
                 ).exists():
-                    raise ValidationError({"transportista": "Transportista no encontrado."})
+                    raise _error_detalle({"transportista": "Transportista no encontrado."})
 
                 if oc:
                     detalles_oc = {
@@ -2253,42 +2269,43 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         .order_by("id")
                     }
                     if not detalles_oc:
-                        raise ValidationError({"detalle": "La orden de compra no tiene productos para recibir."})
+                        raise _error_detalle({"detalle": "La orden de compra no tiene productos para recibir."})
 
                     acumulado = {}  # cantidad ya aceptada en esta petición por renglón de origen
                     for idx, item in enumerate(detalle_raw):
                         detalle_id = item.get("orden_compra_detalle")
                         if not detalle_id:
-                            raise ValidationError(
+                            raise _error_detalle(
                                 {"detalle": f"El renglón #{idx + 1} requiere orden_compra_detalle."}
                             )
                         if item.get("orden_produccion_detalle"):
-                            raise ValidationError(
-                                {"detalle": f"El renglón #{idx + 1} no debe enviar orden_produccion_detalle para una OC."}
+                            raise _error_detalle(
+                                {"detalle": f"El renglón #{idx + 1} (orden_compra_detalle {detalle_id}) no debe enviar orden_produccion_detalle para una OC."}
                             )
 
-                        oc_detalle = detalles_oc.get(detalle_id)
+                        oc_detalle = origen_detalle = detalles_oc.get(detalle_id)
                         if not oc_detalle:
-                            raise ValidationError(
-                                {"detalle": f"El renglón #{idx + 1} no pertenece a la orden de compra."}
+                            raise _error_detalle(
+                                {"detalle": f"El renglón #{idx + 1} (orden_compra_detalle {detalle_id}) no pertenece a la orden de compra."}
                             )
 
+                        ref = _ref_renglon(idx, origen_detalle)
                         cantidad = Decimal(str(item["cantidad_recibida"]))
                         # Defensa en profundidad: ``RecepcionOnboardingSerializer``
                         # ya rechaza esto con el mismo mensaje (EC-894).
                         if cantidad <= 0:
-                            raise ValidationError(
-                                {"detalle": f"El renglón #{idx + 1} debe tener cantidad_recibida > 0."}
+                            raise _error_detalle(
+                                {"detalle": f"El renglón {ref} debe tener cantidad_recibida > 0."}
                             )
 
                         recibido = self._cantidad_recibida_oc(oc_detalle.pk)
                         ordered = Decimal(str(oc_detalle.cantidad or 0))
                         pendiente = ordered - recibido
                         if pendiente <= 0:
-                            raise ValidationError(
+                            raise _error_detalle(
                                 {
                                     "detalle": (
-                                        f"El producto del renglón #{idx + 1} ya fue recibido completamente."
+                                        f"El producto del renglón {ref} ya fue recibido completamente."
                                     )
                                 }
                             )
@@ -2296,10 +2313,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         # la suma de la petición, no cada copia, es la que se compara (#1173).
                         acumulado[oc_detalle.pk] = acumulado.get(oc_detalle.pk, Decimal("0")) + cantidad
                         if acumulado[oc_detalle.pk] > pendiente:
-                            raise ValidationError(
+                            raise _error_detalle(
                                 {
                                     "detalle": (
-                                        f"El renglón #{idx + 1} excede la cantidad pendiente por recibir."
+                                        f"El renglón {ref} excede la cantidad pendiente por recibir."
                                     )
                                 }
                             )
@@ -2323,49 +2340,50 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         .order_by("op_detalle_id")
                     }
                     if not detalles_op:
-                        raise ValidationError({"detalle": "La orden de producción no tiene productos para recibir."})
+                        raise _error_detalle({"detalle": "La orden de producción no tiene productos para recibir."})
 
                     acumulado = {}  # cantidad ya aceptada en esta petición por renglón de origen
                     for idx, item in enumerate(detalle_raw):
                         detalle_id = item.get("orden_produccion_detalle")
                         if not detalle_id:
-                            raise ValidationError(
+                            raise _error_detalle(
                                 {"detalle": f"El renglón #{idx + 1} requiere orden_produccion_detalle."}
                             )
                         if item.get("orden_compra_detalle"):
-                            raise ValidationError(
-                                {"detalle": f"El renglón #{idx + 1} no debe enviar orden_compra_detalle para una OP."}
+                            raise _error_detalle(
+                                {"detalle": f"El renglón #{idx + 1} (orden_produccion_detalle {detalle_id}) no debe enviar orden_compra_detalle para una OP."}
                             )
 
-                        op_detalle = detalles_op.get(detalle_id)
+                        op_detalle = origen_detalle = detalles_op.get(detalle_id)
                         if not op_detalle:
-                            raise ValidationError(
-                                {"detalle": f"El renglón #{idx + 1} no pertenece a la orden de producción."}
+                            raise _error_detalle(
+                                {"detalle": f"El renglón #{idx + 1} (orden_produccion_detalle {detalle_id}) no pertenece a la orden de producción."}
                             )
 
                         producto_variante = op_detalle.producto_variante
                         producto = getattr(producto_variante, "producto", None)
                         if not producto_variante or not producto:
-                            raise ValidationError(
-                                {"detalle": f"El renglón #{idx + 1} no tiene producto terminado configurado."}
+                            raise _error_detalle(
+                                {"detalle": f"El renglón #{idx + 1} (orden_produccion_detalle {detalle_id}) no tiene producto terminado configurado."}
                             )
 
+                        ref = _ref_renglon(idx, origen_detalle)
                         cantidad = Decimal(str(item["cantidad_recibida"]))
                         # Defensa en profundidad: ``RecepcionOnboardingSerializer``
                         # ya rechaza esto con el mismo mensaje (EC-894).
                         if cantidad <= 0:
-                            raise ValidationError(
-                                {"detalle": f"El renglón #{idx + 1} debe tener cantidad_recibida > 0."}
+                            raise _error_detalle(
+                                {"detalle": f"El renglón {ref} debe tener cantidad_recibida > 0."}
                             )
 
                         recibido = self._cantidad_recibida_op(op_detalle.pk)
                         ordered = Decimal(str(op_detalle.cantidad or 0))
                         pendiente = ordered - recibido
                         if pendiente <= 0:
-                            raise ValidationError(
+                            raise _error_detalle(
                                 {
                                     "detalle": (
-                                        f"El producto del renglón #{idx + 1} ya fue recibido completamente."
+                                        f"El producto del renglón {ref} ya fue recibido completamente."
                                     )
                                 }
                             )
@@ -2373,10 +2391,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         # la suma de la petición, no cada copia, es la que se compara (#1173).
                         acumulado[op_detalle.pk] = acumulado.get(op_detalle.pk, Decimal("0")) + cantidad
                         if acumulado[op_detalle.pk] > pendiente:
-                            raise ValidationError(
+                            raise _error_detalle(
                                 {
                                     "detalle": (
-                                        f"El renglón #{idx + 1} excede la cantidad pendiente por recibir."
+                                        f"El renglón {ref} excede la cantidad pendiente por recibir."
                                     )
                                 }
                             )

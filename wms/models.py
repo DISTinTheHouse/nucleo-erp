@@ -4,7 +4,7 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from simple_history.models import HistoricalRecords
 
-from nucleo.scope import empresa_ids_lectura
+from nucleo.scope import visibles_en_empresa_activa
 
 class Estado(models.TextChoices):
     PENDIENTE = "PENDIENTE", "Pendiente"
@@ -614,26 +614,21 @@ class RfidScanQuerySet(models.QuerySet):
         ``nucleo.scope.empresa_ids_lectura``), superusuario incluido (EC-884):
         sin empresa activa no se ve nada. Dentro de la empresa, superusuario e
         ``is_admin_empresa`` ven todas las sucursales; el resto, sólo las de
-        ``user.sucursales_permitidas()``. ``RfidScan`` no tiene ``sucursal``, por
-        eso no usa ``visibles_en_empresa_activa``: la sucursal sale del lector o,
-        sin lector, de la etiqueta impresa.
+        ``user.sucursales_permitidas()``. ``RfidScan`` no tiene ``sucursal``: usa
+        ``visibles_en_empresa_activa`` con la sucursal del lector o, sin lector, de
+        la etiqueta impresa.
 
         Las lecturas sin empresa (tags ajenos de ``/api/receive-scan/`` sin
         token) no las ve nadie por la API; se borran desde el Django admin.
         """
-        empresa_ids = empresa_ids_lectura(user)
-        if not empresa_ids:
-            return self.none()
-        qs = self.filter(empresa_id__in=empresa_ids)
-        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
-            return qs
-        sucursales = user.sucursales_permitidas()
-        # Sin lector (POST /api/receive-scan/, sin token): la sucursal es la de
-        # la etiqueta impresa con ese EPC.
-        return qs.filter(
-            models.Q(lector__sucursal_id__in=sucursales)
-            | models.Q(lector__isnull=True, etiqueta__impresion__sucursal_id__in=sucursales)
-        )
+        # Empresa y staff: la regla compartida (#1156); aquí sólo cambia la sucursal.
+        # Sin lector (POST /api/receive-scan/, sin token): la de la etiqueta impresa.
+        def por_sucursal(u):
+            sucursales = u.sucursales_permitidas()
+            return (models.Q(lector__sucursal_id__in=sucursales)
+                    | models.Q(lector__isnull=True, etiqueta__impresion__sucursal_id__in=sucursales))
+
+        return visibles_en_empresa_activa(self, user, filtro_sucursal=por_sucursal)
 
 
 class RfidScan(models.Model):

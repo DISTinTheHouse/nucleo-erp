@@ -626,8 +626,10 @@ class RecepcionOnboardingSerializer(serializers.Serializer):
             )
         for idx, item in enumerate(detalle):
             if item["cantidad_recibida"] <= 0:
-                raise serializers.ValidationError(
-                    f"El renglón #{idx + 1} debe tener cantidad_recibida > 0."
+                origen = item.get("orden_compra_detalle") and f"orden_compra_detalle {item['orden_compra_detalle']}" or (
+                    item.get("orden_produccion_detalle") and f"orden_produccion_detalle {item['orden_produccion_detalle']}")
+                raise serializers.ValidationError(  # #1188: con referencia estable
+                    f"El renglón #{idx + 1}{f' ({origen})' if origen else ''} debe tener cantidad_recibida > 0."
                 )
         return detalle
 
