@@ -196,6 +196,21 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
     moneda_id = serializers.IntegerField(source="factura.moneda_id", read_only=True)
     moneda_codigo = serializers.CharField(source="factura.moneda.codigo_iso", read_only=True)
     empresa_id = serializers.IntegerField(read_only=True)
+    # lazzar-erp#353: CFDI de la factura que ya no admite cobro. ``factura`` viene en
+    # ``select_related``: sin consultas extra.
+    factura_cfdi_cancelado = serializers.BooleanField(source="factura.cfdi_cancelado", read_only=True, default=False)
+    factura_cfdi_cancelacion_solicitada = serializers.BooleanField(
+        source="factura.cfdi_cancelacion_solicitada", read_only=True, default=False)
+    factura_cfdi_pendiente = serializers.BooleanField(source="factura.cfdi_pendiente", read_only=True, default=False)
+    cobrable = serializers.SerializerMethodField()
+
+    def get_cobrable(self, obj):
+        """Saldo > 0, CxC no cancelada y factura vigente: lo mismo que exige aplicar un cobro."""
+        f = obj.factura
+        return bool(
+            (obj.saldo or 0) > 0 and obj.estatus != CuentaPorCobrar.EstatusCxC.CANCELADA
+            and f is not None and not f.cancelada_o_en_cancelacion and not f.cfdi_pendiente
+        )
 
     class Meta:
         model = CuentaPorCobrar
@@ -218,6 +233,10 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
             "observaciones",
             "created_at",
             "updated_at",
+            "factura_cfdi_cancelado",
+            "factura_cfdi_cancelacion_solicitada",
+            "factura_cfdi_pendiente",
+            "cobrable",
         ]
         # Saldo y estatus los mueve solo el servicio de cobros/notas de crédito:
         # editables aquí, una CxC podía quedar con un saldo que ninguna póliza respalda.

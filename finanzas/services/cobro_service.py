@@ -72,6 +72,10 @@ class CobroService:
                 raise ErrorDeNegocio(
                     {"cuenta_bancaria": f"La CxC {cxc.pk} está en otra moneda que la cuenta bancaria."}
                 )
+            if cxc.factura.cancelada_o_en_cancelacion or cxc.factura.cfdi_pendiente:  # lazzar-erp#353
+                raise ErrorDeNegocio(
+                    {"cobro_detalles": f"El CFDI de la factura de la CxC {cxc.pk} está cancelado, en cancelación o pendiente de timbrar: no admite cobros."}
+                )
             if factura_estatus == Factura.FacturaStatus.CANCELADA:
                 raise ErrorDeNegocio(
                     {"cobro_detalles": f"La factura de la CxC {cxc.pk} está cancelada y no admite cobros."}

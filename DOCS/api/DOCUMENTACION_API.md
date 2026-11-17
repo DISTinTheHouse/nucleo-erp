@@ -3467,8 +3467,11 @@ si la cuenta es de otra empresa, está de baja o es de agrupación.
 - `estatus`
 - `saldo_pendiente`
 - `vencidas`
+- `cobrable`: `true` = solo las que admiten cobro (saldo > 0, CxC no cancelada y CFDI de la factura sin cancelar, sin cancelación solicitada o en curso y sin timbrado pendiente). Para el selector de CxC del alta de cobros.
 - `fecha_inicio`, `fecha_fin`
 - `ordering`
+
+Cada CxC trae `factura_cfdi_cancelado`, `factura_cfdi_cancelacion_solicitada`, `factura_cfdi_pendiente` y `cobrable` (misma regla que el filtro). Aplicar un cobro sobre una CxC no cobrable responde `400 cobro_detalles`.
 
 #### Facturas proveedor
 
