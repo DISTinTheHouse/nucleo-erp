@@ -1902,7 +1902,10 @@ class CobroViewSet(FinanzasBaseViewSet):
         # no usa esa caché (los servicios releen las líneas) y sería una consulta más.
         qs = self._cobros_visibles()
         if self.action in ("list", "retrieve"):
-            qs = qs.select_related("cliente", "cuenta_bancaria__moneda").prefetch_related("cobro_detalles")
+            # EC-904: cada línea con la factura de su CxC (folio) en la misma consulta.
+            qs = qs.select_related("cliente", "cuenta_bancaria__moneda").prefetch_related(
+                Prefetch("cobro_detalles", queryset=CobroDetalle.objects.select_related("cxc__factura"))
+            )
         qp = self.request.query_params
         cliente = qp.get("cliente") or qp.get("cliente_id")
         metodo_pago = (qp.get("metodo_pago") or "").strip()

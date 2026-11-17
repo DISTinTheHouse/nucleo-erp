@@ -50,6 +50,7 @@ from finanzas.models import (
     Banco,
     CentroCosto,
     Cobro,
+    CobroDetalle,
     ConciliacionBancaria,
     ConciliacionDetalle,
     CuentaBancaria,
@@ -11005,5 +11006,58 @@ class FacturaProveedorDatosPdfTests(DatosPdfBase):
         _, retrieve_muchas = self._consultas(self.client_a, f"{FACTURAS_PROVEEDOR_URL}{muchas.pk}/")
         resp, list_muchas = self._consultas(self.client_a, FACTURAS_PROVEEDOR_URL)
         self.assertEqual(len(self._filas(resp.data)), 6)
+        self.assertEqual(retrieve_muchas, retrieve_pocas)
+        self.assertEqual(list_muchas, list_pocas)
+
+
+class CobroDatosPdfTests(DatosPdfBase):
+    """Cobro: id y folio de la factura de cada línea (vía su CxC), sin saldo."""
+
+    def setUp(self):
+        self.client_a = self._client(self.a["usuario"])
+        self.cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+
+    def _cxc(self, folio):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            moneda=self.moneda, folio=folio, total=Decimal("100.00"),
+        )
+        return CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+
+    def _cobro(self, lineas):
+        cobro = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=self.cuenta,
+            sucursal=self.a["sucursal"], total_cobrado=Decimal("10.00") * lineas,
+        )
+        for i in range(lineas):
+            CobroDetalle.objects.create(cobro=cobro, cxc=self._cxc(f"A-{cobro.pk}-{i}"), importe_aplicado=Decimal("10.00"))
+        return cobro
+
+    def test_detalle_y_listado_traen_id_y_folio_de_la_factura(self):
+        cobro = self._cobro(2)
+        esperado = sorted(
+            (d.cxc.factura_id, d.cxc.factura.folio) for d in cobro.cobro_detalles.select_related("cxc__factura")
+        )
+        detalle = self.client_a.get(f"{COBROS_URL}{cobro.pk}/").data
+        listado = {c["id"]: c for c in self._filas(self.client_a.get(COBROS_URL).data)}
+        for fuente, data in (("detalle", detalle), ("listado", listado[cobro.pk])):
+            with self.subTest(fuente=fuente):
+                lineas = data["cobro_detalles"]
+                self.assertEqual(sorted((l["factura_id"], l["factura_folio"]) for l in lineas), esperado)
+                self.assertTrue(all("saldo" not in l for l in lineas))
+
+    def test_consultas_constantes(self):
+        pocas = self._cobro(1)
+        _, retrieve_pocas = self._consultas(self.client_a, f"{COBROS_URL}{pocas.pk}/")
+        _, list_pocas = self._consultas(self.client_a, COBROS_URL)
+        muchas = self._cobro(4)
+        for _ in range(3):
+            self._cobro(2)
+        _, retrieve_muchas = self._consultas(self.client_a, f"{COBROS_URL}{muchas.pk}/")
+        resp, list_muchas = self._consultas(self.client_a, COBROS_URL)
+        self.assertEqual(len(self._filas(resp.data)), 5)
         self.assertEqual(retrieve_muchas, retrieve_pocas)
         self.assertEqual(list_muchas, list_pocas)

@@ -1145,6 +1145,11 @@ class CuentaPorPagarCreateSerializer(CuentaPorPagarSerializer):
 
 
 class CobroDetalleSerializer(serializers.ModelSerializer):
+    # EC-904: factura de la CxC (mismos nombres que en ``CuentaPorCobrarSerializer``).
+    # ``CobroViewSet`` la une al leer las líneas.
+    factura_id = serializers.IntegerField(source="cxc.factura_id", read_only=True)
+    factura_folio = serializers.CharField(source="cxc.factura.folio", read_only=True, default=None)
+
     class Meta:
         model = CobroDetalle
         fields = "__all__"
