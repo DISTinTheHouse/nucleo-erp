@@ -337,7 +337,8 @@ class RecepcionDetalle(models.Model):
     ubicacion = models.ForeignKey(Ubicacion, on_delete=models.CASCADE, null=True, blank=True)
     lote = models.ForeignKey(Lote, on_delete=models.CASCADE, null=True, blank=True)
     serie = models.ForeignKey(Serie, on_delete=models.CASCADE, null=True, blank=True)
-    cantidad_recibida = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    # Sin default: un renglón siempre trae lo recibido, y 0 lo rechaza la BD.
+    cantidad_recibida = models.DecimalField(max_digits=18, decimal_places=4)
 
     history = HistoricalRecords()
 
@@ -345,6 +346,14 @@ class RecepcionDetalle(models.Model):
         db_table = 'recepcion_detalle'
         verbose_name = 'Recepcion Detalle'
         verbose_name_plural = 'Recepciones Detalle'
+        constraints = [
+            # Un renglón de recepción registra algo recibido (EC-894).
+            models.CheckConstraint(
+                condition=models.Q(cantidad_recibida__gt=0),
+                name="ck_recepcion_detalle_cantidad_recibida_positiva",
+                violation_error_message="La cantidad recibida debe ser mayor a 0.",
+            ),
+        ]
 
     def __str__(self):
         return str(self.id)
