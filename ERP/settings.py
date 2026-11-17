@@ -343,7 +343,12 @@ SPECTACULAR_SETTINGS = {
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     # Opcional: Para autenticación en Swagger UI
-    'COMPONENT_SPLIT_REQUEST': True
+    'COMPONENT_SPLIT_REQUEST': True,
+    # Un solo componente para la línea de categoría: ``CategoriaProducto.linea`` y
+    # ``Producto.categoria_producto_linea`` (EC-905) lo comparten.
+    'ENUM_NAME_OVERRIDES': {
+        'LineaEnum': 'catalogo.models.CategoriaProducto.Linea',
+    },
 }
 
 # =========================
