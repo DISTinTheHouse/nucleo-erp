@@ -73,6 +73,7 @@ from produccion.models import (
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 
 from produccion.api.serializers import (
+    anotar_pre_orden,
     CorteMangaAvancesSerializer,
     leer_mapa_pdt,
     AltaCatalogoInputSerializer,
@@ -639,7 +640,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         if empresa is None: return OrdenProduccion.objects.none()
         # Listado más reciente primero; el desempate usa la PK real del modelo
         # (``op_id``, no ``id``).
-        queryset = (
+        queryset = anotar_pre_orden(
             ordenes_produccion_visibles(OrdenProduccion.objects.all(), user)
             .order_by("-fecha_inicio", "-op_id")
         )
@@ -3318,6 +3319,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         """Convierte la pre-orden en OP: body ``{centro_confeccion?, prioridad?}``.
         Solo en "Lista para producir" (se revalida con la existencia de hoy)."""
         from nucleo.models import UnidadMedida
+        from produccion.api.serializers import ligar_pedidos_op
         from produccion.services.pre_orden_service import marcar_convertida, materiales, recalcular
         pre = self.get_object()
         with transaction.atomic():
@@ -3346,7 +3348,10 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             vista = OrdenProduccionViewSet(request=request, format_kwarg=None, action="create")
             respuesta = vista._crear_op_desde_request(
                 request, data=data, sucursal=pre.sucursal,
-                post_crear=lambda op: marcar_convertida(pre, op, request.user),
+                # Los pedidos del resurtido van directo a la OP: ya se validaron al
+                # ligarlos a la pre-orden (no son pedidos de muestra).
+                post_crear=lambda op: (marcar_convertida(pre, op, request.user),
+                                       ligar_pedidos_op(op, list(pre.pedidos.all()))),
             )
         if respuesta.status_code != status.HTTP_201_CREATED:
             return respuesta
