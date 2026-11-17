@@ -13,7 +13,6 @@ from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.filters import OrderingFilter
-from rest_framework.settings import api_settings
 from nucleo.listados import PaginacionOpcionalLimitOffset
 from rest_framework.response import Response
 
@@ -25,6 +24,7 @@ from seguridad.role_identity import (
     claves_departamento_usuario,
 )
 from usuarios.models import Usuario
+from ventas.api.views import FILTER_BACKENDS_SIN_ORDERING
 from ventas.models import Cotizacion, Oportunidad, OportunidadSeguimiento, Pedido
 from ventas.scope import cotizaciones_visibles, oportunidades_base, oportunidades_visibles
 from nucleo.permisos import CODIGOS_OPORTUNIDADES, LecturaPorCodigo
@@ -144,10 +144,7 @@ class OrdenamientoOportunidadesFilter(OrderingFilter):
         ])
 
 
-FILTER_BACKENDS_OPORTUNIDADES = (
-    *(backend for backend in api_settings.DEFAULT_FILTER_BACKENDS if not issubclass(backend, OrderingFilter)),
-    OrdenamientoOportunidadesFilter,
-)
+FILTER_BACKENDS_OPORTUNIDADES = (*FILTER_BACKENDS_SIN_ORDERING, OrdenamientoOportunidadesFilter)
 
 
 def filas_cotizaciones(qs, user, limite=None):
