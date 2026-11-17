@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Case, CharField, Count, Exists, F, Min, OuterRef, Q, Subquery, Sum, Value, When
+from django.db.models.functions import Coalesce, NullIf, Trim
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import serializers, viewsets
@@ -112,10 +113,15 @@ def cliente_visible(user):
     return Exists(clientes_visibles(clientes_base(), user).filter(pk=OuterRef("cliente_id")))
 
 
-# ``?ordering=`` por un campo del cliente: el término público y su alias en la consulta.
+# ``?ordering=`` por un campo del cliente: el término público, su alias en la consulta y
+# lo que ordena. La razón social ordena por la etiqueta que se muestra: la razón social o,
+# si está vacía, el nombre (misma regla que ``cotizaciones_listado.opciones``).
 ORDEN_CLIENTE = {
-    "cliente__nombre": "orden_cliente_nombre",
-    "cliente__razon_social": "orden_cliente_razon_social",
+    "cliente__nombre": ("orden_cliente_nombre", F("cliente__nombre")),
+    "cliente__razon_social": (
+        "orden_cliente_razon_social",
+        Coalesce(NullIf(Trim(F("cliente__razon_social")), Value("")), F("cliente__nombre")),
+    ),
 }
 
 
@@ -133,13 +139,13 @@ class OrdenamientoOportunidadesFilter(OrderingFilter):
         if pedidos:
             visible = cliente_visible(request.user)
             queryset = queryset.alias(**{
-                ORDEN_CLIENTE[campo]: F(campo) if visible is None else Case(
-                    When(visible, then=F(campo)), default=Value(None), output_field=CharField()
+                alias: valor if visible is None else Case(
+                    When(visible, then=valor), default=Value(None), output_field=CharField()
                 )
-                for campo in pedidos
+                for alias, valor in (ORDEN_CLIENTE[campo] for campo in pedidos)
             })
         return queryset.order_by(*[
-            ("-" if campo.startswith("-") else "") + ORDEN_CLIENTE.get(campo.lstrip("-"), campo.lstrip("-"))
+            ("-" if campo.startswith("-") else "") + ORDEN_CLIENTE.get(campo.lstrip("-"), (campo.lstrip("-"),))[0]
             for campo in ordering
         ])
 

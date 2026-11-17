@@ -6346,6 +6346,26 @@ class OportunidadesValidacionesTests(OportunidadesBase):
         self.assertEqual(self._orden(mesa, "-cliente__razon_social,-id"), [zeta, alfa])
         self.assertEqual(self._orden(mesa, "cliente__nombre,-id"), [zeta, alfa])
 
+    def test_ordering_por_razon_social_sigue_la_etiqueta_visible(self):
+        # Sin razón social (vacía o en blanco) la etiqueta es el nombre: ordena entre las Z,
+        # no al principio. Un cliente oculto sigue ordenando como NULL.
+        alfa = self._op(self.ana, cliente=self._cliente_rs("Primero", "Alfa SA", asignado_a=[self.ana])).pk
+        yate = self._op(self.ana, cliente=self._cliente_rs("Otro", "Yate SA", asignado_a=[self.ana])).pk
+        zeta = self._op(self.ana, cliente=self._cliente_rs("Zeta", "", asignado_a=[self.ana])).pk
+        zebra = self._op(self.ana, cliente=self._cliente_rs("Zebra", "   ", asignado_a=[self.ana])).pk
+        zorro = self._op(self.ana, cliente=self._cliente_rs("Ultimo", "Zorro SA", asignado_a=[self.ana])).pk
+        oculto = self._op(self.ana, cliente=self._cliente_rs("Aaa", "")).pk
+        sin_cliente = self._op(self.ana).pk
+
+        esperado = [alfa, yate, zebra, zeta, zorro]
+        self.assertEqual(self._orden(self.ana, "cliente__razon_social,-id"), esperado + [sin_cliente, oculto])
+        self.assertEqual(self._orden(self.ana, "-cliente__razon_social,-id"), [sin_cliente, oculto] + esperado[::-1])
+        # El admin ve también al "oculto" ("Aaa" por su nombre): va primero.
+        self.assertEqual(self._orden(self.jefe, "cliente__razon_social,-id"), [oculto] + esperado + [sin_cliente])
+        # Lo que devuelve el campo no cambia: la razón social tal cual.
+        filas = {o["id"]: o for o in self._client(self.ana).get(OPORTUNIDADES_URL).data}
+        self.assertEqual((filas[zeta]["cliente_razon_social"], filas[zebra]["cliente_razon_social"]), ("", "   "))
+
     def test_ordering_por_cliente_sin_desempate_y_terminos_internos(self):
         ops = self._escenario_orden()
         # Sin ``-id`` también responde; los alias internos no son términos públicos.
