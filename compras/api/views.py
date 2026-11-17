@@ -2244,6 +2244,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                             )
 
                         cantidad = Decimal(str(item["cantidad_recibida"]))
+                        # Defensa en profundidad: ``RecepcionOnboardingSerializer``
+                        # ya rechaza esto con el mismo mensaje (EC-894).
                         if cantidad <= 0:
                             raise ValidationError(
                                 {"detalle": f"El renglón #{idx + 1} debe tener cantidad_recibida > 0."}
@@ -2315,6 +2317,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                             )
 
                         cantidad = Decimal(str(item["cantidad_recibida"]))
+                        # Defensa en profundidad: ``RecepcionOnboardingSerializer``
+                        # ya rechaza esto con el mismo mensaje (EC-894).
                         if cantidad <= 0:
                             raise ValidationError(
                                 {"detalle": f"El renglón #{idx + 1} debe tener cantidad_recibida > 0."}
