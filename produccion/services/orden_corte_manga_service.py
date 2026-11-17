@@ -14,6 +14,7 @@ from produccion.services.common import (
     pendientes_por_linea,
     revisar_empresa,
     tallas_orden_trabajo_qs,
+    tallas_para_alta,
 )
 from produccion.utils.folios import generate_ocm_folio
 from ventas.models import Pedido, PedidoDetalleTalla
@@ -256,13 +257,8 @@ class OrdenCorteMangaService:
         # ``select_for_update`` es no-op; en Postgres es el bloqueo real.
         Pedido.objects.select_for_update().filter(pk=pedido.pk).first()
 
-        # ``pedido_detalle__color`` en el JOIN: cada renglón del ``bulk_create``
-        # lee ``dt.pedido_detalle.color`` y sin él era una consulta por renglón
-        # (EC-889), igual que ya hacen OB y OR.
         detalle_tallas_raw = list(
-            OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id).select_related(
-                "pedido_detalle__color", "talla"
-            )
+            tallas_para_alta(OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id))
         )
 
         # Matriz prenda/proceso (EC-572): la orden solo revisa su propio proceso (EC-575).

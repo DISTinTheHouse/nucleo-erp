@@ -14,6 +14,7 @@ from produccion.services.common import (
     pendientes_por_linea,
     revisar_empresa,
     tallas_orden_trabajo_qs,
+    tallas_para_alta,
 )
 from produccion.utils.folios import generate_ob_folio
 
@@ -345,9 +346,7 @@ class OrdenBordadoService:
         Pedido.objects.select_for_update().filter(pk=pedido.pk).first()
 
         detalle_tallas_raw = list(
-            OrdenBordadoService._tallas_bordado_qs(pedido.id).select_related(
-                "pedido_detalle__color", "talla"
-            )
+            tallas_para_alta(OrdenBordadoService._tallas_bordado_qs(pedido.id))
         )
 
         if not detalle_tallas_raw:
