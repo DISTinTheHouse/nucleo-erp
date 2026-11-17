@@ -161,13 +161,14 @@ class ClienteVisibleMixin:
 
 class OportunidadSerializer(ClienteVisibleMixin, serializers.ModelSerializer):
     cliente_nombre = serializers.SerializerMethodField()
+    cliente_razon_social = serializers.SerializerMethodField()
     vendedor_nombre = serializers.CharField(source="vendedor.get_full_name", read_only=True, default=None)
     estado = serializers.SerializerMethodField()
 
     class Meta:
         model = Oportunidad
         fields = [
-            "id", "cliente", "cliente_nombre", "vendedor", "vendedor_nombre", "nombre_contacto",
+            "id", "cliente", "cliente_nombre", "cliente_razon_social", "vendedor", "vendedor_nombre", "nombre_contacto",
             "telefono", "correo", "titulo", "monto_estimado", "etapa", "estado", "motivo_perdida",
             "proximo_contacto", "notas", "created_at", "updated_at",
         ]
@@ -175,6 +176,15 @@ class OportunidadSerializer(ClienteVisibleMixin, serializers.ModelSerializer):
 
     def get_cliente_nombre(self, obj) -> str | None:
         return self._nombre_cliente(obj)
+
+    def get_cliente_razon_social(self, obj) -> str | None:
+        # Razón social del cliente ligado (EC-902), con la misma regla que ``cliente_nombre``:
+        # ``None`` sin cliente o si el usuario no lo ve. Reusa ese camino (y su consulta, una
+        # por respuesta) para que los dos campos no puedan diferir. Comentario y no docstring:
+        # drf-spectacular publicaría el docstring como ``description`` del campo.
+        if self._nombre_cliente(obj) is None:
+            return None
+        return obj.cliente.razon_social
 
     def get_estado(self, obj):
         if obj.etapa == Oportunidad.Etapa.PERDIDA:

@@ -5775,9 +5775,9 @@ class OportunidadSeguimientosTests(OportunidadesBase):
         data = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/").data
 
         self.assertEqual(set(data), {
-            "id", "cliente", "cliente_nombre", "vendedor", "vendedor_nombre", "nombre_contacto",
-            "telefono", "correo", "titulo", "monto_estimado", "etapa", "estado", "motivo_perdida",
-            "proximo_contacto", "notas", "created_at", "updated_at",
+            "id", "cliente", "cliente_nombre", "cliente_razon_social", "vendedor", "vendedor_nombre",
+            "nombre_contacto", "telefono", "correo", "titulo", "monto_estimado", "etapa", "estado",
+            "motivo_perdida", "proximo_contacto", "notas", "created_at", "updated_at",
         })
 
     # -- seguimientos --------------------------------------------------------
@@ -6210,6 +6210,90 @@ class OportunidadesValidacionesTests(OportunidadesBase):
 
         self.cliente.vendedores.add(self.ana)
         self.assertEqual(self._client(self.ana).get(url).data["cliente_nombre"], "Cliente Acme")
+
+    # -- razón social del cliente (EC-902) ------------------------------------
+
+    def _cliente_rs(self, nombre, razon_social, asignado_a=()):
+        cliente = Cliente.objects.create(empresa=self.empresa, nombre=nombre, razon_social=razon_social)
+        cliente.vendedores.add(*asignado_a)
+        return cliente
+
+    def _mesa(self):
+        """Mesa de Control: ve todos los clientes de la empresa por departamento, sin
+        tenerlos asignados (``clientes_visibles``), y sus propias oportunidades."""
+        mesa = Usuario.objects.create(username="mesa", email="mesa@acme.test", empresa=self.empresa)
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="MESACONTROL-0002", nombre="Mesa-de-control", estatus=Rol.Estatus.ACTIVO
+        )
+        _con_claves(rol, ("R-CRM",))
+        UsuarioRol.objects.create(usuario=mesa, rol=rol, empresa=self.empresa)
+        return mesa
+
+    def test_cliente_razon_social_sale_en_lista_detalle_onboarding_y_transferir(self):
+        cliente = self._cliente_rs("Corto", "Corto SA de CV", asignado_a=[self.ana])
+        op = self._op(self.ana, cliente=cliente)
+        url = f"{OPORTUNIDADES_URL}{op.pk}/"
+        ana = self._client(self.ana)
+
+        respuestas = {
+            "lista": ana.get(OPORTUNIDADES_URL).data[0],
+            "detalle": ana.get(url).data,
+            "onboarding": ana.get(f"{url}onboarding/").data["oportunidad"],
+            "transferir": self._client(self.jefe).post(f"{url}transferir/", {"vendedor": self.beto.pk}).data,
+        }
+
+        for donde, fila in respuestas.items():
+            with self.subTest(donde=donde):
+                self.assertEqual(fila["cliente_razon_social"], "Corto SA de CV")
+                # ``cliente_nombre`` sigue siendo el nombre corto.
+                self.assertEqual(fila["cliente_nombre"], "Corto")
+
+    def test_cliente_razon_social_es_null_sin_cliente_y_con_cliente_oculto(self):
+        sin_cliente = self._op(self.ana)
+        oculto = self._op(self.ana, cliente=self._cliente_rs("Oculto", "Oculto SA"))
+        ana = self._client(self.ana)
+
+        for op in (sin_cliente, oculto):
+            url = f"{OPORTUNIDADES_URL}{op.pk}/"
+            fila = next(o for o in ana.get(OPORTUNIDADES_URL).data if o["id"] == op.pk)
+            for donde, datos in {
+                "lista": fila, "detalle": ana.get(url).data, "onboarding": ana.get(f"{url}onboarding/").data["oportunidad"],
+            }.items():
+                with self.subTest(op=op.pk, donde=donde):
+                    # La llave siempre viene, en ``null``.
+                    self.assertIn("cliente_razon_social", datos)
+                    self.assertIsNone(datos["cliente_razon_social"])
+                    self.assertIsNone(datos["cliente_nombre"])
+
+    def test_cliente_razon_social_lo_ven_admin_y_mesa_de_control(self):
+        cliente = self._cliente_rs("Oculto", "Oculto SA")
+        mesa = self._mesa()
+        de_ana = self._op(self.ana, cliente=cliente)
+        de_mesa = self._op(mesa, cliente=cliente)
+
+        self.assertEqual(self._client(self.jefe).get(f"{OPORTUNIDADES_URL}{de_ana.pk}/").data["cliente_razon_social"], "Oculto SA")
+        self.assertEqual(self._client(mesa).get(OPORTUNIDADES_URL).data[0]["cliente_razon_social"], "Oculto SA")
+        self.assertEqual(self._client(mesa).get(f"{OPORTUNIDADES_URL}{de_mesa.pk}/").data["cliente_razon_social"], "Oculto SA")
+        # Para Ana, el mismo cliente sigue oculto.
+        self.assertIsNone(self._client(self.ana).get(f"{OPORTUNIDADES_URL}{de_ana.pk}/").data["cliente_razon_social"])
+
+    def test_cliente_razon_social_no_agrega_consultas_por_fila(self):
+        def consultas(user):
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._client(user).get(OPORTUNIDADES_URL)
+            self.assertEqual(resp.status_code, 200)
+            return len(ctx), len(resp.data)
+
+        self._op(self.ana, cliente=self._cliente_rs("C0", "C0 SA", asignado_a=[self.ana]))
+        consultas(self.ana)  # calienta cachés de permisos
+        pocas = {"vendedor": consultas(self.ana)[0], "admin": consultas(self.jefe)[0]}
+        for i in range(1, 8):
+            asignado = [self.ana] if i % 2 else []
+            self._op(self.ana, cliente=self._cliente_rs(f"C{i}", f"C{i} SA", asignado_a=asignado))
+        muchas = {"vendedor": consultas(self.ana), "admin": consultas(self.jefe)}
+
+        self.assertEqual({k: v[1] for k, v in muchas.items()}, {"vendedor": 8, "admin": 8})
+        self.assertEqual(pocas, {k: v[0] for k, v in muchas.items()})
 
     def test_transferir_pasa_las_cotizaciones_al_nuevo_dueno(self):
         op = self._op(self.ana, cliente=self.cliente)
