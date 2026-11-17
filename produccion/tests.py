@@ -36,7 +36,16 @@ from inventarios.models import (
     MovimientoInventarioDetalle,
     Ubicacion,
 )
-from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal, UnidadMedida
+from nucleo.models import (
+    Empresa,
+    Moneda,
+    SatFormaPago,
+    SatMetodoPago,
+    SatRegimenFiscal,
+    SerieFolio,
+    Sucursal,
+    UnidadMedida,
+)
 from produccion.models import (
     BomDetalle,
     BordadoAvances,
@@ -1495,7 +1504,7 @@ class ReflejanteAvancesContratoTenantTests(TestCase):
     def test_sin_empresa_no_ve_nada_ni_el_superusuario(self):
         sin_empresa = Usuario.objects.create(username="huerfano-ra", email="huerfano-ra@nowhere.test")
         _conceder_permisos_sin_empresa(sin_empresa, ["R-PRODUCCION-OR"])
-        root =Usuario.objects.create(username="root-ra", email="root-ra@nowhere.test", is_superuser=True)
+        root = Usuario.objects.create(username="root-ra", email="root-ra@nowhere.test", is_superuser=True)
         for user in (sin_empresa, root):
             with self.subTest(user=user.username):
                 self.assertEqual(self._ids(user), [])
@@ -5441,7 +5450,7 @@ class RutaCriticaBulkTests(TestCase):
         )
         # #1133: leer la ruta crítica exige R-PRODUCCION-OP.
         _conceder_permisos(cls.usuario, cls.empresa, ["R-PRODUCCION-OP"])
-        cls.op1 =OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-1")
+        cls.op1 = OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-1")
         cls.op2 = OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-2")
         cls.op_ajena = OrdenProduccion.objects.create(empresa=cls.otra, sucursal=cls.sucursal_otra, folio_op="OP-X")
         OrdenProduccionRutaCritica.objects.create(op=cls.op1, corte_recibido=True)
@@ -5514,7 +5523,7 @@ class OrdenProduccionKpisTests(TestCase):
         _conceder_permisos(cls.usuario, cls.empresa, ["R-PRODUCCION-OP"])
         cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
         _conceder_permisos_sin_empresa(cls.sin_empresa, ["R-PRODUCCION-OP"])
-        cls.admin_empresa =Usuario.objects.create(
+        cls.admin_empresa = Usuario.objects.create(
             username="admin", email="admin@acme.test", empresa=cls.empresa,
             sucursal_default=cls.sucursal, is_admin_empresa=True,
         )
@@ -8825,7 +8834,6 @@ class SalidaMaquilaReglasTests(TestCase):
             username="sm-user", email="sm@acme-sm.test", empresa=cls.empresa, is_admin_empresa=True,
         )
         from terceros.models import Proveedor
-        from nucleo.models import SatFormaPago, SatMetodoPago, SatRegimenFiscal
 
         # Moneda y catálogos SAT son NOT NULL en ``proveedores``.
         cls.maquilero = Proveedor.objects.create(
