@@ -55,8 +55,7 @@ ACCIONES_CON_COLUMNAS = ("list", "exportar")
 CAMPOS_IMPORTE = ("subtotal", "gran_total")
 # ``?ordering=`` sobre anotaciones de ``anotar_columnas`` (sólo en
 # ``ACCIONES_CON_COLUMNAS``); ``vendedor_nombre`` deja los vacíos al final en
-# ambos sentidos, como el front. ``fecha_confirmacion`` igual (#1194): en Postgres un
-# DESC deja los NULL primero y taparía las confirmaciones más recientes.
+# ambos sentidos, como el front.
 CAMPOS_ORDEN_ANOTADOS = ("piezas", "piezas_programadas", "piezas_surtidas", "vendedor_nombre")
 CAMPOS_ORDEN_NULOS_AL_FINAL = ("vendedor_nombre", "fecha_confirmacion")
 CAMPOS_ORDEN = (*CAMPOS_ORDEN_ANOTADOS, *CAMPOS_IMPORTE)
@@ -357,7 +356,7 @@ def opciones(qs):
             distinct=True,
             filter=Q(fecha_confirmacion__isnull=False),
         ),
-        sin_confirmar=Count("id", filter=Q(fecha_confirmacion__isnull=True, activo=True)),
+        sin_confirmar=Count("id", filter=Q(fecha_confirmacion__isnull=True)),
         clasificaciones=ArrayAgg("clasificacion", distinct=True, filter=Q(clasificacion__isnull=False)),
     )
     from ventas.utils.helpers import nombre_para_mostrar

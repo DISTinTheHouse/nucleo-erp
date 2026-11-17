@@ -50,6 +50,7 @@ from finanzas.models import (
     Banco,
     CentroCosto,
     Cobro,
+    CobroDetalle,
     ConciliacionBancaria,
     ConciliacionDetalle,
     CuentaBancaria,
@@ -10815,3 +10816,761 @@ class FkEmpresaHelpersEC846Tests(SimpleTestCase):
         for linea in (SimpleNamespace(empresa_id=2), SimpleNamespace(empresa_id=None), SimpleNamespace()):
             with self.subTest(linea=linea), self.assertRaises(DRFValidationError):
                 validar(linea, "producto", self.empresa)
+
+
+class DatosPdfBase(FinanzasBase):
+    """EC-904: datos que el PDF de cada documento de Finanzas toma del detalle.
+
+    Los conteos de consultas comparan una respuesta con pocas filas (o líneas) contra
+    otra con más: si crecen con las filas hay N+1, sin depender del número absoluto.
+    """
+
+    def _consultas(self, client, url):
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.get(url)
+        self.assertEqual(resp.status_code, 200, getattr(resp, "data", resp))
+        return resp, len(ctx)
+
+    def _filas(self, data):
+        return data["results"] if isinstance(data, dict) and "results" in data else data
+
+
+class PolizaDatosPdfTests(DatosPdfBase):
+    """Póliza: código y nombre de la cuenta en cada línea, sin N+1."""
+
+    def setUp(self):
+        self.cuenta_cargo, self.cuenta_abono, self.centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+        self.client_a = self._client(self.a["usuario"])
+
+    def _poliza(self, n, lineas=2):
+        poliza = Poliza.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], centro_costo=self.centro_costo,
+            folio=f"POL-{n:06d}", folio_consecutivo=n,
+        )
+        for i in range(lineas):
+            cuenta = self.cuenta_cargo if i % 2 == 0 else self.cuenta_abono
+            PolizaDetalle.objects.create(
+                poliza=poliza, cuenta_contable=cuenta, centro_costo=self.centro_costo,
+                cargo=Decimal("10.00") if i % 2 == 0 else Decimal("0"),
+                abono=Decimal("0") if i % 2 == 0 else Decimal("10.00"), orden=i,
+            )
+        return poliza
+
+    def test_detalle_y_listado_traen_codigo_y_nombre_de_la_cuenta(self):
+        poliza = self._poliza(1)
+        detalle = self.client_a.get(f"{POLIZAS_URL}{poliza.pk}/").data
+        listado = {p["id"]: p for p in self._filas(self.client_a.get(POLIZAS_URL).data)}
+        for fuente, data in (("detalle", detalle), ("listado", listado[poliza.pk])):
+            with self.subTest(fuente=fuente):
+                lineas = sorted(data["poliza_detalles"], key=lambda l: l["orden"])
+                self.assertEqual(
+                    [(l["cuenta_contable"], l["cuenta_contable_codigo"], l["cuenta_contable_nombre"]) for l in lineas],
+                    [(self.cuenta_cargo.pk, "1050", "Clientes"), (self.cuenta_abono.pk, "4000", "Ventas")],
+                )
+
+    def test_linea_sin_cuenta_trae_null(self):
+        poliza = self._poliza(1)
+        PolizaDetalle.objects.filter(poliza=poliza).update(cuenta_contable=None)
+        linea = self.client_a.get(f"{POLIZAS_URL}{poliza.pk}/").data["poliza_detalles"][0]
+        self.assertIsNone(linea["cuenta_contable_codigo"])
+        self.assertIsNone(linea["cuenta_contable_nombre"])
+
+    def test_consultas_constantes(self):
+        pocas = self._poliza(1, lineas=1)
+        _, retrieve_pocas = self._consultas(self.client_a, f"{POLIZAS_URL}{pocas.pk}/")
+        _, list_pocas = self._consultas(self.client_a, POLIZAS_URL)
+        muchas = self._poliza(2, lineas=6)
+        for n in range(3, 6):
+            self._poliza(n, lineas=4)
+        _, retrieve_muchas = self._consultas(self.client_a, f"{POLIZAS_URL}{muchas.pk}/")
+        resp, list_muchas = self._consultas(self.client_a, POLIZAS_URL)
+        self.assertEqual(len(self._filas(resp.data)), 5)
+        self.assertEqual(retrieve_muchas, retrieve_pocas)
+        self.assertEqual(list_muchas, list_pocas)
+
+
+class PagoDatosPdfTests(DatosPdfBase):
+    """Pago: moneda de su cuenta bancaria y folio de la factura de proveedor por línea."""
+
+    def setUp(self):
+        self.client_a = self._client(self.a["usuario"])
+        self.proveedor, _, _, _, _, _, self.fp = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+
+    def _cxp(self, folio):
+        # Cada CxP en su propia factura de proveedor (copia de la base, otro folio).
+        fp = FacturaProveedor.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.proveedor,
+            oc=self.fp.oc, recepcion=self.fp.recepcion, moneda=self.moneda, folio=folio,
+        )
+        return CuentaPorPagar.objects.create(
+            empresa=self.a["empresa"], proveedor=self.proveedor, factura_proveedor=fp,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+
+    def _pago(self, cuenta, lineas):
+        pago = Pago.objects.create(
+            empresa=self.a["empresa"], proveedor=self.proveedor, cuenta_bancaria=cuenta,
+            sucursal=self.a["sucursal"], total_pagado=Decimal("10.00") * lineas,
+        )
+        for i in range(lineas):
+            PagoDetalle.objects.create(pago=pago, cxp=self._cxp(f"FP-{pago.pk}-{i}"), importe_aplicado=Decimal("10.00"))
+        return pago
+
+    def test_detalle_y_listado_traen_moneda_de_la_cuenta_y_folio_por_linea(self):
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        banco = Banco.objects.create(empresa=self.a["empresa"], nombre="Banco USD")
+        cuenta_usd = CuentaBancaria.objects.create(empresa=self.a["empresa"], banco=banco, moneda=usd, alias="USD")
+        pago = self._pago(cuenta_usd, 2)
+        detalle = self.client_a.get(f"{PAGOS_URL}{pago.pk}/").data
+        listado = {p["id"]: p for p in self._filas(self.client_a.get(PAGOS_URL).data)}
+        esperados = sorted(f"FP-{pago.pk}-{i}" for i in range(2))
+        for fuente, data in (("detalle", detalle), ("listado", listado[pago.pk])):
+            with self.subTest(fuente=fuente):
+                self.assertEqual(data["moneda"], usd.pk)
+                self.assertEqual(data["moneda_nombre"], "USD")
+                self.assertNotIn("tipo_cambio", data)
+                self.assertEqual(sorted(l["factura_proveedor_folio"] for l in data["pago_detalles"]), esperados)
+                self.assertTrue(all(isinstance(l["cxp"], int) for l in data["pago_detalles"]))
+
+    def test_consultas_constantes(self):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        pocas = self._pago(cuenta, 1)
+        _, retrieve_pocas = self._consultas(self.client_a, f"{PAGOS_URL}{pocas.pk}/")
+        _, list_pocas = self._consultas(self.client_a, PAGOS_URL)
+        muchas = self._pago(cuenta, 4)
+        for _ in range(3):
+            self._pago(self._crear_cuenta_bancaria(self.a["empresa"]), 2)
+        _, retrieve_muchas = self._consultas(self.client_a, f"{PAGOS_URL}{muchas.pk}/")
+        resp, list_muchas = self._consultas(self.client_a, PAGOS_URL)
+        self.assertEqual(len(self._filas(resp.data)), 5)
+        self.assertEqual(retrieve_muchas, retrieve_pocas)
+        self.assertEqual(list_muchas, list_pocas)
+
+
+class FacturaProveedorDatosPdfTests(DatosPdfBase):
+    """Factura de proveedor: nombre y código del producto por línea, sin N+1."""
+
+    def setUp(self):
+        self.client_a = self._client(self.a["usuario"])
+        (self.proveedor, self.producto, self.oc, self.oc_detalle, self.recepcion,
+         self.recepcion_detalle, self.fp) = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+
+    def _factura(self, lineas):
+        fp = FacturaProveedor.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.proveedor,
+            oc=self.oc, recepcion=self.recepcion, moneda=self.moneda,
+        )
+        for i in range(lineas):
+            producto = Producto.objects.create(
+                empresa=self.a["empresa"], nombre=f"Insumo {fp.pk}-{i}", codigo=f"C{i}", tipo=self.tipo_producto,
+            )
+            FacturaProveedorDetalle.objects.create(
+                factura_proveedor=fp, oc_detalle=self.oc_detalle, recepcion_detalle=self.recepcion_detalle,
+                producto=producto, cantidad=1, precio_unitario=Decimal("10.00"),
+                subtotal=Decimal("10.00"), total=Decimal("10.00"),
+            )
+        return fp
+
+    def test_detalle_y_listado_traen_nombre_y_codigo_del_producto(self):
+        fp = self._factura(2)
+        detalle = self.client_a.get(f"{FACTURAS_PROVEEDOR_URL}{fp.pk}/").data
+        listado = {f["id"]: f for f in self._filas(self.client_a.get(FACTURAS_PROVEEDOR_URL).data)}
+        for fuente, data in (("detalle", detalle), ("listado", listado[fp.pk])):
+            with self.subTest(fuente=fuente):
+                self.assertEqual(
+                    sorted((l["producto_nombre"], l["producto_codigo"]) for l in data["factura_proveedor_detalles"]),
+                    [(f"Insumo {fp.pk}-0", "C0"), (f"Insumo {fp.pk}-1", "C1")],
+                )
+                self.assertNotIn("cfdi_uuid", data)
+
+    def test_producto_sin_codigo_trae_null(self):
+        FacturaProveedorDetalle.objects.create(
+            factura_proveedor=self.fp, oc_detalle=self.oc_detalle, recepcion_detalle=self.recepcion_detalle,
+            producto=self.producto, cantidad=1, precio_unitario=Decimal("10.00"),
+        )
+        linea = self.client_a.get(f"{FACTURAS_PROVEEDOR_URL}{self.fp.pk}/").data["factura_proveedor_detalles"][0]
+        self.assertEqual(linea["producto_nombre"], "Insumo Test")
+        self.assertIsNone(linea["producto_codigo"])
+
+    def test_consultas_constantes(self):
+        pocas = self._factura(1)
+        _, retrieve_pocas = self._consultas(self.client_a, f"{FACTURAS_PROVEEDOR_URL}{pocas.pk}/")
+        _, list_pocas = self._consultas(self.client_a, FACTURAS_PROVEEDOR_URL)
+        muchas = self._factura(5)
+        for _ in range(3):
+            self._factura(3)
+        _, retrieve_muchas = self._consultas(self.client_a, f"{FACTURAS_PROVEEDOR_URL}{muchas.pk}/")
+        resp, list_muchas = self._consultas(self.client_a, FACTURAS_PROVEEDOR_URL)
+        self.assertEqual(len(self._filas(resp.data)), 6)
+        self.assertEqual(retrieve_muchas, retrieve_pocas)
+        self.assertEqual(list_muchas, list_pocas)
+
+
+class CobroDatosPdfTests(DatosPdfBase):
+    """Cobro: id y folio de la factura de cada línea (vía su CxC), sin saldo."""
+
+    def setUp(self):
+        self.client_a = self._client(self.a["usuario"])
+        self.cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+
+    def _cxc(self, folio):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            moneda=self.moneda, folio=folio, total=Decimal("100.00"),
+        )
+        return CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=Decimal("100.00"), saldo=Decimal("100.00"),
+        )
+
+    def _cobro(self, lineas):
+        cobro = Cobro.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=self.cuenta,
+            sucursal=self.a["sucursal"], total_cobrado=Decimal("10.00") * lineas,
+        )
+        for i in range(lineas):
+            CobroDetalle.objects.create(cobro=cobro, cxc=self._cxc(f"A-{cobro.pk}-{i}"), importe_aplicado=Decimal("10.00"))
+        return cobro
+
+    def test_detalle_y_listado_traen_id_y_folio_de_la_factura(self):
+        cobro = self._cobro(2)
+        esperado = sorted(
+            (d.cxc.factura_id, d.cxc.factura.folio) for d in cobro.cobro_detalles.select_related("cxc__factura")
+        )
+        detalle = self.client_a.get(f"{COBROS_URL}{cobro.pk}/").data
+        listado = {c["id"]: c for c in self._filas(self.client_a.get(COBROS_URL).data)}
+        for fuente, data in (("detalle", detalle), ("listado", listado[cobro.pk])):
+            with self.subTest(fuente=fuente):
+                lineas = data["cobro_detalles"]
+                self.assertEqual(sorted((l["factura_id"], l["factura_folio"]) for l in lineas), esperado)
+                self.assertTrue(all("saldo" not in l for l in lineas))
+
+    def test_consultas_constantes(self):
+        pocas = self._cobro(1)
+        _, retrieve_pocas = self._consultas(self.client_a, f"{COBROS_URL}{pocas.pk}/")
+        _, list_pocas = self._consultas(self.client_a, COBROS_URL)
+        muchas = self._cobro(4)
+        for _ in range(3):
+            self._cobro(2)
+        _, retrieve_muchas = self._consultas(self.client_a, f"{COBROS_URL}{muchas.pk}/")
+        resp, list_muchas = self._consultas(self.client_a, COBROS_URL)
+        self.assertEqual(len(self._filas(resp.data)), 5)
+        self.assertEqual(retrieve_muchas, retrieve_pocas)
+        self.assertEqual(list_muchas, list_pocas)
+
+
+class NotaCreditoDatosPdfTests(DatosPdfBase):
+    """Nota de crédito: moneda, tipo de cambio y UUID de su factura; producto y talla por línea."""
+
+    def setUp(self):
+        from ventas.models import PedidoServicioExtra
+
+        self.client_a = self._client(self.a["usuario"])
+        self.servicio = PedidoServicioExtra.objects.create(pedido=self.a["pedido"], nombre="Flete", monto=Decimal("50"))
+
+    def _factura(self, folio, moneda=None, tipo_cambio=None, uuid=None):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            pedido=self.a["pedido"], moneda=moneda or self.moneda, folio=folio,
+            tipo_cambio=tipo_cambio, cfdi_uuid=uuid,
+        )
+        pieza = FacturaDetalle.objects.create(
+            factura=factura, pedido_detalle=self.a["detalle"], pedido_detalle_talla=self.a["talla_pedido"],
+            producto=self.a["producto"], cantidad=Decimal("2"), precio_unitario=Decimal("100.00"),
+        )
+        servicio = FacturaDetalle.objects.create(
+            factura=factura, pedido_servicio_extra=self.servicio, cantidad=Decimal("1"),
+            precio_unitario=Decimal("50.00"),
+        )
+        return factura, pieza, servicio
+
+    def _nota(self, factura, renglones):
+        nota = NotaCredito.objects.create(factura=factura, cliente=self.a["cliente"], folio=f"NC-{factura.folio}")
+        for renglon in renglones:
+            NotaCreditoDetalle.objects.create(
+                nota_credito=nota, factura_detalle=renglon, cantidad=Decimal("1"), precio_unitario=Decimal("10.00"),
+            )
+        return nota
+
+    def test_detalle_y_listado_traen_moneda_tipo_cambio_uuid_y_lineas(self):
+        usd = Moneda.objects.create(codigo_iso="USD", nombre="Dólar")
+        factura, pieza, servicio = self._factura(
+            "F-USD", moneda=usd, tipo_cambio=Decimal("17.25"), uuid="11111111-2222-3333-4444-555555555555",
+        )
+        nota = self._nota(factura, [pieza, servicio])
+        detalle = self.client_a.get(f"{NOTAS_CREDITO_URL}{nota.pk}/").data
+        listado = {n["id"]: n for n in self._filas(self.client_a.get(NOTAS_CREDITO_URL).data)}
+        for fuente, data in (("detalle", detalle), ("listado", listado[nota.pk])):
+            with self.subTest(fuente=fuente):
+                self.assertEqual(data["moneda"], usd.pk)
+                self.assertEqual(data["moneda_nombre"], "USD")
+                self.assertEqual(data["tipo_cambio"], "17.250000")
+                self.assertEqual(data["factura_uuid"], "11111111-2222-3333-4444-555555555555")
+                self.assertEqual(data["factura_folio"], "F-USD")
+                lineas = {l["factura_detalle"]: l for l in data["nota_credito_detalles"]}
+                self.assertEqual(
+                    (lineas[pieza.pk]["producto_nombre"], lineas[pieza.pk]["talla_nombre"]), ("Prod acme", "M"),
+                )
+                self.assertEqual(
+                    (lineas[servicio.pk]["producto_nombre"], lineas[servicio.pk]["talla_nombre"]), ("Flete", None),
+                )
+
+    def test_tipo_cambio_uno_en_mxn_y_null_sin_capturar(self):
+        mxn, _, _ = self._factura("F-MXN")
+        usd_sin_tc, _, _ = self._factura("F-USD-SIN", moneda=Moneda.objects.create(codigo_iso="USD", nombre="Dólar"))
+        for factura, esperado in ((mxn, "1.000000"), (usd_sin_tc, None)):
+            nota = self._nota(factura, [])
+            data = self.client_a.get(f"{NOTAS_CREDITO_URL}{nota.pk}/").data
+            with self.subTest(factura=factura.folio):
+                self.assertEqual(data["tipo_cambio"], esperado)
+                self.assertIsNone(data["factura_uuid"])
+
+    def test_consultas_constantes(self):
+        factura, pieza, servicio = self._factura("F-1")
+        pocas = self._nota(factura, [pieza])
+        _, retrieve_pocas = self._consultas(self.client_a, f"{NOTAS_CREDITO_URL}{pocas.pk}/")
+        _, list_pocas = self._consultas(self.client_a, NOTAS_CREDITO_URL)
+        muchas = self._nota(factura, [pieza, servicio, pieza, servicio])
+        for n in range(2, 5):
+            otra, p, s = self._factura(f"F-{n}")
+            self._nota(otra, [p, s])
+        _, retrieve_muchas = self._consultas(self.client_a, f"{NOTAS_CREDITO_URL}{muchas.pk}/")
+        resp, list_muchas = self._consultas(self.client_a, NOTAS_CREDITO_URL)
+        self.assertEqual(len(self._filas(resp.data)), 5)
+        self.assertEqual(retrieve_muchas, retrieve_pocas)
+        self.assertEqual(list_muchas, list_pocas)
+
+
+class FacturaDatosFiscalesPdfTests(DatosPdfBase):
+    """Factura de cliente: receptor fiscal y forma/método/uso de CFDI en el detalle,
+    con la misma regla que ``desglose/`` (``FacturaService.datos_fiscales``)."""
+
+    CAMPOS_PAGO = ("forma_pago", "forma_pago_nombre", "metodo_pago", "metodo_pago_nombre", "uso_cfdi", "uso_cfdi_nombre")
+
+    def setUp(self):
+        from nucleo.models import SatUsoCfdi
+
+        self.client_a = self._client(self.a["usuario"])
+        self.uso_cliente = SatUsoCfdi.objects.create(codigo="G01", descripcion="Adquisición de mercancías")
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(
+            sat_uso_cfdi=self.uso_cliente, sat_regimen_fiscal=self.sat_regimen_fiscal,
+            razon_social="ACME SA", rfc="AAA010101AAA", codigo_postal="64000",
+        )
+
+    def _factura(self, pedido="propio", folio="F-1", renglones=1):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            pedido=self.a["pedido"] if pedido == "propio" else pedido, moneda=self.moneda, folio=folio,
+        )
+        for i in range(renglones):
+            FacturaDetalle.objects.create(
+                factura=factura, pedido_detalle=self.a["detalle"], pedido_detalle_talla=self.a["talla_pedido"],
+                producto=self.a["producto"], cantidad=Decimal("1"), precio_unitario=Decimal("100.00"),
+            )
+        return factura
+
+    def _detalle(self, factura):
+        resp = self.client_a.get(f"{FACTURAS_URL}{factura.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data
+
+    def _desglose(self, factura):
+        resp = self.client_a.get(f"{FACTURAS_URL}{factura.pk}/desglose/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data
+
+    def test_detalle_trae_receptor_y_datos_de_pago_del_pedido(self):
+        factura = self._factura()
+        data = self._detalle(factura)
+        self.assertEqual(data["receptor"], self._desglose(factura)["receptor"])
+        self.assertEqual(data["receptor"]["rfc"], "AAA010101AAA")
+        self.assertEqual(data["receptor"]["regimen_fiscal"], {"codigo": "601", "descripcion": "General de Ley"})
+        self.assertEqual(
+            {c: data[c] for c in self.CAMPOS_PAGO},
+            {
+                "forma_pago": "03", "forma_pago_nombre": "03 - TRANSFERENCIA",
+                "metodo_pago": "PUE", "metodo_pago_nombre": "PUE - PAGO EN UNA SOLA EXHIBICIÓN",
+                "uso_cfdi": "G03", "uso_cfdi_nombre": "G03 - GASTOS EN GENERAL (OTROS) (OTROS)",
+            },
+        )
+        desglose = self._desglose(factura)["pedido"]
+        self.assertEqual({c: desglose[c] for c in self.CAMPOS_PAGO}, {c: data[c] for c in self.CAMPOS_PAGO})
+
+    def test_uso_cfdi_cae_al_del_cliente_si_el_pedido_no_trae(self):
+        Pedido.objects.filter(pk=self.a["pedido"].pk).update(uso_cfdi="")
+        factura = self._factura()
+        esperado = ("G01", "G01 - ADQUISICIÓN DE MERCANCIAS")
+        data = self._detalle(factura)
+        self.assertEqual((data["uso_cfdi"], data["uso_cfdi_nombre"]), esperado)
+        desglose = self._desglose(factura)["pedido"]
+        self.assertEqual((desglose["uso_cfdi"], desglose["uso_cfdi_nombre"]), esperado)
+
+    def test_uso_cfdi_del_cliente_fuera_de_las_opciones_del_pedido_usa_la_descripcion_sat(self):
+        from finanzas.services.factura_service import FacturaService
+        from nucleo.models import SatUsoCfdi
+
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(
+            sat_uso_cfdi=SatUsoCfdi.objects.create(codigo="ZZZ", descripcion="Uso raro"),
+        )
+        factura = Factura.objects.select_related("cliente__sat_uso_cfdi").get(pk=self._factura(pedido=None).pk)
+        _, pago = FacturaService.datos_fiscales(factura, None)
+        self.assertEqual((pago["uso_cfdi"], pago["uso_cfdi_nombre"]), ("ZZZ", "Uso raro"))
+
+    def test_sin_pedido_no_hay_forma_ni_metodo_y_el_uso_es_el_del_cliente(self):
+        factura = self._factura(pedido=None, renglones=0)
+        data = self._detalle(factura)
+        self.assertEqual(
+            {c: data[c] for c in self.CAMPOS_PAGO},
+            {
+                "forma_pago": None, "forma_pago_nombre": None, "metodo_pago": None, "metodo_pago_nombre": None,
+                "uso_cfdi": "G01", "uso_cfdi_nombre": "G01 - ADQUISICIÓN DE MERCANCIAS",
+            },
+        )
+        self.assertEqual(data["receptor"]["razon_social"], "ACME SA")
+        self.assertIsNone(self._desglose(factura)["pedido"])
+
+    def test_sin_uso_en_pedido_ni_cliente_es_cadena_vacia(self):
+        # Como ``desglose/`` antes de EC-904 (el ``uso_cfdi`` vacío del pedido), no ``null``.
+        Pedido.objects.filter(pk=self.a["pedido"].pk).update(uso_cfdi="")
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(sat_uso_cfdi=None)
+        factura = self._factura()
+        data = self._detalle(factura)
+        desglose = self._desglose(factura)["pedido"]
+        for fuente, datos in (("detalle", data), ("desglose", desglose)):
+            with self.subTest(fuente=fuente):
+                self.assertEqual((datos["uso_cfdi"], datos["uso_cfdi_nombre"]), ("", ""))
+
+    def test_recorta_espacios_como_el_timbrado(self):
+        Pedido.objects.filter(pk=self.a["pedido"].pk).update(
+            uso_cfdi=" G03 ", cliente_rfc="BB010101BBB ", cliente_razon_social=" Pedido SA ",
+            cliente_codigo_postal=" 64100",
+        )
+        factura = self._factura()
+        esperado = {"rfc": "BB010101BBB", "razon_social": "Pedido SA", "codigo_postal": "64100"}
+        data, desglose = self._detalle(factura), self._desglose(factura)
+        for fuente, receptor, pago in (("detalle", data["receptor"], data), ("desglose", desglose["receptor"], desglose["pedido"])):
+            with self.subTest(fuente=fuente):
+                self.assertEqual({k: receptor[k] for k in esperado}, esperado)
+                self.assertEqual(
+                    (pago["uso_cfdi"], pago["uso_cfdi_nombre"]), ("G03", "G03 - GASTOS EN GENERAL (OTROS) (OTROS)"),
+                )
+
+    def test_mismo_receptor_que_el_timbrado(self):
+        from finanzas.services.facturama.cfdi_payload import _receptor
+
+        for uso_pedido in ("G03", ""):
+            with self.subTest(uso_pedido=uso_pedido):
+                Pedido.objects.filter(pk=self.a["pedido"].pk).update(uso_cfdi=uso_pedido, cliente_rfc=" aaa010101aaa")
+                factura = Factura.objects.get(pk=self._factura(folio=f"F-{uso_pedido or 'X'}").pk)
+                timbrado = _receptor(factura, {})
+                data = self._detalle(factura)
+                self.assertEqual(data["uso_cfdi"], timbrado["CfdiUse"])
+                self.assertEqual(data["receptor"]["rfc"].upper(), timbrado["Rfc"])
+                self.assertEqual(data["receptor"]["razon_social"], timbrado["Name"])
+                self.assertEqual(data["receptor"]["codigo_postal"], timbrado["TaxZipCode"])
+                self.assertEqual(data["receptor"]["regimen_fiscal"]["codigo"], timbrado["FiscalRegime"])
+
+    def test_pedido_de_otra_empresa_no_se_lee(self):
+        from finanzas.services.factura_service import FacturaService
+
+        Pedido.objects.filter(pk=self.b["pedido"].pk).update(
+            cliente_rfc="BBB010101BBB", cliente_razon_social="Ajena SA", uso_cfdi="I01",
+        )
+        factura = self._factura(pedido=self.b["pedido"], renglones=0)
+        self.assertIsNone(FacturaService.pedido_de_la_factura(factura))
+        data = self._detalle(factura)
+        self.assertEqual(data["receptor"]["rfc"], "AAA010101AAA")
+        self.assertEqual(data["receptor"]["razon_social"], "ACME SA")
+        self.assertIsNone(data["forma_pago"])
+        self.assertEqual(data["uso_cfdi"], "G01")
+        self.assertIsNone(self._desglose(factura)["pedido"])
+
+    def test_solo_el_detalle_cambia(self):
+        factura = self._factura()
+        CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=Decimal("116.00"), saldo=Decimal("116.00"),
+        )
+        listado = {f["id"]: f for f in self._filas(self.client_a.get(FACTURAS_URL).data)}
+        cxc = self._filas(self.client_a.get(CXC_URL).data)[0]
+        anidada = self.client_a.get(f"{CXC_URL}{cxc['id']}/").data["factura"]
+        for fuente, data in (("listado", listado[factura.pk]), ("cxc", anidada)):
+            with self.subTest(fuente=fuente):
+                self.assertNotIn("receptor", data)
+                self.assertNotIn("uso_cfdi", data)
+
+    def test_consultas_constantes_en_el_detalle(self):
+        pocos = self._factura(folio="F-1", renglones=1)
+        _, con_pocos = self._consultas(self.client_a, f"{FACTURAS_URL}{pocos.pk}/")
+        muchos = self._factura(folio="F-2", renglones=6)
+        _, con_muchos = self._consultas(self.client_a, f"{FACTURAS_URL}{muchos.pk}/")
+        self.assertEqual(con_muchos, con_pocos)
+
+
+class RespuestasDeEscrituraSinCamposPdfTests(DatosPdfBase):
+    """EC-904: los campos del PDF viven solo en list/retrieve. Create, update y las
+    acciones (``cancelar``, ``contabilizar``, ``timbrar``, ``timbrar-rep``,
+    ``cancelar-rep``, ``conciliar-cfdi``) responden con la forma de siempre y su
+    serialización no crece con las líneas (después de mutar, el frontend relee el
+    detalle).
+
+    Las consultas se cuentan solo dentro de ``to_representation`` del serializer de
+    la respuesta: el trabajo del servicio sí crece con las líneas (inserta o revierte
+    cada una) y no es lo que se mide. Las llamadas a Facturama se simulan en el
+    servicio de timbrado: aquí solo importa cómo se serializa la respuesta.
+    """
+
+    # Campos del PDF por documento: (cabecera, línea).
+    NUEVOS = {
+        "poliza": (set(), {"cuenta_contable_codigo", "cuenta_contable_nombre"}),
+        "pago": ({"moneda", "moneda_nombre"}, {"factura_proveedor_folio"}),
+        "cobro": (set(), {"factura_id", "factura_folio"}),
+        "nota": ({"moneda", "moneda_nombre", "tipo_cambio", "factura_uuid"}, {"producto_nombre", "talla_nombre"}),
+        "factura_proveedor": (set(), {"producto_nombre", "producto_codigo"}),
+    }
+
+    def setUp(self):
+        self.client_a = self._client(self.a["usuario"])
+
+    def _serializado(self, serializer_cls, llamar):
+        """Respuesta de ``llamar()`` y consultas hechas al serializar con ``serializer_cls``."""
+        original = serializer_cls.to_representation
+        consultas = []
+
+        def espia(serializer, instance):
+            with CaptureQueriesContext(connection) as ctx:
+                data = original(serializer, instance)
+            consultas.append(len(ctx))
+            return data
+
+        with patch.object(serializer_cls, "to_representation", espia):
+            resp = llamar()
+        self.assertIn(resp.status_code, (200, 201), getattr(resp, "data", resp))
+        self.assertTrue(consultas, "la respuesta no pasó por el serializer esperado")
+        return resp, sum(consultas)
+
+    def _comparar(self, doc, serializer_cls, campo_lineas, escenario, acciones):
+        """``escenario(n)`` arma el documento con ``n`` líneas; cada acción es
+        ``(nombre, llamar(documento) -> respuesta, extraer(data) -> dict)``. Con 1 y
+        con 4 líneas: sin campos del PDF y las mismas consultas al serializar."""
+        from finanzas.api import serializers as s
+
+        cls = getattr(s, serializer_cls)
+        cabecera, linea = self.NUEVOS[doc]
+        conteos = {}
+        for n in (1, 4):
+            documento = escenario(n)
+            for nombre, llamar, extraer in acciones:
+                resp, consultas = self._serializado(cls, lambda: llamar(documento))
+                data = extraer(resp.data)
+                lineas = data[campo_lineas]
+                with self.subTest(doc=doc, accion=nombre, lineas=n):
+                    self.assertFalse(cabecera & set(data), data)
+                    for renglon in lineas:
+                        self.assertFalse(linea & set(renglon), renglon)
+                if n == 1:
+                    conteos[nombre] = (consultas, len(lineas))
+                    continue
+                with self.subTest(doc=doc, accion=nombre, consultas="constantes"):
+                    self.assertEqual(len(lineas), conteos[nombre][1] * 4)
+                    self.assertEqual(consultas, conteos[nombre][0], f"{doc} {nombre}")
+
+    # -- póliza ----------------------------------------------------------------
+
+    def test_poliza(self):
+        cargo, abono, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+
+        def escenario(n):
+            lineas = []
+            for _ in range(n):
+                lineas += [
+                    {"cuenta_contable": cargo.pk, "cargo": "10.00", "abono": "0.00"},
+                    {"cuenta_contable": abono.pk, "cargo": "0.00", "abono": "10.00"},
+                ]
+            return {"lineas": lineas, "id": None}
+
+        def crear(doc):
+            resp = self.client_a.post(POLIZAS_URL, {
+                "sucursal": self.a["sucursal"].pk, "centro_costo": centro_costo.pk,
+                "tipo": Poliza.PolizaTipo.DIARIO.value, "poliza_detalles": doc["lineas"],
+            }, format="json")
+            doc["id"] = resp.data["id"]
+            return resp
+
+        self._comparar("poliza", "PolizaSerializer", "poliza_detalles", escenario, [
+            ("create", crear, lambda d: d),
+            ("update", lambda doc: self.client_a.patch(
+                f"{POLIZAS_URL}{doc['id']}/", {"concepto": "otro"}, format="json"), lambda d: d),
+            ("contabilizar", lambda doc: self.client_a.post(f"{POLIZAS_URL}{doc['id']}/contabilizar/"), lambda d: d),
+            ("cancelar", lambda doc: self.client_a.post(f"{POLIZAS_URL}{doc['id']}/cancelar/"), lambda d: d),
+        ])
+
+    # -- cobro -----------------------------------------------------------------
+
+    def test_cobro(self):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+
+        def escenario(n):
+            cxcs = []
+            for i in range(n):
+                factura = Factura.objects.create(
+                    empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+                    moneda=self.moneda, folio=f"A-{n}-{i}",
+                )
+                cxcs.append(CuentaPorCobrar.objects.create(
+                    empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+                    total=Decimal("100.00"), saldo=Decimal("100.00"),
+                ))
+            return {"cxcs": cxcs, "id": None}
+
+        def crear(doc):
+            resp = self.client_a.post(COBROS_URL, {
+                "cliente": self.a["cliente"].pk, "cuenta_bancaria": cuenta.pk,
+                "total_cobrado": str(Decimal("10.00") * len(doc["cxcs"])), "estatus": "Borrador",
+                "cobro_detalles": [{"cxc": c.pk, "importe_aplicado": "10.00"} for c in doc["cxcs"]],
+            }, format="json")
+            doc["id"] = resp.data["id"]
+            return resp
+
+        def accion(url, metodo):
+            def llamar(doc):
+                with patch(f"finanzas.api.views.FacturaTimbradoService.{metodo}"):
+                    return self.client_a.post(f"{COBROS_URL}{doc['id']}/{url}/", {"motivo_sat": "02"}, format="json")
+            return llamar
+
+        self._comparar("cobro", "CobroSerializer", "cobro_detalles", escenario, [
+            ("create", crear, lambda d: d),
+            ("update", lambda doc: self.client_a.patch(
+                f"{COBROS_URL}{doc['id']}/", {"estatus": "Aplicado"}, format="json"), lambda d: d),
+            ("timbrar-rep", accion("timbrar-rep", "timbrar_rep"), lambda d: d),
+            ("cancelar-rep", accion("cancelar-rep", "cancelar_rep"), lambda d: d),
+            ("cancelar", lambda doc: self.client_a.post(f"{COBROS_URL}{doc['id']}/cancelar/"), lambda d: d),
+        ])
+
+    # -- pago ------------------------------------------------------------------
+
+    def test_pago(self):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        proveedor, _, oc, _, recepcion, _, _ = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+
+        def escenario(n):
+            cxps = []
+            for i in range(n):
+                fp = FacturaProveedor.objects.create(
+                    empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=proveedor, oc=oc,
+                    recepcion=recepcion, moneda=self.moneda, folio=f"FP-{n}-{i}", total=Decimal("100.00"),
+                    estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA,
+                )
+                cxps.append(CuentaPorPagar.objects.create(
+                    empresa=self.a["empresa"], proveedor=proveedor, factura_proveedor=fp,
+                    total=Decimal("100.00"), saldo=Decimal("100.00"),
+                ))
+            return {"cxps": cxps, "id": None}
+
+        def crear(doc):
+            resp = self.client_a.post(PAGOS_URL, {
+                "proveedor": proveedor.pk, "cuenta_bancaria": cuenta.pk,
+                "total_pagado": str(Decimal("10.00") * len(doc["cxps"])),
+                "pago_detalles": [{"cxp": c.pk, "importe_aplicado": "10.00"} for c in doc["cxps"]],
+            }, format="json")
+            doc["id"] = resp.data["id"]
+            return resp
+
+        self._comparar("pago", "PagoSerializer", "pago_detalles", escenario, [
+            ("create", crear, lambda d: d),
+            ("update", lambda doc: self.client_a.patch(
+                f"{PAGOS_URL}{doc['id']}/", {"observaciones": "otra"}, format="json"), lambda d: d),
+            ("cancelar", lambda doc: self.client_a.post(f"{PAGOS_URL}{doc['id']}/cancelar/"), lambda d: d),
+        ])
+
+    # -- nota de crédito -------------------------------------------------------
+
+    def test_nota_credito(self):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        # ``timbrar`` exige E-FIN-FACTURAS, que la base ya concede a este usuario.
+        self.assertTrue(UsuarioPermiso.objects.filter(
+            usuario=self.a["usuario"], permiso=Permiso.objects.get(clave="E-FIN-FACTURAS"),
+        ).exists())
+
+        def escenario(n):
+            factura = Factura.objects.create(
+                empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+                pedido=self.a["pedido"], moneda=self.moneda, folio=f"F-NC-{n}", total=Decimal("1000.00"),
+            )
+            CuentaPorCobrar.objects.create(
+                empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+                total=Decimal("1000.00"), saldo=Decimal("1000.00"),
+            )
+            renglones = [
+                FacturaDetalle.objects.create(
+                    factura=factura, pedido_detalle=self.a["detalle"], pedido_detalle_talla=self.a["talla_pedido"],
+                    producto=self.a["producto"], cantidad=Decimal("1"), precio_unitario=Decimal("100.00"),
+                )
+                for _ in range(n)
+            ]
+            return {"factura": factura, "renglones": renglones, "id": None}
+
+        def crear(doc):
+            resp = self.client_a.post(NOTAS_CREDITO_URL, {
+                "factura": doc["factura"].pk, "cliente": self.a["cliente"].pk,
+                "estatus": NotaCredito.Estatus.EMITIDA.value, "total": "10.00",
+                "nota_credito_detalles": [
+                    {"factura_detalle": r.pk, "cantidad": "1", "precio_unitario": "1.00"} for r in doc["renglones"]
+                ],
+            }, format="json")
+            doc["id"] = resp.data["id"]
+            return resp
+
+        def timbrar(doc):
+            with patch("finanzas.api.views.FacturaTimbradoService.timbrar_nota_credito"):
+                return self.client_a.post(f"{NOTAS_CREDITO_URL}{doc['id']}/timbrar/")
+
+        def conciliar(doc):
+            with patch("finanzas.api.views.FacturaTimbradoService.conciliar_cfdi", return_value=("sin_cambio", None)):
+                return self.client_a.post(f"{NOTAS_CREDITO_URL}{doc['id']}/conciliar-cfdi/")
+
+        self._comparar("nota", "NotaCreditoSerializer", "nota_credito_detalles", escenario, [
+            ("create", crear, lambda d: d),
+            ("update", lambda doc: self.client_a.patch(
+                f"{NOTAS_CREDITO_URL}{doc['id']}/", {"observaciones": "otra"}, format="json"), lambda d: d),
+            ("timbrar", timbrar, lambda d: d),
+            ("conciliar-cfdi", conciliar, lambda d: d["nota_credito"]),
+            ("cancelar", lambda doc: self.client_a.post(f"{NOTAS_CREDITO_URL}{doc['id']}/cancelar/"), lambda d: d),
+        ])
+
+    # -- factura de proveedor --------------------------------------------------
+
+    def test_factura_proveedor(self):
+        proveedor, producto, oc, oc_detalle, recepcion, recepcion_detalle, _ = (
+            self._crear_oc_recepcion_y_factura_proveedor(self.a["empresa"], self.a["sucursal"], self.a["usuario"])
+        )
+
+        def crear(doc):
+            resp = self.client_a.post(FACTURAS_PROVEEDOR_URL, {
+                "sucursal": self.a["sucursal"].pk, "proveedor": proveedor.pk, "oc": oc.pk,
+                "recepcion": recepcion.pk, "moneda": self.moneda.pk,
+                "factura_proveedor_detalles": [
+                    {"oc_detalle": oc_detalle.pk, "recepcion_detalle": recepcion_detalle.pk,
+                     "producto": producto.pk, "cantidad": "1.00", "precio_unitario": "1.00"}
+                    for _ in range(doc["n"])
+                ],
+            }, format="json")
+            doc["id"] = resp.data["id"]
+            return resp
+
+        self._comparar(
+            "factura_proveedor", "FacturaProveedorSerializer", "factura_proveedor_detalles",
+            lambda n: {"n": n, "id": None},
+            [
+                ("create", crear, lambda d: d),
+                ("update", lambda doc: self.client_a.patch(
+                    f"{FACTURAS_PROVEEDOR_URL}{doc['id']}/", {"observaciones": "otra"}, format="json"), lambda d: d),
+            ],
+        )

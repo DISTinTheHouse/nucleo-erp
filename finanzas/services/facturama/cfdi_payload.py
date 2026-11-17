@@ -16,6 +16,7 @@ siguiente faltante de uno en uno.
 
 import re
 from decimal import Decimal
+from typing import NamedTuple
 
 from django.db.models import Sum
 from django.utils import timezone
@@ -48,13 +49,51 @@ def _no_se_puede_timbrar(titulo, errores):
     return ErrorDeNegocio(detalle)
 
 
+class ReceptorFiscal(NamedTuple):
+    rfc: str | None
+    razon_social: str | None
+    regimen: object  # ``SatRegimenFiscal`` o ``None``
+    codigo_postal: str | None
+    uso_cfdi: str
+    uso_cfdi_del_cliente: bool
+
+
+def _primer_texto(*valores):
+    """El primer valor no vacío sin espacios a los lados. Si todos vienen vacíos, ``""``
+    o ``None`` según el último (el del cliente): así quien lo muestra conserva el
+    vacío de siempre y ``_texto`` lo vuelve ``""`` para el timbrado."""
+    for valor in valores:
+        texto = _texto(valor)
+        if texto:
+            return texto
+    return None if valores[-1] is None else ""
+
+
+def receptor_fiscal(pedido, cliente):
+    """Datos fiscales del receptor de una factura (EC-904): los que el pedido congeló
+    al capturarse y, si vienen vacíos, los del ``Cliente``. El uso de CFDI es el del
+    pedido o, si no trae, el del cliente.
+
+    Es la regla del timbrado (``_receptor``) y la misma que muestran ``desglose/`` y el
+    detalle de la factura, para que el PDF no se separe de lo timbrado. ``pedido``
+    lo elige quien llama: el timbrado usa ``factura.pedido``; ``desglose/`` y el
+    detalle ignoran uno de otra empresa.
+    """
+    uso_pedido = _texto(getattr(pedido, "uso_cfdi", None))
+    return ReceptorFiscal(
+        rfc=_primer_texto(getattr(pedido, "cliente_rfc", None), cliente.rfc),
+        razon_social=_primer_texto(getattr(pedido, "cliente_razon_social", None), cliente.razon_social),
+        regimen=getattr(pedido, "cliente_regimen_fiscal", None) or cliente.sat_regimen_fiscal,
+        codigo_postal=_primer_texto(getattr(pedido, "cliente_codigo_postal", None), cliente.codigo_postal),
+        uso_cfdi=uso_pedido or _texto(getattr(cliente.sat_uso_cfdi, "codigo", None)),
+        uso_cfdi_del_cliente=not uso_pedido,
+    )
+
+
 def _receptor(factura, errores):
-    pedido, cliente = factura.pedido, factura.cliente
-    rfc = _texto(getattr(pedido, "cliente_rfc", None)) or _texto(cliente.rfc)
-    nombre = _texto(getattr(pedido, "cliente_razon_social", None)) or _texto(cliente.razon_social)
-    regimen = getattr(pedido, "cliente_regimen_fiscal", None) or cliente.sat_regimen_fiscal
-    cp = _texto(getattr(pedido, "cliente_codigo_postal", None)) or _texto(cliente.codigo_postal)
-    uso = _texto(getattr(pedido, "uso_cfdi", None)) or _texto(getattr(cliente.sat_uso_cfdi, "codigo", None))
+    datos = receptor_fiscal(factura.pedido, factura.cliente)
+    rfc, nombre, regimen = _texto(datos.rfc), _texto(datos.razon_social), datos.regimen
+    cp, uso = _texto(datos.codigo_postal), datos.uso_cfdi
 
     rfc = rfc.upper()
     if not RFC_RE.match(rfc):
@@ -283,8 +322,7 @@ def construir_payload_rep(cobro):
         })
 
     factura = detalles[0].cxc.factura if detalles else None
-    rfcs = {(_texto(getattr(d.cxc.factura.pedido, "cliente_rfc", None)) or _texto(d.cxc.factura.cliente.rfc)).upper()
-            for d in detalles}
+    rfcs = {_texto(receptor_fiscal(d.cxc.factura.pedido, d.cxc.factura.cliente).rfc).upper() for d in detalles}
     if len(rfcs) > 1:  # #582: un REP tiene un solo receptor
         errores["receptor"] = "Las facturas del cobro tienen distinto RFC receptor: haz un cobro por receptor."
     receptor = _receptor(factura, errores) if factura else {}
