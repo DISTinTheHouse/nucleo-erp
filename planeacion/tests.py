@@ -248,6 +248,22 @@ class AislamientoPlaneacionTests(PlaneacionBaseTestCase):
                 self.assertEqual(resp.json(), {"sucursal": ["Sucursal no encontrada."]})
 
 
+class NecesidadesParametrosTests(PlaneacionBaseTestCase):
+    """#1115: ``necesidades-materia-prima`` no ordena ni pagina: ``ordering``,
+    ``page`` y ``page_size`` responden 400 en vez de ignorarse en silencio."""
+
+    def test_sin_parametros_de_tablero_responde_200(self):
+        self.assertEqual(self._get(self.a["admin"], NECESIDADES_URL).status_code, 200)
+
+    def test_ordering_page_y_page_size_responden_400(self):
+        # Valores que el tablero sí acepta: el 400 sale del parámetro, no del valor.
+        for param, valor in (("ordering", "sku"), ("page", 1), ("page_size", 10)):
+            with self.subTest(param=param):
+                resp = self._get(self.a["admin"], NECESIDADES_URL, **{param: valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(resp.json(), {param: ["No aplica en necesidades-materia-prima."]})
+
+
 class FechaVentaTests(PlaneacionBaseTestCase):
     """La fecha de venta es el alta del pedido, no ``fecha_confirmacion`` (EC-875)."""
 

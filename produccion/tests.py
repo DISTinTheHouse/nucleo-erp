@@ -5283,6 +5283,38 @@ class EstatusOPTests(TestCase):
         OrdenProduccion.objects.filter(pk=self.op.pk).update(sucursal=otra_suc)
         self.assertEqual(self._client(self.lector).get(self.url).status_code, 404)
 
+    def test_produccion_no_cambia_estatus_de_op_de_otra_sucursal_de_su_empresa(self):
+        """#1134: el POST usa el mismo alcance. El usuario pasa los chequeos de hoy
+        (departamento Producción y R-PRODUCCION-OP, que ``estatus`` pide también en
+        el POST), así que el 404 viene del alcance por sucursal, no de un 400/403."""
+        from seguridad.models import Rol, UsuarioRol
+        from seguridad.role_identity import CLAVE_DEPARTAMENTO_PRODUCCION
+
+        operador = Usuario.objects.create(
+            username="prod-est", email="prod-est@acme.test", empresa=self.empresa, sucursal_default=self.sucursal,
+        )
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="PRODUCCION-EST", nombre="Producción",
+            clave_departamento=CLAVE_DEPARTAMENTO_PRODUCCION,
+        )
+        UsuarioRol.objects.create(usuario=operador, rol=rol, empresa=self.empresa)
+        _conceder_permisos(operador, self.empresa, ["R-PRODUCCION-OP"])
+        body = {"estatus_op": int(self.E.PREPARACION)}
+
+        # Control: en su sucursal el mismo usuario sí cambia el estatus.
+        propia = OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op="OP-EST-2")
+        resp = self._client(operador).post(
+            f"/api/v1/produccion/orden-produccion/{propia.pk}/estatus/", body, format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        otra_suc = Sucursal.objects.create(empresa=self.empresa, codigo="GDL", nombre="Guadalajara")
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(sucursal=otra_suc)
+        estatus_previo = OrdenProduccion.objects.get(pk=self.op.pk).estatus_op
+        resp = self._post(body, user=operador)
+        self.assertEqual(resp.status_code, 404, resp.data)
+        self.assertEqual(OrdenProduccion.objects.get(pk=self.op.pk).estatus_op, estatus_previo)
+
     def test_motivo_que_no_es_texto_responde_400(self):
         resp = self._post({"estatus_op": int(self.E.DETENIDO), "motivo": 5})
         self.assertEqual(resp.status_code, 400, resp.data)
