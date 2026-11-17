@@ -2252,6 +2252,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     if not detalles_oc:
                         raise ValidationError({"detalle": "La orden de compra no tiene productos para recibir."})
 
+                    acumulado = {}  # cantidad ya aceptada en esta petición por renglón de origen
                     for idx, item in enumerate(detalle_raw):
                         detalle_id = item.get("orden_compra_detalle")
                         if not detalle_id:
@@ -2288,7 +2289,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                                     )
                                 }
                             )
-                        if cantidad > pendiente:
+                        # El mismo renglón puede venir varias veces (otra ubicación o lote):
+                        # la suma de la petición, no cada copia, es la que se compara (#1173).
+                        acumulado[oc_detalle.pk] = acumulado.get(oc_detalle.pk, Decimal("0")) + cantidad
+                        if acumulado[oc_detalle.pk] > pendiente:
                             raise ValidationError(
                                 {
                                     "detalle": (
@@ -2318,6 +2322,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     if not detalles_op:
                         raise ValidationError({"detalle": "La orden de producción no tiene productos para recibir."})
 
+                    acumulado = {}  # cantidad ya aceptada en esta petición por renglón de origen
                     for idx, item in enumerate(detalle_raw):
                         detalle_id = item.get("orden_produccion_detalle")
                         if not detalle_id:
@@ -2361,7 +2366,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                                     )
                                 }
                             )
-                        if cantidad > pendiente:
+                        # El mismo renglón puede venir varias veces (otra ubicación o lote):
+                        # la suma de la petición, no cada copia, es la que se compara (#1173).
+                        acumulado[op_detalle.pk] = acumulado.get(op_detalle.pk, Decimal("0")) + cantidad
+                        if acumulado[op_detalle.pk] > pendiente:
                             raise ValidationError(
                                 {
                                     "detalle": (
