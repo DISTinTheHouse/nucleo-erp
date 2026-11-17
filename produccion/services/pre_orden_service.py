@@ -501,6 +501,8 @@ def requiere_recalculo(pre, mats):
     Lectura pura, con las mismas reglas que ``recalcular`` y ``revisar_semaforo``:
     el GET del detalle la usa para no bloquear ni escribir cuando nada cambió.
     """
+    if not mats and pre.origen == PreOrdenProduccion.Origen.RESURTIDO:
+        return False  # misma salida temprana que ``recalcular`` (#1182)
     if len(_faltan(mats)) != pre.materiales_faltantes:
         return True
     if pre.estatus not in RECALCULABLES:
@@ -511,8 +513,17 @@ def requiere_recalculo(pre, mats):
 
 
 def recalcular_ids(ids, motivo_regreso=None):
-    for pre in PreOrdenProduccion.objects.filter(pk__in=list(ids), estatus__in=RECALCULABLES).select_related("pedido"):
-        recalcular(pre, motivo_regreso=motivo_regreso)
+    """Recalcula sobre filas bloqueadas, el mismo candado que el GET del detalle
+    (#1181): una recepción de OC o un consumo de OP a la vez que un GET ya no
+    duplican la transición ni sus eventos/avisos. Orden por pk: sin interbloqueos."""
+    ids = sorted(set(ids))
+    if not ids:
+        return
+    with transaction.atomic():
+        filas = (PreOrdenProduccion.objects.filter(pk__in=ids, estatus__in=RECALCULABLES)
+                 .select_related("pedido").select_for_update(of=("self",)).order_by("pk"))
+        for pre in filas:
+            recalcular(pre, motivo_regreso=motivo_regreso)
 
 
 def recalcular_listas(empresa_id, sucursal_id, op=None):
