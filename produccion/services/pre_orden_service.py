@@ -134,8 +134,7 @@ def compromiso(pre):
 def referencia(pre):
     """Texto para mostrar el origen: ``pedido P-…`` o ``Resurtido · SKU``."""
     if pre.origen == PreOrdenProduccion.Origen.RESURTIDO:
-        p = pre.producto
-        return f"Resurtido · {(p.cod_proscai or p.codigo or p.nombre) if p else pre.pk}"
+        return f"Resurtido #{pre.pk}"  # siempre el folio de la pre-orden: distingue un resurtido de otro
     return f"pedido {getattr(pre.pedido, 'folio', None) or pre.pedido_id}"
 
 
@@ -850,3 +849,17 @@ def _pedidos_cubiertos(empresa_id, sucursal_id):
         preordenproduccion__empresa_id=empresa_id, preordenproduccion__sucursal_id=sucursal_id,
         preordenproduccion__origen=PreOrdenProduccion.Origen.RESURTIDO, preordenproduccion__estatus__in=CANCELABLES,
     ).values("pedido_id")
+
+
+def liberar_necesidades_oc(oc_id):
+    """Al cancelar una OC: sus necesidades vuelven a Pendiente (se pueden
+    consolidar en otra OC) si su pre-orden sigue abierta; si la pre-orden ya
+    se cerró, o la necesidad estaba huérfana, quedan Canceladas."""
+    from compras.models import NecesidadCompra as N
+    ahora = timezone.now()
+    base = N.objects.filter(orden_compra_id=oc_id)
+    abiertas = base.filter(estatus=N.Estatus.EN_OC, pre_orden__estatus__in=CANCELABLES).update(
+        estatus=N.Estatus.PENDIENTE, orden_compra=None, orden_compra_detalle=None, updated_at=ahora)
+    cerradas = base.filter(estatus__in=[N.Estatus.EN_OC, N.Estatus.HUERFANA]).update(
+        estatus=N.Estatus.CANCELADA, updated_at=ahora)
+    return abiertas, cerradas

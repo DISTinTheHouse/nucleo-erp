@@ -3336,7 +3336,8 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                      "cantidad": str(d.cantidad), "unidad": pieza.pk}
                     if d.variante_produccion_id else
                     # Resurtido: una sola OP con todos los SKUs fabricados (los de compra no).
-                    {"producto_variante_id": d.producto_variante_id, "cantidad": str(d.cantidad), "unidad": pieza.pk}
+                    # La OP admite 2 decimales; el renglón guarda 4 (los fabricados son piezas enteras).
+                    {"producto_variante_id": d.producto_variante_id, "cantidad": str(d.cantidad.quantize(Decimal("0.01"))), "unidad": pieza.pk}
                     for d in pre.detalles.all() if d.tipo_linea == "fabricado"
                 ],
             }
