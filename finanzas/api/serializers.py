@@ -846,12 +846,6 @@ class CentroCostoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSer
 
 
 class PolizaDetalleSerializer(serializers.ModelSerializer):
-    # EC-904: código y nombre de la cuenta para el PDF (mismos nombres que
-    # ``PolizaDetalleRelacionadoSerializer``). ``PolizaViewSet`` une la cuenta al
-    # leer las líneas; ``null`` si la línea perdió su cuenta (SET_NULL).
-    cuenta_contable_codigo = serializers.CharField(source="cuenta_contable.codigo", read_only=True, default=None)
-    cuenta_contable_nombre = serializers.CharField(source="cuenta_contable.nombre", read_only=True, default=None)
-
     class Meta:
         model = PolizaDetalle
         fields = "__all__"
@@ -920,11 +914,6 @@ class PolizaSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixi
 
 
 class FacturaProveedorDetalleSerializer(serializers.ModelSerializer):
-    # EC-904: nombre y código del producto (convención de los renglones de compras).
-    # ``FacturaProveedorViewSet`` une el producto al leer las líneas.
-    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
-    producto_codigo = serializers.CharField(source="producto.codigo", read_only=True, default=None)
-
     class Meta:
         model = FacturaProveedorDetalle
         fields = "__all__"
@@ -1195,11 +1184,6 @@ class CuentaPorPagarCreateSerializer(CuentaPorPagarSerializer):
 
 
 class CobroDetalleSerializer(serializers.ModelSerializer):
-    # EC-904: factura de la CxC (mismos nombres que en ``CuentaPorCobrarSerializer``).
-    # ``CobroViewSet`` la une al leer las líneas.
-    factura_id = serializers.IntegerField(source="cxc.factura_id", read_only=True)
-    factura_folio = serializers.CharField(source="cxc.factura.folio", read_only=True, default=None)
-
     class Meta:
         model = CobroDetalle
         fields = "__all__"
@@ -1287,10 +1271,6 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
 
 
 class PagoDetalleSerializer(serializers.ModelSerializer):
-    # EC-904: folio de la factura de proveedor de la CxP (mismo nombre que en
-    # ``CuentaPorPagarSerializer``). ``PagoViewSet`` la une al leer las líneas.
-    factura_proveedor_folio = serializers.CharField(source="cxp.factura_proveedor.folio", read_only=True, default=None)
-
     class Meta:
         model = PagoDetalle
         fields = "__all__"
@@ -1304,11 +1284,6 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
     pago_detalles = PagoDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)
-    # EC-904: el pago no guarda moneda; es la de su cuenta bancaria. Misma forma que en
-    # ``FacturaSerializer`` (id + código ISO). Sin tipo de cambio: el lado de
-    # proveedores no lo registra en ningún documento.
-    moneda = serializers.IntegerField(source="cuenta_bancaria.moneda_id", read_only=True)
-    moneda_nombre = serializers.CharField(source="cuenta_bancaria.moneda.codigo_iso", read_only=True)
 
     class Meta:
         model = Pago
@@ -1411,16 +1386,6 @@ class ConciliacionBancariaSerializer(serializers.ModelSerializer):
 
 
 class NotaCreditoDetalleSerializer(serializers.ModelSerializer):
-    # EC-904: lo que se acredita, del renglón de la factura (misma regla que
-    # ``FacturaDetalleSerializer``): producto, o servicio extra con talla ``null``.
-    producto_nombre = serializers.SerializerMethodField()
-    talla_nombre = serializers.CharField(
-        source="factura_detalle.pedido_detalle_talla.talla.nombre", read_only=True, default=None
-    )
-
-    def get_producto_nombre(self, obj) -> str | None:
-        return nombre_producto_o_servicio(obj.factura_detalle)
-
     class Meta:
         model = NotaCreditoDetalle
         fields = "__all__"
@@ -1434,15 +1399,6 @@ class NotaCreditoSerializer(CreateOnlyNestedLinesMixin, serializers.ModelSeriali
     nota_credito_detalles = NotaCreditoDetalleSerializer(many=True, required=False)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
     factura_folio = serializers.CharField(source="factura.folio", read_only=True)
-    # EC-904: la nota no guarda moneda ni tipo de cambio; son los de su factura.
-    # Moneda con la forma de ``FacturaSerializer`` (id + código ISO). El tipo de
-    # cambio es ``1`` en MXN y ``null`` si la factura en otra moneda no lo tiene.
-    moneda = serializers.IntegerField(source="factura.moneda_id", read_only=True)
-    moneda_nombre = serializers.CharField(source="factura.moneda.codigo_iso", read_only=True)
-    tipo_cambio = serializers.DecimalField(
-        source="factura.tipo_cambio_mxn", max_digits=18, decimal_places=6, read_only=True, allow_null=True
-    )
-    factura_uuid = serializers.CharField(source="factura.cfdi_uuid", read_only=True, default=None)
 
     class Meta:
         model = NotaCredito
@@ -1464,6 +1420,84 @@ class NotaCreditoSerializer(CreateOnlyNestedLinesMixin, serializers.ModelSeriali
             if cliente and factura and cliente.pk != getattr(factura, "cliente_id", None):
                 raise ValidationError({"cliente": "Cliente no coincide con la factura."})
         return attrs
+
+
+# == Lectura (list/retrieve) con los datos del PDF (EC-904) =====================
+#
+# Solo los usan ``list`` y ``retrieve``, cuyos querysets unen estas relaciones en
+# bloque. Create, update y las acciones (``cancelar``, ``contabilizar``,
+# ``timbrar``...) siguen con los serializers base, con la forma y las consultas de
+# siempre: después de mutar, el frontend relee el detalle.
+
+
+class PolizaDetalleLecturaSerializer(PolizaDetalleSerializer):
+    # Mismos nombres que ``PolizaDetalleRelacionadoSerializer``; ``null`` si la línea
+    # perdió su cuenta (SET_NULL).
+    cuenta_contable_codigo = serializers.CharField(source="cuenta_contable.codigo", read_only=True, default=None)
+    cuenta_contable_nombre = serializers.CharField(source="cuenta_contable.nombre", read_only=True, default=None)
+
+
+class PolizaLecturaSerializer(PolizaSerializer):
+    poliza_detalles = PolizaDetalleLecturaSerializer(many=True, read_only=True)
+
+
+class FacturaProveedorDetalleLecturaSerializer(FacturaProveedorDetalleSerializer):
+    # Convención de los renglones de compras.
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    producto_codigo = serializers.CharField(source="producto.codigo", read_only=True, default=None)
+
+
+class FacturaProveedorLecturaSerializer(FacturaProveedorSerializer):
+    factura_proveedor_detalles = FacturaProveedorDetalleLecturaSerializer(many=True, read_only=True)
+
+
+class CobroDetalleLecturaSerializer(CobroDetalleSerializer):
+    # Factura de la CxC, con los nombres de ``CuentaPorCobrarSerializer``. Sin saldo.
+    factura_id = serializers.IntegerField(source="cxc.factura_id", read_only=True)
+    factura_folio = serializers.CharField(source="cxc.factura.folio", read_only=True, default=None)
+
+
+class CobroLecturaSerializer(CobroSerializer):
+    cobro_detalles = CobroDetalleLecturaSerializer(many=True, read_only=True)
+
+
+class PagoDetalleLecturaSerializer(PagoDetalleSerializer):
+    # Nombre de ``CuentaPorPagarSerializer``.
+    factura_proveedor_folio = serializers.CharField(source="cxp.factura_proveedor.folio", read_only=True, default=None)
+
+
+class PagoLecturaSerializer(PagoSerializer):
+    pago_detalles = PagoDetalleLecturaSerializer(many=True, read_only=True)
+    # El pago no guarda moneda: es la de su cuenta bancaria, con la forma de
+    # ``FacturaSerializer`` (id + código ISO). Sin tipo de cambio: el lado de
+    # proveedores no lo registra en ningún documento.
+    moneda = serializers.IntegerField(source="cuenta_bancaria.moneda_id", read_only=True)
+    moneda_nombre = serializers.CharField(source="cuenta_bancaria.moneda.codigo_iso", read_only=True)
+
+
+class NotaCreditoDetalleLecturaSerializer(NotaCreditoDetalleSerializer):
+    # Lo que se acredita, del renglón de la factura (regla de ``FacturaDetalleSerializer``):
+    # producto, o servicio extra con talla ``null``.
+    producto_nombre = serializers.SerializerMethodField()
+    talla_nombre = serializers.CharField(
+        source="factura_detalle.pedido_detalle_talla.talla.nombre", read_only=True, default=None
+    )
+
+    def get_producto_nombre(self, obj) -> str | None:
+        return nombre_producto_o_servicio(obj.factura_detalle)
+
+
+class NotaCreditoLecturaSerializer(NotaCreditoSerializer):
+    nota_credito_detalles = NotaCreditoDetalleLecturaSerializer(many=True, read_only=True)
+    # La nota no guarda moneda ni tipo de cambio: son los de su factura. Moneda con la
+    # forma de ``FacturaSerializer``; tipo de cambio ``1`` en MXN y ``null`` si la
+    # factura en otra moneda no lo tiene.
+    moneda = serializers.IntegerField(source="factura.moneda_id", read_only=True)
+    moneda_nombre = serializers.CharField(source="factura.moneda.codigo_iso", read_only=True)
+    tipo_cambio = serializers.DecimalField(
+        source="factura.tipo_cambio_mxn", max_digits=18, decimal_places=6, read_only=True, allow_null=True
+    )
+    factura_uuid = serializers.CharField(source="factura.cfdi_uuid", read_only=True, default=None)
 
 
 class AlertaMoraSerializer(serializers.ModelSerializer):

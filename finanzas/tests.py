@@ -11275,3 +11275,268 @@ class FacturaDatosFiscalesPdfTests(DatosPdfBase):
         muchos = self._factura(folio="F-2", renglones=6)
         _, con_muchos = self._consultas(self.client_a, f"{FACTURAS_URL}{muchos.pk}/")
         self.assertEqual(con_muchos, con_pocos)
+
+
+class RespuestasDeEscrituraSinCamposPdfTests(DatosPdfBase):
+    """EC-904: los campos del PDF viven solo en list/retrieve. Create, update y las
+    acciones (``cancelar``, ``contabilizar``, ``timbrar``, ``timbrar-rep``,
+    ``cancelar-rep``, ``conciliar-cfdi``) responden con la forma de siempre y su
+    serialización no crece con las líneas (después de mutar, el frontend relee el
+    detalle).
+
+    Las consultas se cuentan solo dentro de ``to_representation`` del serializer de
+    la respuesta: el trabajo del servicio sí crece con las líneas (inserta o revierte
+    cada una) y no es lo que se mide. Las llamadas a Facturama se simulan en el
+    servicio de timbrado: aquí solo importa cómo se serializa la respuesta.
+    """
+
+    # Campos del PDF por documento: (cabecera, línea).
+    NUEVOS = {
+        "poliza": (set(), {"cuenta_contable_codigo", "cuenta_contable_nombre"}),
+        "pago": ({"moneda", "moneda_nombre"}, {"factura_proveedor_folio"}),
+        "cobro": (set(), {"factura_id", "factura_folio"}),
+        "nota": ({"moneda", "moneda_nombre", "tipo_cambio", "factura_uuid"}, {"producto_nombre", "talla_nombre"}),
+        "factura_proveedor": (set(), {"producto_nombre", "producto_codigo"}),
+    }
+
+    def setUp(self):
+        self.client_a = self._client(self.a["usuario"])
+
+    def _serializado(self, serializer_cls, llamar):
+        """Respuesta de ``llamar()`` y consultas hechas al serializar con ``serializer_cls``."""
+        original = serializer_cls.to_representation
+        consultas = []
+
+        def espia(serializer, instance):
+            with CaptureQueriesContext(connection) as ctx:
+                data = original(serializer, instance)
+            consultas.append(len(ctx))
+            return data
+
+        with patch.object(serializer_cls, "to_representation", espia):
+            resp = llamar()
+        self.assertIn(resp.status_code, (200, 201), getattr(resp, "data", resp))
+        self.assertTrue(consultas, "la respuesta no pasó por el serializer esperado")
+        return resp, sum(consultas)
+
+    def _comparar(self, doc, serializer_cls, campo_lineas, escenario, acciones):
+        """``escenario(n)`` arma el documento con ``n`` líneas; cada acción es
+        ``(nombre, llamar(documento) -> respuesta, extraer(data) -> dict)``. Con 1 y
+        con 4 líneas: sin campos del PDF y las mismas consultas al serializar."""
+        from finanzas.api import serializers as s
+
+        cls = getattr(s, serializer_cls)
+        cabecera, linea = self.NUEVOS[doc]
+        conteos = {}
+        for n in (1, 4):
+            documento = escenario(n)
+            for nombre, llamar, extraer in acciones:
+                resp, consultas = self._serializado(cls, lambda: llamar(documento))
+                data = extraer(resp.data)
+                lineas = data[campo_lineas]
+                with self.subTest(doc=doc, accion=nombre, lineas=n):
+                    self.assertFalse(cabecera & set(data), data)
+                    for renglon in lineas:
+                        self.assertFalse(linea & set(renglon), renglon)
+                if n == 1:
+                    conteos[nombre] = (consultas, len(lineas))
+                    continue
+                with self.subTest(doc=doc, accion=nombre, consultas="constantes"):
+                    self.assertEqual(len(lineas), conteos[nombre][1] * 4)
+                    self.assertEqual(consultas, conteos[nombre][0], f"{doc} {nombre}")
+
+    # -- póliza ----------------------------------------------------------------
+
+    def test_poliza(self):
+        cargo, abono, centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+
+        def escenario(n):
+            lineas = []
+            for _ in range(n):
+                lineas += [
+                    {"cuenta_contable": cargo.pk, "cargo": "10.00", "abono": "0.00"},
+                    {"cuenta_contable": abono.pk, "cargo": "0.00", "abono": "10.00"},
+                ]
+            return {"lineas": lineas, "id": None}
+
+        def crear(doc):
+            resp = self.client_a.post(POLIZAS_URL, {
+                "sucursal": self.a["sucursal"].pk, "centro_costo": centro_costo.pk,
+                "tipo": Poliza.PolizaTipo.DIARIO.value, "poliza_detalles": doc["lineas"],
+            }, format="json")
+            doc["id"] = resp.data["id"]
+            return resp
+
+        self._comparar("poliza", "PolizaSerializer", "poliza_detalles", escenario, [
+            ("create", crear, lambda d: d),
+            ("update", lambda doc: self.client_a.patch(
+                f"{POLIZAS_URL}{doc['id']}/", {"concepto": "otro"}, format="json"), lambda d: d),
+            ("contabilizar", lambda doc: self.client_a.post(f"{POLIZAS_URL}{doc['id']}/contabilizar/"), lambda d: d),
+            ("cancelar", lambda doc: self.client_a.post(f"{POLIZAS_URL}{doc['id']}/cancelar/"), lambda d: d),
+        ])
+
+    # -- cobro -----------------------------------------------------------------
+
+    def test_cobro(self):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+
+        def escenario(n):
+            cxcs = []
+            for i in range(n):
+                factura = Factura.objects.create(
+                    empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+                    moneda=self.moneda, folio=f"A-{n}-{i}",
+                )
+                cxcs.append(CuentaPorCobrar.objects.create(
+                    empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+                    total=Decimal("100.00"), saldo=Decimal("100.00"),
+                ))
+            return {"cxcs": cxcs, "id": None}
+
+        def crear(doc):
+            resp = self.client_a.post(COBROS_URL, {
+                "cliente": self.a["cliente"].pk, "cuenta_bancaria": cuenta.pk,
+                "total_cobrado": str(Decimal("10.00") * len(doc["cxcs"])), "estatus": "Borrador",
+                "cobro_detalles": [{"cxc": c.pk, "importe_aplicado": "10.00"} for c in doc["cxcs"]],
+            }, format="json")
+            doc["id"] = resp.data["id"]
+            return resp
+
+        def accion(url, metodo):
+            def llamar(doc):
+                with patch(f"finanzas.api.views.FacturaTimbradoService.{metodo}"):
+                    return self.client_a.post(f"{COBROS_URL}{doc['id']}/{url}/", {"motivo_sat": "02"}, format="json")
+            return llamar
+
+        self._comparar("cobro", "CobroSerializer", "cobro_detalles", escenario, [
+            ("create", crear, lambda d: d),
+            ("update", lambda doc: self.client_a.patch(
+                f"{COBROS_URL}{doc['id']}/", {"estatus": "Aplicado"}, format="json"), lambda d: d),
+            ("timbrar-rep", accion("timbrar-rep", "timbrar_rep"), lambda d: d),
+            ("cancelar-rep", accion("cancelar-rep", "cancelar_rep"), lambda d: d),
+            ("cancelar", lambda doc: self.client_a.post(f"{COBROS_URL}{doc['id']}/cancelar/"), lambda d: d),
+        ])
+
+    # -- pago ------------------------------------------------------------------
+
+    def test_pago(self):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        proveedor, _, oc, _, recepcion, _, _ = self._crear_oc_recepcion_y_factura_proveedor(
+            self.a["empresa"], self.a["sucursal"], self.a["usuario"],
+        )
+
+        def escenario(n):
+            cxps = []
+            for i in range(n):
+                fp = FacturaProveedor.objects.create(
+                    empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=proveedor, oc=oc,
+                    recepcion=recepcion, moneda=self.moneda, folio=f"FP-{n}-{i}", total=Decimal("100.00"),
+                    estatus=FacturaProveedor.FacturaProveedorStatus.REGISTRADA,
+                )
+                cxps.append(CuentaPorPagar.objects.create(
+                    empresa=self.a["empresa"], proveedor=proveedor, factura_proveedor=fp,
+                    total=Decimal("100.00"), saldo=Decimal("100.00"),
+                ))
+            return {"cxps": cxps, "id": None}
+
+        def crear(doc):
+            resp = self.client_a.post(PAGOS_URL, {
+                "proveedor": proveedor.pk, "cuenta_bancaria": cuenta.pk,
+                "total_pagado": str(Decimal("10.00") * len(doc["cxps"])),
+                "pago_detalles": [{"cxp": c.pk, "importe_aplicado": "10.00"} for c in doc["cxps"]],
+            }, format="json")
+            doc["id"] = resp.data["id"]
+            return resp
+
+        self._comparar("pago", "PagoSerializer", "pago_detalles", escenario, [
+            ("create", crear, lambda d: d),
+            ("update", lambda doc: self.client_a.patch(
+                f"{PAGOS_URL}{doc['id']}/", {"observaciones": "otra"}, format="json"), lambda d: d),
+            ("cancelar", lambda doc: self.client_a.post(f"{PAGOS_URL}{doc['id']}/cancelar/"), lambda d: d),
+        ])
+
+    # -- nota de crédito -------------------------------------------------------
+
+    def test_nota_credito(self):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        # ``timbrar`` exige E-FIN-FACTURAS, que la base ya concede a este usuario.
+        self.assertTrue(UsuarioPermiso.objects.filter(
+            usuario=self.a["usuario"], permiso=Permiso.objects.get(clave="E-FIN-FACTURAS"),
+        ).exists())
+
+        def escenario(n):
+            factura = Factura.objects.create(
+                empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+                pedido=self.a["pedido"], moneda=self.moneda, folio=f"F-NC-{n}", total=Decimal("1000.00"),
+            )
+            CuentaPorCobrar.objects.create(
+                empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+                total=Decimal("1000.00"), saldo=Decimal("1000.00"),
+            )
+            renglones = [
+                FacturaDetalle.objects.create(
+                    factura=factura, pedido_detalle=self.a["detalle"], pedido_detalle_talla=self.a["talla_pedido"],
+                    producto=self.a["producto"], cantidad=Decimal("1"), precio_unitario=Decimal("100.00"),
+                )
+                for _ in range(n)
+            ]
+            return {"factura": factura, "renglones": renglones, "id": None}
+
+        def crear(doc):
+            resp = self.client_a.post(NOTAS_CREDITO_URL, {
+                "factura": doc["factura"].pk, "cliente": self.a["cliente"].pk,
+                "estatus": NotaCredito.Estatus.EMITIDA.value, "total": "10.00",
+                "nota_credito_detalles": [
+                    {"factura_detalle": r.pk, "cantidad": "1", "precio_unitario": "1.00"} for r in doc["renglones"]
+                ],
+            }, format="json")
+            doc["id"] = resp.data["id"]
+            return resp
+
+        def timbrar(doc):
+            with patch("finanzas.api.views.FacturaTimbradoService.timbrar_nota_credito"):
+                return self.client_a.post(f"{NOTAS_CREDITO_URL}{doc['id']}/timbrar/")
+
+        def conciliar(doc):
+            with patch("finanzas.api.views.FacturaTimbradoService.conciliar_cfdi", return_value=("sin_cambio", None)):
+                return self.client_a.post(f"{NOTAS_CREDITO_URL}{doc['id']}/conciliar-cfdi/")
+
+        self._comparar("nota", "NotaCreditoSerializer", "nota_credito_detalles", escenario, [
+            ("create", crear, lambda d: d),
+            ("update", lambda doc: self.client_a.patch(
+                f"{NOTAS_CREDITO_URL}{doc['id']}/", {"observaciones": "otra"}, format="json"), lambda d: d),
+            ("timbrar", timbrar, lambda d: d),
+            ("conciliar-cfdi", conciliar, lambda d: d["nota_credito"]),
+            ("cancelar", lambda doc: self.client_a.post(f"{NOTAS_CREDITO_URL}{doc['id']}/cancelar/"), lambda d: d),
+        ])
+
+    # -- factura de proveedor --------------------------------------------------
+
+    def test_factura_proveedor(self):
+        proveedor, producto, oc, oc_detalle, recepcion, recepcion_detalle, _ = (
+            self._crear_oc_recepcion_y_factura_proveedor(self.a["empresa"], self.a["sucursal"], self.a["usuario"])
+        )
+
+        def crear(doc):
+            resp = self.client_a.post(FACTURAS_PROVEEDOR_URL, {
+                "sucursal": self.a["sucursal"].pk, "proveedor": proveedor.pk, "oc": oc.pk,
+                "recepcion": recepcion.pk, "moneda": self.moneda.pk,
+                "factura_proveedor_detalles": [
+                    {"oc_detalle": oc_detalle.pk, "recepcion_detalle": recepcion_detalle.pk,
+                     "producto": producto.pk, "cantidad": "1.00", "precio_unitario": "1.00"}
+                    for _ in range(doc["n"])
+                ],
+            }, format="json")
+            doc["id"] = resp.data["id"]
+            return resp
+
+        self._comparar(
+            "factura_proveedor", "FacturaProveedorSerializer", "factura_proveedor_detalles",
+            lambda n: {"n": n, "id": None},
+            [
+                ("create", crear, lambda d: d),
+                ("update", lambda doc: self.client_a.patch(
+                    f"{FACTURAS_PROVEEDOR_URL}{doc['id']}/", {"observaciones": "otra"}, format="json"), lambda d: d),
+            ],
+        )

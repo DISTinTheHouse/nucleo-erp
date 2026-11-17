@@ -61,6 +61,7 @@ from finanzas.api.serializers import (
     AlertaMoraSerializer,
     BancoSerializer,
     CentroCostoSerializer,
+    CobroLecturaSerializer,
     CobroSerializer,
     ConciliacionBancariaSerializer,
     ConciliacionPrepararInputSerializer,
@@ -77,10 +78,14 @@ from finanzas.api.serializers import (
     FacturaSerializer,
     FacturaDesdePedidoInputSerializer,
     FacturaPendienteCobroInputSerializer,
+    FacturaProveedorLecturaSerializer,
     FacturaProveedorSerializer,
     MovimientoBancarioSerializer,
+    NotaCreditoLecturaSerializer,
     NotaCreditoSerializer,
+    PagoLecturaSerializer,
     PagoSerializer,
+    PolizaLecturaSerializer,
     PolizaSerializer,
     FacturamaProductSerializer,
     FacturamaCfdiCreateSerializer,
@@ -1287,13 +1292,26 @@ class ParametrosContabilidadViewSet(FinanzasBaseViewSet):
         serializer.save()
 
 
-class PolizaViewSet(FinanzasBaseViewSet):
-    # Las líneas se leen una vez para todo el listado (el serializer las suma), con
-    # su cuenta contable en la misma consulta (EC-904: código y nombre por línea).
-    queryset = Poliza.objects.prefetch_related(
-        Prefetch("poliza_detalles", queryset=PolizaDetalle.objects.select_related("cuenta_contable"))
-    )
+class LecturaConDatosPdfMixin:
+    """EC-904: ``list`` y ``retrieve`` responden con ``serializer_lectura`` (los datos
+    del PDF), y sus querysets unen esas relaciones en bloque. Create, update y las
+    acciones siguen con ``serializer_class``: misma forma y mismas consultas que antes."""
+
+    serializer_lectura = None
+
+    def _es_lectura(self):
+        return self.action in ("list", "retrieve")
+
+    def get_serializer_class(self):
+        if self.serializer_lectura is not None and self._es_lectura():
+            return self.serializer_lectura
+        return super().get_serializer_class()
+
+
+class PolizaViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
+    queryset = Poliza.objects.all()
     serializer_class = PolizaSerializer
+    serializer_lectura = PolizaLecturaSerializer
 
     # Crear, editar, borrar, contabilizar y cancelar (que genera contrapóliza) son
     # asientos (#826). ``validar-cuadre`` es un POST que solo lee.
@@ -1302,7 +1320,12 @@ class PolizaViewSet(FinanzasBaseViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = super().get_queryset()
+        # Las líneas se leen una vez para todo el listado (el serializer las suma); al
+        # leer, con su cuenta contable en la misma consulta (EC-904).
+        lineas = "poliza_detalles"
+        if self._es_lectura():
+            lineas = Prefetch(lineas, queryset=PolizaDetalle.objects.select_related("cuenta_contable"))
+        qs = super().get_queryset().prefetch_related(lineas)
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -1415,9 +1438,10 @@ def _vacio_como_nulo(value):
     return None if value == "" else value
 
 
-class FacturaProveedorViewSet(FinanzasBaseViewSet):
+class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
     queryset = FacturaProveedor.objects.all()
     serializer_class = FacturaProveedorSerializer
+    serializer_lectura = FacturaProveedorLecturaSerializer
 
     def get_queryset(self):
         user = self.request.user
@@ -1427,12 +1451,13 @@ class FacturaProveedorViewSet(FinanzasBaseViewSet):
         qs = (
             super().get_queryset()
             .select_related("proveedor", "moneda", "oc", "recepcion")
-            # EC-904: el producto de cada línea en la misma consulta de las líneas.
+            # EC-904: al leer, el producto de cada línea en la misma consulta de las líneas.
             .prefetch_related(
                 Prefetch(
                     "factura_proveedor_detalles",
                     queryset=FacturaProveedorDetalle.objects.select_related("producto"),
                 )
+                if self._es_lectura() else "factura_proveedor_detalles"
             )
             .defer("pdf_adjunto")
             .annotate(
@@ -1897,10 +1922,11 @@ def _validar_transicion_estatus_cobro_pago(Estatus, anterior, nuevo, documento):
         )
 
 
-class CobroViewSet(FinanzasBaseViewSet):
+class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
     codigo_lectura_seccion = "R-CONTABILIDAD-CXC"  # EC-746: CxC y Cobros son una sección
     queryset = Cobro.objects.all()
     serializer_class = CobroSerializer
+    serializer_lectura = CobroLecturaSerializer
 
     def _cobros_visibles(self):
         """Alcance del listado sin sus filtros de ``?``: activos, empresa y sucursal (#753)."""
@@ -1917,7 +1943,7 @@ class CobroViewSet(FinanzasBaseViewSet):
         # consultas por fila del listado. Sólo al leer: en las escrituras ``get_object``
         # no usa esa caché (los servicios releen las líneas) y sería una consulta más.
         qs = self._cobros_visibles()
-        if self.action in ("list", "retrieve"):
+        if self._es_lectura():
             # EC-904: cada línea con la factura de su CxC (folio) en la misma consulta.
             qs = qs.select_related("cliente", "cuenta_bancaria__moneda").prefetch_related(
                 Prefetch("cobro_detalles", queryset=CobroDetalle.objects.select_related("cxc__factura"))
@@ -2139,9 +2165,10 @@ class CobroViewSet(FinanzasBaseViewSet):
         return Response(CobroSerializer(cobro).data)
 
 
-class PagoViewSet(FinanzasBaseViewSet):
+class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
     queryset = Pago.objects.all()
     serializer_class = PagoSerializer
+    serializer_lectura = PagoLecturaSerializer
 
     def get_queryset(self):
         user = self.request.user
@@ -2150,7 +2177,7 @@ class PagoViewSet(FinanzasBaseViewSet):
         if not empresa:
             return qs.none()
         qs = qs.filter(empresa=empresa)
-        if self.action in ("list", "retrieve"):
+        if self._es_lectura():
             # EC-904: proveedor, cuenta (con su moneda) y líneas (con el folio de su
             # factura de proveedor) en bloque; antes eran ~3 consultas por fila del
             # listado. Sólo al leer, como en ``CobroViewSet``.
@@ -2472,9 +2499,10 @@ class TimbradoNotaCreditoFallido(ValidationError):
         self.detail["nota_credito"] = {"id": nota.pk, "estatus": nota.estatus}
 
 
-class NotaCreditoViewSet(FinanzasBaseViewSet):
+class NotaCreditoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
     queryset = NotaCredito.objects.all()
     serializer_class = NotaCreditoSerializer
+    serializer_lectura = NotaCreditoLecturaSerializer
 
     # Crear, editar, borrar, emitir y cancelar mueven la CxC y la póliza (#752).
     mensaje_sin_permiso_escritura = "No tienes permiso para registrar o cancelar notas de crédito."
@@ -2486,7 +2514,7 @@ class NotaCreditoViewSet(FinanzasBaseViewSet):
             return NotaCredito.objects.none()
         qs = NotaCredito.objects.filter(factura__empresa=empresa)
         qs = por_sucursal(qs, user, "factura__sucursal")
-        if self.action in ("list", "retrieve"):
+        if self._es_lectura():
             # EC-904: cliente, factura (moneda) y líneas con su renglón de factura en
             # bloque. Antes el listado hacía ~3 consultas por nota.
             qs = qs.select_related("cliente", "factura__moneda").prefetch_related(
