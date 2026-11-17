@@ -7,22 +7,25 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Case, CharField, Count, Exists, F, Min, OuterRef, Q, Subquery, Sum, Value, When
+from django.db.models.functions import Coalesce, NullIf, Trim
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.filters import OrderingFilter
 from nucleo.listados import PaginacionOpcionalLimitOffset
 from rest_framework.response import Response
 
 from terceros.cartera import cartera_de_cliente
-from terceros.scope import clientes_base, clientes_visibles, clientes_visibles_entre
+from terceros.scope import clientes_base, clientes_visibles, clientes_visibles_entre, ve_clientes_sin_asignacion
 from seguridad.role_identity import (
     CLAVE_DEPARTAMENTO_MESA_CONTROL_Y_VENTAS,
     CLAVE_DEPARTAMENTO_VENTAS,
     claves_departamento_usuario,
 )
 from usuarios.models import Usuario
+from ventas.api.views import FILTER_BACKENDS_SIN_ORDERING
 from ventas.models import Cotizacion, Oportunidad, OportunidadSeguimiento, Pedido
 from ventas.scope import cotizaciones_visibles, oportunidades_base, oportunidades_visibles
 from nucleo.permisos import CODIGOS_OPORTUNIDADES, LecturaPorCodigo
@@ -97,6 +100,59 @@ def con_estado(qs):
     )
 
 
+def cliente_visible(user):
+    """Expresión booleana "el usuario ve al cliente de la oportunidad", o ``None`` si los
+    ve todos (superusuario y admin de empresa: sin costo).
+
+    Misma regla que ``ClienteVisibleMixin`` (``clientes_visibles_entre``), como
+    ``EXISTS`` dentro de la consulta, igual que el buscador global
+    (``nucleo.api.search._oportunidades_buscables``). Sin cliente da ``False``.
+    """
+    if ve_clientes_sin_asignacion(user):
+        return None
+    return Exists(clientes_visibles(clientes_base(), user).filter(pk=OuterRef("cliente_id")))
+
+
+# ``?ordering=`` por un campo del cliente: el término público, su alias en la consulta y
+# lo que ordena. La razón social ordena por la etiqueta que se muestra: la razón social o,
+# si está vacía, el nombre (misma regla que ``cotizaciones_listado.opciones``).
+ORDEN_CLIENTE = {
+    "cliente__nombre": ("orden_cliente_nombre", F("cliente__nombre")),
+    "cliente__razon_social": (
+        "orden_cliente_razon_social",
+        Coalesce(NullIf(Trim(F("cliente__razon_social")), Value("")), F("cliente__nombre")),
+    ),
+}
+
+
+class OrdenamientoOportunidadesFilter(OrderingFilter):
+    """``OrderingFilter`` con la lista blanca de la vista, pero un cliente que el usuario
+    no ve ordena como si no hubiera cliente (``NULL``): si no, el orden delataría su
+    nombre o su razón social (EC-902). El ``EXISTS`` solo se arma cuando se ordena por
+    un campo del cliente y el usuario no ve a todos los clientes."""
+
+    def filter_queryset(self, request, queryset, view):
+        ordering = self.get_ordering(request, queryset, view)
+        if not ordering:
+            return queryset
+        pedidos = {campo.lstrip("-") for campo in ordering} & ORDEN_CLIENTE.keys()
+        if pedidos:
+            visible = cliente_visible(request.user)
+            queryset = queryset.alias(**{
+                alias: valor if visible is None else Case(
+                    When(visible, then=valor), default=Value(None), output_field=CharField()
+                )
+                for alias, valor in (ORDEN_CLIENTE[campo] for campo in pedidos)
+            })
+        return queryset.order_by(*[
+            ("-" if campo.startswith("-") else "") + ORDEN_CLIENTE.get(campo.lstrip("-"), (campo.lstrip("-"),))[0]
+            for campo in ordering
+        ])
+
+
+FILTER_BACKENDS_OPORTUNIDADES = (*FILTER_BACKENDS_SIN_ORDERING, OrdenamientoOportunidadesFilter)
+
+
 def filas_cotizaciones(qs, user, limite=None):
     """Cotizaciones visibles para la pantalla de la oportunidad, con su pedido (si ya lo hay).
     Una consulta, sin importar cuántas sean."""
@@ -161,13 +217,14 @@ class ClienteVisibleMixin:
 
 class OportunidadSerializer(ClienteVisibleMixin, serializers.ModelSerializer):
     cliente_nombre = serializers.SerializerMethodField()
+    cliente_razon_social = serializers.SerializerMethodField()
     vendedor_nombre = serializers.CharField(source="vendedor.get_full_name", read_only=True, default=None)
     estado = serializers.SerializerMethodField()
 
     class Meta:
         model = Oportunidad
         fields = [
-            "id", "cliente", "cliente_nombre", "vendedor", "vendedor_nombre", "nombre_contacto",
+            "id", "cliente", "cliente_nombre", "cliente_razon_social", "vendedor", "vendedor_nombre", "nombre_contacto",
             "telefono", "correo", "titulo", "monto_estimado", "etapa", "estado", "motivo_perdida",
             "proximo_contacto", "notas", "created_at", "updated_at",
         ]
@@ -175,6 +232,28 @@ class OportunidadSerializer(ClienteVisibleMixin, serializers.ModelSerializer):
 
     def get_cliente_nombre(self, obj) -> str | None:
         return self._nombre_cliente(obj)
+
+    def get_cliente_razon_social(self, obj) -> str | None:
+        # Razón social del cliente ligado (EC-902), con la misma regla que ``cliente_nombre``:
+        # ``None`` sin cliente o si el usuario no lo ve. Reusa ese camino para que los dos
+        # campos no puedan diferir; la consulta de visibilidad sigue siendo una por respuesta
+        # (en la lista la guarda el mixin; con un solo objeto, ``_clientes_visibles``).
+        # Comentario y no docstring: drf-spectacular lo publicaría como ``description``.
+        if self._nombre_cliente(obj) is None:
+            return None
+        return obj.cliente.razon_social
+
+    def _clientes_visibles(self, obj):
+        """Como el del mixin, pero también guardado cuando se serializa un solo objeto
+        (detalle, ``onboarding``, ``transferir``): ahí el mixin no tiene dónde guardarlo y
+        ``cliente_nombre`` y ``cliente_razon_social`` harían la consulta dos veces."""
+        if isinstance(self.parent, serializers.ListSerializer):
+            return super()._clientes_visibles(obj)
+        guardados = self.__dict__.setdefault("_clientes_visibles_por_cliente", {})
+        cliente_id = getattr(self._cliente_de(obj), "pk", None)
+        if cliente_id not in guardados:
+            guardados[cliente_id] = super()._clientes_visibles(obj)
+        return guardados[cliente_id]
 
     def get_estado(self, obj):
         if obj.etapa == Oportunidad.Etapa.PERDIDA:
@@ -219,12 +298,15 @@ class OportunidadViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "patch", "delete"]
     pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= la lista completa; ?limit= topado (EC-757)
     # Explícitos: sin esto DRF acepta en ``?ordering=`` los ``source`` del serializer, y
-    # ``vendedor__get_full_name`` no es una columna (500). Son los que ya se aceptaban.
+    # ``vendedor__get_full_name`` no es una columna (500). Son los que ya se aceptaban,
+    # más ``cliente__razon_social`` (EC-902). Los dos del cliente pasan por
+    # ``OrdenamientoOportunidadesFilter``: un cliente oculto ordena como ``NULL``.
     ordering_fields = [
-        "id", "cliente", "cliente__nombre", "vendedor", "nombre_contacto", "telefono", "correo",
-        "titulo", "monto_estimado", "etapa", "motivo_perdida", "proximo_contacto", "notas",
-        "created_at", "updated_at",
+        "id", "cliente", "cliente__nombre", "cliente__razon_social", "vendedor", "nombre_contacto",
+        "telefono", "correo", "titulo", "monto_estimado", "etapa", "motivo_perdida",
+        "proximo_contacto", "notas", "created_at", "updated_at",
     ]
+    filter_backends = FILTER_BACKENDS_OPORTUNIDADES
 
     def get_queryset(self):
         qs = oportunidades_visibles(super().get_queryset(), self.request.user)
@@ -246,7 +328,14 @@ class OportunidadViewSet(viewsets.ModelViewSet):
             qs = qs.filter(vendedor_id=_entero(params, "vendedor"))
         buscar = (params.get("q") or "").strip()
         if buscar:
-            qs = qs.filter(Q(titulo__icontains=buscar) | Q(nombre_contacto__icontains=buscar))
+            # Nombre y razón social del cliente solo cuentan si el usuario ve a ese cliente
+            # (EC-902), como en el buscador global: si no, buscar delataría al cliente oculto.
+            por_cliente = Q(cliente__nombre__icontains=buscar) | Q(cliente__razon_social__icontains=buscar)
+            visible = cliente_visible(self.request.user)
+            if visible is not None:
+                qs = qs.alias(busqueda_cliente_visible=visible)
+                por_cliente &= Q(busqueda_cliente_visible=True)
+            qs = qs.filter(Q(titulo__icontains=buscar) | Q(nombre_contacto__icontains=buscar) | por_cliente)
         hasta = params.get("proximo_contacto_hasta")
         if hasta:
             fecha = parse_date(hasta)

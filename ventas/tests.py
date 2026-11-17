@@ -5775,9 +5775,9 @@ class OportunidadSeguimientosTests(OportunidadesBase):
         data = self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/").data
 
         self.assertEqual(set(data), {
-            "id", "cliente", "cliente_nombre", "vendedor", "vendedor_nombre", "nombre_contacto",
-            "telefono", "correo", "titulo", "monto_estimado", "etapa", "estado", "motivo_perdida",
-            "proximo_contacto", "notas", "created_at", "updated_at",
+            "id", "cliente", "cliente_nombre", "cliente_razon_social", "vendedor", "vendedor_nombre",
+            "nombre_contacto", "telefono", "correo", "titulo", "monto_estimado", "etapa", "estado",
+            "motivo_perdida", "proximo_contacto", "notas", "created_at", "updated_at",
         })
 
     # -- seguimientos --------------------------------------------------------
@@ -6210,6 +6210,367 @@ class OportunidadesValidacionesTests(OportunidadesBase):
 
         self.cliente.vendedores.add(self.ana)
         self.assertEqual(self._client(self.ana).get(url).data["cliente_nombre"], "Cliente Acme")
+
+    # -- razón social del cliente (EC-902) ------------------------------------
+
+    def _cliente_rs(self, nombre, razon_social, asignado_a=()):
+        cliente = Cliente.objects.create(empresa=self.empresa, nombre=nombre, razon_social=razon_social)
+        cliente.vendedores.add(*asignado_a)
+        return cliente
+
+    def _mesa(self):
+        """Mesa de Control: ve todos los clientes de la empresa por departamento, sin
+        tenerlos asignados (``clientes_visibles``), y sus propias oportunidades."""
+        mesa = Usuario.objects.create(username="mesa", email="mesa@acme.test", empresa=self.empresa)
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="MESACONTROL-0002", nombre="Mesa-de-control", estatus=Rol.Estatus.ACTIVO
+        )
+        _con_claves(rol, ("R-CRM",))
+        UsuarioRol.objects.create(usuario=mesa, rol=rol, empresa=self.empresa)
+        return mesa
+
+    def test_cliente_razon_social_sale_en_lista_detalle_onboarding_y_transferir(self):
+        cliente = self._cliente_rs("Corto", "Corto SA de CV", asignado_a=[self.ana])
+        op = self._op(self.ana, cliente=cliente)
+        url = f"{OPORTUNIDADES_URL}{op.pk}/"
+        ana = self._client(self.ana)
+
+        respuestas = {
+            "lista": ana.get(OPORTUNIDADES_URL).data[0],
+            "detalle": ana.get(url).data,
+            "onboarding": ana.get(f"{url}onboarding/").data["oportunidad"],
+            "transferir": self._client(self.jefe).post(f"{url}transferir/", {"vendedor": self.beto.pk}).data,
+        }
+
+        for donde, fila in respuestas.items():
+            with self.subTest(donde=donde):
+                self.assertEqual(fila["cliente_razon_social"], "Corto SA de CV")
+                # ``cliente_nombre`` sigue siendo el nombre corto.
+                self.assertEqual(fila["cliente_nombre"], "Corto")
+
+    def test_cliente_razon_social_es_null_sin_cliente_y_con_cliente_oculto(self):
+        sin_cliente = self._op(self.ana)
+        oculto = self._op(self.ana, cliente=self._cliente_rs("Oculto", "Oculto SA"))
+        ana = self._client(self.ana)
+
+        for op in (sin_cliente, oculto):
+            url = f"{OPORTUNIDADES_URL}{op.pk}/"
+            fila = next(o for o in ana.get(OPORTUNIDADES_URL).data if o["id"] == op.pk)
+            for donde, datos in {
+                "lista": fila, "detalle": ana.get(url).data, "onboarding": ana.get(f"{url}onboarding/").data["oportunidad"],
+            }.items():
+                with self.subTest(op=op.pk, donde=donde):
+                    # La llave siempre viene, en ``null``.
+                    self.assertIn("cliente_razon_social", datos)
+                    self.assertIsNone(datos["cliente_razon_social"])
+                    self.assertIsNone(datos["cliente_nombre"])
+
+    def test_cliente_razon_social_lo_ven_admin_y_mesa_de_control(self):
+        cliente = self._cliente_rs("Oculto", "Oculto SA")
+        mesa = self._mesa()
+        de_ana = self._op(self.ana, cliente=cliente)
+        de_mesa = self._op(mesa, cliente=cliente)
+
+        self.assertEqual(self._client(self.jefe).get(f"{OPORTUNIDADES_URL}{de_ana.pk}/").data["cliente_razon_social"], "Oculto SA")
+        self.assertEqual(self._client(mesa).get(OPORTUNIDADES_URL).data[0]["cliente_razon_social"], "Oculto SA")
+        self.assertEqual(self._client(mesa).get(f"{OPORTUNIDADES_URL}{de_mesa.pk}/").data["cliente_razon_social"], "Oculto SA")
+        # Para Ana, el mismo cliente sigue oculto.
+        self.assertIsNone(self._client(self.ana).get(f"{OPORTUNIDADES_URL}{de_ana.pk}/").data["cliente_razon_social"])
+
+    def test_cliente_razon_social_no_agrega_consultas_por_fila(self):
+        def consultas(user):
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._client(user).get(OPORTUNIDADES_URL)
+            self.assertEqual(resp.status_code, 200)
+            return len(ctx), len(resp.data)
+
+        self._op(self.ana, cliente=self._cliente_rs("C0", "C0 SA", asignado_a=[self.ana]))
+        consultas(self.ana)  # calienta cachés de permisos
+        pocas = {"vendedor": consultas(self.ana)[0], "admin": consultas(self.jefe)[0]}
+        for i in range(1, 8):
+            asignado = [self.ana] if i % 2 else []
+            self._op(self.ana, cliente=self._cliente_rs(f"C{i}", f"C{i} SA", asignado_a=asignado))
+        muchas = {"vendedor": consultas(self.ana), "admin": consultas(self.jefe)}
+
+        self.assertEqual({k: v[1] for k, v in muchas.items()}, {"vendedor": 8, "admin": 8})
+        self.assertEqual(pocas, {k: v[0] for k, v in muchas.items()})
+
+    def _escenario_orden(self):
+        """Tres clientes de Ana (uno oculto para ella) y una oportunidad sin cliente.
+        Nombre y razón social van en órdenes distintos para que no se confundan."""
+        visible_a = self._cliente_rs("Alfa", "Zeta SA", asignado_a=[self.ana])
+        oculto = self._cliente_rs("Beta", "Alfa SA")
+        visible_c = self._cliente_rs("Gama", "Media SA", asignado_a=[self.ana])
+        return {
+            "a": self._op(self.ana, cliente=visible_a).pk,
+            "b": self._op(self.ana, cliente=oculto).pk,
+            "c": self._op(self.ana, cliente=visible_c).pk,
+            "n": self._op(self.ana).pk,
+        }
+
+    def _orden(self, user, ordering):
+        resp = self._client(user).get(OPORTUNIDADES_URL, {"ordering": ordering})
+        self.assertEqual(resp.status_code, 200, ordering)
+        return [o["id"] for o in resp.data]
+
+    def test_ordering_por_campos_del_cliente_trata_al_oculto_como_null(self):
+        ops = self._escenario_orden()
+
+        def ids(*claves):
+            return [ops[c] for c in claves]
+
+        # ASC deja los NULL al final y DESC al principio (PostgreSQL); entre ellos, ``-id``.
+        # Para Ana, "Beta"/"Alfa SA" (oculto) cuenta como la oportunidad sin cliente.
+        esperado = {
+            (self.ana, "cliente__razon_social,-id"): ids("c", "a", "n", "b"),
+            (self.ana, "-cliente__razon_social,-id"): ids("n", "b", "a", "c"),
+            (self.ana, "cliente__nombre,-id"): ids("a", "c", "n", "b"),
+            (self.ana, "-cliente__nombre,-id"): ids("n", "b", "c", "a"),
+            # El admin ve todos los clientes: orden de siempre.
+            (self.jefe, "cliente__razon_social,-id"): ids("b", "c", "a", "n"),
+            (self.jefe, "-cliente__razon_social,-id"): ids("n", "a", "c", "b"),
+            (self.jefe, "cliente__nombre,-id"): ids("a", "b", "c", "n"),
+            (self.jefe, "-cliente__nombre,-id"): ids("n", "c", "b", "a"),
+        }
+        for (user, ordering), ids_esperados in esperado.items():
+            with self.subTest(user=user.username, ordering=ordering):
+                self.assertEqual(self._orden(user, ordering), ids_esperados)
+
+    def test_ordering_por_campos_del_cliente_con_mesa_de_control(self):
+        # Mesa ve al cliente por departamento: pasa por el EXISTS y lo ordena como visible.
+        mesa = self._mesa()
+        zeta = self._op(mesa, cliente=self._cliente_rs("Alfa", "Zeta SA")).pk
+        alfa = self._op(mesa, cliente=self._cliente_rs("Beta", "Alfa SA")).pk
+
+        self.assertEqual(self._orden(mesa, "cliente__razon_social,-id"), [alfa, zeta])
+        self.assertEqual(self._orden(mesa, "-cliente__razon_social,-id"), [zeta, alfa])
+        self.assertEqual(self._orden(mesa, "cliente__nombre,-id"), [zeta, alfa])
+
+    def test_ordering_por_razon_social_sigue_la_etiqueta_visible(self):
+        # Sin razón social (vacía o en blanco) la etiqueta es el nombre: ordena entre las Z,
+        # no al principio. Un cliente oculto sigue ordenando como NULL.
+        alfa = self._op(self.ana, cliente=self._cliente_rs("Primero", "Alfa SA", asignado_a=[self.ana])).pk
+        yate = self._op(self.ana, cliente=self._cliente_rs("Otro", "Yate SA", asignado_a=[self.ana])).pk
+        zeta = self._op(self.ana, cliente=self._cliente_rs("Zeta", "", asignado_a=[self.ana])).pk
+        zebra = self._op(self.ana, cliente=self._cliente_rs("Zebra", "   ", asignado_a=[self.ana])).pk
+        zorro = self._op(self.ana, cliente=self._cliente_rs("Ultimo", "Zorro SA", asignado_a=[self.ana])).pk
+        oculto = self._op(self.ana, cliente=self._cliente_rs("Aaa", "")).pk
+        sin_cliente = self._op(self.ana).pk
+
+        esperado = [alfa, yate, zebra, zeta, zorro]
+        self.assertEqual(self._orden(self.ana, "cliente__razon_social,-id"), esperado + [sin_cliente, oculto])
+        self.assertEqual(self._orden(self.ana, "-cliente__razon_social,-id"), [sin_cliente, oculto] + esperado[::-1])
+        # El admin ve también al "oculto" ("Aaa" por su nombre): va primero.
+        self.assertEqual(self._orden(self.jefe, "cliente__razon_social,-id"), [oculto] + esperado + [sin_cliente])
+        # Lo que devuelve el campo no cambia: la razón social tal cual.
+        filas = {o["id"]: o for o in self._client(self.ana).get(OPORTUNIDADES_URL).data}
+        self.assertEqual((filas[zeta]["cliente_razon_social"], filas[zebra]["cliente_razon_social"]), ("", "   "))
+
+    def test_ordering_por_cliente_sin_desempate_y_terminos_internos(self):
+        ops = self._escenario_orden()
+        # Sin ``-id`` también responde; los alias internos no son términos públicos.
+        self.assertEqual(self._orden(self.ana, "cliente__razon_social")[:2], [ops["c"], ops["a"]])
+        por_omision = self._orden(self.ana, "")
+        for termino in ("orden_cliente_razon_social", "-orden_cliente_nombre", "cliente_razon_social"):
+            with self.subTest(termino=termino):
+                self.assertEqual(self._orden(self.ana, termino), por_omision)
+
+    def test_ordering_por_cliente_no_agrega_consultas_por_fila(self):
+        def consultas(user, ordering):
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._client(user).get(OPORTUNIDADES_URL, {"ordering": ordering} if ordering else {})
+            self.assertEqual(resp.status_code, 200)
+            return len(ctx)
+
+        casos = [
+            (user, ordering)
+            for user in (self.ana, self.jefe)
+            for ordering in (None, "titulo,-id", "cliente__razon_social,-id", "-cliente__nombre,-id")
+        ]
+        self._op(self.ana, cliente=self._cliente_rs("C0", "C0 SA", asignado_a=[self.ana]))
+        consultas(self.ana, None)  # calienta cachés de permisos
+        pocas = {caso: consultas(*caso) for caso in casos}
+        for i in range(1, 8):
+            asignado = [self.ana] if i % 2 else []
+            self._op(self.ana, cliente=self._cliente_rs(f"C{i}", f"C{i} SA", asignado_a=asignado))
+        muchas = {caso: consultas(*caso) for caso in casos}
+
+        self.assertEqual(pocas, muchas)
+        # Ordenar por el cliente no agrega viajes a la BD: el EXISTS va en la misma consulta.
+        for user in (self.ana, self.jefe):
+            self.assertEqual(muchas[(user, "cliente__razon_social,-id")], muchas[(user, None)])
+
+    def test_exists_de_clientes_solo_al_ordenar_por_cliente_y_si_no_los_ve_todos(self):
+        self._op(self.ana, cliente=self._cliente_rs("C0", "C0 SA", asignado_a=[self.ana]))
+
+        def listado_con_exists(user, ordering):
+            with CaptureQueriesContext(connection) as ctx:
+                self._client(user).get(OPORTUNIDADES_URL, {"ordering": ordering} if ordering else {})
+            listado = [q["sql"] for q in ctx.captured_queries if 'FROM "oportunidades"' in q["sql"]]
+            self.assertEqual(len(listado), 1)
+            return 'FROM "clientes"' in listado[0]
+
+        self.assertFalse(listado_con_exists(self.ana, None))
+        self.assertFalse(listado_con_exists(self.ana, "titulo,-id"))
+        self.assertTrue(listado_con_exists(self.ana, "cliente__razon_social,-id"))
+        self.assertTrue(listado_con_exists(self.ana, "-cliente__nombre"))
+        self.assertFalse(listado_con_exists(self.jefe, "cliente__razon_social,-id"))
+
+    def _busca(self, user, q, url=OPORTUNIDADES_URL):
+        resp = self._client(user).get(url, {"q": q})
+        self.assertEqual(resp.status_code, 200, q)
+        return {o["id"] for o in resp.data}
+
+    def test_q_busca_por_razon_social_y_nombre_del_cliente_visible(self):
+        visible = self._op(self.ana, cliente=self._cliente_rs("Corto Visible", "Textiles Norte SA", asignado_a=[self.ana]))
+        self._op(self.ana, cliente=self._cliente_rs("Otro", "Otra SA", asignado_a=[self.ana]))
+
+        self.assertEqual(self._busca(self.ana, "textiles norte"), {visible.pk})
+        self.assertEqual(self._busca(self.ana, "corto vis"), {visible.pk})
+        # Título y contacto siguen igual.
+        por_titulo = self._op(self.ana, nombre_contacto="Ximena")
+        self.assertEqual(self._busca(self.ana, "ximena"), {por_titulo.pk})
+        self.assertIn(visible.pk, self._busca(self.ana, "uniformes"))
+
+    def test_q_no_encuentra_por_cliente_oculto_para_el_vendedor(self):
+        oculto = self._op(self.ana, cliente=self._cliente_rs("Corto Oculto", "Secreta SA"))
+
+        self.assertEqual(self._busca(self.ana, "secreta"), set())
+        self.assertEqual(self._busca(self.ana, "corto oculto"), set())
+        # El embudo usa los mismos filtros: tampoco cuenta la oportunidad.
+        embudo = self._client(self.ana).get(f"{OPORTUNIDADES_URL}embudo/", {"q": "secreta"}).data
+        self.assertEqual(embudo["total"]["cantidad"], 0)
+        # Por su propio título sí sale: lo que se oculta es el cliente, no la oportunidad.
+        self.assertEqual(self._busca(self.ana, "uniformes"), {oculto.pk})
+        # Si se le asigna el cliente, ya lo encuentra.
+        oculto.cliente.vendedores.add(self.ana)
+        self.assertEqual(self._busca(self.ana, "secreta"), {oculto.pk})
+
+    def test_q_por_cliente_para_quien_ve_todos_los_clientes(self):
+        cliente = self._cliente_rs("Corto Oculto", "Secreta SA")
+        de_ana = self._op(self.ana, cliente=cliente)
+        mesa = self._mesa()
+        de_mesa = self._op(mesa, cliente=cliente)
+
+        self.assertEqual(self._busca(self.jefe, "secreta"), {de_ana.pk, de_mesa.pk})
+        self.assertEqual(self._busca(self.jefe, "corto oculto"), {de_ana.pk, de_mesa.pk})
+        self.assertEqual(self._busca(mesa, "secreta"), {de_mesa.pk})
+        self.assertEqual(self._busca(mesa, "corto oculto"), {de_mesa.pk})
+
+    def test_q_por_cliente_no_agrega_consultas_ni_exists_para_el_admin(self):
+        self._op(self.ana, cliente=self._cliente_rs("C0", "C0 SA", asignado_a=[self.ana]))
+
+        def medir(user):
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._client(user).get(OPORTUNIDADES_URL, {"q": "sa"})
+            self.assertEqual(resp.status_code, 200)
+            listado = [q["sql"] for q in ctx.captured_queries if 'FROM "oportunidades"' in q["sql"]]
+            return len(ctx), 'FROM "clientes"' in listado[0]
+
+        medir(self.ana)  # calienta cachés de permisos
+        pocas = {"vendedor": medir(self.ana), "admin": medir(self.jefe)}
+        for i in range(1, 8):
+            asignado = [self.ana] if i % 2 else []
+            self._op(self.ana, cliente=self._cliente_rs(f"C{i}", f"C{i} SA", asignado_a=asignado))
+        muchas = {"vendedor": medir(self.ana), "admin": medir(self.jefe)}
+
+        self.assertEqual(pocas, muchas)
+        self.assertEqual(muchas, {"vendedor": (pocas["vendedor"][0], True), "admin": (pocas["admin"][0], False)})
+
+    # -- quien ve todos los clientes sin ser admin (por departamento) --------
+    # ``ve_clientes_sin_asignacion`` es solo superusuario y admin de empresa. Los que no
+    # son admin y ven todos los clientes de la empresa lo hacen por departamento (Mesa de
+    # Control, Contabilidad: ``DEPARTAMENTOS_TODOS_LOS_CLIENTES``) y pasan por el EXISTS.
+
+    def _por_departamento(self, clave):
+        user = Usuario.objects.create(username=f"u-{clave}", email=f"{clave.lower()}@acme.test", empresa=self.empresa)
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo=f"{clave}-0901", nombre=clave, estatus=Rol.Estatus.ACTIVO,
+            clave_departamento=clave,
+        )
+        _con_claves(rol, ("R-CRM",))
+        UsuarioRol.objects.create(usuario=user, rol=rol, empresa=self.empresa)
+        return user
+
+    def _revisar_ve_todos_por_departamento(self, clave):
+        user = self._por_departamento(clave)
+        # Ninguno de estos clientes está asignado al usuario.
+        ops = {
+            "a": self._op(user, cliente=self._cliente_rs("Alfa", "Zeta SA")).pk,
+            "b": self._op(user, cliente=self._cliente_rs("Beta", "Alfa SA")).pk,
+            "c": self._op(user, cliente=self._cliente_rs("Gama", "Media SA")).pk,
+            "n": self._op(user).pk,
+        }
+        suyas = set(ops.values())
+
+        def ids(*claves):
+            return [ops[c] for c in claves]
+
+        def del_admin(lista):
+            return [i for i in lista if i in suyas]
+
+        # Nombre y razón social, con valor y no en null.
+        filas = {o["id"]: o for o in self._client(user).get(OPORTUNIDADES_URL).data}
+        detalle = self._client(user).get(f"{OPORTUNIDADES_URL}{ops['b']}/").data
+        for fila in (filas[ops["b"]], detalle):
+            self.assertEqual((fila["cliente_nombre"], fila["cliente_razon_social"]), ("Beta", "Alfa SA"))
+
+        # ``?q=`` por razón social y por nombre corto, igual que el admin.
+        for q, esperado in (("alfa sa", {ops["b"]}), ("beta", {ops["b"]}), ("media", {ops["c"]}), ("gama", {ops["c"]})):
+            with self.subTest(q=q):
+                self.assertEqual(self._busca(user, q), esperado)
+                self.assertEqual(self._busca(self.jefe, q) & suyas, esperado)
+
+        # Orden por el valor real del cliente, no como NULL; el mismo que ve el admin.
+        esperado = {
+            "cliente__razon_social,-id": ids("b", "c", "a", "n"),
+            "-cliente__razon_social,-id": ids("n", "a", "c", "b"),
+            "cliente__nombre,-id": ids("a", "b", "c", "n"),
+            "-cliente__nombre,-id": ids("n", "c", "b", "a"),
+        }
+        for ordering, ids_esperados in esperado.items():
+            with self.subTest(ordering=ordering):
+                self.assertEqual(self._orden(user, ordering), ids_esperados)
+                self.assertEqual(del_admin(self._orden(self.jefe, ordering)), ids_esperados)
+
+    def test_un_solo_objeto_hace_las_mismas_consultas_que_antes_del_campo(self):
+        # Conteos de ``main`` antes de EC-902 (medidos con estas mismas peticiones). El
+        # campo nuevo no agrega viajes: la consulta de visibilidad sigue siendo una.
+        cliente = self._cliente_rs("N", "RS")
+        casos = {
+            "vendedor": (self.ana, {"detalle": 4, "onboarding": 8}),
+            "mesa": (self._por_departamento("MESACONTROL"), {"detalle": 4, "onboarding": 9}),
+            "contabilidad": (self._por_departamento("CONTABILIDAD"), {"detalle": 4, "onboarding": 9}),
+            "admin": (self.jefe, {"detalle": 1, "onboarding": 7}),
+        }
+        for quien, (user, esperado) in casos.items():
+            op = self._op(self.ana if quien == "admin" else user, cliente=cliente)
+            url = f"{OPORTUNIDADES_URL}{op.pk}/"
+            api = self._client(user)
+            api.get(url)  # calienta cachés de permisos
+            for nombre, ruta in (("detalle", url), ("onboarding", f"{url}onboarding/")):
+                with self.subTest(quien=quien, nombre=nombre):
+                    with CaptureQueriesContext(connection) as ctx:
+                        resp = api.get(ruta)
+                    self.assertEqual(resp.status_code, 200)
+                    self.assertEqual(len(ctx), esperado[nombre])
+                    visibilidad = [q for q in ctx.captured_queries if q["sql"].lstrip().startswith('SELECT "clientes"."id"')]
+                    self.assertEqual(len(visibilidad), 0 if quien == "admin" else 1)
+
+        # ``transferir`` solo lo hace el admin (403 para los demás), que no consulta visibilidad.
+        op = self._op(self.ana, cliente=cliente)
+        api = self._client(self.jefe)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = api.post(f"{OPORTUNIDADES_URL}{op.pk}/transferir/", {"vendedor": self.beto.pk})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(ctx), 6)
+        self.assertEqual(resp.data["cliente_razon_social"], "RS")
+
+    def test_contabilidad_ve_nombre_busca_y_ordena_por_clientes_no_asignados(self):
+        self._revisar_ve_todos_por_departamento("CONTABILIDAD")
+
+    def test_mesa_de_control_ve_nombre_busca_y_ordena_por_clientes_no_asignados(self):
+        self._revisar_ve_todos_por_departamento("MESACONTROL")
 
     def test_transferir_pasa_las_cotizaciones_al_nuevo_dueno(self):
         op = self._op(self.ana, cliente=self.cliente)
