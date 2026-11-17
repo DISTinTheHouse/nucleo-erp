@@ -232,12 +232,25 @@ class OportunidadSerializer(ClienteVisibleMixin, serializers.ModelSerializer):
 
     def get_cliente_razon_social(self, obj) -> str | None:
         # Razón social del cliente ligado (EC-902), con la misma regla que ``cliente_nombre``:
-        # ``None`` sin cliente o si el usuario no lo ve. Reusa ese camino (y su consulta, una
-        # por respuesta) para que los dos campos no puedan diferir. Comentario y no docstring:
-        # drf-spectacular publicaría el docstring como ``description`` del campo.
+        # ``None`` sin cliente o si el usuario no lo ve. Reusa ese camino para que los dos
+        # campos no puedan diferir; la consulta de visibilidad sigue siendo una por respuesta
+        # (en la lista la guarda el mixin; con un solo objeto, ``_clientes_visibles``).
+        # Comentario y no docstring: drf-spectacular lo publicaría como ``description``.
         if self._nombre_cliente(obj) is None:
             return None
         return obj.cliente.razon_social
+
+    def _clientes_visibles(self, obj):
+        """Como el del mixin, pero también guardado cuando se serializa un solo objeto
+        (detalle, ``onboarding``, ``transferir``): ahí el mixin no tiene dónde guardarlo y
+        ``cliente_nombre`` y ``cliente_razon_social`` harían la consulta dos veces."""
+        if isinstance(self.parent, serializers.ListSerializer):
+            return super()._clientes_visibles(obj)
+        guardados = self.__dict__.setdefault("_clientes_visibles_por_cliente", {})
+        cliente_id = getattr(self._cliente_de(obj), "pk", None)
+        if cliente_id not in guardados:
+            guardados[cliente_id] = super()._clientes_visibles(obj)
+        return guardados[cliente_id]
 
     def get_estado(self, obj):
         if obj.etapa == Oportunidad.Etapa.PERDIDA:
