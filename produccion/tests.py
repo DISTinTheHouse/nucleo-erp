@@ -103,6 +103,18 @@ def _conceder_permisos(usuario, empresa, claves):
     return rol
 
 
+def _conceder_permisos_sin_empresa(usuario, claves):
+    """GRANT sin empresa para un usuario sin empresa activa: un rol no le sirve
+    (``UsuarioRol.empresa`` es obligatorio y ``permisos_efectivos`` solo cuenta
+    los de la empresa activa). Así la petición pasa ``LecturaPorCodigo`` y la
+    prueba sigue midiendo el alcance del queryset, no el 403 del código."""
+    from seguridad.models import Permiso, UsuarioPermiso
+
+    for clave in claves:
+        permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+        UsuarioPermiso.objects.create(usuario=usuario, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT)
+
+
 def _tipo_producto():
     """Tipo de producto obligatorio (#871); PT tiene pk=3 como en producción."""
     return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
@@ -565,6 +577,10 @@ SATELITES = (
     },
 )
 
+#: Lo que exigen hoy los ``SATELITES`` (#1133): lectura por sección y edición o
+#: baja de los de bordado. Las incidencias de reflejante no piden código al escribir.
+CLAVES_SATELITES = ("R-PRODUCCION-OB", "R-PRODUCCION-OR", "E-PRODUCCION-OB", "D-PRODUCCION-OB")
+
 
 class SatelitesScopeTenantTests(TestCase):
     """Aislamiento multi-tenant de Avances/Incidencias de Bordado y Reflejante.
@@ -585,6 +601,9 @@ class SatelitesScopeTenantTests(TestCase):
         usuario = Usuario.objects.create(
             username=email, email=email, empresa=empresa, sucursal_default=sucursal
         )
+        # #1133: leer los satélites exige el código de la sección de su orden
+        # padre; editar/borrar los de bordado, ``E-``/``D-PRODUCCION-OB``.
+        _conceder_permisos(usuario, empresa, CLAVES_SATELITES)
         pedido = Pedido.objects.create(
             empresa=empresa,
             sucursal=sucursal,
@@ -624,6 +643,7 @@ class SatelitesScopeTenantTests(TestCase):
         cls.sin_empresa = Usuario.objects.create(
             username="huerfano", email="huerfano@nowhere.test"
         )
+        _conceder_permisos_sin_empresa(cls.sin_empresa, CLAVES_SATELITES)
         cls.superuser = Usuario.objects.create(
             username="root", email="root@nowhere.test", is_superuser=True
         )
@@ -739,6 +759,7 @@ class SatelitesScopeTenantTests(TestCase):
             empresa=self.a["empresa"],
             sucursal_default=otra_sucursal,
         )
+        _conceder_permisos(forastero, self.a["empresa"], CLAVES_SATELITES)
         client = self._client(forastero)
         for cfg in SATELITES:
             with self.subTest(cfg["nombre"]):
@@ -922,6 +943,8 @@ class SatelitesSuperficieEscribibleTests(TestCase):
             empresa=cls.empresa,
             sucursal_default=cls.sucursal,
         )
+        # #1133: el PATCH de avances e incidencias de bordado exige E-PRODUCCION-OB.
+        _conceder_permisos(cls.usuario, cls.empresa, ["E-PRODUCCION-OB"])
         # Dos pedidos: la constraint antiduplicado del bug previo prohíbe dos
         # órdenes activas del mismo tipo sobre un mismo pedido, así que la orden
         # "otra" (destino ilegítimo de la reasignación) vive en su propio pedido.
@@ -1100,6 +1123,8 @@ class SatelitesUsuarioTenantTests(TestCase):
             empresa=cls.empresa_a,
             sucursal_default=cls.sucursal_a,
         )
+        # #1133: el PATCH de avances e incidencias de bordado exige E-PRODUCCION-OB.
+        _conceder_permisos(cls.solicitante, cls.empresa_a, ["E-PRODUCCION-OB"])
         cls.operador_mismo_tenant = Usuario.objects.create(
             username="operador_a", email="operador_a@acme.test", empresa=cls.empresa_a
         )
@@ -1407,6 +1432,8 @@ class ReflejanteAvancesContratoTenantTests(TestCase):
             clave_departamento=CLAVE_DEPARTAMENTO_PRODUCCION,
         )
         UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=empresa)
+        # #1133: el departamento ya no basta para leer; hace falta el código de OR.
+        _conceder_permisos(usuario, empresa, ["R-PRODUCCION-OR"])
         pedido = Pedido.objects.create(
             empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda,
             persona_pagos="Pagos", correo_facturas=email, telefono_pagos="8100000000",
@@ -1459,6 +1486,7 @@ class ReflejanteAvancesContratoTenantTests(TestCase):
             username="forastero-ra", email="forastero-ra@acme.test", empresa=self.a["empresa"],
             sucursal_default=otra,
         )
+        _conceder_permisos(forastero, self.a["empresa"], ["R-PRODUCCION-OR"])
         self.assertEqual(self._ids(forastero), [])
         client = APIClient()
         client.force_authenticate(user=forastero)
@@ -1466,7 +1494,8 @@ class ReflejanteAvancesContratoTenantTests(TestCase):
 
     def test_sin_empresa_no_ve_nada_ni_el_superusuario(self):
         sin_empresa = Usuario.objects.create(username="huerfano-ra", email="huerfano-ra@nowhere.test")
-        root = Usuario.objects.create(username="root-ra", email="root-ra@nowhere.test", is_superuser=True)
+        _conceder_permisos_sin_empresa(sin_empresa, ["R-PRODUCCION-OR"])
+        root =Usuario.objects.create(username="root-ra", email="root-ra@nowhere.test", is_superuser=True)
         for user in (sin_empresa, root):
             with self.subTest(user=user.username):
                 self.assertEqual(self._ids(user), [])
@@ -4636,6 +4665,11 @@ class OrdenProduccionPedidoOpcionalTests(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
 
 
+#: Lectura de las tres secciones con ``onboarding`` (#1133): ``codigos_lectura``
+#: va por acción, así que el POST de ``onboarding`` también pide el ``R-``.
+CLAVES_ONBOARDING_SECCIONES = ("R-PRODUCCION-OB", "R-PRODUCCION-OR", "R-PRODUCCION-CM")
+
+
 class OnboardingPostScopeTenantTests(TestCase):
     """POST de onboarding de OB/OR/OCM: un pedido o una talla fuera del alcance
     del usuario se rechaza sin exponer datos del registro ajeno (#275)."""
@@ -4665,6 +4699,8 @@ class OnboardingPostScopeTenantTests(TestCase):
             username="operador", email="operador@acme.test",
             empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
+        # #1133: ``onboarding`` (también el POST) exige el código de lectura de la sección.
+        _conceder_permisos(cls.usuario, cls.empresa, CLAVES_ONBOARDING_SECCIONES)
         cls.pedido, cls.pdt = cls._pedido(cls.empresa, cls.sucursal, 10)
         cls.pedido_b, cls.pdt_b = cls._pedido(cls.empresa_b, cls.sucursal_b, cls.CANTIDAD_AJENA)
         cls.pedido_otra_sucursal, cls.pdt_otra_sucursal = cls._pedido(
@@ -4756,6 +4792,9 @@ class OnboardingPostLineaMuestraTests(TestCase):
             username="operador", email="operador@acme.test",
             empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
+        # #1133: ``onboarding`` (también el POST) exige el código de lectura de la
+        # sección; ``OrdenBordadoMuestraTests`` hereda este usuario para la OB.
+        _conceder_permisos(cls.usuario, cls.empresa, CLAVES_ONBOARDING_SECCIONES)
         cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
         cls.pedido = Pedido.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente,
@@ -5028,6 +5067,8 @@ class RutaCriticaOPTests(TestCase):
             username="lector", email="lector@acme.test",
             empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
+        # #1133: leer la ruta crítica exige R-PRODUCCION-OP; escribirla sigue con el departamento.
+        _conceder_permisos(cls.lector, cls.empresa, ["R-PRODUCCION-OP"])
 
     def setUp(self):
         self.op = OrdenProduccion.objects.create(
@@ -5138,6 +5179,8 @@ class EstatusOPTests(TestCase):
         cls.lector = Usuario.objects.create(
             username="lec", email="lec@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
+        # #1133: leer ``estatus/`` exige R-PRODUCCION-OP; cambiarlo sigue con el departamento.
+        _conceder_permisos(cls.lector, cls.empresa, ["R-PRODUCCION-OP"])
         cls.ajeno = Usuario.objects.create(
             username="ajeno", email="ajeno@otra.test", empresa=cls.otra, is_admin_empresa=True,
         )
@@ -5391,7 +5434,9 @@ class RutaCriticaBulkTests(TestCase):
         cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
         cls.sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="GDL", nombre="GDL")
         cls.usuario = Usuario.objects.create(username="u", email="u@acme.test", empresa=cls.empresa)
-        cls.op1 = OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-1")
+        # #1133: leer la ruta crítica exige R-PRODUCCION-OP.
+        _conceder_permisos(cls.usuario, cls.empresa, ["R-PRODUCCION-OP"])
+        cls.op1 =OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-1")
         cls.op2 = OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-2")
         cls.op_ajena = OrdenProduccion.objects.create(empresa=cls.otra, sucursal=cls.sucursal_otra, folio_op="OP-X")
         OrdenProduccionRutaCritica.objects.create(op=cls.op1, corte_recibido=True)
@@ -5460,8 +5505,11 @@ class OrdenProduccionKpisTests(TestCase):
         cls.usuario = Usuario.objects.create(
             username="u", email="u@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
+        # #1133: ``kpis`` y el listado de OP exigen R-PRODUCCION-OP.
+        _conceder_permisos(cls.usuario, cls.empresa, ["R-PRODUCCION-OP"])
         cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
-        cls.admin_empresa = Usuario.objects.create(
+        _conceder_permisos_sin_empresa(cls.sin_empresa, ["R-PRODUCCION-OP"])
+        cls.admin_empresa =Usuario.objects.create(
             username="admin", email="admin@acme.test", empresa=cls.empresa,
             sucursal_default=cls.sucursal, is_admin_empresa=True,
         )
@@ -6574,7 +6622,8 @@ class OrdenProduccionDetalleTenantTests(_BomTenantBase, TestCase):
         )
         # EC-870 (b70ee1a): editar y dar de baja la OP exige estos permisos; el
         # aislamiento por empresa se prueba con un usuario que sí los tiene.
-        _conceder_permisos(cls.usuario, cls.empresa, ["E-PRODUCCION-OP", "D-PRODUCCION-OP"])
+        # #1133: leer la OP (detalle y ``onboarding``) exige R-PRODUCCION-OP.
+        _conceder_permisos(cls.usuario, cls.empresa, ["R-PRODUCCION-OP", "E-PRODUCCION-OP", "D-PRODUCCION-OP"])
 
     @classmethod
     def _pedido_muestra(cls, empresa, sucursal, cliente):
@@ -7995,6 +8044,8 @@ class BordadoAvancesRegresionesTests(TestCase):
             username="op@acme.test", email="op@acme.test",
             empresa=cls.empresa, sucursal_default=cls.mty,
         )
+        # #1133: leer bordado-avances exige R-PRODUCCION-OB y su PATCH, E-PRODUCCION-OB.
+        _conceder_permisos(cls.op, cls.empresa, ["R-PRODUCCION-OB", "E-PRODUCCION-OB"])
         cls.admin = Usuario.objects.create(
             username="adm@acme.test", email="adm@acme.test",
             empresa=cls.empresa, sucursal_default=cls.mty, is_admin_empresa=True,
