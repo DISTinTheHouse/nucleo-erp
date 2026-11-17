@@ -348,6 +348,226 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
         self.assertFalse(MovimientoInventario.objects.filter(recepcion=recepcion).exists())
 
 
+class RecepcionOnboardingRenglonesTests(TestCase):
+    """EC-894: ``POST /recepciones/onboarding/`` exige renglones con cantidad > 0.
+
+    Con ``detalle: []`` se creaba la recepción En calidad sin renglones, se
+    consumía el folio y la OC pasaba a Parcialmente recibida sin nada recibido.
+    Todo rechazo es 400 sin escrituras: ni recepción, ni folio, ni estatus de
+    la OC/OP. Se cubren ambos orígenes (OC y OP).
+    """
+
+    MSG_SIN_RENGLONES = "La recepción debe tener al menos un renglón con cantidad recibida."
+
+    @staticmethod
+    def _msg_cantidad(renglon):
+        return f"El renglón #{renglon} debe tener cantidad_recibida > 0."
+
+    @staticmethod
+    def _msg_excede(renglon):
+        return f"El renglón #{renglon} excede la cantidad pendiente por recibir."
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import Talla
+        from nucleo.models import UnidadMedida
+        from produccion.models import ListaMaterialBom, OrdenProduccion, OrdenProduccionDetalle
+
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
+
+        cls.empresa = Empresa.objects.create(codigo="ec894", razon_social="EC894 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="E94", nombre="EC894 1")
+        cls.serie = SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="RECEPCION", serie="RC",
+        )
+        cls.almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="A94", nombre="A94")
+        cls.usuario = Usuario.objects.create(username="u@ec894.test", email="u@ec894.test", empresa=cls.empresa)
+        proveedor = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="Proveedor", moneda=moneda, sat_regimen_fiscal=regimen,
+            sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="PROV-894", razon_social="Proveedor SA",
+            telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000", email="p@ec894.test",
+        )
+        tipo = _tipo_producto()
+
+        # Origen OC: renglones de 100 y de 5.
+        cls.oc = OrdenCompra.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, proveedor=proveedor, moneda=moneda, usuario=cls.usuario,
+            fecha_oc=timezone.now().date(), estatus=OrdenCompra.EstatusOrdenCompra.AUTORIZADA,
+        )
+        cls.producto = Producto.objects.create(tipo=tipo, empresa=cls.empresa, nombre="Tela 894")
+        cls.oc_detalle = OrdenCompraDetalle.objects.create(
+            orden_compra=cls.oc, producto=cls.producto, sucursal=cls.sucursal, cantidad=100,
+        )
+        cls.oc_detalle_2 = OrdenCompraDetalle.objects.create(
+            orden_compra=cls.oc, producto=Producto.objects.create(tipo=tipo, empresa=cls.empresa, nombre="Hilo 894"),
+            sucursal=cls.sucursal, cantidad=5,
+        )
+
+        # Origen OP: renglones de 10 y de 3 de producto terminado.
+        color = Color.objects.create(nombre="Negro 894", codigo="N94", codigo_hex="#000000")
+        playera = Producto.objects.create(tipo=tipo, empresa=cls.empresa, nombre="Playera 894")
+        unidad = UnidadMedida.objects.create(clave="PZA-894", nombre="Pieza")
+        cls.op = OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-894-1")
+        renglones_op = []
+        for talla, cantidad in (("M-894", 10), ("G-894", 3)):
+            variante = ProductoVariante.objects.create(
+                producto=playera, empresa=cls.empresa, color=color,
+                talla=Talla.objects.create(nombre=talla), sku=f"PLA-894-{talla}", precio_base="1",
+            )
+            renglones_op.append(OrdenProduccionDetalle.objects.create(
+                op=cls.op, cantidad=cantidad, producto_variante=variante, unidad=unidad,
+                bom=ListaMaterialBom.objects.create(empresa=cls.empresa, producto_variante=variante, activo=True),
+            ))
+        cls.op_detalle, cls.op_detalle_2 = renglones_op
+
+    # --- helpers --------------------------------------------------------------
+
+    def _post(self, origen, detalle):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        if origen == "oc":
+            encabezado = {"orden_compra": self.oc.pk}
+        else:
+            encabezado = {"orden_produccion": self.op.pk}
+        encabezado.update({"almacen": self.almacen.pk, "serie_codigo": "RC"})
+        return client.post(
+            RECEPCION_ONBOARDING_URL, {"recepcion": encabezado, "detalle": detalle}, format="json",
+        )
+
+    def _renglon(self, origen, cantidad, segundo=False):
+        if origen == "oc":
+            detalle = self.oc_detalle_2 if segundo else self.oc_detalle
+            return {"orden_compra_detalle": detalle.pk, "cantidad_recibida": cantidad}
+        detalle = self.op_detalle_2 if segundo else self.op_detalle
+        return {"orden_produccion_detalle": detalle.pk, "cantidad_recibida": cantidad}
+
+    def _huella(self):
+        self.oc.refresh_from_db()
+        self.op.refresh_from_db()
+        self.serie.refresh_from_db()
+        return (
+            Recepcion.objects.count(),
+            RecepcionDetalle.objects.count(),
+            self.serie.folio_actual,
+            self.oc.estatus,
+            self.op.estatus_op,
+        )
+
+    def _assert_400_sin_escrituras(self, origen, detalle, cuerpo):
+        antes = self._huella()
+        resp = self._post(origen, detalle)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        body = resp.json()
+        self.assertEqual(body, cuerpo)
+        # El frontend (useCreateReceipt.ts) toma ``Object.values(body).flat()[0]``
+        # como mensaje: tiene que salir un string, nunca un dict anidado.
+        primero = [m for v in body.values() for m in (v if isinstance(v, list) else [v])][0]
+        self.assertIsInstance(primero, str)
+        self.assertEqual(self._huella(), antes)
+
+    # --- detalle vacío ----------------------------------------------------------
+
+    def test_detalle_vacio_es_400_sin_escrituras(self):
+        for origen in ("oc", "op"):
+            with self.subTest(origen=origen):
+                self._assert_400_sin_escrituras(origen, [], {"detalle": [self.MSG_SIN_RENGLONES]})
+
+    # --- cantidad no positiva ---------------------------------------------------
+
+    def test_cantidad_cero_o_negativa_es_400_sin_escrituras(self):
+        for origen in ("oc", "op"):
+            for cantidad in ("0", "-1", "0.0000"):
+                with self.subTest(origen=origen, cantidad=cantidad):
+                    self._assert_400_sin_escrituras(
+                        origen, [self._renglon(origen, cantidad)], {"detalle": [self._msg_cantidad(1)]},
+                    )
+
+    def test_segundo_renglon_en_cero_es_400_sin_escrituras(self):
+        for origen in ("oc", "op"):
+            with self.subTest(origen=origen):
+                self._assert_400_sin_escrituras(
+                    origen,
+                    [self._renglon(origen, "1"), self._renglon(origen, "0", segundo=True)],
+                    {"detalle": [self._msg_cantidad(2)]},
+                )
+
+    def test_cantidad_minima_representable_se_acepta(self):
+        resp = self._post("oc", [self._renglon("oc", "0.0001")])
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(RecepcionDetalle.objects.get().cantidad_recibida, Decimal("0.0001"))
+
+    # --- excede lo pendiente ------------------------------------------------------
+
+    def test_cantidad_mayor_a_lo_pendiente_es_400_sin_escrituras(self):
+        casos = {"oc": "100.0001", "op": "11"}
+        for origen, cantidad in casos.items():
+            with self.subTest(origen=origen):
+                self._assert_400_sin_escrituras(
+                    origen, [self._renglon(origen, cantidad)], {"detalle": self._msg_excede(1)},
+                )
+
+    def test_segundo_renglon_excede_lo_pendiente_es_400_sin_escrituras(self):
+        # El primer renglón es válido; el segundo pide más de su pendiente (5 en
+        # la OC, 3 en la OP). No debe quedar escrito ni el primero.
+        casos = {"oc": "6", "op": "4"}
+        for origen, cantidad in casos.items():
+            with self.subTest(origen=origen):
+                self._assert_400_sin_escrituras(
+                    origen,
+                    [self._renglon(origen, "1"), self._renglon(origen, cantidad, segundo=True)],
+                    {"detalle": self._msg_excede(2)},
+                )
+
+    # --- regresión: recepción válida ----------------------------------------------
+
+    def test_recepcion_valida_de_oc_pasa_a_calidad(self):
+        folio_antes = self.serie.folio_actual
+        resp = self._post("oc", [self._renglon("oc", "40")])
+        self.assertEqual(resp.status_code, 200, resp.content)
+        recepcion = Recepcion.objects.get(pk=resp.json()["recepcion"]["id"])
+        self.assertEqual(recepcion.estatus, Recepcion.EstatusRecepcion.EN_CALIDAD)
+        self.assertEqual(
+            list(RecepcionDetalle.objects.filter(recepcion=recepcion).values_list("orden_compra_detalle_id", "cantidad_recibida")),
+            [(self.oc_detalle.pk, Decimal("40"))],
+        )
+        self.serie.refresh_from_db()
+        self.assertEqual(self.serie.folio_actual, folio_antes + 1)
+        self.oc.refresh_from_db()
+        self.assertEqual(self.oc.estatus, OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA)
+
+    def test_recepcion_valida_de_op_pasa_a_calidad(self):
+        resp = self._post("op", [self._renglon("op", "4")])
+        self.assertEqual(resp.status_code, 200, resp.content)
+        recepcion = Recepcion.objects.get(pk=resp.json()["recepcion"]["id"])
+        self.assertEqual(
+            (recepcion.tipo_origen, recepcion.op_id, recepcion.estatus),
+            (Recepcion.TipoOrigen.ORDEN_PRODUCCION, self.op.pk, Recepcion.EstatusRecepcion.EN_CALIDAD),
+        )
+        self.assertEqual(
+            list(RecepcionDetalle.objects.filter(recepcion=recepcion).values_list("orden_produccion_detalle_id", "cantidad_recibida")),
+            [(self.op_detalle.pk, Decimal("4"))],
+        )
+
+    # --- restricción en BD ----------------------------------------------------------
+
+    def test_la_bd_rechaza_un_renglon_sin_cantidad_positiva(self):
+        from django.db import IntegrityError, transaction
+
+        recepcion = Recepcion.objects.create(
+            tipo_origen="OC", orden_compra=self.oc, empresa=self.empresa, sucursal=self.sucursal,
+            almacen=self.almacen, usuario=self.usuario, folio="RC-894-BD", fecha_recepcion=timezone.now(),
+        )
+        for cantidad in (Decimal("0"), Decimal("-1")):
+            with self.subTest(cantidad=cantidad), self.assertRaises(IntegrityError), transaction.atomic():
+                RecepcionDetalle.objects.create(
+                    recepcion=recepcion, orden_compra_detalle=self.oc_detalle, producto=self.producto,
+                    cantidad_recibida=cantidad,
+                )
+
+
 ORDENES_URL = "/api/v1/compras/ordenes/"
 
 
