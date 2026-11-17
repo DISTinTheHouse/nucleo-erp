@@ -73,6 +73,7 @@ from finanzas.api.serializers import (
     ConfiguracionContableSerializer,
     ParametrosContabilidadSerializer,
     FacturaListSerializer,
+    FacturaRetrieveSerializer,
     FacturaSerializer,
     FacturaDesdePedidoInputSerializer,
     FacturaPendienteCobroInputSerializer,
@@ -563,6 +564,8 @@ class FacturaViewSet(FinanzasBaseViewSet):
     def get_serializer_class(self):
         if self._es_listado():
             return FacturaListSerializer
+        if self.action == 'retrieve':
+            return FacturaRetrieveSerializer
         return super().get_serializer_class()
 
     def get_queryset(self):
@@ -571,6 +574,19 @@ class FacturaViewSet(FinanzasBaseViewSet):
             Factura.objects
             .select_related('pedido', 'cliente', 'moneda')
         )
+        if self.action == 'retrieve':
+            # EC-904: catálogos SAT del receptor y renglones con su producto, servicio
+            # y talla en bloque. Antes cada renglón costaba ~3 consultas.
+            qs = qs.select_related(
+                'cliente__sat_regimen_fiscal', 'cliente__sat_uso_cfdi', 'pedido__cliente_regimen_fiscal',
+            ).prefetch_related(
+                Prefetch(
+                    'factura_detalles',
+                    queryset=FacturaDetalle.objects.select_related(
+                        'producto', 'pedido_servicio_extra', 'pedido_detalle_talla__talla',
+                    ),
+                )
+            )
         if self._es_listado():
             # Piezas y precio por subconsulta, no uniendo renglones: el filtro
             # ``saldo_pendiente`` ya une con CxC y multiplicaría las sumas.

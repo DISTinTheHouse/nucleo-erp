@@ -40,6 +40,7 @@ from finanzas.services.factura_proveedor_montos import (
 )
 from finanzas.scope import por_sucursal
 from finanzas.api.permisos import permisos_de_la_peticion
+from finanzas.services.factura_service import FacturaService
 from finanzas.services.poliza_service import PolizaService
 from finanzas.services.cuenta_por_pagar_service import (
     CuentaPorPagarService,
@@ -430,6 +431,50 @@ class FacturaSerializer(serializers.ModelSerializer):
         ]
         fields = '__all__'
         extra_kwargs = {'tipo_cambio': {'min_value': Decimal('0.000001')}}
+
+
+class FacturaRetrieveSerializer(FacturaSerializer):
+    """``GET /facturas/{id}/`` (EC-904): la factura más los datos fiscales que el
+    PDF necesita, con la misma regla que ``desglose/`` (``FacturaService.datos_fiscales``).
+
+    Solo el detalle: ``FacturaSerializer`` va anidado en el detalle de CxC y en las
+    respuestas de ``emitir``/``timbrar``/``cancelar``/``desde-pedido``, que no cambian.
+    ``FacturaViewSet`` une cliente, pedido y sus catálogos SAT al leer el detalle.
+    """
+
+    receptor = serializers.SerializerMethodField()
+    forma_pago = serializers.SerializerMethodField()
+    forma_pago_nombre = serializers.SerializerMethodField()
+    metodo_pago = serializers.SerializerMethodField()
+    metodo_pago_nombre = serializers.SerializerMethodField()
+    uso_cfdi = serializers.SerializerMethodField()
+    uso_cfdi_nombre = serializers.SerializerMethodField()
+
+    def _fiscales(self, obj):
+        if getattr(obj, '_datos_fiscales', None) is None:
+            obj._datos_fiscales = FacturaService.datos_fiscales(obj, FacturaService.pedido_de_la_factura(obj))
+        return obj._datos_fiscales
+
+    def get_receptor(self, obj) -> dict:
+        return self._fiscales(obj)[0]
+
+    def get_forma_pago(self, obj) -> str | None:
+        return self._fiscales(obj)[1]['forma_pago']
+
+    def get_forma_pago_nombre(self, obj) -> str | None:
+        return self._fiscales(obj)[1]['forma_pago_nombre']
+
+    def get_metodo_pago(self, obj) -> str | None:
+        return self._fiscales(obj)[1]['metodo_pago']
+
+    def get_metodo_pago_nombre(self, obj) -> str | None:
+        return self._fiscales(obj)[1]['metodo_pago_nombre']
+
+    def get_uso_cfdi(self, obj) -> str | None:
+        return self._fiscales(obj)[1]['uso_cfdi']
+
+    def get_uso_cfdi_nombre(self, obj) -> str | None:
+        return self._fiscales(obj)[1]['uso_cfdi_nombre']
 
 
 class FacturaListSerializer(serializers.ModelSerializer):

@@ -11143,3 +11143,135 @@ class NotaCreditoDatosPdfTests(DatosPdfBase):
         self.assertEqual(len(self._filas(resp.data)), 5)
         self.assertEqual(retrieve_muchas, retrieve_pocas)
         self.assertEqual(list_muchas, list_pocas)
+
+
+class FacturaDatosFiscalesPdfTests(DatosPdfBase):
+    """Factura de cliente: receptor fiscal y forma/método/uso de CFDI en el detalle,
+    con la misma regla que ``desglose/`` (``FacturaService.datos_fiscales``)."""
+
+    CAMPOS_PAGO = ("forma_pago", "forma_pago_nombre", "metodo_pago", "metodo_pago_nombre", "uso_cfdi", "uso_cfdi_nombre")
+
+    def setUp(self):
+        from nucleo.models import SatUsoCfdi
+
+        self.client_a = self._client(self.a["usuario"])
+        self.uso_cliente = SatUsoCfdi.objects.create(codigo="G01", descripcion="Adquisición de mercancías")
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(
+            sat_uso_cfdi=self.uso_cliente, sat_regimen_fiscal=self.sat_regimen_fiscal,
+            razon_social="ACME SA", rfc="AAA010101AAA", codigo_postal="64000",
+        )
+
+    def _factura(self, pedido="propio", folio="F-1", renglones=1):
+        factura = Factura.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],
+            pedido=self.a["pedido"] if pedido == "propio" else pedido, moneda=self.moneda, folio=folio,
+        )
+        for i in range(renglones):
+            FacturaDetalle.objects.create(
+                factura=factura, pedido_detalle=self.a["detalle"], pedido_detalle_talla=self.a["talla_pedido"],
+                producto=self.a["producto"], cantidad=Decimal("1"), precio_unitario=Decimal("100.00"),
+            )
+        return factura
+
+    def _detalle(self, factura):
+        resp = self.client_a.get(f"{FACTURAS_URL}{factura.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data
+
+    def _desglose(self, factura):
+        resp = self.client_a.get(f"{FACTURAS_URL}{factura.pk}/desglose/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data
+
+    def test_detalle_trae_receptor_y_datos_de_pago_del_pedido(self):
+        factura = self._factura()
+        data = self._detalle(factura)
+        self.assertEqual(data["receptor"], self._desglose(factura)["receptor"])
+        self.assertEqual(data["receptor"]["rfc"], "AAA010101AAA")
+        self.assertEqual(data["receptor"]["regimen_fiscal"], {"codigo": "601", "descripcion": "General de Ley"})
+        self.assertEqual(
+            {c: data[c] for c in self.CAMPOS_PAGO},
+            {
+                "forma_pago": "03", "forma_pago_nombre": "03 - TRANSFERENCIA",
+                "metodo_pago": "PUE", "metodo_pago_nombre": "PUE - PAGO EN UNA SOLA EXHIBICIÓN",
+                "uso_cfdi": "G03", "uso_cfdi_nombre": "G03 - GASTOS EN GENERAL (OTROS) (OTROS)",
+            },
+        )
+        desglose = self._desglose(factura)["pedido"]
+        self.assertEqual({c: desglose[c] for c in self.CAMPOS_PAGO}, {c: data[c] for c in self.CAMPOS_PAGO})
+
+    def test_uso_cfdi_cae_al_del_cliente_si_el_pedido_no_trae(self):
+        Pedido.objects.filter(pk=self.a["pedido"].pk).update(uso_cfdi="")
+        factura = self._factura()
+        esperado = ("G01", "G01 - ADQUISICIÓN DE MERCANCIAS")
+        data = self._detalle(factura)
+        self.assertEqual((data["uso_cfdi"], data["uso_cfdi_nombre"]), esperado)
+        desglose = self._desglose(factura)["pedido"]
+        self.assertEqual((desglose["uso_cfdi"], desglose["uso_cfdi_nombre"]), esperado)
+
+    def test_uso_cfdi_del_cliente_fuera_de_las_opciones_del_pedido_usa_la_descripcion_sat(self):
+        from finanzas.services.factura_service import FacturaService
+        from nucleo.models import SatUsoCfdi
+
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(
+            sat_uso_cfdi=SatUsoCfdi.objects.create(codigo="ZZZ", descripcion="Uso raro"),
+        )
+        factura = Factura.objects.select_related("cliente__sat_uso_cfdi").get(pk=self._factura(pedido=None).pk)
+        _, pago = FacturaService.datos_fiscales(factura, None)
+        self.assertEqual((pago["uso_cfdi"], pago["uso_cfdi_nombre"]), ("ZZZ", "Uso raro"))
+
+    def test_sin_pedido_no_hay_forma_ni_metodo_y_el_uso_es_el_del_cliente(self):
+        factura = self._factura(pedido=None, renglones=0)
+        data = self._detalle(factura)
+        self.assertEqual(
+            {c: data[c] for c in self.CAMPOS_PAGO},
+            {
+                "forma_pago": None, "forma_pago_nombre": None, "metodo_pago": None, "metodo_pago_nombre": None,
+                "uso_cfdi": "G01", "uso_cfdi_nombre": "G01 - ADQUISICIÓN DE MERCANCIAS",
+            },
+        )
+        self.assertEqual(data["receptor"]["razon_social"], "ACME SA")
+        self.assertIsNone(self._desglose(factura)["pedido"])
+
+    def test_sin_uso_en_pedido_ni_cliente_es_null(self):
+        Pedido.objects.filter(pk=self.a["pedido"].pk).update(uso_cfdi="")
+        Cliente.objects.filter(pk=self.a["cliente"].pk).update(sat_uso_cfdi=None)
+        data = self._detalle(self._factura())
+        self.assertIsNone(data["uso_cfdi"])
+        self.assertIsNone(data["uso_cfdi_nombre"])
+
+    def test_pedido_de_otra_empresa_no_se_lee(self):
+        from finanzas.services.factura_service import FacturaService
+
+        Pedido.objects.filter(pk=self.b["pedido"].pk).update(
+            cliente_rfc="BBB010101BBB", cliente_razon_social="Ajena SA", uso_cfdi="I01",
+        )
+        factura = self._factura(pedido=self.b["pedido"], renglones=0)
+        self.assertIsNone(FacturaService.pedido_de_la_factura(factura))
+        data = self._detalle(factura)
+        self.assertEqual(data["receptor"]["rfc"], "AAA010101AAA")
+        self.assertEqual(data["receptor"]["razon_social"], "ACME SA")
+        self.assertIsNone(data["forma_pago"])
+        self.assertEqual(data["uso_cfdi"], "G01")
+        self.assertIsNone(self._desglose(factura)["pedido"])
+
+    def test_solo_el_detalle_cambia(self):
+        factura = self._factura()
+        CuentaPorCobrar.objects.create(
+            empresa=self.a["empresa"], cliente=self.a["cliente"], factura=factura,
+            total=Decimal("116.00"), saldo=Decimal("116.00"),
+        )
+        listado = {f["id"]: f for f in self._filas(self.client_a.get(FACTURAS_URL).data)}
+        cxc = self._filas(self.client_a.get(CXC_URL).data)[0]
+        anidada = self.client_a.get(f"{CXC_URL}{cxc['id']}/").data["factura"]
+        for fuente, data in (("listado", listado[factura.pk]), ("cxc", anidada)):
+            with self.subTest(fuente=fuente):
+                self.assertNotIn("receptor", data)
+                self.assertNotIn("uso_cfdi", data)
+
+    def test_consultas_constantes_en_el_detalle(self):
+        pocos = self._factura(folio="F-1", renglones=1)
+        _, con_pocos = self._consultas(self.client_a, f"{FACTURAS_URL}{pocos.pk}/")
+        muchos = self._factura(folio="F-2", renglones=6)
+        _, con_muchos = self._consultas(self.client_a, f"{FACTURAS_URL}{muchos.pk}/")
+        self.assertEqual(con_muchos, con_pocos)
