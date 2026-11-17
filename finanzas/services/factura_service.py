@@ -7,6 +7,7 @@ from django.db.models import Sum
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import Factura, FacturaDetalle
+from finanzas.services.facturama.cfdi_payload import receptor_fiscal
 from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.utils.folios import TIPOS_DOCUMENTO_FACTURA, generate_factura_folio
 from nucleo.models import SerieFolio
@@ -144,39 +145,33 @@ class FacturaService:
         factura, para ``desglose/`` y el detalle (EC-904).
 
         ``pedido`` es el de ``pedido_de_la_factura`` (``None`` sin pedido o si es
-        de otra empresa). El receptor toma los datos congelados en el pedido (los
-        que se usarán al timbrar) y, si no hay pedido o vienen vacíos, los del
-        cliente. Forma y método de pago solo existen en el pedido. El uso de CFDI
-        sigue la regla del timbrado (``cfdi_payload._receptor``): el del pedido o,
-        si no trae, el del cliente.
+        de otra empresa). Receptor y uso de CFDI salen de
+        ``cfdi_payload.receptor_fiscal``, la misma regla (y el mismo recorte de
+        espacios) del timbrado: datos congelados en el pedido o, vacíos, los del
+        cliente; uso del pedido o, si no trae, del cliente (``""`` si ninguno).
+        Forma y método de pago solo existen en el pedido.
 
         Devuelve ``(receptor, datos_pago)``.
         """
         cliente = factura.cliente
-        regimen = (getattr(pedido, 'cliente_regimen_fiscal', None)
-                   or cliente.sat_regimen_fiscal)
+        datos = receptor_fiscal(pedido, cliente)
         receptor = {
             'cliente': cliente.pk,
             'nombre': cliente.nombre,
-            'razon_social': getattr(pedido, 'cliente_razon_social', None) or cliente.razon_social,
-            'rfc': getattr(pedido, 'cliente_rfc', None) or cliente.rfc,
-            'regimen_fiscal': _codigo_y_descripcion(regimen),
-            'codigo_postal': getattr(pedido, 'cliente_codigo_postal', None) or cliente.codigo_postal,
+            'razon_social': datos.razon_social,
+            'rfc': datos.rfc,
+            'regimen_fiscal': _codigo_y_descripcion(datos.regimen),
+            'codigo_postal': datos.codigo_postal,
             'correo_facturas': (getattr(pedido, 'correo_facturas', None) or cliente.correo or None),
         }
 
-        uso_pedido = (getattr(pedido, 'uso_cfdi', None) or '').strip()
-        if uso_pedido:
-            uso, uso_nombre = pedido.uso_cfdi, pedido.get_uso_cfdi_display()
-        else:
-            uso_cliente = cliente.sat_uso_cfdi
-            uso = getattr(uso_cliente, 'codigo', None) or None
-            # Mismo nombre que daría el pedido con ese código; si no está en sus
-            # opciones, la descripción del catálogo SAT.
-            uso_nombre = (
-                dict(Pedido._meta.get_field('uso_cfdi').flatchoices).get(uso) or uso_cliente.descripcion
-                if uso else None
-            )
+        # Nombre: la etiqueta del pedido para ese código; si viene del cliente y el
+        # pedido no lo tiene entre sus opciones, la descripción del catálogo SAT; si
+        # no, el código (como ``get_uso_cfdi_display``).
+        uso = datos.uso_cfdi
+        uso_nombre = dict(Pedido._meta.get_field('uso_cfdi').flatchoices).get(uso)
+        if uso_nombre is None:
+            uso_nombre = (datos.uso_cfdi_del_cliente and uso and cliente.sat_uso_cfdi.descripcion) or uso
         datos_pago = {
             'forma_pago': pedido.forma_pago if pedido else None,
             'forma_pago_nombre': pedido.get_forma_pago_display() if pedido else None,

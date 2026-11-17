@@ -11233,12 +11233,46 @@ class FacturaDatosFiscalesPdfTests(DatosPdfBase):
         self.assertEqual(data["receptor"]["razon_social"], "ACME SA")
         self.assertIsNone(self._desglose(factura)["pedido"])
 
-    def test_sin_uso_en_pedido_ni_cliente_es_null(self):
+    def test_sin_uso_en_pedido_ni_cliente_es_cadena_vacia(self):
+        # Como ``desglose/`` antes de EC-904 (el ``uso_cfdi`` vacío del pedido), no ``null``.
         Pedido.objects.filter(pk=self.a["pedido"].pk).update(uso_cfdi="")
         Cliente.objects.filter(pk=self.a["cliente"].pk).update(sat_uso_cfdi=None)
-        data = self._detalle(self._factura())
-        self.assertIsNone(data["uso_cfdi"])
-        self.assertIsNone(data["uso_cfdi_nombre"])
+        factura = self._factura()
+        data = self._detalle(factura)
+        desglose = self._desglose(factura)["pedido"]
+        for fuente, datos in (("detalle", data), ("desglose", desglose)):
+            with self.subTest(fuente=fuente):
+                self.assertEqual((datos["uso_cfdi"], datos["uso_cfdi_nombre"]), ("", ""))
+
+    def test_recorta_espacios_como_el_timbrado(self):
+        Pedido.objects.filter(pk=self.a["pedido"].pk).update(
+            uso_cfdi=" G03 ", cliente_rfc="BB010101BBB ", cliente_razon_social=" Pedido SA ",
+            cliente_codigo_postal=" 64100",
+        )
+        factura = self._factura()
+        esperado = {"rfc": "BB010101BBB", "razon_social": "Pedido SA", "codigo_postal": "64100"}
+        data, desglose = self._detalle(factura), self._desglose(factura)
+        for fuente, receptor, pago in (("detalle", data["receptor"], data), ("desglose", desglose["receptor"], desglose["pedido"])):
+            with self.subTest(fuente=fuente):
+                self.assertEqual({k: receptor[k] for k in esperado}, esperado)
+                self.assertEqual(
+                    (pago["uso_cfdi"], pago["uso_cfdi_nombre"]), ("G03", "G03 - GASTOS EN GENERAL (OTROS) (OTROS)"),
+                )
+
+    def test_mismo_receptor_que_el_timbrado(self):
+        from finanzas.services.facturama.cfdi_payload import _receptor
+
+        for uso_pedido in ("G03", ""):
+            with self.subTest(uso_pedido=uso_pedido):
+                Pedido.objects.filter(pk=self.a["pedido"].pk).update(uso_cfdi=uso_pedido, cliente_rfc=" aaa010101aaa")
+                factura = Factura.objects.get(pk=self._factura(folio=f"F-{uso_pedido or 'X'}").pk)
+                timbrado = _receptor(factura, {})
+                data = self._detalle(factura)
+                self.assertEqual(data["uso_cfdi"], timbrado["CfdiUse"])
+                self.assertEqual(data["receptor"]["rfc"].upper(), timbrado["Rfc"])
+                self.assertEqual(data["receptor"]["razon_social"], timbrado["Name"])
+                self.assertEqual(data["receptor"]["codigo_postal"], timbrado["TaxZipCode"])
+                self.assertEqual(data["receptor"]["regimen_fiscal"]["codigo"], timbrado["FiscalRegime"])
 
     def test_pedido_de_otra_empresa_no_se_lee(self):
         from finanzas.services.factura_service import FacturaService
