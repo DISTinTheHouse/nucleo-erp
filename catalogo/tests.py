@@ -1847,6 +1847,61 @@ class ProductoCategoriaListadoTests(CatalogoSelectorBase):
         self.assertEqual(resp.status_code, 201, resp.content)
         self.assertEqual(self._campos(resp.json()), ("Cat A", ""))
 
+    def test_las_anotaciones_son_campos_del_serializer(self):
+        # Los nombres de ``ANOTACIONES_*`` son los campos que leen: sin coincidencia el
+        # campo saldría siempre ``null`` (EC-905).
+        from catalogo.api.serializers import (
+            ANOTACIONES_PRODUCTO, ANOTACIONES_UNIDAD, ProductoSelectorSerializer, ProductoSerializer,
+        )
+
+        self.assertLessEqual(set(ANOTACIONES_PRODUCTO), set(ProductoSerializer().fields))
+        self.assertLessEqual(set(ANOTACIONES_UNIDAD), set(ProductoSelectorSerializer().fields))
+
+    def test_escrituras_responden_unidad_de_la_fila(self):
+        from nucleo.models import UnidadMedida
+
+        pieza = UnidadMedida.objects.create(clave="PZA-S", nombre="Pieza")
+        self.cat_industrial.unidad_medida = pieza
+        self.cat_industrial.save()
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+
+        def unidad(resp, status):
+            self.assertEqual(resp.status_code, status, resp.content)
+            datos = resp.json()
+            return datos["unidad_id"], datos["unidad_nombre"], datos["unidad_abreviatura"]
+
+        alta = client.post(PRODUCTOS_URL, {
+            "nombre": "Con unidad", "codigo": "CU001", "precio_base": "1.00", "unidad_medida": self.unidad.pk,
+        }, format="json")
+        self.assertEqual(unidad(alta, 201), (self.unidad.pk, "Metro", "MTR-S"))
+        onboarding = client.post(f"{PRODUCTOS_URL}onboarding/", {
+            "nombre": "Onb unidad", "categoria_producto": self.cat_industrial.pk, "precio_base": "1.00",
+        }, format="json")
+        self.assertEqual(unidad(onboarding, 201), (pieza.pk, "Pieza", "PZA-S"))
+        cambio = client.patch(
+            f"{PRODUCTOS_URL}{alta.json()['id']}/", {"unidad_medida": pieza.pk}, format="json",
+        )
+        self.assertEqual(unidad(cambio, 200), (pieza.pk, "Pieza", "PZA-S"))
+        sin_unidad = client.patch(f"{PRODUCTOS_URL}{alta.json()['id']}/", {"unidad_medida": None}, format="json")
+        self.assertEqual(unidad(sin_unidad, 200), (None, None, None))
+
+    def test_editar_sin_tocar_la_categoria_no_la_consulta(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        client = APIClient()
+        client.force_authenticate(user=self.user_a)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.patch(f"{PRODUCTOS_URL}{self.p_industrial.pk}/", {"precio_base": "9.00"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        # Sigue respondiendo la categoría: la trae la relectura en su LEFT JOIN.
+        self.assertEqual(self._campos(resp.json()), ("Cat Ind", "INDUSTRIAL"))
+        consultas_a_categorias = [
+            q["sql"] for q in ctx.captured_queries if 'FROM "categorias_producto"' in q["sql"]
+        ]
+        self.assertEqual(consultas_a_categorias, [])
+
     def test_filtro_linea_y_columna_coinciden(self):
         # La columna y ``?linea=`` hablan de la misma línea, también con categoría inactiva.
         filas = self._filas(linea="EPP")
@@ -1907,4 +1962,11 @@ class SchemaProductoCategoriaTests(SimpleTestCase):
         self.assertTrue(linea.get("nullable"))
         self.assertNotIn("categoria_producto_nombre", componentes["ProductoSelector"]["properties"])
         self.assertNotIn("categoria_producto_linea", componentes["ProductoSelector"]["properties"])
-        self.assertNotIn("categoria_producto_nombre", componentes.get("PatchedProducto", {}).get("required", []))
+        # De sólo lectura en el contrato: fuera de los componentes de petición.
+        for componente in ("ProductoRequest", "PatchedProductoRequest"):
+            with self.subTest(componente=componente):
+                peticion = componentes[componente]["properties"]
+                self.assertIn("nombre", peticion)
+                self.assertTrue(
+                    {"categoria_producto_nombre", "categoria_producto_linea"}.isdisjoint(peticion), peticion,
+                )

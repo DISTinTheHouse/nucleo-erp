@@ -14,7 +14,7 @@ from catalogo.codigos import siguiente_codigo_producto
 from catalogo.tallas import talla_sort_key
 from catalogo.validaciones import talla_permitida_para_producto
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso, VarianteProductoProduccion
-from catalogo.api.serializers import REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoSelectorSerializer,ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer, ProductoVarianteSelectorSerializer
+from catalogo.api.serializers import ANOTACIONES_PRODUCTO, ANOTACIONES_UNIDAD, REGLA_DUPLICADA, CategoriaProductoProcesoSerializer, TipoProductoSerializer, CategoriaProductoSerializer, ColorSerializer, TallaSerializer, ProductoSerializer, ProductoOnboardingSerializer, ProductoSelectorSerializer,ProductoVarianteSerializer, ProductoVarianteOnboardingSerializer, ProductoVarianteSelectorSerializer
 from nucleo.kpis import MENSAJE_ENTERO, entero_estricto, vacio
 from nucleo.listados import (
     OrdenamientoEstableFilter,
@@ -424,12 +424,12 @@ class ProductoViewSet(viewsets.ModelViewSet):
     ]
 
     def get_queryset(self):
-        # ``categoria_producto_nombre``/``_linea`` del serializer (EC-905), activa o no
-        # la categoría, en la misma consulta. ``selector/`` no los publica.
-        qs = self._productos_de_la_empresa().annotate(
-            categoria_producto_nombre=F("categoria_producto__nombre"),
-            categoria_producto_linea=F("categoria_producto__linea"),
-        )
+        qs = self._productos_de_la_empresa()
+        # Las anotaciones de la respuesta (``unidad_*``, ``categoria_producto_*``,
+        # EC-905) sólo donde se leen; edición y baja no las necesitan en
+        # ``get_object()``: su respuesta sale de ``_releer``.
+        if self.action in ("list", "retrieve"):
+            qs = qs.annotate(**ANOTACIONES_PRODUCTO)
         # El detalle también lee productos dados de baja (lazzar-erp#401: editar la
         # variante de un producto inactivo); listado, edición y baja, solo activos.
         if self.action != "retrieve":
@@ -442,12 +442,16 @@ class ProductoViewSet(viewsets.ModelViewSet):
         return qs
 
     def _productos_de_la_empresa(self):
-        """Productos de la empresa del usuario (activos o no), con ``unidad_*`` y el
-        orden del listado. Sin filtros de query string: los pone ``_filtrar``."""
-        qs = super().get_queryset().annotate(
-            unidad_nombre=F('unidad_medida__nombre'), unidad_abreviatura=F('unidad_medida__clave'),
-        )
-        return _alcance_empresa(qs, self.request.user).order_by("-created_at", "-id")
+        """Productos de la empresa del usuario (activos o no) en el orden del listado.
+        Sin anotaciones ni filtros de query string: los pone quien los necesita."""
+        return _alcance_empresa(super().get_queryset(), self.request.user).order_by("-created_at", "-id")
+
+    def _releer(self, producto):
+        """El producto recién escrito con las anotaciones del listado (EC-905): la
+        respuesta de alta, edición y onboarding sale de la misma fila que la lista,
+        sin las de ``get_object()`` (que ya no las trae) ni la FK por campo. Por pk,
+        sin el alcance por empresa: es el que acaba de guardar esta petición."""
+        return Producto.objects.annotate(**ANOTACIONES_PRODUCTO).get(pk=producto.pk)
 
     def _filtrar(self, qs, *, buscar_en_descripcion):
         """Filtros compartidos por el listado y ``selector/``: ``tipo_id``,
@@ -512,7 +516,7 @@ class ProductoViewSet(viewsets.ModelViewSet):
         Sólo productos activos, salvo con ``?ids=1,2``: entonces regresa esos, activos o
         no, sin aplicar ``q`` ni los demás filtros, siempre de la empresa del usuario."""
         ids = _ids_param(request)
-        qs = self._productos_de_la_empresa()
+        qs = self._productos_de_la_empresa().annotate(**ANOTACIONES_UNIDAD)
         if ids is not None:
             # Sólo el alcance por empresa: lo ya elegido conserva su etiqueta aunque
             # esté inactivo o no coincida con la búsqueda o los filtros actuales.
@@ -543,8 +547,14 @@ class ProductoViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 extra["codigo"] = siguiente_codigo_producto(categoria)
                 serializer.save(**extra)
-            return
-        serializer.save(**extra)
+        else:
+            serializer.save(**extra)
+        # La respuesta (``serializer.data``) sale de la fila anotada.
+        serializer.instance = self._releer(serializer.instance)
+
+    def perform_update(self, serializer):
+        serializer.save()
+        serializer.instance = self._releer(serializer.instance)
 
     def _categoria_del_request(self, request, categoria_id):
         if not categoria_id:
@@ -593,7 +603,7 @@ class ProductoViewSet(viewsets.ModelViewSet):
             producto = serializer.save(
                 codigo=codigo, unidad_medida=categoria.unidad_medida, empresa=categoria.empresa,
             )
-        return Response(ProductoSerializer(producto).data, status=201)
+        return Response(ProductoSerializer(self._releer(producto)).data, status=201)
 
 @extend_schema_view(list=extend_schema(parameters=[
     PARAM_Q,

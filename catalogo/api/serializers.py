@@ -1,3 +1,4 @@
+from django.db.models import F
 from rest_framework import serializers
 from catalogo.models import TipoProducto, CategoriaProducto, Color, Talla, Producto, ProductoVariante, CategoriaProductoProceso
 from catalogo.compatibilidad import normalizar_ubicacion
@@ -75,29 +76,19 @@ class TallaSerializer(serializers.ModelSerializer):
         model = Talla
         exclude = ['activo']
 
-class _CampoCategoriaMixin:
-    """Campo de sólo lectura de la categoría del producto (EC-905). Lee la anotación
-    del mismo nombre (``ProductoViewSet.get_queryset``, un LEFT JOIN de dos columnas:
-    ``select_related`` instanciaba una categoría por fila y duplicaba el tiempo del
-    listado completo); sin ella (alta, onboarding, tras editar) sigue la FK."""
-
-    def __init__(self, atributo, **kwargs):
-        self.atributo = atributo
-        super().__init__(read_only=True, allow_null=True, **kwargs)
-
-    def get_attribute(self, instance):
-        if self.field_name in instance.__dict__:
-            return instance.__dict__[self.field_name]
-        categoria = instance.categoria_producto
-        return getattr(categoria, self.atributo) if categoria is not None else None
-
-
-class _CampoCategoriaCharField(_CampoCategoriaMixin, serializers.CharField):
-    pass
-
-
-class _CampoCategoriaChoiceField(_CampoCategoriaMixin, serializers.ChoiceField):
-    pass
+# Anotaciones de ``producto/`` (los nombres son los campos de sólo lectura de los
+# serializers de producto). Las aplica ``ProductoViewSet``: listado, detalle y la
+# relectura tras alta, edición y onboarding (EC-905), y ``selector/`` sólo las de
+# unidad. Un LEFT JOIN por FK, sin instanciar la unidad ni la categoría por fila.
+ANOTACIONES_UNIDAD = {
+    "unidad_nombre": F("unidad_medida__nombre"),
+    "unidad_abreviatura": F("unidad_medida__clave"),
+}
+ANOTACIONES_PRODUCTO = {
+    **ANOTACIONES_UNIDAD,
+    "categoria_producto_nombre": F("categoria_producto__nombre"),
+    "categoria_producto_linea": F("categoria_producto__linea"),
+}
 
 
 class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
@@ -108,10 +99,11 @@ class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerial
     # Nombre y línea de la categoría aunque esté inactiva (EC-905): el catálogo de
     # categorías sólo trae activas y la tabla mostraba "—". ``null`` sin categoría;
     # la línea vacía (``""``) tal cual la guarda el modelo, la misma que ``?linea=``
-    # trata como ``SIN_LINEA``. Los anota ``ProductoViewSet.get_queryset``.
-    categoria_producto_nombre = _CampoCategoriaCharField('nombre')
-    categoria_producto_linea = _CampoCategoriaChoiceField(
-        'linea', choices=CategoriaProducto.Linea.choices, allow_blank=True,
+    # trata como ``SIN_LINEA``. Salen de ``ANOTACIONES_PRODUCTO``.
+    categoria_producto_nombre = serializers.CharField(read_only=True, allow_null=True, default=None)
+    categoria_producto_linea = serializers.ChoiceField(
+        choices=CategoriaProducto.Linea.choices, read_only=True, allow_blank=True, allow_null=True,
+        default=None,
     )
 
     # ``perform_create`` de ``ProductoViewSet`` ya inyecta ``user.empresa``, que es
@@ -139,28 +131,20 @@ class ProductoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerial
 
     def validate(self, attrs):
         # Aislamiento multi-tenant: la categoria debe ser de la empresa del
-        # producto, para TODOS (superusuario incluido).
-        categoria = (
-            attrs['categoria_producto'] if 'categoria_producto' in attrs
-            else getattr(self.instance, 'categoria_producto', None)
-        )
+        # producto, para TODOS (superusuario incluido). Sólo cuando llega: en update
+        # ``empresa`` es de sólo lectura, así que sin ``categoria_producto`` el par no
+        # cambia y leer la categoría guardada era una consulta de más (EC-905).
+        categoria = attrs.get('categoria_producto')
         if categoria is not None and categoria.empresa_id != self._empresa_id_resuelta(attrs):
             raise serializers.ValidationError(
                 {"categoria_producto": "La categoria no pertenece a la empresa del producto."}
             )
         return attrs
 
-    def update(self, instance, validated_data):
-        instance = super().update(instance, validated_data)
-        # Las anotaciones de EC-905 son de antes del cambio: la respuesta lee la FK.
-        for campo in ('categoria_producto_nombre', 'categoria_producto_linea'):
-            instance.__dict__.pop(campo, None)
-        return instance
-
 class ProductoSelectorSerializer(serializers.ModelSerializer):
     """Fila de ``producto/selector/`` (EC-886): lo que leen los selectores. ``tipo`` y
     ``categoria_producto`` son ids, como en ``ProductoSerializer``; ``unidad_*`` con
-    la misma forma (las anota ``ProductoViewSet.get_queryset``)."""
+    la misma forma (``ANOTACIONES_UNIDAD``)."""
     unidad_id = serializers.IntegerField(source='unidad_medida_id', read_only=True, allow_null=True)
     unidad_nombre = serializers.CharField(read_only=True, allow_null=True, default=None)
     unidad_abreviatura = serializers.CharField(read_only=True, allow_null=True, default=None)
