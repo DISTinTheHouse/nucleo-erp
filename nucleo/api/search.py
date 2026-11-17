@@ -338,7 +338,11 @@ def _nombre_oportunidad(oportunidad, cliente_visible: bool) -> tuple[str, str | 
     demás grupos.
     """
     titulo = _texto(oportunidad.titulo)
-    cliente = _texto(oportunidad.cliente.nombre) if cliente_visible and oportunidad.cliente_id else None
+    # Razón social como etiqueta principal (EC-810), con respaldo en el nombre corto (#1201).
+    cliente = (
+        (_texto(oportunidad.cliente.razon_social) or _texto(oportunidad.cliente.nombre))
+        if cliente_visible and oportunidad.cliente_id else None
+    )
     contacto = _texto(oportunidad.nombre_contacto)
     if titulo:
         candidatos = (cliente, contacto)
@@ -682,8 +686,10 @@ REGISTRO: tuple[EntidadBuscable, ...] = (
         # ``ventas.Oportunidad``. Y en el nombre del cliente, solo si el usuario lo ve:
         # buscar por un cliente oculto revelaría que existe.
         campos_nombre=("titulo", "nombre_contacto"),
-        condiciones_nombre=(lambda q: Q(cliente__nombre__icontains=q, cliente_visible=True),),
-        campos_only=("titulo", "nombre_contacto", "etapa", "cliente__nombre"),
+        condiciones_nombre=(lambda q: (
+            Q(cliente__nombre__icontains=q) | Q(cliente__razon_social__icontains=q)
+        ) & Q(cliente_visible=True),),
+        campos_only=("titulo", "nombre_contacto", "etapa", "cliente__nombre", "cliente__razon_social"),
         # La clave de la sección de oportunidades más el módulo ``R-CRM`` de respaldo:
         # en este catálogo son cadenas planas y quien ya entra al módulo la ve.
         permisos_visibilidad=("R-CRM-OPORTUNIDADES", "R-CRM"),

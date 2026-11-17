@@ -1790,6 +1790,16 @@ class BusquedaDeOportunidadesTests(BusquedaGlobalBaseTestCase):
         self.assertEqual(self._ids(self._buscar(self.vendedor_a, "norte"), "oportunidad"), [])
         self.assertCountEqual(self._ids(self._buscar(self.a["admin"], "norte"), "oportunidad"), [op.pk, del_admin.pk])
 
+    def test_se_encuentra_y_se_nombra_por_la_razon_social_del_cliente(self):
+        # #1201: la razón social es la etiqueta principal; sin ella, el nombre corto.
+        cliente = Cliente.objects.create(
+            empresa=self.a["empresa"], nombre="Zeta", razon_social="Industrias Ómega SA de CV",
+        )
+        op = self._oportunidad(self.a, self.a["admin"], "", cliente=cliente)
+        self.assertEqual(self._ids(self._buscar(self.a["admin"], "ómega"), "oportunidad"), [op.pk])
+        self.assertEqual(self._fila(self.a["admin"], "ómega", op), ("Industrias Ómega SA de CV", None))
+        self.assertEqual(self._ids(self._buscar(self.a["admin"], "zeta"), "oportunidad"), [op.pk])
+
     def test_buscar_por_cliente_no_cruza_empresas_ni_crece_las_consultas(self):
         self._dar_permiso_crm(self.vendedor_a)
         visibles = set()

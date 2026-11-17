@@ -42,6 +42,7 @@ from produccion.models import (
     OrdenesBordado,
     OrdenesCorteManga,
     OrdenProduccion,
+    OrdenProduccionPedido,
     OrdenProduccionRutaCritica,
 )
 from seguridad.models import Permiso, Rol, RolPermiso, UsuarioPermiso, UsuarioRol
@@ -5150,6 +5151,8 @@ class PedidoTrazabilidadTests(TestCase):
             empresa=self.empresa, sucursal=self.sucursal, pedido=pedido, folio_op="OP-1",
             estatus_op=OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
         )
+        # La trazabilidad lee ``OrdenProduccionPedido`` (#1086); la API lo crea con el principal.
+        OrdenProduccionPedido.objects.create(op=op, pedido=pedido)
         OrdenProduccionRutaCritica.objects.create(
             op=op, kit_completo=True, fecha_trazo=timezone.localdate(),
         )
@@ -9531,7 +9534,8 @@ class PedidoKpisMesaTests(_PedidosModoServidorBase, TestCase):
         """``total`` + ``cancelados`` = ``count`` del listado con los mismos filtros; los
         cancelados (estatus 5) no entran en ``total`` ni en ``por_moneda``."""
         # Cancelado en USD (moneda sin vigentes con estos filtros) y uno dado de baja
-        # por ``POST /cancelar/`` (``activo=False``): fuera del listado y de los KPIs.
+        # por ``POST /cancelar/`` (``activo=False``): solo con ``?estatus=5`` entra al
+        # listado y a los KPIs (#1144), igual que el ``count``.
         self._pedido("P-782-C1", self.cliente_b, self.usd, estatus=Pedido.ESTATUS_CANCELADO, gran_total="999")
         baja = self._pedido("P-782-C2", self.cliente_b, self.mxn, estatus=Pedido.ESTATUS_CANCELADO)
         Pedido.objects.filter(pk=baja.pk).update(activo=False)
@@ -9540,7 +9544,7 @@ class PedidoKpisMesaTests(_PedidosModoServidorBase, TestCase):
             ({"confirmado": "false"}, (2, 1)),              # p2, p3 + C1
             ({"confirmado": "true"}, (1, 1)),               # p1 + p4
             ({"cliente": self.cliente_b.pk, "moneda": self.mxn.pk}, (0, 1)),  # p4
-            ({"estatus": "5"}, (0, 2)),
+            ({"estatus": "5"}, (0, 3)),                     # p4, C1 y C2 (dado de baja)
         ]
         for params, (total, cancelados) in casos:
             with self.subTest(params=params):
@@ -9554,7 +9558,7 @@ class PedidoKpisMesaTests(_PedidosModoServidorBase, TestCase):
         self.assertEqual(Decimal(str(data["por_moneda"][0]["valor"])), Decimal("23200"))
         data = self._get(self.URL, {"estatus": "5"}).json()
         self.assertEqual(data["por_moneda"], [])
-        self.assertEqual(self._get(self.URL, {"estatus": "5"}, self.sin_importes).json()["cancelados"], 2)
+        self.assertEqual(self._get(self.URL, {"estatus": "5"}, self.sin_importes).json()["cancelados"], 3)
 
     def test_sin_permiso_sin_valor(self):
         data = self._get(self.URL, {"gran_total_min": "1000000"}, self.sin_importes).json()

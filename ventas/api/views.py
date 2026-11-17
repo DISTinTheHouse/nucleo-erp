@@ -4373,7 +4373,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
         clasificaciones presentes en los pedidos que el usuario ve, en una
         consulta. No reaccionan a los filtros (como ``por-almacen/resumen/``)."""
         validar_parametros(request, {"mis_pedidos"})
-        qs = pedidos_visibles(pedidos_base(), request.user)
+        # Con los cancelados (``activo=False``, #1118): el filtro «Cancelado» del listado
+        # debe poder elegir sus meses y clasificaciones (#1195).
+        qs = pedidos_visibles(
+            Pedido.objects.filter(Q(activo=True) | Q(estatus=Pedido.ESTATUS_CANCELADO)), request.user)
         if (request.query_params.get("mis_pedidos") or "").lower() in ("true", "1"):
             qs = qs.filter(cotizacion__vendedor=request.user)
         datos = pedidos_listado.opciones(qs)

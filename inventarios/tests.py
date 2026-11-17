@@ -2550,7 +2550,7 @@ class PermisoYValidacionReportesPeriodoTests(ReportesPeriodoBase):
             self.assertEqual(resp.status_code, 401, nombre)
 
     def test_el_permiso_cuesta_consultas_fijas(self):
-        """El permiso suma sus 2 consultas fijas (overrides y roles) y nada más."""
+        """El permiso suma 1 consulta fija (overrides y roles en un UNION ALL, #1158) y nada más."""
         from inventarios.api.views import PermisoReportesInventario
 
         def consultas(url, params):
@@ -2562,7 +2562,7 @@ class PermisoYValidacionReportesPeriodoTests(ReportesPeriodoBase):
             con_permiso = consultas(url, params)
             with mock.patch.object(PermisoReportesInventario, "has_permission", return_value=True):
                 sin_permiso = consultas(url, params)
-            self.assertEqual(con_permiso - sin_permiso, 2, nombre)
+            self.assertEqual(con_permiso - sin_permiso, 1, nombre)
 
     # --- Almacén -------------------------------------------------------------------
 

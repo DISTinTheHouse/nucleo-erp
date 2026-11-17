@@ -200,6 +200,11 @@ class AislamientoEmpresaCatalogoTests(TestCase):
         cls.superuser = Usuario.objects.create(
             username="s@cat.test", email="s@cat.test", is_superuser=True, is_staff=True,
         )
+        # Con empresa activa (EC-798): ve y escribe solo en ella, como cualquiera.
+        cls.superuser_a = Usuario.objects.create(
+            username="sa@cat.test", email="sa@cat.test", is_superuser=True, is_staff=True,
+            empresa=cls.empresa_a,
+        )
 
     def _client(self, user):
         client = APIClient()
@@ -227,17 +232,19 @@ class AislamientoEmpresaCatalogoTests(TestCase):
         for url in (CATEGORIAS_URL, PRODUCTOS_URL, VARIANTES_URL):
             self.assertEqual(self._ids(client.get(url)), set(), url)
 
-    def test_list_superusuario_ve_todas_las_empresas(self):
+    def test_list_superusuario_ve_solo_su_empresa_activa(self):
+        client = self._client(self.superuser_a)
+        self.assertEqual(self._ids(client.get(CATEGORIAS_URL)), {self.cat_a.pk})
+        self.assertEqual(
+            self._ids(client.get(PRODUCTOS_URL)), {self.prod_a.pk, self.prod_a_otro_tipo.pk},
+        )
+        self.assertEqual(
+            self._ids(client.get(VARIANTES_URL)), {self.var_a.pk, self.var_a_sin_bom.pk},
+        )
+        # Sin empresa activa no ve nada.
         client = self._client(self.superuser)
-        self.assertEqual(self._ids(client.get(CATEGORIAS_URL)), {self.cat_a.pk, self.cat_b.pk})
-        self.assertEqual(
-            self._ids(client.get(PRODUCTOS_URL)),
-            {self.prod_a.pk, self.prod_a_otro_tipo.pk, self.prod_b.pk},
-        )
-        self.assertEqual(
-            self._ids(client.get(VARIANTES_URL)),
-            {self.var_a.pk, self.var_a_sin_bom.pk, self.var_b.pk},
-        )
+        for url in (CATEGORIAS_URL, PRODUCTOS_URL, VARIANTES_URL):
+            self.assertEqual(self._ids(client.get(url)), set(), url)
 
     def test_filtros_existentes_siguen_funcionando_dentro_del_alcance(self):
         client = self._client(self.user_a)
@@ -289,7 +296,7 @@ class AislamientoEmpresaCatalogoTests(TestCase):
     # --- empresa no reasignable por update -------------------------------------
 
     def test_patch_con_empresa_en_el_body_no_reasigna_el_tenant(self):
-        for user in (self.user_a, self.superuser):
+        for user in (self.user_a, self.superuser_a):
             client = self._client(user)
             for url, propia in (
                 (CATEGORIAS_URL, self.cat_a),
@@ -358,11 +365,14 @@ class AislamientoEmpresaCatalogoTests(TestCase):
         self.assertEqual(resp.status_code, 201, resp.content)
         self.assertEqual(resp.json()["empresa"], self.empresa_a.pk)
 
-        su = self._client(self.superuser).post(
+        # El superusuario también: crea en su empresa activa, no en la que mande (EC-798).
+        su = self._client(self.superuser_a).post(
             PRODUCTOS_URL, {"nombre": "Gorra", "empresa": self.empresa_b.pk}, format="json",
         )
         self.assertEqual(su.status_code, 201, su.content)
-        self.assertEqual(su.json()["empresa"], self.empresa_b.pk)
+        self.assertEqual(su.json()["empresa"], self.empresa_a.pk)
+        sin_empresa = self._client(self.superuser).post(PRODUCTOS_URL, {"nombre": "Gorra"}, format="json")
+        self.assertEqual(sin_empresa.status_code, 400, sin_empresa.content)
 
     # --- onboarding (validación propia, se conserva) ---------------------------
 
@@ -465,7 +475,7 @@ class AislamientoEmpresaCatalogoTests(TestCase):
         self.assertEqual(ok.json()["empresa"], self.empresa_b.pk)
 
     def test_patch_y_put_variante_a_producto_de_otra_empresa_son_rechazados(self):
-        for user in (self.user_a, self.superuser):
+        for user in (self.user_a, self.superuser_a):
             client = self._client(user)
             patch = client.patch(
                 f"{VARIANTES_URL}{self.var_a.pk}/", {"producto": self.prod_b.pk}, format="json",
@@ -518,7 +528,7 @@ class AislamientoEmpresaCatalogoTests(TestCase):
         self.assertFalse(Producto.objects.filter(nombre="Cruzado").exists())
 
     def test_create_producto_superusuario_cruzando_empresas_es_rechazado(self):
-        client = self._client(self.superuser)
+        client = self._client(self.superuser_a)
         resp = client.post(
             PRODUCTOS_URL,
             {"nombre": "Cruzado", "empresa": self.empresa_a.pk, "categoria_producto": self.cat_b.pk},
@@ -527,17 +537,15 @@ class AislamientoEmpresaCatalogoTests(TestCase):
         self.assertEqual(resp.status_code, 400, resp.content)
         self.assertIn("categoria_producto", resp.json())
         self.assertFalse(Producto.objects.filter(nombre="Cruzado").exists())
-        # Sin cruzar sigue pudiendo crear en cualquier empresa.
+        # Con una categoría de su empresa activa sí puede dar de alta.
         ok = client.post(
-            PRODUCTOS_URL,
-            {"nombre": "Gorra B", "empresa": self.empresa_b.pk, "categoria_producto": self.cat_b.pk},
-            format="json",
+            PRODUCTOS_URL, {"nombre": "Gorra A", "categoria_producto": self.cat_a.pk}, format="json",
         )
         self.assertEqual(ok.status_code, 201, ok.content)
-        self.assertEqual(ok.json()["empresa"], self.empresa_b.pk)
+        self.assertEqual(ok.json()["empresa"], self.empresa_a.pk)
 
     def test_patch_y_put_producto_a_categoria_de_otra_empresa_son_rechazados(self):
-        for user in (self.user_a, self.superuser):
+        for user in (self.user_a, self.superuser_a):
             client = self._client(user)
             patch = client.patch(
                 f"{PRODUCTOS_URL}{self.prod_a.pk}/", {"categoria_producto": self.cat_b.pk}, format="json",
@@ -1744,7 +1752,10 @@ class FiltrosServidorVariantesTests(FiltrosServidorCatalogoBase):
             "limit": 50, "producto": f"{self.p_activo.pk},{self.p_otro.pk}", "color": self.azul.pk,
             "activo": "true", "precio_base_min": "0", "ordering": "talla__nombre", "q": "0",
         }
-        with self.assertNumQueries(2):
+        # En frío 3 (el orden de tallas, ``_orden_tallas``, va a caché 5 min), luego 2.
+        from django.core.cache import cache
+        cache.delete("catalogo:orden_tallas")
+        with self.assertNumQueries(3):
             self.assertEqual(client.get(VARIANTES_URL, params).status_code, 200)
         ProductoVariante.objects.bulk_create([
             ProductoVariante(

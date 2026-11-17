@@ -62,11 +62,10 @@ class CostoInventarioViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset()
-        if not user.is_superuser:
-            empresa = getattr(user, "empresa", None)
-            if not empresa:
-                return qs.none()
-            qs = qs.filter(empresa=empresa)
+        empresa = getattr(user, "empresa", None)  # superusuario incluido (#1131)
+        if not empresa:
+            return qs.none()
+        qs = qs.filter(empresa=empresa)
         if self.action == "list":
             for nombre in ("producto", "producto_variante", "variante_produccion"):
                 valor = entero_param(self.request, nombre)
