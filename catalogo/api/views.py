@@ -383,7 +383,11 @@ class ProductoViewSet(viewsets.ModelViewSet):
     ]
 
     def get_queryset(self):
-        qs = self._productos_de_la_empresa().filter(activo=True)
+        qs = self._productos_de_la_empresa()
+        # El detalle también lee productos dados de baja (lazzar-erp#401: editar la
+        # variante de un producto inactivo); listado, edición y baja, solo activos.
+        if self.action != "retrieve":
+            qs = qs.filter(activo=True)
         # Los filtros del query string sólo en el listado (EC-896): en detalle,
         # edición y baja un ``?q=`` o ``?tipo_id=`` respondía 404 sobre un producto
         # visible. ``selector/`` arma su propio queryset.
