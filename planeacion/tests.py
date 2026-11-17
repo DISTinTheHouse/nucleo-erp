@@ -116,7 +116,9 @@ class PlaneacionBaseTestCase(TestCase):
     def _get(self, user, url=TABLERO_URL, **params):
         client = APIClient()
         client.force_authenticate(user=user)
-        return client.get(url, {"page_size": 500, **params})
+        # ``necesidades-materia-prima`` no pagina y rechaza ``page_size`` (#1115).
+        base = {} if url == NECESIDADES_URL else {"page_size": 500}
+        return client.get(url, {**base, **params})
 
     def _fila(self, data, variante):
         filas = [r for r in data["results"] if r["variante_id"] == variante.pk]
