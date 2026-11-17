@@ -6396,6 +6396,67 @@ class OportunidadesValidacionesTests(OportunidadesBase):
         self.assertTrue(listado_con_exists(self.ana, "-cliente__nombre"))
         self.assertFalse(listado_con_exists(self.jefe, "cliente__razon_social,-id"))
 
+    def _busca(self, user, q, url=OPORTUNIDADES_URL):
+        resp = self._client(user).get(url, {"q": q})
+        self.assertEqual(resp.status_code, 200, q)
+        return {o["id"] for o in resp.data}
+
+    def test_q_busca_por_razon_social_y_nombre_del_cliente_visible(self):
+        visible = self._op(self.ana, cliente=self._cliente_rs("Corto Visible", "Textiles Norte SA", asignado_a=[self.ana]))
+        self._op(self.ana, cliente=self._cliente_rs("Otro", "Otra SA", asignado_a=[self.ana]))
+
+        self.assertEqual(self._busca(self.ana, "textiles norte"), {visible.pk})
+        self.assertEqual(self._busca(self.ana, "corto vis"), {visible.pk})
+        # Título y contacto siguen igual.
+        por_titulo = self._op(self.ana, nombre_contacto="Ximena")
+        self.assertEqual(self._busca(self.ana, "ximena"), {por_titulo.pk})
+        self.assertIn(visible.pk, self._busca(self.ana, "uniformes"))
+
+    def test_q_no_encuentra_por_cliente_oculto_para_el_vendedor(self):
+        oculto = self._op(self.ana, cliente=self._cliente_rs("Corto Oculto", "Secreta SA"))
+
+        self.assertEqual(self._busca(self.ana, "secreta"), set())
+        self.assertEqual(self._busca(self.ana, "corto oculto"), set())
+        # El embudo usa los mismos filtros: tampoco cuenta la oportunidad.
+        embudo = self._client(self.ana).get(f"{OPORTUNIDADES_URL}embudo/", {"q": "secreta"}).data
+        self.assertEqual(embudo["total"]["cantidad"], 0)
+        # Por su propio título sí sale: lo que se oculta es el cliente, no la oportunidad.
+        self.assertEqual(self._busca(self.ana, "uniformes"), {oculto.pk})
+        # Si se le asigna el cliente, ya lo encuentra.
+        oculto.cliente.vendedores.add(self.ana)
+        self.assertEqual(self._busca(self.ana, "secreta"), {oculto.pk})
+
+    def test_q_por_cliente_para_quien_ve_todos_los_clientes(self):
+        cliente = self._cliente_rs("Corto Oculto", "Secreta SA")
+        de_ana = self._op(self.ana, cliente=cliente)
+        mesa = self._mesa()
+        de_mesa = self._op(mesa, cliente=cliente)
+
+        self.assertEqual(self._busca(self.jefe, "secreta"), {de_ana.pk, de_mesa.pk})
+        self.assertEqual(self._busca(self.jefe, "corto oculto"), {de_ana.pk, de_mesa.pk})
+        self.assertEqual(self._busca(mesa, "secreta"), {de_mesa.pk})
+        self.assertEqual(self._busca(mesa, "corto oculto"), {de_mesa.pk})
+
+    def test_q_por_cliente_no_agrega_consultas_ni_exists_para_el_admin(self):
+        self._op(self.ana, cliente=self._cliente_rs("C0", "C0 SA", asignado_a=[self.ana]))
+
+        def medir(user):
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._client(user).get(OPORTUNIDADES_URL, {"q": "sa"})
+            self.assertEqual(resp.status_code, 200)
+            listado = [q["sql"] for q in ctx.captured_queries if 'FROM "oportunidades"' in q["sql"]]
+            return len(ctx), 'FROM "clientes"' in listado[0]
+
+        medir(self.ana)  # calienta cachés de permisos
+        pocas = {"vendedor": medir(self.ana), "admin": medir(self.jefe)}
+        for i in range(1, 8):
+            asignado = [self.ana] if i % 2 else []
+            self._op(self.ana, cliente=self._cliente_rs(f"C{i}", f"C{i} SA", asignado_a=asignado))
+        muchas = {"vendedor": medir(self.ana), "admin": medir(self.jefe)}
+
+        self.assertEqual(pocas, muchas)
+        self.assertEqual(muchas, {"vendedor": (pocas["vendedor"][0], True), "admin": (pocas["admin"][0], False)})
+
     def test_transferir_pasa_las_cotizaciones_al_nuevo_dueno(self):
         op = self._op(self.ana, cliente=self.cliente)
         resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")

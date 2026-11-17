@@ -312,7 +312,14 @@ class OportunidadViewSet(viewsets.ModelViewSet):
             qs = qs.filter(vendedor_id=_entero(params, "vendedor"))
         buscar = (params.get("q") or "").strip()
         if buscar:
-            qs = qs.filter(Q(titulo__icontains=buscar) | Q(nombre_contacto__icontains=buscar))
+            # Nombre y razón social del cliente solo cuentan si el usuario ve a ese cliente
+            # (EC-902), como en el buscador global: si no, buscar delataría al cliente oculto.
+            por_cliente = Q(cliente__nombre__icontains=buscar) | Q(cliente__razon_social__icontains=buscar)
+            visible = cliente_visible(self.request.user)
+            if visible is not None:
+                qs = qs.alias(busqueda_cliente_visible=visible)
+                por_cliente &= Q(busqueda_cliente_visible=True)
+            qs = qs.filter(Q(titulo__icontains=buscar) | Q(nombre_contacto__icontains=buscar) | por_cliente)
         hasta = params.get("proximo_contacto_hasta")
         if hasta:
             fecha = parse_date(hasta)
