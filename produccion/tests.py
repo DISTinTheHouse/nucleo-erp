@@ -36,7 +36,16 @@ from inventarios.models import (
     MovimientoInventarioDetalle,
     Ubicacion,
 )
-from nucleo.models import Empresa, Moneda, SerieFolio, Sucursal, UnidadMedida
+from nucleo.models import (
+    Empresa,
+    Moneda,
+    SatFormaPago,
+    SatMetodoPago,
+    SatRegimenFiscal,
+    SerieFolio,
+    Sucursal,
+    UnidadMedida,
+)
 from produccion.models import (
     BomDetalle,
     BordadoAvances,
@@ -85,10 +94,18 @@ from usuarios.models import Usuario
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
 
 
+def _permiso(clave):
+    """El ``Permiso`` de ``clave``: el catálogo solo vive en la BD, así que las
+    pruebas lo siembran."""
+    from seguridad.models import Permiso
+
+    return Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})[0]
+
+
 def _conceder_permisos(usuario, empresa, claves):
     """Rol activo de ``empresa`` con esas claves, asignado a ``usuario``. El
     catálogo de permisos solo vive en la BD, así que se siembran aquí."""
-    from seguridad.models import Permiso, Rol, RolPermiso, UsuarioRol
+    from seguridad.models import Rol, RolPermiso, UsuarioRol
 
     # Un rol por llamada: el sufijo no se repite aunque se llame dos veces para
     # el mismo usuario (``uq_rol_empresa_codigo``).
@@ -97,10 +114,20 @@ def _conceder_permisos(usuario, empresa, claves):
         estatus=Rol.Estatus.ACTIVO,
     )
     for clave in claves:
-        permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
-        RolPermiso.objects.create(rol=rol, permiso=permiso)
+        RolPermiso.objects.create(rol=rol, permiso=_permiso(clave))
     UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=empresa)
     return rol
+
+
+def _conceder_permisos_sin_empresa(usuario, claves):
+    """GRANT sin empresa para un usuario sin empresa activa: un rol no le sirve
+    (``UsuarioRol.empresa`` es obligatorio y ``permisos_efectivos`` solo cuenta
+    los de la empresa activa). Así la petición pasa ``LecturaPorCodigo`` y la
+    prueba sigue midiendo el alcance del queryset, no el 403 del código."""
+    from seguridad.models import UsuarioPermiso
+
+    for clave in claves:
+        UsuarioPermiso.objects.create(usuario=usuario, permiso=_permiso(clave), tipo=UsuarioPermiso.TIPO_GRANT)
 
 
 def _tipo_producto():
@@ -565,6 +592,10 @@ SATELITES = (
     },
 )
 
+#: Lo que exigen hoy los ``SATELITES`` (#1133): lectura por sección y edición o
+#: baja de los de bordado. Las incidencias de reflejante no piden código al escribir.
+CLAVES_SATELITES = ("R-PRODUCCION-OB", "R-PRODUCCION-OR", "E-PRODUCCION-OB", "D-PRODUCCION-OB")
+
 
 class SatelitesScopeTenantTests(TestCase):
     """Aislamiento multi-tenant de Avances/Incidencias de Bordado y Reflejante.
@@ -620,10 +651,15 @@ class SatelitesScopeTenantTests(TestCase):
         cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
         cls.a = cls._tenant("acme", "MTY", "a@acme.test")
         cls.b = cls._tenant("globex", "GDL", "b@globex.test")
+        # #1133: leer los satélites exige el código de la sección de su orden
+        # padre; editar/borrar los de bordado, ``E-``/``D-PRODUCCION-OB``. Solo
+        # el usuario de A hace peticiones; el de B solo es autor de sus registros.
+        _conceder_permisos(cls.a["usuario"], cls.a["empresa"], CLAVES_SATELITES)
 
         cls.sin_empresa = Usuario.objects.create(
             username="huerfano", email="huerfano@nowhere.test"
         )
+        _conceder_permisos_sin_empresa(cls.sin_empresa, CLAVES_SATELITES)
         cls.superuser = Usuario.objects.create(
             username="root", email="root@nowhere.test", is_superuser=True
         )
@@ -739,6 +775,7 @@ class SatelitesScopeTenantTests(TestCase):
             empresa=self.a["empresa"],
             sucursal_default=otra_sucursal,
         )
+        _conceder_permisos(forastero, self.a["empresa"], CLAVES_SATELITES)
         client = self._client(forastero)
         for cfg in SATELITES:
             with self.subTest(cfg["nombre"]):
@@ -922,6 +959,8 @@ class SatelitesSuperficieEscribibleTests(TestCase):
             empresa=cls.empresa,
             sucursal_default=cls.sucursal,
         )
+        # #1133: el PATCH de avances e incidencias de bordado exige E-PRODUCCION-OB.
+        _conceder_permisos(cls.usuario, cls.empresa, ["E-PRODUCCION-OB"])
         # Dos pedidos: la constraint antiduplicado del bug previo prohíbe dos
         # órdenes activas del mismo tipo sobre un mismo pedido, así que la orden
         # "otra" (destino ilegítimo de la reasignación) vive en su propio pedido.
@@ -1100,6 +1139,8 @@ class SatelitesUsuarioTenantTests(TestCase):
             empresa=cls.empresa_a,
             sucursal_default=cls.sucursal_a,
         )
+        # #1133: el PATCH de avances e incidencias de bordado exige E-PRODUCCION-OB.
+        _conceder_permisos(cls.solicitante, cls.empresa_a, ["E-PRODUCCION-OB"])
         cls.operador_mismo_tenant = Usuario.objects.create(
             username="operador_a", email="operador_a@acme.test", empresa=cls.empresa_a
         )
@@ -1407,6 +1448,8 @@ class ReflejanteAvancesContratoTenantTests(TestCase):
             clave_departamento=CLAVE_DEPARTAMENTO_PRODUCCION,
         )
         UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=empresa)
+        # #1133: el departamento ya no basta para leer; hace falta el código de OR.
+        _conceder_permisos(usuario, empresa, ["R-PRODUCCION-OR"])
         pedido = Pedido.objects.create(
             empresa=empresa, sucursal=sucursal, cliente=cliente, moneda=cls.moneda,
             persona_pagos="Pagos", correo_facturas=email, telefono_pagos="8100000000",
@@ -1459,6 +1502,7 @@ class ReflejanteAvancesContratoTenantTests(TestCase):
             username="forastero-ra", email="forastero-ra@acme.test", empresa=self.a["empresa"],
             sucursal_default=otra,
         )
+        _conceder_permisos(forastero, self.a["empresa"], ["R-PRODUCCION-OR"])
         self.assertEqual(self._ids(forastero), [])
         client = APIClient()
         client.force_authenticate(user=forastero)
@@ -1466,6 +1510,7 @@ class ReflejanteAvancesContratoTenantTests(TestCase):
 
     def test_sin_empresa_no_ve_nada_ni_el_superusuario(self):
         sin_empresa = Usuario.objects.create(username="huerfano-ra", email="huerfano-ra@nowhere.test")
+        _conceder_permisos_sin_empresa(sin_empresa, ["R-PRODUCCION-OR"])
         root = Usuario.objects.create(username="root-ra", email="root-ra@nowhere.test", is_superuser=True)
         for user in (sin_empresa, root):
             with self.subTest(user=user.username):
@@ -4636,6 +4681,15 @@ class OrdenProduccionPedidoOpcionalTests(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
 
 
+#: Código de lectura de cada ``onboarding`` (#1133): ``codigos_lectura`` va por
+#: acción, así que su POST también pide el ``R-`` de la sección.
+CODIGO_ONBOARDING = {
+    "/api/v1/produccion/orden-bordado/onboarding/": "R-PRODUCCION-OB",
+    "/api/v1/produccion/orden-reflejante/onboarding/": "R-PRODUCCION-OR",
+    "/api/v1/produccion/orden-corte-manga/onboarding/": "R-PRODUCCION-CM",
+}
+
+
 class OnboardingPostScopeTenantTests(TestCase):
     """POST de onboarding de OB/OR/OCM: un pedido o una talla fuera del alcance
     del usuario se rechaza sin exponer datos del registro ajeno (#275)."""
@@ -4661,10 +4715,14 @@ class OnboardingPostScopeTenantTests(TestCase):
         )
         cls.empresa_b = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
         cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="GDL", nombre="GDL")
-        cls.usuario = Usuario.objects.create(
-            username="operador", email="operador@acme.test",
-            empresa=cls.empresa, sucursal_default=cls.sucursal,
-        )
+        # #1133: un operador por sección, cada uno solo con el código de su ``onboarding``.
+        cls.usuarios = {}
+        for i, url in enumerate(cls.URLS):
+            cls.usuarios[url] = Usuario.objects.create(
+                username=f"operador-{i}", email=f"operador-{i}@acme.test",
+                empresa=cls.empresa, sucursal_default=cls.sucursal,
+            )
+            _conceder_permisos(cls.usuarios[url], cls.empresa, [CODIGO_ONBOARDING[url]])
         cls.pedido, cls.pdt = cls._pedido(cls.empresa, cls.sucursal, 10)
         cls.pedido_b, cls.pdt_b = cls._pedido(cls.empresa_b, cls.sucursal_b, cls.CANTIDAD_AJENA)
         cls.pedido_otra_sucursal, cls.pdt_otra_sucursal = cls._pedido(
@@ -4690,7 +4748,7 @@ class OnboardingPostScopeTenantTests(TestCase):
 
     def _post(self, url, pedido_id, pdt_id):
         client = APIClient()
-        client.force_authenticate(user=self.usuario)
+        client.force_authenticate(user=self.usuarios[url])
         return client.post(
             url,
             {"pedido": pedido_id, "detalles_override": [{"pedido_detalle_talla_id": pdt_id, "cantidad": 999999}]},
@@ -4742,6 +4800,9 @@ class OnboardingPostLineaMuestraTests(TestCase):
         ("/api/v1/produccion/orden-reflejante/onboarding/", OrdenesReflejante, "ORDEN_REFLEJANTE"),
         ("/api/v1/produccion/orden-corte-manga/onboarding/", OrdenesCorteManga, "ORDEN_CORTE_MANGA"),
     )
+    #: Códigos de las secciones que ejercita la clase (#1133); la subclase de bordado
+    #: los reemplaza por el de la OB.
+    CLAVES = (CODIGO_ONBOARDING[CASOS[0][0]], CODIGO_ONBOARDING[CASOS[1][0]])
 
     @classmethod
     def setUpTestData(cls):
@@ -4756,6 +4817,7 @@ class OnboardingPostLineaMuestraTests(TestCase):
             username="operador", email="operador@acme.test",
             empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
+        _conceder_permisos(cls.usuario, cls.empresa, cls.CLAVES)
         cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
         cls.pedido = Pedido.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente,
@@ -4796,6 +4858,7 @@ class OrdenBordadoMuestraTests(OnboardingPostLineaMuestraTests):
 
     URL = "/api/v1/produccion/orden-bordado/onboarding/"
     CASOS = ()
+    CLAVES = (CODIGO_ONBOARDING[URL],)
 
     def _client(self):
         client = APIClient()
@@ -5028,6 +5091,8 @@ class RutaCriticaOPTests(TestCase):
             username="lector", email="lector@acme.test",
             empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
+        # #1133: leer la ruta crítica exige R-PRODUCCION-OP; escribirla sigue con el departamento.
+        _conceder_permisos(cls.lector, cls.empresa, ["R-PRODUCCION-OP"])
 
     def setUp(self):
         self.op = OrdenProduccion.objects.create(
@@ -5138,6 +5203,8 @@ class EstatusOPTests(TestCase):
         cls.lector = Usuario.objects.create(
             username="lec", email="lec@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
+        # #1133: leer ``estatus/`` exige R-PRODUCCION-OP; cambiarlo sigue con el departamento.
+        _conceder_permisos(cls.lector, cls.empresa, ["R-PRODUCCION-OP"])
         cls.ajeno = Usuario.objects.create(
             username="ajeno", email="ajeno@otra.test", empresa=cls.otra, is_admin_empresa=True,
         )
@@ -5209,11 +5276,44 @@ class EstatusOPTests(TestCase):
             self.assertEqual(self._client().get(self.url).data["opciones"], [])
             self.assertEqual(self._post({"estatus_op": int(self.E.PREPARACION)}).status_code, 409)
 
-    def test_usuario_no_admin_cambia_estatus_de_op_de_otra_sucursal_de_su_empresa(self):
-        """#507: mismo alcance que list/detail (empresa), sin filtrar por sucursal."""
+    def test_usuario_no_admin_no_ve_estatus_de_op_de_otra_sucursal_de_su_empresa(self):
+        """#1134: mismo alcance que el detalle (empresa y sucursales del usuario):
+        la OP de otra sucursal de su empresa es 404."""
         otra_suc = Sucursal.objects.create(empresa=self.empresa, codigo="GDL", nombre="Guadalajara")
         OrdenProduccion.objects.filter(pk=self.op.pk).update(sucursal=otra_suc)
-        self.assertEqual(self._client(self.lector).get(self.url).status_code, 200)
+        self.assertEqual(self._client(self.lector).get(self.url).status_code, 404)
+
+    def test_produccion_no_cambia_estatus_de_op_de_otra_sucursal_de_su_empresa(self):
+        """#1134: el POST usa el mismo alcance. El usuario pasa los chequeos de hoy
+        (departamento Producción y R-PRODUCCION-OP, que ``estatus`` pide también en
+        el POST), así que el 404 viene del alcance por sucursal, no de un 400/403."""
+        from seguridad.models import Rol, UsuarioRol
+        from seguridad.role_identity import CLAVE_DEPARTAMENTO_PRODUCCION
+
+        operador = Usuario.objects.create(
+            username="prod-est", email="prod-est@acme.test", empresa=self.empresa, sucursal_default=self.sucursal,
+        )
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="PRODUCCION-EST", nombre="Producción",
+            clave_departamento=CLAVE_DEPARTAMENTO_PRODUCCION,
+        )
+        UsuarioRol.objects.create(usuario=operador, rol=rol, empresa=self.empresa)
+        _conceder_permisos(operador, self.empresa, ["R-PRODUCCION-OP"])
+        body = {"estatus_op": int(self.E.PREPARACION)}
+
+        # Control: en su sucursal el mismo usuario sí cambia el estatus.
+        propia = OrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, folio_op="OP-EST-2")
+        resp = self._client(operador).post(
+            f"/api/v1/produccion/orden-produccion/{propia.pk}/estatus/", body, format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+
+        otra_suc = Sucursal.objects.create(empresa=self.empresa, codigo="GDL", nombre="Guadalajara")
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(sucursal=otra_suc)
+        estatus_previo = OrdenProduccion.objects.get(pk=self.op.pk).estatus_op
+        resp = self._post(body, user=operador)
+        self.assertEqual(resp.status_code, 404, resp.data)
+        self.assertEqual(OrdenProduccion.objects.get(pk=self.op.pk).estatus_op, estatus_previo)
 
     def test_motivo_que_no_es_texto_responde_400(self):
         resp = self._post({"estatus_op": int(self.E.DETENIDO), "motivo": 5})
@@ -5390,7 +5490,13 @@ class RutaCriticaBulkTests(TestCase):
         cls.otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
         cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
         cls.sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="GDL", nombre="GDL")
-        cls.usuario = Usuario.objects.create(username="u", email="u@acme.test", empresa=cls.empresa)
+        # #1134: ``ruta-critica/`` usa el alcance del detalle (sucursal); sin
+        # sucursal el usuario no vería ninguna OP y las pruebas medirían una lista vacía.
+        cls.usuario = Usuario.objects.create(
+            username="u", email="u@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        # #1133: leer la ruta crítica exige R-PRODUCCION-OP.
+        _conceder_permisos(cls.usuario, cls.empresa, ["R-PRODUCCION-OP"])
         cls.op1 = OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-1")
         cls.op2 = OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-2")
         cls.op_ajena = OrdenProduccion.objects.create(empresa=cls.otra, sucursal=cls.sucursal_otra, folio_op="OP-X")
@@ -5460,7 +5566,10 @@ class OrdenProduccionKpisTests(TestCase):
         cls.usuario = Usuario.objects.create(
             username="u", email="u@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
+        # #1133: ``kpis`` y el listado de OP exigen R-PRODUCCION-OP.
+        _conceder_permisos(cls.usuario, cls.empresa, ["R-PRODUCCION-OP"])
         cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
+        _conceder_permisos_sin_empresa(cls.sin_empresa, ["R-PRODUCCION-OP"])
         cls.admin_empresa = Usuario.objects.create(
             username="admin", email="admin@acme.test", empresa=cls.empresa,
             sucursal_default=cls.sucursal, is_admin_empresa=True,
@@ -6574,7 +6683,8 @@ class OrdenProduccionDetalleTenantTests(_BomTenantBase, TestCase):
         )
         # EC-870 (b70ee1a): editar y dar de baja la OP exige estos permisos; el
         # aislamiento por empresa se prueba con un usuario que sí los tiene.
-        _conceder_permisos(cls.usuario, cls.empresa, ["E-PRODUCCION-OP", "D-PRODUCCION-OP"])
+        # #1133: leer la OP (detalle y ``onboarding``) exige R-PRODUCCION-OP.
+        _conceder_permisos(cls.usuario, cls.empresa, ["R-PRODUCCION-OP", "E-PRODUCCION-OP", "D-PRODUCCION-OP"])
 
     @classmethod
     def _pedido_muestra(cls, empresa, sucursal, cliente):
@@ -7995,6 +8105,8 @@ class BordadoAvancesRegresionesTests(TestCase):
             username="op@acme.test", email="op@acme.test",
             empresa=cls.empresa, sucursal_default=cls.mty,
         )
+        # #1133: leer bordado-avances exige R-PRODUCCION-OB y su PATCH, E-PRODUCCION-OB.
+        _conceder_permisos(cls.op, cls.empresa, ["R-PRODUCCION-OB", "E-PRODUCCION-OB"])
         cls.admin = Usuario.objects.create(
             username="adm@acme.test", email="adm@acme.test",
             empresa=cls.empresa, sucursal_default=cls.mty, is_admin_empresa=True,
@@ -8699,7 +8811,9 @@ class OrdenProduccionPedidosLigadosTests(TestCase):
     Reutiliza el escenario de ``OrdenProduccionPedidoOpcionalTests``."""
 
     URL = OrdenProduccionPedidoOpcionalTests.URL
-    setUpTestData = OrdenProduccionPedidoOpcionalTests.setUpTestData
+    # Se reutiliza la función, no el classmethod ya ligado: ligado a la otra clase,
+    # sembraba los atributos en ella y aquí faltaban (``self.empresa``).
+    setUpTestData = classmethod(OrdenProduccionPedidoOpcionalTests.setUpTestData.__func__)
     _client = OrdenProduccionPedidoOpcionalTests._client
     _body = OrdenProduccionPedidoOpcionalTests._body
     _pedido_muestra = OrdenProduccionPedidoOpcionalTests._pedido_muestra
@@ -8767,13 +8881,27 @@ class SalidaMaquilaReglasTests(TestCase):
             username="sm-user", email="sm@acme-sm.test", empresa=cls.empresa, is_admin_empresa=True,
         )
         from terceros.models import Proveedor
-        cls.maquilero = Proveedor.objects.create(empresa=cls.empresa, nombre="Maquila SA", es_maquilero=True)
+
+        # Moneda y catálogos SAT son NOT NULL en ``proveedores``.
+        cls.maquilero = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="Maquila SA", es_maquilero=True,
+            moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"),
+            sat_regimen_fiscal=SatRegimenFiscal.objects.get_or_create(
+                codigo="601", defaults={"descripcion": "General de Ley"})[0],
+            sat_forma_pago=SatFormaPago.objects.get_or_create(
+                codigo="03", defaults={"descripcion": "Transferencia"})[0],
+            sat_metodo_pago=SatMetodoPago.objects.get_or_create(
+                codigo="PUE", defaults={"descripcion": "Pago en una sola exhibición"})[0],
+        )
         unidad = UnidadMedida.objects.create(clave="PZA", nombre="Pieza")
         cls.op = OrdenProduccion.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-SM-1",
             centro_confeccion=cls.maquilero, costo_maquila_unitario=Decimal("10"),
         )
-        cls.det = OrdenProduccionDetalle.objects.create(op=cls.op, cantidad=Decimal("5"), unidad=unidad)
+        cls.det = OrdenProduccionDetalle.objects.create(
+            op=cls.op, bom=ListaMaterialBom.objects.create(empresa=cls.empresa),  # bom_id es NOT NULL
+            cantidad=Decimal("5"), unidad=unidad,
+        )
 
     def _post(self, **body):
         client = APIClient()

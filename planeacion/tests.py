@@ -116,7 +116,9 @@ class PlaneacionBaseTestCase(TestCase):
     def _get(self, user, url=TABLERO_URL, **params):
         client = APIClient()
         client.force_authenticate(user=user)
-        return client.get(url, {"page_size": 500, **params})
+        # ``necesidades-materia-prima`` no pagina y rechaza ``page_size`` (#1115).
+        base = {} if url == NECESIDADES_URL else {"page_size": 500}
+        return client.get(url, {**base, **params})
 
     def _fila(self, data, variante):
         filas = [r for r in data["results"] if r["variante_id"] == variante.pk]
@@ -244,6 +246,22 @@ class AislamientoPlaneacionTests(PlaneacionBaseTestCase):
                 resp = self._get(self.a["admin"], url, sucursal=self.b["sucursal"].pk)
                 self.assertEqual(resp.status_code, 400)
                 self.assertEqual(resp.json(), {"sucursal": ["Sucursal no encontrada."]})
+
+
+class NecesidadesParametrosTests(PlaneacionBaseTestCase):
+    """#1115: ``necesidades-materia-prima`` no ordena ni pagina: ``ordering``,
+    ``page`` y ``page_size`` responden 400 en vez de ignorarse en silencio."""
+
+    def test_sin_parametros_de_tablero_responde_200(self):
+        self.assertEqual(self._get(self.a["admin"], NECESIDADES_URL).status_code, 200)
+
+    def test_ordering_page_y_page_size_responden_400(self):
+        # Valores que el tablero sí acepta: el 400 sale del parámetro, no del valor.
+        for param, valor in (("ordering", "sku"), ("page", 1), ("page_size", 10)):
+            with self.subTest(param=param):
+                resp = self._get(self.a["admin"], NECESIDADES_URL, **{param: valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(resp.json(), {param: ["No aplica en necesidades-materia-prima."]})
 
 
 class FechaVentaTests(PlaneacionBaseTestCase):

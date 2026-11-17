@@ -384,7 +384,8 @@ class PermisosEfectivosEquivalenciaTests(BusquedaGlobalBaseTestCase):
             return [q["sql"] for q in capturadas.captured_queries]
 
         def de_permisos(sqls):
-            # Las 2 de ``permisos_efectivos``: overrides del usuario y claves por rol.
+            # La de ``permisos_efectivos``: overrides del usuario y claves por rol
+            # en una sola consulta (``UNION ALL``, #1158).
             return sum(1 for sql in sqls if '"usuarios_permisos"' in sql or '"roles_permisos"' in sql)
 
         self.assertEqual([g["tipo"] for g in self._buscar(un_grupo, "acme")["grupos"]], ["pedido"])
@@ -394,8 +395,8 @@ class PermisosEfectivosEquivalenciaTests(BusquedaGlobalBaseTestCase):
         # Los permisos se resuelven una vez por petición, vea 1 grupo o 3. Se
         # cuentan solo esas consultas: el resto depende del alcance de filas de
         # cada entidad (p. ej. clientes consulta el rol de Mesa de Control).
-        self.assertEqual(de_permisos(sql_1), 2)
-        self.assertEqual(de_permisos(sql_3), 2)
+        self.assertEqual(de_permisos(sql_1), 1)
+        self.assertEqual(de_permisos(sql_3), 1)
         self.assertLessEqual(len(sql_1), 4, f"la petición de 1 grupo costó {len(sql_1)}")
 
     def test_usuario_anonimo_no_revienta_y_no_ve_nada(self):
