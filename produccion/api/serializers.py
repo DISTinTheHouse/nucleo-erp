@@ -558,9 +558,13 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
     cantidad_total = serializers.FloatField(read_only=True, default=0.0)
     ruta_critica = serializers.SerializerMethodField()
     pedidos = serializers.SerializerMethodField()
+    pre_orden = serializers.SerializerMethodField()
 
     def get_pedidos(self, obj):
         return pedidos_de_op(obj)
+
+    def get_pre_orden(self, obj):
+        return pre_orden_de_op(obj)
 
     class Meta:
         model = OrdenProduccion
@@ -569,6 +573,7 @@ class OrdenProduccionListSerializer(serializers.ModelSerializer):
             "prioridad", "fecha_inicio", "fecha_fin", "fecha_entrega_estimada", "activo",
             "pedido", "pedido_folio", "pedidos", "sucursal",
             "centro_confeccion", "fecha_pedido", "fecha_vence", "cantidad_total", "ruta_critica",
+            "pre_orden",
         ]
 
     def get_centro_confeccion(self, obj):
@@ -608,6 +613,28 @@ def pedidos_de_op(op, con_cliente=False):
     ]
 
 
+def anotar_pre_orden(qs):
+    """``pre_orden_json`` ``{id, origen, pedido_folio}``: la pre-orden que originó
+    la OP, como subconsulta en la misma consulta (sin viajes por fila)."""
+    from django.db.models import JSONField, Subquery
+    from django.db.models.functions import JSONObject
+    sub = (PreOrdenProduccion.objects.filter(op_id=OuterRef("pk")).order_by("-pk")
+           .values(j=JSONObject(id="id", origen="origen", pedido_folio="pedido__folio"))[:1])
+    return qs.annotate(pre_orden_json=Subquery(sub, output_field=JSONField()))
+
+
+def pre_orden_de_op(op):
+    """``{id, origen, referencia}`` o ``None``; lee la anotación ``pre_orden_json``."""
+    p = getattr(op, "pre_orden_json", None)
+    if not p:
+        return None
+    if p["origen"] == PreOrdenProduccion.Origen.RESURTIDO:
+        ref = f"Resurtido #{p['id']}"
+    else:
+        ref = f"pedido {p.get('pedido_folio') or ''}".strip()
+    return {"id": p["id"], "origen": p["origen"], "referencia": ref}
+
+
 def ligar_pedidos_op(op, pedidos=None):
     """Liga la OP a su pedido principal y, si se pasan, deja exactamente ``pedidos``
     (+ principal). Con ``pedidos=None`` solo asegura el principal."""
@@ -642,6 +669,11 @@ class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSeri
     sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True)
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True, allow_null=True)
     usuario_nombre = serializers.SerializerMethodField()
+    # Pre-orden que originó la OP (``{id, origen, referencia}``, anotada).
+    pre_orden = serializers.SerializerMethodField()
+
+    def get_pre_orden(self, obj):
+        return pre_orden_de_op(obj)
     # ``fecha_pedido``/``fecha_vence`` (EC-880): de ``_FechasPedidoListadoMixin``,
     # mismas fechas y semántica que el listado de OP (del pedido principal).
 

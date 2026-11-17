@@ -22,7 +22,7 @@ from rest_framework.exceptions import ValidationError
 
 from catalogo.models import VarianteProductoProduccion
 from inventarios.models import Existencia
-from produccion.models import BomDetalle, PreOrdenEvento, PreOrdenProduccion, PreOrdenProduccionDetalle
+from produccion.models import BomDetalle, OrdenProduccion, PreOrdenEvento, PreOrdenProduccion, PreOrdenProduccionDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
 from ventas.services.sku_produccion_service import detalles_de_muestra
 
@@ -612,7 +612,10 @@ def cancelar(pre_id, user):
     están en una OC quedan ``huerfana`` para que compras decida."""
     from compras.models import NecesidadCompra as N
     pre = PreOrdenProduccion.objects.select_for_update().get(pk=pre_id)
-    if pre.estatus not in CANCELABLES:
+    # Convertida cuya OP se canceló: se puede cancelar también (queda la liga a la OP).
+    op_cancelada = (pre.estatus == E.CONVERTIDA and pre.op_id is not None and OrdenProduccion.objects.filter(
+        pk=pre.op_id, estatus_op=OrdenProduccion.EstatusOrdenProduccion.CANCELADO).exists())
+    if pre.estatus not in CANCELABLES and not op_cancelada:
         raise ValidationError({"estatus": f"La pre-orden está {pre.get_estatus_display().lower()}."})
     liberadas = N.objects.filter(pre_orden=pre, estatus=N.Estatus.PENDIENTE).update(estatus=N.Estatus.CANCELADA, updated_at=timezone.now())
     huerfanas = N.objects.filter(pre_orden=pre, estatus=N.Estatus.EN_OC).update(estatus=N.Estatus.HUERFANA, updated_at=timezone.now())
