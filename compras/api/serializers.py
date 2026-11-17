@@ -615,6 +615,22 @@ class RecepcionOnboardingSerializer(serializers.Serializer):
     recepcion = RecepcionOnboardingHeaderSerializer()
     detalle = RecepcionOnboardingDetalleInputSerializer(many=True)
 
+    def validate_detalle(self, detalle):
+        # EC-894: sin renglones, o con uno en cantidad <= 0, no hay recepción.
+        # Se valida aquí, antes de consumir folio, crear la recepción o cambiar
+        # el estatus de la OC/OP. El error va plano (``{"detalle": ["..."]}``)
+        # y numera el renglón desde 1, igual que los demás de la vista.
+        if not detalle:
+            raise serializers.ValidationError(
+                "La recepción debe tener al menos un renglón con cantidad recibida."
+            )
+        for idx, item in enumerate(detalle):
+            if item["cantidad_recibida"] <= 0:
+                raise serializers.ValidationError(
+                    f"El renglón #{idx + 1} debe tener cantidad_recibida > 0."
+                )
+        return detalle
+
 
 class CalidadInspeccionDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="recepcion_detalle.producto.nombre", read_only=True)
