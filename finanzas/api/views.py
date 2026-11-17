@@ -524,6 +524,12 @@ class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
             qs = qs.filter(factura__moneda_id=moneda)
         if factura_id:
             qs = qs.filter(factura_id=factura_id)
+        if _bool_param(qp.get('cobrable'), "cobrable"):  # lazzar-erp#353: para el selector de cobros
+            qs = qs.filter(saldo__gt=0).exclude(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA).exclude(
+                Q(factura__estatus=Factura.FacturaStatus.CANCELADA) | Q(factura__cfdi_cancelado=True)
+                | Q(factura__cfdi_cancelacion_solicitada=True) | Q(factura__cfdi_pendiente=True)
+                | Q(factura__cfdi_cancelacion_en_curso_desde__isnull=False)
+            )
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha_emision")
         qs = _aplicar_ordering(qs, qp, ["-fecha_emision", "-id"])
         return qs
