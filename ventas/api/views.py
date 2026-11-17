@@ -3277,7 +3277,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         accion = getattr(self, "action", None)
         if accion == "retrieve":
             return True
-        return accion == "list" and Pedido.ESTATUS_CANCELADO in (estatus_param(
+        return accion in ("list", "kpis_mesa") and Pedido.ESTATUS_CANCELADO in (estatus_param(  # #1144
             self.request, {e for e, _ in Pedido.CHOICES_ESTATUS}) or ())
 
     def get_queryset(self):

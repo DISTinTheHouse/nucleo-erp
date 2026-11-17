@@ -42,7 +42,7 @@ def es_empresa_activa(user, empresa_id):
     return bool(empresa_id) and empresa_id == getattr(user, "empresa_id", None)
 
 
-def visibles_en_empresa_activa(qs, user):
+def visibles_en_empresa_activa(qs, user, filtro_sucursal=None):
     """Acota ``qs`` (modelo con ``empresa`` y ``sucursal``) a la empresa activa.
 
     Predicado de producción (``produccion/scope.py``, #361, EC-880) y de WMS
@@ -52,6 +52,10 @@ def visibles_en_empresa_activa(qs, user):
     las de ``user.sucursales_permitidas()`` (M2M ``sucursales`` +
     ``sucursal_default``), filtrando por la sucursal dueña del registro.
 
+    ``filtro_sucursal(user) -> Q`` cambia sólo el último paso, para modelos cuya
+    sucursal no es un campo propio (p. ej. ``RfidScan``, #1156); por defecto
+    ``sucursales_permitidas_q(user)``.
+
     No aplica ``select_related``/``prefetch_related`` ni orden.
     """
     empresa_ids = empresa_ids_lectura(user)
@@ -60,7 +64,7 @@ def visibles_en_empresa_activa(qs, user):
     qs = qs.filter(empresa_id__in=empresa_ids)
     if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
         return qs
-    return qs.filter(sucursales_permitidas_q(user))
+    return qs.filter((filtro_sucursal or sucursales_permitidas_q)(user))
 
 
 def sucursales_permitidas_q(user, campo="sucursal_id"):

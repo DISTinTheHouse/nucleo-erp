@@ -37,6 +37,47 @@ FILTROS_CON_ORDEN_ESTABLE = [
     *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
     OrdenamientoEstableFilter,
 ]
+
+
+def _orden_tallas():
+    """``{talla_id: posición canónica}`` (``catalogo.tallas.talla_sort_key``). El catálogo es
+    global y chico: una consulta, guardada 5 min en caché."""
+    from django.core.cache import cache
+
+    from catalogo.models import Talla
+    from catalogo.tallas import talla_sort_key
+
+    orden = cache.get("catalogo:orden_tallas")
+    if orden is None:
+        tallas = sorted(Talla.objects.values_list("id", "nombre"), key=lambda t: talla_sort_key(t[1]))
+        orden = {pk: i for i, (pk, _) in enumerate(tallas)}
+        cache.set("catalogo:orden_tallas", orden, 300)
+    return orden
+
+
+class OrdenamientoTallaCanonica(OrdenamientoEstableFilter):
+    """``ordering=talla__nombre`` en el orden canónico de tallas (CH, M, G… y no
+    alfabético) y las variantes sin talla al final en ambas direcciones (#1164)."""
+
+    def filter_queryset(self, request, queryset, view):
+        ordering = self.get_ordering(request, queryset, view)
+        if not ordering or not any(c.lstrip("-") == "talla__nombre" for c in ordering):
+            return super().filter_queryset(request, queryset, view)
+        from django.db.models import Case, IntegerField, Value, When
+
+        orden = _orden_tallas()
+        queryset = queryset.annotate(_talla_orden=Case(
+            *[When(talla_id=pk, then=Value(i)) for pk, i in orden.items()],
+            default=None, output_field=IntegerField(),
+        ))
+        terminos = []
+        for c in ordering:
+            if c.lstrip("-") == "talla__nombre":
+                terminos.append(F("_talla_orden").desc(nulls_last=True) if c.startswith("-")
+                                else F("_talla_orden").asc(nulls_last=True))
+            else:
+                terminos.append(c)
+        return queryset.order_by(*terminos)
 # Productos (EC-896): el mismo orden estable, con los NULL al final en ambas
 # direcciones (``OrdenamientoNullsAlFinal``, EC-826): los productos sin categoría
 # (o sin ``codigo``/``precio_base``) cierran la lista al ordenar por esa columna,
@@ -567,7 +608,7 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
     serializer_class = ProductoVarianteSerializer
     # Sin ``?limit=`` regresa la lista completa, como antes (EC-886).
     pagination_class = PaginacionOpcionalCatalogo
-    filter_backends = FILTROS_CON_ORDEN_ESTABLE
+    filter_backends = [*FILTROS_CON_ORDEN_ESTABLE[:-1], OrdenamientoTallaCanonica]
     # Sin ``?ordering=`` válido manda ``-id`` (``get_queryset``). ``producto__cod_proscai``
     # es el ``cod_proscai`` que publica el serializer; ``cod_proscai`` es el de la variante.
     ordering_fields = [
