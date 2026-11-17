@@ -10815,3 +10815,74 @@ class FkEmpresaHelpersEC846Tests(SimpleTestCase):
         for linea in (SimpleNamespace(empresa_id=2), SimpleNamespace(empresa_id=None), SimpleNamespace()):
             with self.subTest(linea=linea), self.assertRaises(DRFValidationError):
                 validar(linea, "producto", self.empresa)
+
+
+class DatosPdfBase(FinanzasBase):
+    """EC-904: datos que el PDF de cada documento de Finanzas toma del detalle.
+
+    Los conteos de consultas comparan una respuesta con pocas filas (o líneas) contra
+    otra con más: si crecen con las filas hay N+1, sin depender del número absoluto.
+    """
+
+    def _consultas(self, client, url):
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.get(url)
+        self.assertEqual(resp.status_code, 200, getattr(resp, "data", resp))
+        return resp, len(ctx)
+
+    def _filas(self, data):
+        return data["results"] if isinstance(data, dict) and "results" in data else data
+
+
+class PolizaDatosPdfTests(DatosPdfBase):
+    """Póliza: código y nombre de la cuenta en cada línea, sin N+1."""
+
+    def setUp(self):
+        self.cuenta_cargo, self.cuenta_abono, self.centro_costo = self._crear_cuentas_contables(self.a["empresa"])
+        self.client_a = self._client(self.a["usuario"])
+
+    def _poliza(self, n, lineas=2):
+        poliza = Poliza.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], centro_costo=self.centro_costo,
+            folio=f"POL-{n:06d}", folio_consecutivo=n,
+        )
+        for i in range(lineas):
+            cuenta = self.cuenta_cargo if i % 2 == 0 else self.cuenta_abono
+            PolizaDetalle.objects.create(
+                poliza=poliza, cuenta_contable=cuenta, centro_costo=self.centro_costo,
+                cargo=Decimal("10.00") if i % 2 == 0 else Decimal("0"),
+                abono=Decimal("0") if i % 2 == 0 else Decimal("10.00"), orden=i,
+            )
+        return poliza
+
+    def test_detalle_y_listado_traen_codigo_y_nombre_de_la_cuenta(self):
+        poliza = self._poliza(1)
+        detalle = self.client_a.get(f"{POLIZAS_URL}{poliza.pk}/").data
+        listado = {p["id"]: p for p in self._filas(self.client_a.get(POLIZAS_URL).data)}
+        for fuente, data in (("detalle", detalle), ("listado", listado[poliza.pk])):
+            with self.subTest(fuente=fuente):
+                lineas = sorted(data["poliza_detalles"], key=lambda l: l["orden"])
+                self.assertEqual(
+                    [(l["cuenta_contable"], l["cuenta_contable_codigo"], l["cuenta_contable_nombre"]) for l in lineas],
+                    [(self.cuenta_cargo.pk, "1050", "Clientes"), (self.cuenta_abono.pk, "4000", "Ventas")],
+                )
+
+    def test_linea_sin_cuenta_trae_null(self):
+        poliza = self._poliza(1)
+        PolizaDetalle.objects.filter(poliza=poliza).update(cuenta_contable=None)
+        linea = self.client_a.get(f"{POLIZAS_URL}{poliza.pk}/").data["poliza_detalles"][0]
+        self.assertIsNone(linea["cuenta_contable_codigo"])
+        self.assertIsNone(linea["cuenta_contable_nombre"])
+
+    def test_consultas_constantes(self):
+        pocas = self._poliza(1, lineas=1)
+        _, retrieve_pocas = self._consultas(self.client_a, f"{POLIZAS_URL}{pocas.pk}/")
+        _, list_pocas = self._consultas(self.client_a, POLIZAS_URL)
+        muchas = self._poliza(2, lineas=6)
+        for n in range(3, 6):
+            self._poliza(n, lineas=4)
+        _, retrieve_muchas = self._consultas(self.client_a, f"{POLIZAS_URL}{muchas.pk}/")
+        resp, list_muchas = self._consultas(self.client_a, POLIZAS_URL)
+        self.assertEqual(len(self._filas(resp.data)), 5)
+        self.assertEqual(retrieve_muchas, retrieve_pocas)
+        self.assertEqual(list_muchas, list_pocas)

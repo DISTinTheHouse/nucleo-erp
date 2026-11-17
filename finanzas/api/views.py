@@ -3,7 +3,9 @@ from django.utils.dateparse import parse_date
 from decimal import Decimal
 from django.db import OperationalError, transaction
 from django.db.models.deletion import ProtectedError, RestrictedError
-from django.db.models import BooleanField, Case, Count, DecimalField, Max, Min, OuterRef, Q, Subquery, Sum, Value, When
+from django.db.models import (
+    BooleanField, Case, Count, DecimalField, Max, Min, OuterRef, Prefetch, Q, Subquery, Sum, Value, When,
+)
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -1270,8 +1272,11 @@ class ParametrosContabilidadViewSet(FinanzasBaseViewSet):
 
 
 class PolizaViewSet(FinanzasBaseViewSet):
-    # Las líneas se leen una vez para todo el listado (el serializer las suma).
-    queryset = Poliza.objects.prefetch_related("poliza_detalles")
+    # Las líneas se leen una vez para todo el listado (el serializer las suma), con
+    # su cuenta contable en la misma consulta (EC-904: código y nombre por línea).
+    queryset = Poliza.objects.prefetch_related(
+        Prefetch("poliza_detalles", queryset=PolizaDetalle.objects.select_related("cuenta_contable"))
+    )
     serializer_class = PolizaSerializer
 
     # Crear, editar, borrar, contabilizar y cancelar (que genera contrapóliza) son

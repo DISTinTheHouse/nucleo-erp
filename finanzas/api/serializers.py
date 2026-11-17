@@ -796,6 +796,12 @@ class CentroCostoSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSer
 
 
 class PolizaDetalleSerializer(serializers.ModelSerializer):
+    # EC-904: código y nombre de la cuenta para el PDF (mismos nombres que
+    # ``PolizaDetalleRelacionadoSerializer``). ``PolizaViewSet`` une la cuenta al
+    # leer las líneas; ``null`` si la línea perdió su cuenta (SET_NULL).
+    cuenta_contable_codigo = serializers.CharField(source="cuenta_contable.codigo", read_only=True, default=None)
+    cuenta_contable_nombre = serializers.CharField(source="cuenta_contable.nombre", read_only=True, default=None)
+
     class Meta:
         model = PolizaDetalle
         fields = "__all__"
