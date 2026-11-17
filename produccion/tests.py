@@ -9121,3 +9121,73 @@ class ConsultasAltaYPatchOrdenServicioTests(TestCase):
                         f"PATCH de {destino} ({nombre}): {chico} consultas con 1 renglón, "
                         f"{grande} con {self.N_GRANDE}",
                     )
+
+
+class PreOrdenRecalculoTests(TestCase):
+    """EC-890 / #1181-#1183: el GET del detalle de ``pre-ordenes`` solo bloquea y
+    escribe cuando algo cambió, y todos los caminos de recálculo toman el mismo
+    candado de fila. (Los GET simultáneos de verdad necesitan
+    ``TransactionTestCase`` con dos hilos sobre Postgres local; aquí se protege
+    que cada camino emita ``FOR UPDATE`` y que un GET sin cambios no escriba.)"""
+
+    URL = "/api/v1/produccion/pre-ordenes/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from produccion.models import PreOrdenProduccion
+        cls.empresa = Empresa.objects.create(codigo="acme-pr", razon_social="acme-pr SA")
+        cls.empresa_b = Empresa.objects.create(codigo="globex-pr", razon_social="globex-pr SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Matriz")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="GDL", nombre="GDL")
+        cls.usuario = Usuario.objects.create(
+            username="pre", email="pre@acme-pr.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        R, E = PreOrdenProduccion.Origen.RESURTIDO, PreOrdenProduccion.Estatus
+        # Resurtido aceptado solo de compra: queda En compra sin materiales (#1182).
+        cls.solo_compra = PreOrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, origen=R, estatus=E.EN_COMPRA,
+        )
+        cls.ajena = PreOrdenProduccion.objects.create(
+            empresa=cls.empresa_b, sucursal=cls.sucursal_b, origen=R, estatus=E.EN_COMPRA,
+        )
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    @staticmethod
+    def _escrituras(ctx):
+        return [q["sql"] for q in ctx.captured_queries
+                if q["sql"].lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")) or "FOR UPDATE" in q["sql"].upper()]
+
+    def test_requiere_recalculo_resurtido_solo_compra_es_false(self):
+        from produccion.services.pre_orden_service import requiere_recalculo
+        self.assertFalse(requiere_recalculo(self.solo_compra, []))
+
+    def test_get_resurtido_solo_compra_no_bloquea_ni_escribe(self):
+        from produccion.models import PreOrdenEvento
+        eventos = PreOrdenEvento.objects.count()
+        for _ in range(2):  # el segundo GET tampoco escribe
+            with CaptureQueriesContext(connection) as ctx:
+                r = self._client().get(f"{self.URL}{self.solo_compra.pk}/")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(self._escrituras(ctx), [])
+        self.assertEqual(PreOrdenEvento.objects.count(), eventos)
+
+    def test_pre_orden_de_otra_empresa_404(self):
+        r = self._client().get(f"{self.URL}{self.ajena.pk}/")
+        self.assertEqual(r.status_code, 404)
+
+    def test_recalcular_ids_bloquea_las_filas(self):
+        from produccion.services.pre_orden_service import recalcular_ids
+        with CaptureQueriesContext(connection) as ctx:
+            recalcular_ids([self.solo_compra.pk, self.solo_compra.pk])
+        self.assertTrue(any("FOR UPDATE" in q["sql"].upper() for q in ctx.captured_queries))
+
+    def test_recalcular_ids_vacio_no_consulta(self):
+        from produccion.services.pre_orden_service import recalcular_ids
+        with CaptureQueriesContext(connection) as ctx:
+            recalcular_ids([])
+        self.assertEqual(len(ctx.captured_queries), 0)
