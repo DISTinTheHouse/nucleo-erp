@@ -698,6 +698,8 @@ class ClienteKpisTests(TestCase):
             username="admin", email="admin@acme.test", empresa=cls.empresa, is_admin_empresa=True,
         )
         cls.sin_empresa = Usuario.objects.create(username="se", email="se@nowhere.test")
+        for usuario in (cls.vendedor_a, cls.vendedor_b):
+            _lectura_clientes(usuario)  # los KPIs piden R-CRM-CLIENTES (#1020)
 
         cls.cliente_a = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente A", correo="a@test.mx")
         cls.cliente_a.vendedores.add(cls.vendedor_a)
@@ -796,11 +798,14 @@ class ClienteKpisTests(TestCase):
 
         otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
         sucursal = Sucursal.objects.create(empresa=otra, codigo="GDL", nombre="GDL")
-        Pedido.objects.create(
-            empresa=otra, sucursal=sucursal, cliente=self.cliente_b, moneda=self.moneda,
+        # ``Pedido.save`` ya no deja crear uno con un cliente de otra empresa (#1024): se arma el
+        # dato legado cruzado con ``update()``, que no pasa por ahí.
+        cruzado = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente_b, moneda=self.moneda,
             persona_pagos="Pagos", correo_facturas="p@globex.test", telefono_pagos="8100000000",
             forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
         )
+        Pedido.objects.filter(pk=cruzado.pk).update(empresa=otra, sucursal=sucursal)
         factura = Factura.objects.create(
             empresa=otra, sucursal=sucursal, cliente=self.cliente_b, moneda=self.moneda,
             total=Decimal("5000.00"), estatus=Factura.FacturaStatus.EMITIDA,
@@ -829,10 +834,8 @@ class ClienteKpisTests(TestCase):
         self.assertFalse(resp.data["reclamos_devoluciones"]["disponible"])
 
     def test_usuario_sin_empresa_no_ve_nada(self):
-        resp = self._get(self.sin_empresa)
-
-        self.assertEqual(resp.status_code, 200)
-        self.assertFalse(resp.data["ventas_por_cliente"]["disponible"])
+        # Sin empresa no tiene ``R-CRM-CLIENTES``: se cierra en 403 antes de calcular nada (#1020).
+        self.assertEqual(self._get(self.sin_empresa).status_code, 403)
 
     # --- #367: qué cuenta como facturación y como actividad ------------------
 
@@ -871,7 +874,9 @@ class ClienteKpisTests(TestCase):
         self.assertEqual(activos["activos"], 1)
         self.assertEqual(activos["inactivos"], 2)
 
-        self._pedido_extra(cliente_c, estatus=2)  # POR AUTORIZAR sí cuenta
+        self._pedido_extra(cliente_c, estatus=2)  # POR AUTORIZAR tampoco: solo Autorizado o En proceso
+        self.assertEqual(self._get(self.admin_empresa).data["clientes_activos"]["activos"], 1)
+        self._pedido_extra(cliente_c, estatus=3)  # AUTORIZADA sí cuenta
         self.assertEqual(self._get(self.admin_empresa).data["clientes_activos"]["activos"], 2)
 
     # --- #370: monedas -------------------------------------------------------
@@ -1046,9 +1051,8 @@ class ClienteKpisTests(TestCase):
         )
 
     def test_clientes_nuevos_sin_empresa_no_disponible(self):
-        self.assertEqual(
-            self._nuevos(self.sin_empresa), {"disponible": False, "motivo": "Usuario sin empresa asignada."},
-        )
+        # Sin permiso de clientes (#1020) ni empresa: 403 antes de calcular.
+        self.assertEqual(self._get(self.sin_empresa).status_code, 403)
 
     def test_clientes_nuevos_no_acepta_parametros(self):
         resp = self._get(self.admin_empresa, "?mes=2026-10")

@@ -200,22 +200,15 @@ class MovimientoOperacionViewSetScopeTenantTests(TestCase):
         """Solo la empresa activa (#538), como ventas y producción."""
         self.assertEqual(self._ids(self.multi_empresa), [self.a["evento"].pk])
 
-    # La BD es la de producción (sin BD de pruebas vacía, EC-780): el
-    # superusuario ve también filas reales, así que se exige que incluya las
-    # de ambas empresas, no que sean las únicas.
-    def test_superuser_ve_todo(self):
-        self.assertTrue(
-            {self.a["evento"].pk, self.b["evento"].pk} <= set(self._ids(self.superuser)),
-        )
+    # El superusuario también se limita a su empresa activa (EC-798, #1131); sin
+    # empresa no ve nada.
+    def test_superuser_ve_solo_su_empresa_activa(self):
+        self.assertEqual(self._ids(self.superuser_con_empresa), [self.a["evento"].pk])
+        self.assertEqual(self._ids(self.superuser), [])
 
-    def test_superuser_con_empresa_asignada_sigue_viendo_todo(self):
-        self.assertTrue(
-            {self.a["evento"].pk, self.b["evento"].pk} <= set(self._ids(self.superuser_con_empresa)),
-        )
-
-    def test_superuser_puede_acotar_con_el_param(self):
+    def test_superuser_no_abre_otra_empresa_con_el_param(self):
         url = f"{MOVIMIENTOS_URL}?empresa_id={self.b['empresa'].pk}"
-        self.assertEqual(self._ids(self.superuser, url), [self.b["evento"].pk])
+        self.assertEqual(self._ids(self.superuser_con_empresa, url), [])
 
     def test_solo_devuelve_eventos_de_inventarios_sobre_existencias(self):
         """El filtro base del módulo/tabla no se pierde con el aislamiento."""
@@ -284,8 +277,9 @@ class ExistenciaViewSetScopeTenantTests(TestCase):
         )
         # Sin empresa pero CON la sucursal de B: la sucursal sola no abre el alcance.
         cls.sin_empresa.sucursales.add(cls.b["sucursal"])
+        # Con empresa activa A: el superusuario solo opera en ella (EC-798, #1131).
         cls.superuser = Usuario.objects.create(
-            username="root-ex", email="root@nowhere-ex.test", is_superuser=True,
+            username="root-ex", email="root@nowhere-ex.test", is_superuser=True, empresa=cls.a["empresa"],
         )
         cls.multi_empresa = Usuario.objects.create(
             username="multi-ex", email="multi@acme-ex.test", empresa=cls.a["empresa"],
@@ -334,13 +328,9 @@ class ExistenciaViewSetScopeTenantTests(TestCase):
             self._ids(self.multi_empresa, {"empresa_id": self.b["empresa"].pk}), [],
         )
 
-    def test_superusuario_ve_todo_y_puede_filtrar(self):
-        self.assertTrue(
-            {self.a["existencia"].pk, self.b["existencia"].pk} <= set(self._ids(self.superuser)),
-        )
-        self.assertEqual(
-            self._ids(self.superuser, {"almacen_id": self.b["almacen"].pk}), [self.b["existencia"].pk],
-        )
+    def test_superusuario_ve_solo_su_empresa_activa(self):
+        self.assertEqual(self._ids(self.superuser), [self.a["existencia"].pk])
+        self.assertEqual(self._ids(self.superuser, {"almacen_id": self.b["almacen"].pk}), [])
 
     def test_detalle_update_y_delete_de_otra_empresa_son_404_y_no_tocan_la_fila(self):
         ajena = self.b["existencia"]
@@ -393,8 +383,11 @@ class ExistenciaViewSetScopeTenantTests(TestCase):
         propia = self._crear(self.a["admin"], almacen=self.a["almacen"].pk, producto=self.a["producto"].pk)
         self.assertEqual(propia.status_code, 201, propia.content)
         self.assertEqual(propia.json()["almacen"], self.a["almacen"].pk)
-        root = self._crear(self.superuser, almacen=self.b["almacen"].pk, producto=self.b["producto"].pk)
+        root = self._crear(self.superuser, almacen=self.a["almacen"].pk, producto=self.a["producto"].pk)
         self.assertEqual(root.status_code, 201, root.content)
+        # En un almacén de otra empresa no, ni siendo superusuario (#1131).
+        ajena = self._crear(self.superuser, almacen=self.b["almacen"].pk, producto=self.b["producto"].pk)
+        self.assertEqual(ajena.status_code, 403, ajena.content)
 
     # --- relacionados == empresa del almacén (todos, superusuario incluido) -----
 
@@ -482,7 +475,7 @@ class OperacionInventarioScopeTenantTests(TestCase):
         cls.a = cls._tenant("acme-op")
         cls.b = cls._tenant("globex-op")
         cls.superuser = Usuario.objects.create(
-            username="root-op", email="root@nowhere-op.test", is_superuser=True,
+            username="root-op", email="root@nowhere-op.test", is_superuser=True, empresa=cls.a["empresa"],
         )
 
     def _post(self, user, tipo, almacen, items, **extra):
@@ -646,13 +639,20 @@ class OperacionInventarioScopeTenantTests(TestCase):
         )
         self.assertEqual((detalle.producto_id, detalle.producto_variante_id), (self.a["producto"].pk, None))
 
-    def test_superusuario_opera_en_cualquier_almacen(self):
+    def test_superusuario_opera_solo_en_su_empresa_activa(self):
         resp = self._post(
-            self.superuser, "entrada", self.b["almacen"], [{"producto": self.b["producto"].pk, "cantidad": "4"}],
+            self.superuser, "entrada", self.a["almacen"], [{"producto": self.a["producto"].pk, "cantidad": "4"}],
         )
         self.assertEqual(resp.status_code, 200, resp.content)
+        self.a["existencia"].refresh_from_db()
+        self.assertEqual(str(self.a["existencia"].cantidad), "14.0000")
+        # Un almacén de otra empresa no existe para él (#1131).
+        ajena = self._post(
+            self.superuser, "entrada", self.b["almacen"], [{"producto": self.b["producto"].pk, "cantidad": "4"}],
+        )
+        self.assertEqual(ajena.status_code, 400, ajena.content)
         self.b["existencia"].refresh_from_db()
-        self.assertEqual(str(self.b["existencia"].cantidad), "14.0000")
+        self.assertEqual(str(self.b["existencia"].cantidad), "10.0000")
 
     def test_entrada_salida_y_ajuste_legitimos_actualizan_el_stock(self):
         ex = self.a["existencia"]
@@ -1215,7 +1215,8 @@ class AuxiliarMovimientosTests(TestCase):
         self.assertEqual(self._get(q="CAM-99").json()["opciones"], [])
 
     def test_transferencia_sin_ubicaciones_usa_almacenes_de_la_transferencia(self):
-        superuser = Usuario.objects.create(username="su@aux.test", email="su@aux.test", is_superuser=True)
+        superuser = Usuario.objects.create(
+            username="su@aux.test", email="su@aux.test", is_superuser=True, empresa=self.empresa)
         filas = self._get(user=superuser, producto_variante=self.variante.pk).json()["results"]
         self.assertEqual(
             [(f["almacen_codigo"], f["efecto"]) for f in filas if f["folio_referencia"] == "TR-AUX"],
@@ -1430,7 +1431,8 @@ class ExistenciasPorAlmacenTests(TestCase):
         cls.alm_b = Almacen.objects.create(empresa=otra, sucursal=suc_b, codigo="E7B-1", nombre="Alm B EC774")
         prod_b = Producto.objects.create(tipo=pt, empresa=otra, nombre="Producto B")
         cls.e_b = Existencia.objects.create(almacen=cls.alm_b, producto=prod_b, stock=7, cantidad="7")
-        cls.superuser = Usuario.objects.create(username="root-ec774", email="root@ec774.test", is_superuser=True)
+        cls.superuser = Usuario.objects.create(
+            username="root-ec774", email="root@ec774.test", is_superuser=True, empresa=cls.empresa)
 
     def _get(self, params, user=None, url=POR_ALMACEN_URL):
         client = APIClient()
@@ -1472,11 +1474,12 @@ class ExistenciasPorAlmacenTests(TestCase):
     def test_almacen_inexistente_da_vacio(self):
         self.assertEqual(self._get({"almacen_id": 999999999}).json(), [])
 
-    def test_superusuario_consulta_cualquier_almacen(self):
-        filas = self._get({"almacen_id": self.alm_b.pk}, user=self.superuser).json()
-        self.assertEqual([f["id"] for f in filas], [self.e_b.pk])
+    def test_superusuario_consulta_solo_almacenes_de_su_empresa(self):
+        propio = self._get({"almacen_id": self.alm.pk}, user=self.superuser).json()
+        self.assertTrue(propio)
+        self.assertEqual(self._get({"almacen_id": self.alm_b.pk}, user=self.superuser).json(), [])
         resumen = self._get({"almacen_id": self.alm_b.pk}, user=self.superuser, url=POR_ALMACEN_RESUMEN_URL).json()
-        self.assertEqual(resumen["kpis"]["total_registros"], 1)
+        self.assertEqual(resumen["kpis"]["total_registros"], 0)
 
     def test_solo_get(self):
         client = APIClient()
@@ -2879,3 +2882,42 @@ class DetalleAlmacenSinUbicacionTests(TestCase):
             return consultas
 
         self.assertEqual(correr(1), correr(5))
+
+
+class SuperusuarioAlmacenesUbicacionesTests(TestCase):
+    """#1131: almacenes y ubicaciones del superusuario son solo los de su empresa activa."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresas = []
+        for codigo in ("sua-a", "sua-b"):
+            empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+            sucursal = Sucursal.objects.create(empresa=empresa, codigo=codigo[-1].upper(), nombre=codigo)
+            almacen = Almacen.objects.create(empresa=empresa, sucursal=sucursal, codigo=f"{codigo}-1", nombre=codigo)
+            ubicacion = Ubicacion.objects.create(almacen=almacen, pasillo="1")
+            cls.empresas.append((empresa, sucursal, almacen, ubicacion))
+        cls.root = Usuario.objects.create(
+            username="root-sua", email="root@sua.test", is_superuser=True, empresa=cls.empresas[0][0],
+        )
+        cls.sin_empresa = Usuario.objects.create(username="root-sua-0", email="root0@sua.test", is_superuser=True)
+
+    def _get(self, user, url):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client.get(url)
+
+    def test_lista_y_detalle_solo_de_la_empresa_activa(self):
+        (_, _, alm_a, ubi_a), (_, _, alm_b, ubi_b) = self.empresas
+        almacenes = self._get(self.root, "/api/v1/inventarios/almacenes/")
+        self.assertEqual({f["id_almacen"] for f in almacenes.json()}, {alm_a.pk})
+        ubicaciones = self._get(self.root, "/api/v1/inventarios/ubicaciones/")
+        self.assertEqual({f["id_ubicacion"] for f in ubicaciones.json()}, {ubi_a.pk})
+        self.assertEqual(self._get(self.root, f"/api/v1/inventarios/almacenes/{alm_b.pk}/").status_code, 404)
+        self.assertEqual(self._get(self.root, f"/api/v1/inventarios/ubicaciones/{ubi_b.pk}/").status_code, 404)
+
+    def test_sin_empresa_activa_no_ve_nada(self):
+        for url in ("almacenes", "ubicaciones", "existencias", "movimientos"):
+            resp = self._get(self.sin_empresa, f"/api/v1/inventarios/{url}/")
+            self.assertEqual(resp.status_code, 200, url)
+            datos = resp.json()
+            self.assertEqual(datos["results"] if isinstance(datos, dict) else datos, [], url)
