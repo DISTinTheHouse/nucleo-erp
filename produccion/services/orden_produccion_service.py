@@ -389,18 +389,23 @@ class OrdenProduccionService:
                 if not product:
                     continue
                 product_id, product_nombre = product.id, product.nombre
+                product_codigo, product_proscai = product.codigo, product.cod_proscai
             elif detail.variante_produccion is not None:
                 # Muestra sin catálogo: se agrupa por la línea de muestra que la
                 # originó (cada talla es una variante de producción distinta).
                 variant = detail.variante_produccion
                 product_id = f"mp-{variant.pedido_detalle_id or variant.pk}"
                 product_nombre = variant.nombre or variant.sku
+                product_codigo, product_proscai = None, None
             else:
                 continue
 
             if product_id not in products_data:
                 products_data[product_id] = {
                     "nombre": product_nombre,
+                    "codigo": product_codigo,
+                    "cod_proscai": product_proscai or None,
+                    "skus": {},
                     "cantidades": {
                         "total": 0.0,
                         "tallas": {}
@@ -418,6 +423,7 @@ class OrdenProduccionService:
             color_name = variant.color.nombre if variant.color else "N/A"
             talla_color_key = (talla_name, color_name)
             p_data["cantidades"]["tallas"][talla_color_key] = p_data["cantidades"]["tallas"].get(talla_color_key, 0.0) + qty
+            p_data["skus"].setdefault(talla_color_key, getattr(variant, "sku", None))
 
             # 2. Habilitacion (materia prima)
             if detail.bom:
@@ -456,6 +462,7 @@ class OrdenProduccionService:
                 tallas_list.append({
                     "talla": t_name,
                     "color": c_name,
+                    "sku": p_info["skus"].get((t_name, c_name)),
                     "cantidad": t_qty_formatted
                 })
 
@@ -472,6 +479,8 @@ class OrdenProduccionService:
 
             productos_list.append({
                 "nombre": p_info["nombre"],
+                "codigo": p_info["codigo"],
+                "cod_proscai": p_info["cod_proscai"],
                 "cantidades": {
                     "total": total_qty_formatted,
                     "tallas": tallas_list

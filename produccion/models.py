@@ -823,7 +823,11 @@ class SalidaMaquila(models.Model):
 
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="salidas_maquila")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="salidas_maquila")
-    op = models.ForeignKey(OrdenProduccion, on_delete=models.PROTECT, related_name="salidas_maquila")
+    # Origen: una OP o una OB (bordado también manda a maquila); exactamente uno.
+    op = models.ForeignKey(OrdenProduccion, on_delete=models.PROTECT, related_name="salidas_maquila",
+                           null=True, blank=True)
+    ob = models.ForeignKey("produccion.OrdenesBordado", on_delete=models.PROTECT, related_name="salidas_maquila",
+                           null=True, blank=True)
     centro_confeccion = models.ForeignKey(
         "terceros.Proveedor", on_delete=models.PROTECT, related_name="salidas_maquila"
     )
@@ -844,7 +848,13 @@ class SalidaMaquila(models.Model):
         db_table = "salidas_maquila"
         verbose_name = "Salida a maquila"
         verbose_name_plural = "Salidas a maquila"
-        constraints = [models.UniqueConstraint(fields=["empresa", "folio"], name="uq_sm_empresa_folio")]
+        constraints = [
+            models.UniqueConstraint(fields=["empresa", "folio"], name="uq_sm_empresa_folio"),
+            models.CheckConstraint(
+                condition=models.Q(op__isnull=False, ob__isnull=True) | models.Q(op__isnull=True, ob__isnull=False),
+                name="ck_sm_origen_op_u_ob",
+            ),
+        ]
         indexes = [models.Index(fields=["empresa", "-id"], name="sm_empresa_id")]
 
     def __str__(self):
@@ -855,6 +865,9 @@ class SalidaMaquilaDetalle(models.Model):
     salida = models.ForeignKey(SalidaMaquila, on_delete=models.CASCADE, related_name="detalles")
     op_detalle = models.ForeignKey(
         OrdenProduccionDetalle, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    ob_detalle = models.ForeignKey(
+        "produccion.OrdenBordadoDetalle", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     descripcion = models.CharField(max_length=255)
     cantidad = models.DecimalField(max_digits=14, decimal_places=2)
