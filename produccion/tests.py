@@ -5252,11 +5252,12 @@ class EstatusOPTests(TestCase):
             self.assertEqual(self._client().get(self.url).data["opciones"], [])
             self.assertEqual(self._post({"estatus_op": int(self.E.PREPARACION)}).status_code, 409)
 
-    def test_usuario_no_admin_cambia_estatus_de_op_de_otra_sucursal_de_su_empresa(self):
-        """#507: mismo alcance que list/detail (empresa), sin filtrar por sucursal."""
+    def test_usuario_no_admin_no_ve_estatus_de_op_de_otra_sucursal_de_su_empresa(self):
+        """#1134: mismo alcance que el detalle (empresa y sucursales del usuario):
+        la OP de otra sucursal de su empresa es 404."""
         otra_suc = Sucursal.objects.create(empresa=self.empresa, codigo="GDL", nombre="Guadalajara")
         OrdenProduccion.objects.filter(pk=self.op.pk).update(sucursal=otra_suc)
-        self.assertEqual(self._client(self.lector).get(self.url).status_code, 200)
+        self.assertEqual(self._client(self.lector).get(self.url).status_code, 404)
 
     def test_motivo_que_no_es_texto_responde_400(self):
         resp = self._post({"estatus_op": int(self.E.DETENIDO), "motivo": 5})
@@ -5433,7 +5434,11 @@ class RutaCriticaBulkTests(TestCase):
         cls.otra = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
         cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
         cls.sucursal_otra = Sucursal.objects.create(empresa=cls.otra, codigo="GDL", nombre="GDL")
-        cls.usuario = Usuario.objects.create(username="u", email="u@acme.test", empresa=cls.empresa)
+        # #1134: ``ruta-critica/`` usa el alcance del detalle (sucursal); sin
+        # sucursal el usuario no vería ninguna OP y las pruebas medirían una lista vacía.
+        cls.usuario = Usuario.objects.create(
+            username="u", email="u@acme.test", empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
         # #1133: leer la ruta crítica exige R-PRODUCCION-OP.
         _conceder_permisos(cls.usuario, cls.empresa, ["R-PRODUCCION-OP"])
         cls.op1 =OrdenProduccion.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-1")
