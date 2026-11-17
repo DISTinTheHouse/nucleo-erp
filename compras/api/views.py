@@ -439,6 +439,9 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             oc.estatus = OrdenCompra.EstatusOrdenCompra.CANCELADA
             oc.motivo_cancelacion = motivo
             oc.save(update_fields=["estatus", "motivo_cancelacion", "updated_at"])
+            # Necesidades de pre-órdenes: vuelven a Pendiente o se cancelan (no quedan huérfanas).
+            from produccion.services.pre_orden_service import liberar_necesidades_oc
+            liberar_necesidades_oc(oc.pk)
             self._auditar_orden_compra(
                 request,
                 oc,
