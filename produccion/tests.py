@@ -94,10 +94,18 @@ from usuarios.models import Usuario
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
 
 
+def _permiso(clave):
+    """El ``Permiso`` de ``clave``: el catálogo solo vive en la BD, así que las
+    pruebas lo siembran."""
+    from seguridad.models import Permiso
+
+    return Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})[0]
+
+
 def _conceder_permisos(usuario, empresa, claves):
     """Rol activo de ``empresa`` con esas claves, asignado a ``usuario``. El
     catálogo de permisos solo vive en la BD, así que se siembran aquí."""
-    from seguridad.models import Permiso, Rol, RolPermiso, UsuarioRol
+    from seguridad.models import Rol, RolPermiso, UsuarioRol
 
     # Un rol por llamada: el sufijo no se repite aunque se llame dos veces para
     # el mismo usuario (``uq_rol_empresa_codigo``).
@@ -106,8 +114,7 @@ def _conceder_permisos(usuario, empresa, claves):
         estatus=Rol.Estatus.ACTIVO,
     )
     for clave in claves:
-        permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
-        RolPermiso.objects.create(rol=rol, permiso=permiso)
+        RolPermiso.objects.create(rol=rol, permiso=_permiso(clave))
     UsuarioRol.objects.create(usuario=usuario, rol=rol, empresa=empresa)
     return rol
 
@@ -117,11 +124,10 @@ def _conceder_permisos_sin_empresa(usuario, claves):
     (``UsuarioRol.empresa`` es obligatorio y ``permisos_efectivos`` solo cuenta
     los de la empresa activa). Así la petición pasa ``LecturaPorCodigo`` y la
     prueba sigue midiendo el alcance del queryset, no el 403 del código."""
-    from seguridad.models import Permiso, UsuarioPermiso
+    from seguridad.models import UsuarioPermiso
 
     for clave in claves:
-        permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
-        UsuarioPermiso.objects.create(usuario=usuario, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT)
+        UsuarioPermiso.objects.create(usuario=usuario, permiso=_permiso(clave), tipo=UsuarioPermiso.TIPO_GRANT)
 
 
 def _tipo_producto():
@@ -610,9 +616,6 @@ class SatelitesScopeTenantTests(TestCase):
         usuario = Usuario.objects.create(
             username=email, email=email, empresa=empresa, sucursal_default=sucursal
         )
-        # #1133: leer los satélites exige el código de la sección de su orden
-        # padre; editar/borrar los de bordado, ``E-``/``D-PRODUCCION-OB``.
-        _conceder_permisos(usuario, empresa, CLAVES_SATELITES)
         pedido = Pedido.objects.create(
             empresa=empresa,
             sucursal=sucursal,
@@ -648,6 +651,10 @@ class SatelitesScopeTenantTests(TestCase):
         cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
         cls.a = cls._tenant("acme", "MTY", "a@acme.test")
         cls.b = cls._tenant("globex", "GDL", "b@globex.test")
+        # #1133: leer los satélites exige el código de la sección de su orden
+        # padre; editar/borrar los de bordado, ``E-``/``D-PRODUCCION-OB``. Solo
+        # el usuario de A hace peticiones; el de B solo es autor de sus registros.
+        _conceder_permisos(cls.a["usuario"], cls.a["empresa"], CLAVES_SATELITES)
 
         cls.sin_empresa = Usuario.objects.create(
             username="huerfano", email="huerfano@nowhere.test"
@@ -4674,9 +4681,13 @@ class OrdenProduccionPedidoOpcionalTests(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
 
 
-#: Lectura de las tres secciones con ``onboarding`` (#1133): ``codigos_lectura``
-#: va por acción, así que el POST de ``onboarding`` también pide el ``R-``.
-CLAVES_ONBOARDING_SECCIONES = ("R-PRODUCCION-OB", "R-PRODUCCION-OR", "R-PRODUCCION-CM")
+#: Código de lectura de cada ``onboarding`` (#1133): ``codigos_lectura`` va por
+#: acción, así que su POST también pide el ``R-`` de la sección.
+CODIGO_ONBOARDING = {
+    "/api/v1/produccion/orden-bordado/onboarding/": "R-PRODUCCION-OB",
+    "/api/v1/produccion/orden-reflejante/onboarding/": "R-PRODUCCION-OR",
+    "/api/v1/produccion/orden-corte-manga/onboarding/": "R-PRODUCCION-CM",
+}
 
 
 class OnboardingPostScopeTenantTests(TestCase):
@@ -4704,12 +4715,14 @@ class OnboardingPostScopeTenantTests(TestCase):
         )
         cls.empresa_b = Empresa.objects.create(codigo="globex", razon_social="GLOBEX SA")
         cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="GDL", nombre="GDL")
-        cls.usuario = Usuario.objects.create(
-            username="operador", email="operador@acme.test",
-            empresa=cls.empresa, sucursal_default=cls.sucursal,
-        )
-        # #1133: ``onboarding`` (también el POST) exige el código de lectura de la sección.
-        _conceder_permisos(cls.usuario, cls.empresa, CLAVES_ONBOARDING_SECCIONES)
+        # #1133: un operador por sección, cada uno solo con el código de su ``onboarding``.
+        cls.usuarios = {}
+        for i, url in enumerate(cls.URLS):
+            cls.usuarios[url] = Usuario.objects.create(
+                username=f"operador-{i}", email=f"operador-{i}@acme.test",
+                empresa=cls.empresa, sucursal_default=cls.sucursal,
+            )
+            _conceder_permisos(cls.usuarios[url], cls.empresa, [CODIGO_ONBOARDING[url]])
         cls.pedido, cls.pdt = cls._pedido(cls.empresa, cls.sucursal, 10)
         cls.pedido_b, cls.pdt_b = cls._pedido(cls.empresa_b, cls.sucursal_b, cls.CANTIDAD_AJENA)
         cls.pedido_otra_sucursal, cls.pdt_otra_sucursal = cls._pedido(
@@ -4735,7 +4748,7 @@ class OnboardingPostScopeTenantTests(TestCase):
 
     def _post(self, url, pedido_id, pdt_id):
         client = APIClient()
-        client.force_authenticate(user=self.usuario)
+        client.force_authenticate(user=self.usuarios[url])
         return client.post(
             url,
             {"pedido": pedido_id, "detalles_override": [{"pedido_detalle_talla_id": pdt_id, "cantidad": 999999}]},
@@ -4787,6 +4800,9 @@ class OnboardingPostLineaMuestraTests(TestCase):
         ("/api/v1/produccion/orden-reflejante/onboarding/", OrdenesReflejante, "ORDEN_REFLEJANTE"),
         ("/api/v1/produccion/orden-corte-manga/onboarding/", OrdenesCorteManga, "ORDEN_CORTE_MANGA"),
     )
+    #: Códigos de las secciones que ejercita la clase (#1133); la subclase de bordado
+    #: los reemplaza por el de la OB.
+    CLAVES = (CODIGO_ONBOARDING[CASOS[0][0]], CODIGO_ONBOARDING[CASOS[1][0]])
 
     @classmethod
     def setUpTestData(cls):
@@ -4801,9 +4817,7 @@ class OnboardingPostLineaMuestraTests(TestCase):
             username="operador", email="operador@acme.test",
             empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
-        # #1133: ``onboarding`` (también el POST) exige el código de lectura de la
-        # sección; ``OrdenBordadoMuestraTests`` hereda este usuario para la OB.
-        _conceder_permisos(cls.usuario, cls.empresa, CLAVES_ONBOARDING_SECCIONES)
+        _conceder_permisos(cls.usuario, cls.empresa, cls.CLAVES)
         cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
         cls.pedido = Pedido.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente,
@@ -4844,6 +4858,7 @@ class OrdenBordadoMuestraTests(OnboardingPostLineaMuestraTests):
 
     URL = "/api/v1/produccion/orden-bordado/onboarding/"
     CASOS = ()
+    CLAVES = (CODIGO_ONBOARDING[URL],)
 
     def _client(self):
         client = APIClient()
