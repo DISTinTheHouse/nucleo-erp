@@ -1,3 +1,5 @@
+from django.db.models.functions import JSONObject
+from django.contrib.postgres.expressions import ArraySubquery
 import math
 from decimal import Decimal
 
@@ -3218,6 +3220,12 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 piezas_total=Coalesce(Subquery(piezas, output_field=DecimalField(max_digits=14, decimal_places=2)), Value(Decimal("0"))),
                 tallas_total=Coalesce(Subquery(tallas, output_field=IntegerField()), Value(0)),
                 fem=_fecha_estimada_material(OuterRef("pk")),
+                # Pedidos ligados al resurtido, en la misma consulta.
+                pedidos_json=ArraySubquery(
+                    PreOrdenProduccion.pedidos.through.objects.filter(preordenproduccion_id=OuterRef("pk"))
+                    .order_by("pedido_id").values(json=JSONObject(
+                        id="pedido_id", folio="pedido__folio", cliente_nombre="pedido__cliente_nombre"))
+                ),
             )
         )
         origen = (self.request.query_params.get("origen") or "").strip()
@@ -3518,7 +3526,19 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 lineas.append((v, cant, tipo))
         if any(errs):
             raise ValidationError({"lineas": errs})
-        pre = crear_resurtido(user, sucursal, lineas, fecha, d.get("notas") or "")
+        pedidos = []
+        pedidos_in = d.get("pedidos") or []
+        if pedidos_in:
+            from ventas.models import Pedido
+            try:
+                pids = {int(x) for x in pedidos_in}
+            except (TypeError, ValueError):
+                raise ValidationError({"pedidos": "Lista de ids de pedidos."})
+            pedidos = list(Pedido.objects.filter(pk__in=pids, empresa=empresa).exclude(estatus=Pedido.ESTATUS_CANCELADO))
+            if len(pedidos) != len(pids):
+                faltan = sorted(pids - {p.pk for p in pedidos})
+                raise ValidationError({"pedidos": f"Pedido(s) no encontrado(s) o cancelado(s): {', '.join(map(str, faltan))}."})
+        pre = crear_resurtido(user, sucursal, lineas, fecha, d.get("notas") or "", pedidos)
         return self._respuesta(pre, status_code=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], url_path="aceptar")

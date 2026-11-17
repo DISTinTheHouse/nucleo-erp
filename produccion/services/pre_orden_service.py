@@ -633,7 +633,7 @@ def marcar_convertida(pre, op, user):
 # --------------------------------------------------------------------------- resurtido
 
 @transaction.atomic
-def crear_resurtido(user, sucursal, lineas, fecha_compromiso_, notas=""):
+def crear_resurtido(user, sucursal, lineas, fecha_compromiso_, notas="", pedidos=()):
     """Resurtido de planeación (sin pedido): un documento con muchos SKUs de una
     sucursal. ``lineas`` = ``[(ProductoVariante, cantidad, tipo_linea)]``. Nace
     en Pendiente de aceptar; avisa a producción."""
@@ -651,6 +651,8 @@ def crear_resurtido(user, sucursal, lineas, fecha_compromiso_, notas=""):
         )
         for it, cant, tipo in lineas
     ], batch_size=500)
+    if pedidos:
+        pre.pedidos.set(pedidos)
     fab = sum(1 for _, _, t in lineas if t == "fabricado")
     evento(pre, EV.CREADA, user, f"Resurtido: {len(lineas)} SKU(s) ({fab} fabricado(s), {len(lineas) - fab} de compra), "
                                  f"{sum(c for _, c, _ in lineas)} pieza(s).")
@@ -770,7 +772,7 @@ def disponibilidad(empresa_id, sucursal_id, variante_ids):
     for k, v in suma(PedidoDetalleTalla.objects.filter(
         variante_id__in=ids, pedido_detalle__pedido__empresa_id=empresa_id, pedido_detalle__pedido__sucursal_id=sucursal_id,
         pedido_detalle__pedido__estatus__in=[Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO],
-    ), "variante_id", "cantidad").items():
+    ).exclude(pedido_detalle__pedido_id__in=_pedidos_cubiertos(empresa_id, sucursal_id)), "variante_id", "cantidad").items():
         comprometido[k] += v
     for k, v in suma(PreOrdenProduccionDetalle.objects.filter(
         producto_variante_id__in=ids, pre_orden__empresa_id=empresa_id, pre_orden__sucursal_id=sucursal_id,
@@ -827,7 +829,7 @@ def disponibilidad_productos(empresa_id, sucursal_id, producto_ids):
     for k, v in suma(PedidoDetalleTalla.objects.filter(
         pedido_detalle__pedido__empresa_id=empresa_id, pedido_detalle__pedido__sucursal_id=sucursal_id,
         pedido_detalle__pedido__estatus__in=[Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO],
-    ), "variante__producto_id", "pedido_detalle__producto_id", "cantidad").items():
+    ).exclude(pedido_detalle__pedido_id__in=_pedidos_cubiertos(empresa_id, sucursal_id)), "variante__producto_id", "pedido_detalle__producto_id", "cantidad").items():
         comprometido[k] += v
     for k, v in suma(PreOrdenProduccionDetalle.objects.filter(
         pre_orden__empresa_id=empresa_id, pre_orden__sucursal_id=sucursal_id,
@@ -839,3 +841,12 @@ def disponibilidad_productos(empresa_id, sucursal_id, producto_ids):
         e, f, c, m = existencia.get(pid, CERO), por_fabricar.get(pid, CERO), por_comprar[pid], comprometido[pid]
         out[pid] = {"existencia": e, "por_fabricar": f, "por_comprar": c, "comprometido": m, "disponible": e + f + c - m}
     return out
+
+
+def _pedidos_cubiertos(empresa_id, sucursal_id):
+    """Pedidos ligados a un resurtido abierto de la sucursal (subconsulta): su
+    demanda ya está en las líneas del resurtido, no se cuenta dos veces."""
+    return PreOrdenProduccion.pedidos.through.objects.filter(
+        preordenproduccion__empresa_id=empresa_id, preordenproduccion__sucursal_id=sucursal_id,
+        preordenproduccion__origen=PreOrdenProduccion.Origen.RESURTIDO, preordenproduccion__estatus__in=CANCELABLES,
+    ).values("pedido_id")
