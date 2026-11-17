@@ -210,14 +210,27 @@ class OrdenCompraDetalleAdmin(admin.ModelAdmin):
     list_select_related = ("orden_compra", "producto", "solicitud_compra_detalle", "requisicion_detalle")
 
 
-class RecepcionDetalleInline(admin.TabularInline):
+class SoloLecturaAdminMixin:
+    """Recepciones solo se escriben por la API (reglas de onboarding)."""
+
+    def has_add_permission(self, request, *args, **kwargs):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class RecepcionDetalleInline(SoloLecturaAdminMixin, admin.TabularInline):
     model = RecepcionDetalle
     extra = 0
     autocomplete_fields = ("orden_compra_detalle", "producto", "ubicacion", "lote", "serie")
 
 
 @admin.register(Recepcion)
-class RecepcionAdmin(admin.ModelAdmin):
+class RecepcionAdmin(SoloLecturaAdminMixin, admin.ModelAdmin):
     list_display = (
         "folio",
         "tipo_origen",
@@ -268,7 +281,7 @@ class RecepcionAdmin(admin.ModelAdmin):
 
 
 @admin.register(RecepcionDetalle)
-class RecepcionDetalleAdmin(admin.ModelAdmin):
+class RecepcionDetalleAdmin(SoloLecturaAdminMixin, admin.ModelAdmin):
     list_display = (
         "id",
         "recepcion",
