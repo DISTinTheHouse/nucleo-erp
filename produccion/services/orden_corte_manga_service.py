@@ -256,9 +256,12 @@ class OrdenCorteMangaService:
         # ``select_for_update`` es no-op; en Postgres es el bloqueo real.
         Pedido.objects.select_for_update().filter(pk=pedido.pk).first()
 
+        # ``pedido_detalle__color`` en el JOIN: cada renglón del ``bulk_create``
+        # lee ``dt.pedido_detalle.color`` y sin él era una consulta por renglón
+        # (EC-889), igual que ya hacen OB y OR.
         detalle_tallas_raw = list(
             OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id).select_related(
-                "pedido_detalle", "talla"
+                "pedido_detalle__color", "talla"
             )
         )
 
