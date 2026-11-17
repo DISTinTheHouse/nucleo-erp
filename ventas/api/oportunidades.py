@@ -12,11 +12,13 @@ from django.utils.dateparse import parse_date
 from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.filters import OrderingFilter
+from rest_framework.settings import api_settings
 from nucleo.listados import PaginacionOpcionalLimitOffset
 from rest_framework.response import Response
 
 from terceros.cartera import cartera_de_cliente
-from terceros.scope import clientes_base, clientes_visibles, clientes_visibles_entre
+from terceros.scope import clientes_base, clientes_visibles, clientes_visibles_entre, ve_clientes_sin_asignacion
 from seguridad.role_identity import (
     CLAVE_DEPARTAMENTO_MESA_CONTROL_Y_VENTAS,
     CLAVE_DEPARTAMENTO_VENTAS,
@@ -95,6 +97,57 @@ def con_estado(qs):
             output_field=CharField(),
         )
     )
+
+
+def cliente_visible(user):
+    """Expresión booleana "el usuario ve al cliente de la oportunidad", o ``None`` si los
+    ve todos (superusuario y admin de empresa: sin costo).
+
+    Misma regla que ``ClienteVisibleMixin`` (``clientes_visibles_entre``), como
+    ``EXISTS`` dentro de la consulta, igual que el buscador global
+    (``nucleo.api.search._oportunidades_buscables``). Sin cliente da ``False``.
+    """
+    if ve_clientes_sin_asignacion(user):
+        return None
+    return Exists(clientes_visibles(clientes_base(), user).filter(pk=OuterRef("cliente_id")))
+
+
+# ``?ordering=`` por un campo del cliente: el término público y su alias en la consulta.
+ORDEN_CLIENTE = {
+    "cliente__nombre": "orden_cliente_nombre",
+    "cliente__razon_social": "orden_cliente_razon_social",
+}
+
+
+class OrdenamientoOportunidadesFilter(OrderingFilter):
+    """``OrderingFilter`` con la lista blanca de la vista, pero un cliente que el usuario
+    no ve ordena como si no hubiera cliente (``NULL``): si no, el orden delataría su
+    nombre o su razón social (EC-902). El ``EXISTS`` solo se arma cuando se ordena por
+    un campo del cliente y el usuario no ve a todos los clientes."""
+
+    def filter_queryset(self, request, queryset, view):
+        ordering = self.get_ordering(request, queryset, view)
+        if not ordering:
+            return queryset
+        pedidos = {campo.lstrip("-") for campo in ordering} & ORDEN_CLIENTE.keys()
+        if pedidos:
+            visible = cliente_visible(request.user)
+            queryset = queryset.alias(**{
+                ORDEN_CLIENTE[campo]: F(campo) if visible is None else Case(
+                    When(visible, then=F(campo)), default=Value(None), output_field=CharField()
+                )
+                for campo in pedidos
+            })
+        return queryset.order_by(*[
+            ("-" if campo.startswith("-") else "") + ORDEN_CLIENTE.get(campo.lstrip("-"), campo.lstrip("-"))
+            for campo in ordering
+        ])
+
+
+FILTER_BACKENDS_OPORTUNIDADES = (
+    *(backend for backend in api_settings.DEFAULT_FILTER_BACKENDS if not issubclass(backend, OrderingFilter)),
+    OrdenamientoOportunidadesFilter,
+)
 
 
 def filas_cotizaciones(qs, user, limite=None):
@@ -229,12 +282,15 @@ class OportunidadViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "patch", "delete"]
     pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= la lista completa; ?limit= topado (EC-757)
     # Explícitos: sin esto DRF acepta en ``?ordering=`` los ``source`` del serializer, y
-    # ``vendedor__get_full_name`` no es una columna (500). Son los que ya se aceptaban.
+    # ``vendedor__get_full_name`` no es una columna (500). Son los que ya se aceptaban,
+    # más ``cliente__razon_social`` (EC-902). Los dos del cliente pasan por
+    # ``OrdenamientoOportunidadesFilter``: un cliente oculto ordena como ``NULL``.
     ordering_fields = [
-        "id", "cliente", "cliente__nombre", "vendedor", "nombre_contacto", "telefono", "correo",
-        "titulo", "monto_estimado", "etapa", "motivo_perdida", "proximo_contacto", "notas",
-        "created_at", "updated_at",
+        "id", "cliente", "cliente__nombre", "cliente__razon_social", "vendedor", "nombre_contacto",
+        "telefono", "correo", "titulo", "monto_estimado", "etapa", "motivo_perdida",
+        "proximo_contacto", "notas", "created_at", "updated_at",
     ]
+    filter_backends = FILTER_BACKENDS_OPORTUNIDADES
 
     def get_queryset(self):
         qs = oportunidades_visibles(super().get_queryset(), self.request.user)

@@ -6295,6 +6295,107 @@ class OportunidadesValidacionesTests(OportunidadesBase):
         self.assertEqual({k: v[1] for k, v in muchas.items()}, {"vendedor": 8, "admin": 8})
         self.assertEqual(pocas, {k: v[0] for k, v in muchas.items()})
 
+    def _escenario_orden(self):
+        """Tres clientes de Ana (uno oculto para ella) y una oportunidad sin cliente.
+        Nombre y razón social van en órdenes distintos para que no se confundan."""
+        visible_a = self._cliente_rs("Alfa", "Zeta SA", asignado_a=[self.ana])
+        oculto = self._cliente_rs("Beta", "Alfa SA")
+        visible_c = self._cliente_rs("Gama", "Media SA", asignado_a=[self.ana])
+        return {
+            "a": self._op(self.ana, cliente=visible_a).pk,
+            "b": self._op(self.ana, cliente=oculto).pk,
+            "c": self._op(self.ana, cliente=visible_c).pk,
+            "n": self._op(self.ana).pk,
+        }
+
+    def _orden(self, user, ordering):
+        resp = self._client(user).get(OPORTUNIDADES_URL, {"ordering": ordering})
+        self.assertEqual(resp.status_code, 200, ordering)
+        return [o["id"] for o in resp.data]
+
+    def test_ordering_por_campos_del_cliente_trata_al_oculto_como_null(self):
+        ops = self._escenario_orden()
+
+        def ids(*claves):
+            return [ops[c] for c in claves]
+
+        # ASC deja los NULL al final y DESC al principio (PostgreSQL); entre ellos, ``-id``.
+        # Para Ana, "Beta"/"Alfa SA" (oculto) cuenta como la oportunidad sin cliente.
+        esperado = {
+            (self.ana, "cliente__razon_social,-id"): ids("c", "a", "n", "b"),
+            (self.ana, "-cliente__razon_social,-id"): ids("n", "b", "a", "c"),
+            (self.ana, "cliente__nombre,-id"): ids("a", "c", "n", "b"),
+            (self.ana, "-cliente__nombre,-id"): ids("n", "b", "c", "a"),
+            # El admin ve todos los clientes: orden de siempre.
+            (self.jefe, "cliente__razon_social,-id"): ids("b", "c", "a", "n"),
+            (self.jefe, "-cliente__razon_social,-id"): ids("n", "a", "c", "b"),
+            (self.jefe, "cliente__nombre,-id"): ids("a", "b", "c", "n"),
+            (self.jefe, "-cliente__nombre,-id"): ids("n", "c", "b", "a"),
+        }
+        for (user, ordering), ids_esperados in esperado.items():
+            with self.subTest(user=user.username, ordering=ordering):
+                self.assertEqual(self._orden(user, ordering), ids_esperados)
+
+    def test_ordering_por_campos_del_cliente_con_mesa_de_control(self):
+        # Mesa ve al cliente por departamento: pasa por el EXISTS y lo ordena como visible.
+        mesa = self._mesa()
+        zeta = self._op(mesa, cliente=self._cliente_rs("Alfa", "Zeta SA")).pk
+        alfa = self._op(mesa, cliente=self._cliente_rs("Beta", "Alfa SA")).pk
+
+        self.assertEqual(self._orden(mesa, "cliente__razon_social,-id"), [alfa, zeta])
+        self.assertEqual(self._orden(mesa, "-cliente__razon_social,-id"), [zeta, alfa])
+        self.assertEqual(self._orden(mesa, "cliente__nombre,-id"), [zeta, alfa])
+
+    def test_ordering_por_cliente_sin_desempate_y_terminos_internos(self):
+        ops = self._escenario_orden()
+        # Sin ``-id`` también responde; los alias internos no son términos públicos.
+        self.assertEqual(self._orden(self.ana, "cliente__razon_social")[:2], [ops["c"], ops["a"]])
+        por_omision = self._orden(self.ana, "")
+        for termino in ("orden_cliente_razon_social", "-orden_cliente_nombre", "cliente_razon_social"):
+            with self.subTest(termino=termino):
+                self.assertEqual(self._orden(self.ana, termino), por_omision)
+
+    def test_ordering_por_cliente_no_agrega_consultas_por_fila(self):
+        def consultas(user, ordering):
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._client(user).get(OPORTUNIDADES_URL, {"ordering": ordering} if ordering else {})
+            self.assertEqual(resp.status_code, 200)
+            return len(ctx)
+
+        casos = [
+            (user, ordering)
+            for user in (self.ana, self.jefe)
+            for ordering in (None, "titulo,-id", "cliente__razon_social,-id", "-cliente__nombre,-id")
+        ]
+        self._op(self.ana, cliente=self._cliente_rs("C0", "C0 SA", asignado_a=[self.ana]))
+        consultas(self.ana, None)  # calienta cachés de permisos
+        pocas = {caso: consultas(*caso) for caso in casos}
+        for i in range(1, 8):
+            asignado = [self.ana] if i % 2 else []
+            self._op(self.ana, cliente=self._cliente_rs(f"C{i}", f"C{i} SA", asignado_a=asignado))
+        muchas = {caso: consultas(*caso) for caso in casos}
+
+        self.assertEqual(pocas, muchas)
+        # Ordenar por el cliente no agrega viajes a la BD: el EXISTS va en la misma consulta.
+        for user in (self.ana, self.jefe):
+            self.assertEqual(muchas[(user, "cliente__razon_social,-id")], muchas[(user, None)])
+
+    def test_exists_de_clientes_solo_al_ordenar_por_cliente_y_si_no_los_ve_todos(self):
+        self._op(self.ana, cliente=self._cliente_rs("C0", "C0 SA", asignado_a=[self.ana]))
+
+        def listado_con_exists(user, ordering):
+            with CaptureQueriesContext(connection) as ctx:
+                self._client(user).get(OPORTUNIDADES_URL, {"ordering": ordering} if ordering else {})
+            listado = [q["sql"] for q in ctx.captured_queries if 'FROM "oportunidades"' in q["sql"]]
+            self.assertEqual(len(listado), 1)
+            return 'FROM "clientes"' in listado[0]
+
+        self.assertFalse(listado_con_exists(self.ana, None))
+        self.assertFalse(listado_con_exists(self.ana, "titulo,-id"))
+        self.assertTrue(listado_con_exists(self.ana, "cliente__razon_social,-id"))
+        self.assertTrue(listado_con_exists(self.ana, "-cliente__nombre"))
+        self.assertFalse(listado_con_exists(self.jefe, "cliente__razon_social,-id"))
+
     def test_transferir_pasa_las_cotizaciones_al_nuevo_dueno(self):
         op = self._op(self.ana, cliente=self.cliente)
         resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
