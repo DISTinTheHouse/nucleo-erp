@@ -1,4 +1,6 @@
 from django.db.models import Prefetch
+from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import mixins, status
 from rest_framework.decorators import action
@@ -139,8 +141,8 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
     antes) y ``?resumen=1`` regresa el listado sin renglones anidados.
 
     EC-921 (modo servidor del listado): ``?estado=``, ``?prioridad=``, ``?search=`` y
-    ``?ordering=`` (``wms/api/pickings_listado.py``). Sin parámetros, la misma
-    respuesta de siempre."""
+    ``?ordering=`` (``wms/api/pickings_listado.py``), y ``kpis/`` con los mismos
+    filtros. Sin parámetros, la misma respuesta de siempre."""
 
     queryset = Picking.objects.all()
     serializer_class = PickingSerializer
@@ -238,6 +240,29 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
         if self._resumen():
             return PickingListSerializer
         return PickingSerializer
+
+    @extend_schema(
+        summary="KPIs del listado de pickings con sus filtros",
+        description=(
+            "Mismos `estado`, `prioridad` y `search` que el listado, sin paginar ni ordenar "
+            "(`limit`, `offset` y `ordering` se ignoran). Respuesta: `generado_en`, `total` "
+            "(= `count` del listado con los mismos filtros), `lineas_por_surtir` (suma de "
+            "`total_lineas - total_lineas_completas`, cada picking acotado a >= 0) y "
+            "`por_prioridad` (`[{prioridad, prioridad_label, total}]`, ALTA, MEDIA, BAJA)."
+        ),
+        parameters=list(pickings_listado.PARAMETROS_FILTRO_OPENAPI),
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path=pickings_listado.ACCION_KPIS)
+    def kpis(self, request):
+        """Tarjetas de ``PickingView`` sobre el conjunto filtrado, en una consulta
+        (``pickings_listado.kpis``). Mismo ``get_queryset`` (alcance y filtros) y los
+        mismos filter backends que el listado, salvo el de orden."""
+        qs = self.get_queryset()
+        for backend in self.filter_backends:
+            if not issubclass(backend, OrderingFilter):
+                qs = backend().filter_queryset(request, qs, self)
+        return Response({"generado_en": timezone.now(), **pickings_listado.kpis(qs)})
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
     def onboarding(self, request):

@@ -6,12 +6,12 @@ completa, filtra y ordena en el navegador y calcula sus tarjetas con
 
 Los filtros van SIEMPRE encima del alcance (``documentos_wms_visibles``, vía
 ``PickingViewSet.get_queryset``): sólo acotan lo que el usuario ya ve. Sólo en
-``ACCIONES_FILTRADAS``; las acciones de detalle resuelven por pk sin ellos, como
-``cotizaciones_listado``.
+``ACCIONES_FILTRADAS`` (el listado y sus KPIs); las acciones de detalle resuelven
+por pk sin ellos, como ``cotizaciones_listado``.
 """
 
-from django.db.models import Case, CharField, F, IntegerField, Value, When
-from django.db.models.functions import Coalesce, Concat, NullIf, Trim
+from django.db.models import Case, CharField, Count, F, IntegerField, Q, Sum, Value, When
+from django.db.models.functions import Coalesce, Concat, Greatest, NullIf, Trim
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter
 from rest_framework.exceptions import ValidationError
@@ -20,10 +20,15 @@ from rest_framework.filters import SearchFilter
 from nucleo.listados import OrdenamientoEstableFilter
 from wms.models import Picking
 
-ACCIONES_FILTRADAS = ("list",)
+ACCION_KPIS = "kpis"
+ACCIONES_FILTRADAS = ("list", ACCION_KPIS)
 
 ESTADOS_VALIDOS = frozenset(Picking.Estado.values)
 PRIORIDADES_VALIDAS = frozenset(Picking.Prioridad.values)
+
+# De la más urgente a la menos: orden de ``por_prioridad`` en los KPIs, el mismo que
+# ``PICKING_PRIORIDAD_ORDER`` del front.
+PRIORIDADES_POR_URGENCIA = (Picking.Prioridad.ALTA, Picking.Prioridad.MEDIA, Picking.Prioridad.BAJA)
 
 PARAMETROS_FILTRO_OPENAPI = (
     OpenApiParameter("search", OpenApiTypes.STR, description=(
@@ -166,3 +171,37 @@ class OrdenamientoPickingsFilter(OrdenamientoEstableFilter):
         if anotaciones:
             queryset = queryset.annotate(**anotaciones)
         return queryset.order_by(*[_termino(campo) for campo in ordering])
+
+
+# --- KPIs ------------------------------------------------------------------------
+
+
+def kpis(qs):
+    """Tarjetas del listado sobre el conjunto filtrado, en UNA consulta (``aggregate``).
+
+    Misma definición que ``computePickingKpis`` del front:
+
+    - ``total``: pickings del conjunto, cualquiera que sea su estado o prioridad
+      (= ``count`` del listado con los mismos filtros).
+    - ``lineas_por_surtir``: suma de ``total_lineas - total_lineas_completas`` de cada
+      picking, cada término acotado a ``>= 0``.
+    - ``por_prioridad``: pickings por prioridad, siempre las tres del catálogo de la
+      más urgente a la menos (en cero si no hay); una prioridad fuera del catálogo
+      cuenta en ``total`` pero en ningún bloque.
+    """
+    etiquetas = dict(Picking.Prioridad.choices)
+    datos = qs.order_by().aggregate(
+        total=Count("id"),
+        lineas_por_surtir=Coalesce(
+            Sum(Greatest(F("total_lineas") - F("total_lineas_completas"), Value(0))), Value(0)
+        ),
+        **{f"prioridad_{p.value}": Count("id", filter=Q(prioridad=p.value)) for p in PRIORIDADES_POR_URGENCIA},
+    )
+    return {
+        "total": datos["total"],
+        "lineas_por_surtir": datos["lineas_por_surtir"],
+        "por_prioridad": [
+            {"prioridad": p.value, "prioridad_label": etiquetas[p.value], "total": datos[f"prioridad_{p.value}"]}
+            for p in PRIORIDADES_POR_URGENCIA
+        ],
+    }
