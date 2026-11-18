@@ -8978,9 +8978,115 @@ class SalidaMaquilaAlcanceTests(TestCase):
         self.assertEqual(resp.status_code, 403, resp.data)
 
 
+class SalidaMaquilaOrigenServicioTests(SalidaMaquilaReglasTests):
+    """#1220-#1222: SM con origen OB u OR, mensajes y forma de los 400.
+    Reutiliza empresa, serie, maquilero y usuario de ``SalidaMaquilaReglasTests``."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente SM")
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente,
+            moneda=Moneda.objects.get(codigo_iso="MXN"), persona_pagos="Pagos", correo_facturas="f@acme-sm.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        pd = PedidoDetalle.objects.create(pedido=cls.pedido, producto_nombre_externo="Playera")
+        producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera SM")
+        cls.ob = OrdenesBordado.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, pedido=cls.pedido, folio_bordado="OB-SM-1",
+            proveedor=cls.maquilero,
+        )
+        cls.ob_det = OrdenBordadoDetalle.objects.create(ob=cls.ob, pedido_detalle=pd, cantidad=10)
+        cls.orr = OrdenesReflejante.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, pedido=cls.pedido, folio_reflejante="OR-SM-1",
+        )
+        cls.or_det = OrdenReflejanteDetalle.objects.create(orden_r=cls.orr, pedido_detalle=pd, producto=producto,
+                                                           cantidad=20)
+        cls.orr2 = OrdenesReflejante.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, pedido=cls.pedido, folio_reflejante="OR-SM-2",
+        )
+        cls.or2_det = OrdenReflejanteDetalle.objects.create(orden_r=cls.orr2, pedido_detalle=pd, producto=producto,
+                                                            cantidad=5)
+
+    def _alta(self, body):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client.post(self.URL, body, format="json")
+
+    def _or(self, cantidad="5", **extra):
+        return {"orden_r": self.orr.pk, "centro_confeccion": self.maquilero.pk,
+                "detalles": [{"or_detalle": self.or_det.pk, "cantidad": cantidad, "precio_unitario": "3"}], **extra}
+
+    def test_ob_sin_centro_toma_el_proveedor(self):
+        resp = self._alta({"ob": self.ob.pk, "detalles": [
+            {"ob_detalle": self.ob_det.pk, "cantidad": "4", "precio_unitario": "2"}]})
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data["origen"], "OB")
+        self.assertEqual(resp.data["folio_display"], f"{resp.data['folio']} · OB-SM-1")
+
+    def test_or_sin_centro_400(self):
+        body = self._or()
+        body.pop("centro_confeccion")
+        resp = self._alta(body)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIsInstance(resp.data["centro_confeccion"], list)
+
+    def test_ob_u_or_sin_detalles_pide_renglones(self):
+        for body in ({"ob": self.ob.pk}, {"orden_r": self.orr.pk, "centro_confeccion": self.maquilero.pk}):
+            with self.subTest(body=body):
+                resp = self._alta(body)
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("captura los renglones", resp.data["detalles"][0])
+
+    def test_tope_por_or_en_lista_y_sin_ceros(self):
+        self.assertEqual(self._alta(self._or("15")).status_code, 201)
+        resp = self._alta(self._or("10"))
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.data["detalles"],
+                         ["La salida excede las piezas de la OR: 20 programadas, 15 ya enviadas a maquila; quedan 5."])
+
+    def test_renglon_de_otro_tipo_y_de_otro_documento(self):
+        resp = self._alta({"ob": self.ob.pk, "detalles": [
+            {"or_detalle": self.or_det.pk, "cantidad": "1", "precio_unitario": "1"}]})
+        self.assertEqual(resp.data["detalles"], ["La salida es de la OB: sus renglones van con ob_detalle."])
+        body = self._or()
+        body["detalles"][0]["or_detalle"] = self.or2_det.pk
+        self.assertEqual(self._alta(body).data["detalles"], ["Un renglón no pertenece a la OR."])
+
+    def test_dos_origenes_se_reportan_en_el_primero(self):
+        resp = self._alta({"ob": self.ob.pk, "orden_r": self.orr.pk})
+        self.assertIn("ob", resp.data)
+
+    def test_filtro_por_origen_y_nombres(self):
+        self._alta(self._or())
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        filas = client.get(self.URL + "?origen=OR").json()
+        self.assertTrue(filas and all(f["origen"] == "OR" for f in filas))
+        self.assertEqual(filas[0]["sucursal_nombre"], "Matriz")
+        self.assertIn("usuario_nombre", filas[0])
+        self.assertEqual(client.get(self.URL + "?origen=XX").status_code, 400)
+
+    def test_lectura_y_montos_por_codigo(self):
+        self._alta(self._or())
+        sin = Usuario.objects.create(username="sm-sin", email="sin@acme-sm.test", empresa=self.empresa)
+        client = APIClient()
+        client.force_authenticate(user=sin)
+        self.assertEqual(client.get(self.URL).status_code, 403)
+        lector = Usuario.objects.create(username="sm-lee", email="lee@acme-sm.test", empresa=self.empresa)
+        lector.sucursales.add(self.sucursal)
+        _conceder_permisos(lector, self.empresa, ["R-PRODUCCION-OP"])
+        client.force_authenticate(user=lector)
+        fila = client.get(self.URL).json()[0]
+        self.assertNotIn("total", fila)
+        detalle = client.get(f"{self.URL}{fila['id']}/").json()
+        self.assertNotIn("precio_unitario", detalle["detalles"][0])
+
+
 class PermisosProduccionTests(TestCase):
-    """#1133: leer OP/OB/OR/OCM (y sus avances/incidencias) exige ``R-PRODUCCION``
-    o el código de la sección; editar/borrar una OB, sus avances o incidencias
+    """EC-899 (#1219): leer OP/OB/OR/OCM (y sus avances/incidencias) exige el
+    código de la sección; ``R-PRODUCCION`` solo abre el módulo en el frontend; editar/borrar una OB, sus avances o incidencias
     exige ``E-``/``D-PRODUCCION-OB``. #1135: el costo de maquila de la OP solo
     viaja (y se cambia) con ``R-PRODUCCION-COSTOS``."""
 
@@ -9008,7 +9114,8 @@ class PermisosProduccionTests(TestCase):
         cls.modulo = usuario("modulo", "R-PRODUCCION")
         cls.seccion_ob = usuario("seccionob", "R-PRODUCCION-OB")
         cls.crm = usuario("crm", "R-CRM")
-        cls.costos = usuario("costos", "R-PRODUCCION", "R-PRODUCCION-COSTOS")
+        cls.seccion_op = usuario("seccionop", "R-PRODUCCION-OP")
+        cls.costos = usuario("costos", "R-PRODUCCION-OP", "R-PRODUCCION-COSTOS")
         cls.op = OrdenProduccion.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-PERM-1",
             costo_maquila_unitario=Decimal("12"),
@@ -9019,7 +9126,7 @@ class PermisosProduccionTests(TestCase):
         client.force_authenticate(user=user)
         return client.get(url)
 
-    def test_lectura_con_modulo_o_seccion(self):
+    def test_lectura_por_seccion(self):
         urls = [
             "/api/v1/produccion/orden-produccion/", "/api/v1/produccion/orden-bordado/",
             "/api/v1/produccion/orden-reflejante/", "/api/v1/produccion/orden-corte-manga/",
@@ -9027,8 +9134,10 @@ class PermisosProduccionTests(TestCase):
         ]
         for url in urls:
             with self.subTest(url=url):
-                self.assertEqual(self._get(self.modulo, url).status_code, 200)
+                self.assertEqual(self._get(self.modulo, url).status_code, 403)
                 self.assertEqual(self._get(self.crm, url).status_code, 403)
+        self.assertEqual(self._get(self.seccion_op, "/api/v1/produccion/orden-produccion/").status_code, 200)
+        self.assertEqual(self._get(self.seccion_op, "/api/v1/produccion/orden-bordado/").status_code, 403)
         self.assertEqual(self._get(self.seccion_ob, "/api/v1/produccion/orden-bordado/").status_code, 200)
         self.assertEqual(self._get(self.seccion_ob, "/api/v1/produccion/orden-reflejante/").status_code, 403)
 
@@ -9042,7 +9151,7 @@ class PermisosProduccionTests(TestCase):
 
     def test_costo_de_maquila_solo_con_permiso_de_costos(self):
         url = f"/api/v1/produccion/orden-produccion/{self.op.pk}/"
-        self.assertNotIn("costo_maquila_unitario", self._get(self.modulo, url).json())
+        self.assertNotIn("costo_maquila_unitario", self._get(self.seccion_op, url).json())
         self.assertEqual(self._get(self.costos, url).json()["costo_maquila_unitario"], "12.0000")
 
     def test_sin_permiso_de_costos_no_cambia_el_costo(self):

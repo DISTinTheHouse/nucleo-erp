@@ -1,11 +1,16 @@
 """SM — salida de prendas a maquila: ``/api/v1/produccion/salidas-maquila/``.
 
 - ``GET`` listado (``?op=``, ``?centro_confeccion=``, ``?estatus=``) y detalle.
-- ``POST`` crea con folio SM. Body: ``op`` (obligatorio), ``centro_confeccion``
-  (si no, el de la OP), ``fecha_envio`` (hoy), ``fecha_compromiso``,
-  ``observaciones`` y ``detalles`` ``[{op_detalle?, descripcion?, cantidad,
-  precio_unitario?}]``. Sin ``detalles`` se arman de los renglones de la OP con
-  el ``costo_maquila_unitario`` de la OP como precio.
+- ``POST`` crea con folio SM. Body: un solo origen, ``op``, ``ob`` u ``orden_r``;
+  ``centro_confeccion`` (si no, el de la OP o el proveedor de la OB; la OR no
+  tiene), ``fecha_envio`` (hoy), ``fecha_compromiso``, ``observaciones`` y
+  ``detalles`` ``[{op_detalle?|ob_detalle?|or_detalle?, descripcion?, cantidad,
+  precio_unitario?}]``. OP sin ``detalles``: se arman de sus renglones con el
+  ``costo_maquila_unitario`` como precio. OB/OR no tienen costo de maquila:
+  ``detalles`` con ``precio_unitario`` es obligatorio (#1218).
+- Errores 400 siempre ``{campo: ["mensaje"]}`` (#1222).
+- Lectura: ``R-PRODUCCION-OP``; ``total``, ``precio_unitario`` e ``importe`` solo
+  con ``R-PRODUCCION-COSTOS`` (#1211).
 - ``POST {id}/cerrar/``: WMS recibió y pasó calidad → ``RECIBIDA``.
 - ``POST {id}/cancelar/``.
 
@@ -19,12 +24,14 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import mixins, serializers, status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
 from nucleo.models import SerieFolio
+from nucleo.permisos import CODIGOS_PRODUCCION_OP, LecturaPorCodigo, permisos_de_la_peticion
 from produccion.models import (
     OrdenBordadoDetalle, OrdenesBordado, OrdenesReflejante, OrdenReflejanteDetalle, OrdenProduccion, OrdenProduccionDetalle, SalidaMaquila, SalidaMaquilaDetalle,
 )
@@ -82,6 +89,31 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
             return obj.orden_r.folio_reflejante
         return obj.op.folio_op
     centro_confeccion_nombre = serializers.CharField(source="centro_confeccion.nombre", read_only=True)
+    sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True, default=None)
+    usuario_nombre = serializers.SerializerMethodField()
+
+    def get_usuario_nombre(self, obj):
+        u = obj.usuario
+        if u is None:
+            return None
+        return u.get_full_name().strip() or u.email
+
+    def _ve_costos(self):
+        """``R-PRODUCCION-COSTOS`` (#1211, como el costo de maquila de la OP, #1135)."""
+        request = self.context.get("request")
+        if request is None or not getattr(request, "user", None):
+            return False
+        from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
+        return PERMISO_COSTOS_PRODUCCION in permisos_de_la_peticion(request)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not self._ve_costos():
+            data.pop("total", None)
+            for d in data.get("detalles") or []:
+                d.pop("precio_unitario", None)
+                d.pop("importe", None)
+        return data
     estatus_display = serializers.CharField(source="get_estatus_display", read_only=True)
     fecha_envio = serializers.DateField(required=False)
 
@@ -90,9 +122,9 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
         fields = [
             "id", "folio", "folio_display", "estatus", "estatus_display", "origen", "origen_id", "origen_folio",
             "op", "op_folio", "ob", "ob_folio", "orden_r", "orden_r_folio",
-            "centro_confeccion", "centro_confeccion_nombre", "sucursal",
+            "centro_confeccion", "centro_confeccion_nombre", "sucursal", "sucursal_nombre",
             "fecha_envio", "fecha_compromiso", "fecha_recepcion",
-            "total_piezas", "total", "observaciones", "usuario", "created_at", "detalles",
+            "total_piezas", "total", "observaciones", "usuario", "usuario_nombre", "created_at", "detalles",
         ]
         read_only_fields = ["folio", "estatus", "sucursal", "fecha_recepcion", "total_piezas", "total",
                             "usuario", "created_at"]
@@ -117,8 +149,10 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         op, ob, orr = attrs.get("op"), attrs.get("ob"), attrs.get("orden_r")
-        if sum(x is not None for x in (op, ob, orr)) != 1:
-            raise ValidationError({"op": "Indica el documento de origen: OP, OB u OR (solo uno)."})
+        enviados = [k for k, v in (("op", op), ("ob", ob), ("orden_r", orr)) if v is not None]
+        if len(enviados) != 1:
+            # La llave es la del primer origen enviado (o ``op`` si no llegó ninguno).
+            raise ValidationError({(enviados or ["op"])[0]: "Indica el documento de origen: OP, OB u OR (solo uno)."})
         if op is not None and op.estatus_op == OrdenProduccion.EstatusOrdenProduccion.CANCELADO:
             raise ValidationError({"op": "La OP está cancelada."})
         if ob is not None and ob.estatus_bordado == OrdenesBordado.EstatusBordado.CANCELADO_LEGACY:
@@ -138,13 +172,24 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
         compromiso = attrs.get("fecha_compromiso")
         if compromiso and compromiso < envio:
             raise ValidationError({"fecha_compromiso": "No puede ser anterior a la fecha de envío."})
-        for d in attrs.get("detalles", []):
-            if d.get("op_detalle") is not None and (op is None or d["op_detalle"].op_id != op.pk):
-                raise ValidationError({"detalles": "Un renglón no pertenece a la OP."})
-            if d.get("ob_detalle") is not None and (ob is None or d["ob_detalle"].ob_id != ob.pk):
-                raise ValidationError({"detalles": "Un renglón no pertenece a la OB."})
-            if d.get("or_detalle") is not None and (orr is None or d["or_detalle"].orden_r_id != orr.pk):
-                raise ValidationError({"detalles": "Un renglón no pertenece a la OR."})
+        sigla, doc = ("OP", op) if op else ("OB", ob) if ob else ("OR", orr)
+        propio = {"OP": "op_detalle", "OB": "ob_detalle", "OR": "or_detalle"}[sigla]
+        fk_doc = {"OP": "op_id", "OB": "ob_id", "OR": "orden_r_id"}[sigla]
+        detalles = attrs.get("detalles") or []
+        for d in detalles:
+            # #1221: renglón de otro tipo que el origen ≠ renglón de otro documento.
+            if any(d.get(c) is not None for c in ("op_detalle", "ob_detalle", "or_detalle") if c != propio):
+                raise ValidationError({"detalles": f"La salida es de la {sigla}: sus renglones van con {propio}."})
+            if d.get(propio) is not None and getattr(d[propio], fk_doc) != doc.pk:
+                raise ValidationError({"detalles": f"Un renglón no pertenece a la {sigla}."})
+        if sigla != "OP":
+            # #1218: OB/OR no tienen costo de maquila; se captura por renglón.
+            if not detalles:
+                raise ValidationError({"detalles": (
+                    f"Para una salida desde {sigla} captura los renglones con su precio_unitario.")})
+            if any(d.get("precio_unitario") is None for d in detalles):
+                raise ValidationError({"precio_unitario": (
+                    f"La {sigla} no tiene costo de maquila: indica el precio_unitario de cada renglón (mayor que 0).")})
         return attrs
 
 
@@ -157,6 +202,12 @@ class SalidaMaquilaListSerializer(SalidaMaquilaSerializer):
 
 
 TIPOS_SERIE_SM = ["Salida a Maquila", "SALIDA_MAQUILA", "SM"]
+_RELACIONES = ("op", "ob", "orden_r", "centro_confeccion", "sucursal", "usuario")
+
+
+def _n(valor):
+    """Piezas sin ceros de sobra: ``20``, ``15``, ``5.5`` (#1222)."""
+    return f"{Decimal(str(valor)).normalize():f}"
 
 
 def _serie_sm(empresa_id, sucursal_id):
@@ -209,13 +260,15 @@ def _exigir_produccion(user):
 class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin,
                            GenericViewSet):
     serializer_class = SalidaMaquilaSerializer
+    permission_classes = [IsAuthenticated, LecturaPorCodigo]
+    codigos_lectura = {"list": CODIGOS_PRODUCCION_OP, "retrieve": CODIGOS_PRODUCCION_OP}
 
     def get_queryset(self):
         # EC-871: empresa activa + sucursales del usuario (la SM lleva la sucursal
         # de su OP), el mismo alcance que la OP: lo que no ve en OP da 404 aquí.
         qs = (
             ordenes_produccion_visibles(SalidaMaquila.objects.filter(activo=True), self.request.user)
-            .select_related("op", "ob", "orden_r", "centro_confeccion")
+            .select_related(*_RELACIONES)
             .order_by("-id")
         )
         if self.action == "retrieve":
@@ -279,11 +332,11 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
                 renglones = [{campo_det: d, "cantidad": Decimal(str(d.cantidad))} for d in base]
             programado = sum((Decimal(str(d.cantidad)) for d in base), Decimal("0"))
         if not renglones:
-            raise ValidationError({"detalles": f"La {sigla} no tiene renglones; captura los de la salida."})
+            raise ValidationError({"detalles": [f"La {sigla} no tiene renglones; captura los de la salida."]})
         if any((precio_op if r.get("precio_unitario") is None else r["precio_unitario"]) <= 0 for r in renglones):
-            raise ValidationError({"precio_unitario": (
+            raise ValidationError({"precio_unitario": [
                 f"La {sigla} no tiene costo de maquila: indica el precio_unitario de cada renglón (mayor que 0)."
-            )})
+            ]})
         # Tope total por documento (#1088): Σ piezas de sus SM no canceladas + esta
         # ≤ Σ piezas de sus renglones.
         enviado = (
@@ -292,10 +345,10 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
         )
         nuevo = sum((r["cantidad"] for r in renglones), Decimal("0"))
         if enviado + nuevo > programado:
-            raise ValidationError({"detalles": (
-                f"La salida excede las piezas de la {sigla}: {programado:g} programadas, "
-                f"{enviado:g} ya enviadas a maquila; quedan {max(programado - enviado, Decimal('0')):g}."
-            )})
+            raise ValidationError({"detalles": [
+                f"La salida excede las piezas de la {sigla}: {_n(programado)} programadas, "
+                f"{_n(enviado)} ya enviadas a maquila; quedan {_n(max(programado - enviado, Decimal('0')))}."
+            ]})
         try:
             _serie_sm(doc.empresa_id, doc.sucursal_id)
             folio = SerieFolio.consumir_siguiente_folio(
@@ -303,7 +356,7 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
                 descripcion_documento="Salida a Maquila",
             )
         except Exception as exc:  # serie no configurada / agotada
-            raise ValidationError({"folio": str(getattr(exc, "message", exc))})
+            raise ValidationError({"folio": [str(getattr(exc, "message", exc))]})
         sm = serializer.save(
             empresa_id=doc.empresa_id, sucursal_id=doc.sucursal_id, folio=folio, usuario=user,
             fecha_envio=serializer.validated_data.get("fecha_envio") or timezone.localdate(),
@@ -332,7 +385,7 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        sm = SalidaMaquila.objects.prefetch_related("detalles").select_related("op", "ob", "orden_r", "centro_confeccion").get(
+        sm = SalidaMaquila.objects.prefetch_related("detalles").select_related(*_RELACIONES).get(
             pk=serializer.instance.pk
         )
         return Response(SalidaMaquilaSerializer(sm, context=self.get_serializer_context()).data,
