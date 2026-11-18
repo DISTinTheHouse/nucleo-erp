@@ -552,10 +552,15 @@ def _lista(qs, *campos, **alias):
     return [dict(f) for f in qs.values(*campos, **alias)]
 
 
-def documentos_pedido(pedido, con_finanzas=True):
+def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
     """Vista 360: cada documento que nació del pedido, una consulta por tipo
     (constante, sin importar cuántos haya). Endpoint aparte de la trazabilidad
-    para no hacerla más lenta: el frontend lo pide al abrir la pestaña."""
+    para no hacerla más lenta: el frontend lo pide al abrir la pestaña.
+
+    ``con_finanzas=False``: ``facturas`` y ``cobros`` en null. ``con_costos=False``
+    (sin ``R-PRODUCCION-COSTOS``, como el endpoint de SM, #1226): el ``total`` de
+    cada salida a maquila en null. Ese total es el del documento SM, no la parte
+    del pedido."""
     from logistica.models import Envio
     from produccion.models import PreOrdenProduccion, SalidaMaquila
     from inventarios.models import MovimientoInventario
@@ -574,6 +579,9 @@ def documentos_pedido(pedido, con_finanzas=True):
         centro_confeccion_nombre=F("centro_confeccion__nombre"), op_folio=F("op__folio_op"),
         ob_folio=F("ob__folio_bordado"), or_folio=F("orden_r__folio_reflejante"),
     )
+    if not con_costos:
+        for fila in salidas_maquila:
+            fila["total"] = None
     pickings = list(
         Picking.objects.filter(pedido_id=pk).select_related("almacen", "almacen_destino", "transferencia")
         .order_by("id")

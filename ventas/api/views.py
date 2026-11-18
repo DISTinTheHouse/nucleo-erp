@@ -4268,11 +4268,18 @@ class PedidoViewSet(viewsets.ModelViewSet):
         """Vista 360 del pedido: pre-órdenes, salidas a maquila, pickings (y dónde
         están), movimientos de inventario, despachos, envíos, facturas y cobros.
         Mismo scope que ``trazabilidad`` (404 fuera de alcance); facturas y cobros
-        solo con permiso de contabilidad."""
+        solo con permiso de contabilidad; el ``total`` de las salidas a maquila,
+        solo con ``R-PRODUCCION-COSTOS`` (si no, null)."""
+        from nucleo.permisos import permisos_de_la_peticion
+        from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
         from ventas.services.trazabilidad_service import documentos_pedido
 
         pedido = get_object_or_404(pedidos_visibles(pedidos_base(), request.user), pk=pk)
-        data = documentos_pedido(pedido, con_finanzas=puede_ver_contabilidad(request.user))
+        data = documentos_pedido(
+            pedido,
+            con_finanzas=puede_ver_contabilidad(request.user),
+            con_costos=PERMISO_COSTOS_PRODUCCION in permisos_de_la_peticion(request),
+        )
         return Response(data)
 
     @action(detail=True, methods=["get"], url_path="stock-detalle")
