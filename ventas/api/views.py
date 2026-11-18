@@ -4269,9 +4269,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
         están), movimientos de inventario, despachos, envíos, facturas, cobros y,
         con las reglas de ``pedido.documentos`` (EC-920), cotización, OC,
         OP/OB/OR/OCM y packings.
-        Mismo scope que ``trazabilidad`` (404 fuera de alcance); facturas y cobros
-        solo con permiso de contabilidad; el ``total`` de las salidas a maquila,
-        solo con ``R-PRODUCCION-COSTOS`` (si no, null)."""
+        Mismo scope que ``trazabilidad`` (404 fuera de alcance); sin admin, los
+        documentos por sucursal (#536), pickings y despachos solo de sus
+        sucursales; facturas y cobros solo con permiso de contabilidad; el
+        ``total`` de las salidas a maquila, solo con ``R-PRODUCCION-COSTOS`` (si
+        no, null)."""
         from nucleo.permisos import permisos_de_la_peticion
         from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
         from ventas.services.trazabilidad_service import documentos_pedido
@@ -4282,9 +4284,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
         )
         data = documentos_pedido(
             pedido,
+            user=request.user,
             con_finanzas=puede_ver_contabilidad(request.user),
             con_costos=PERMISO_COSTOS_PRODUCCION in permisos_de_la_peticion(request),
-            user=request.user,
         )
         return Response(data)
 

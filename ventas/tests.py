@@ -5791,6 +5791,60 @@ class PedidoDocumentosTests(TestCase):
         client.force_authenticate(user=superuser)
         self.assertEqual(client.get(f"/api/v1/ventas/pedidos/{pedido_b.pk}/documentos/").status_code, 404)
 
+    def test_pickings_y_despachos_solo_de_las_sucursales_del_usuario(self):
+        """La regla por sucursal de ``pedido.documentos`` (#536) también en
+        ``pickings`` y ``despachos`` (un despacho, si su packing es visible): sin
+        admin, ni el picking ni el despacho de otra sucursal, ni su ``packing_id``
+        o ``packing_folio``. Admin y superusuario, todas las de la empresa."""
+        superuser = Usuario.objects.create(
+            username="root@acme.test", email="root@acme.test", empresa=self.empresa, is_superuser=True,
+        )
+        otra = Sucursal.objects.create(empresa=self.empresa, codigo="CDMX", nombre="CDMX")
+        almacen_otra = Almacen.objects.create(
+            empresa=self.empresa, sucursal=otra, codigo="ALM-CDMX", nombre="Almacen CDMX",
+        )
+        pedido = self._pedido()
+        creados = {}
+        for clave, sucursal, almacen in (("propio", self.sucursal, self.almacen), ("ajeno", otra, almacen_otra)):
+            picking = Picking.objects.create(
+                folio=self._siguiente("PK"), empresa=self.empresa, sucursal=sucursal, pedido=pedido,
+                operador=self.usuario, usuario=self.usuario, almacen=almacen,
+            )
+            packing = Packing.objects.create(
+                folio=self._siguiente("PA"), empresa=self.empresa, sucursal=sucursal, pedido=pedido,
+                picking=picking, operador=self.usuario, usuario=self.usuario,
+            )
+            despacho = Despacho.objects.create(packing=packing, guia=self._siguiente("G"))
+            creados[clave] = (picking, packing, despacho)
+        picking, packing, despacho = creados["propio"]
+        picking_ajeno, packing_ajeno, despacho_ajeno = creados["ajeno"]
+
+        data = self._data(pedido, self.usuario)
+        self.assertEqual([p["id"] for p in data["pickings"]], [picking.pk])
+        self.assertEqual(
+            [(d["id"], d["packing_id"], d["packing_folio"]) for d in data["despachos"]],
+            [(despacho.pk, packing.pk, packing.folio)],
+        )
+        self.assertEqual([p["id"] for p in data["packings"]], [packing.pk])
+
+        for user in (self.admin, superuser):
+            data = self._data(pedido, user)
+            self.assertEqual([p["id"] for p in data["pickings"]], [picking.pk, picking_ajeno.pk])
+            self.assertEqual([d["id"] for d in data["despachos"]], [despacho.pk, despacho_ajeno.pk])
+            self.assertEqual(
+                [d["packing_id"] for d in data["despachos"]], [packing.pk, packing_ajeno.pk],
+            )
+
+    def test_documentos_pedido_sin_usuario_falla_cerrado(self):
+        """Sin usuario no hay alcance por sucursal que aplicar: no devuelve todo."""
+        from ventas.services.trazabilidad_service import documentos_pedido
+
+        pedido = self._pedido()
+        with self.assertRaises(TypeError):
+            documentos_pedido(pedido)
+        with self.assertRaises(ValueError):
+            documentos_pedido(pedido, user=None)
+
     def test_consultas_no_crecen_con_los_bloques_de_pedido_documentos(self):
         pedido = self._pedido()
         self._documentos_de_produccion_y_compras(pedido)

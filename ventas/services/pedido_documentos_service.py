@@ -208,8 +208,9 @@ def _docs_relacionados(pedido, cfg):
 TIPOS_POR_SUCURSAL = {"orden_bordado", "orden_reflejante", "orden_corte_manga", "picking", "packing"}
 
 
-def _alcance(user):
-    """``(ve_facturas, sucursales)``; ``sucursales`` es ``None`` si ve todas."""
+def alcance_documentos(user):
+    """``(ve_facturas, sucursales)``; ``sucursales`` es ``None`` si ve todas.
+    Sin ``user`` (``pedido.documentos`` sin petición), todo."""
     from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
 
     if user is None:
@@ -245,15 +246,17 @@ def _visible(doc, cfg, alcance, pedido):
     return True
 
 
-def documentos_visibles(pedido, user=None, tipos=None):
+def documentos_visibles(pedido, user=None, tipos=None, alcance=None):
     """``(cfg, doc)`` de cada documento del pedido, en el orden de
     ``DOCUMENTOS_CONFIG``: la relación y las reglas de visibilidad de
     ``listar_documentos_pedido`` (``pedido.documentos``), en un solo lugar para
     que ``documentos/`` (EC-920) no las redefina. Con ``user``: sin bajas, sin
     facturas si no ve contabilidad y, en los tipos por sucursal, solo los de sus
     sucursales; siempre de la empresa del pedido (EC-916). ``tipos``: solo esos.
-    Una consulta por tipo, salvo lo que ya venga precargado."""
-    alcance = _alcance(user)
+    Una consulta por tipo, salvo lo que ya venga precargado. ``alcance``: el de
+    ``alcance_documentos(user)`` ya calculado."""
+    if alcance is None:
+        alcance = alcance_documentos(user)
     for cfg in DOCUMENTOS_CONFIG:
         if tipos is not None and cfg["tipo"] not in tipos:
             continue
