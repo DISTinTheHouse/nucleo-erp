@@ -402,6 +402,13 @@ def _lectura(codigos, *acciones):
     return {accion: codigos for accion in ("list", "retrieve", *acciones)}
 
 
+def _exigir_codigo(user, clave, verbo):
+    """403 si el usuario no tiene ``clave`` (EC-899). Superusuario y admin de
+    empresa pasan (``tiene_permiso``)."""
+    if not user.tiene_permiso(clave):
+        raise PermissionDenied(f"No tienes permiso para {verbo} ({clave}).")
+
+
 class _EscrituraConCodigoMixin:
     """PUT/PATCH exigen ``permiso_editar`` y DELETE ``permiso_borrar`` (#1133),
     como la OP. Superusuario y admin de empresa pasan (``tiene_permiso``)."""
@@ -800,7 +807,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
     def _crear_op_desde_request(self, request, data=None, sucursal=None, post_crear=None):
         """Alta de OP. ``data``/``sucursal``/``post_crear(op)`` los usa
         ``pre-ordenes/{id}/crear-op``: cuerpo armado en el servidor, sucursal de
-        la pre-orden y su cambio de estatus dentro de la misma transacción."""
+        la pre-orden y su cambio de estatus dentro de la misma transacción.
+        Exige ``C-PRODUCCION-OP`` (EC-899)."""
+        _exigir_codigo(request.user, "C-PRODUCCION-OP", "crear órdenes de producción")
         empresa = getattr(request.user, 'empresa', None)
         if empresa is None:
             return Response(
@@ -910,9 +919,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         elige el usuario y el resto de los insumos no se toca.
         Registra solo la diferencia (movimiento de inventario + consumo
         nuevo, sin pólizas). No acepta menos piezas que las planeadas; se
-        puede repetir. Mismo gate y 404 por empresa que la ruta crítica.
+        puede repetir. 404 por empresa como la ruta crítica.
         """
-        self._require_produccion(request.user)
+        _exigir_codigo(request.user, "E-PRODUCCION-OP", "recalcular consumos")  # EC-899
         empresa = getattr(request.user, 'empresa', None)
         op = (
             OrdenProduccion.objects.filter(pk=pk, empresa=empresa).first()
@@ -1067,6 +1076,8 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
         estatus_destino = request.data.get('estatus_op')
         if isinstance(estatus_destino, bool) or not isinstance(estatus_destino, int):
             raise ValidationError({'estatus_op': 'Requerido: entero con el estatus destino.'})
+        if estatus_destino == OrdenProduccion.EstatusOrdenProduccion.CANCELADO:
+            _exigir_codigo(request.user, "D-PRODUCCION-OP", "cancelar órdenes de producción")  # EC-899
         try:
             op = estatus_op_service.cambiar_estatus(
                 pk, visibles, request.user, estatus_destino,
@@ -1516,6 +1527,7 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
         return Response(serializer.data)
 
     def create(self, request):
+        _exigir_codigo(request.user, "C-PRODUCCION-OB", "crear órdenes de bordado")  # EC-899
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         orden_bordado = OrdenBordadoService.save(serializer.validated_data, request.user)
@@ -1600,6 +1612,7 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
                 "preview": {"folio_ob_sugerido": preview_folio},
             })
 
+        _exigir_codigo(request.user, "C-PRODUCCION-OB", "crear órdenes")  # EC-899
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         orden_bordado = OrdenBordadoService.save(serializer.validated_data, request.user)
@@ -1706,6 +1719,7 @@ class BordadoAvancesViewSet(_EscrituraConCodigoMixin, _OrdenPadreTenantScopedMix
         )
 
     def perform_create(self, serializer):
+        _exigir_codigo(self.request.user, "E-PRODUCCION-OB", "capturar avances")  # EC-899
         v = serializer.validated_data
         with transaction.atomic():
             # Bloquea la orden antes de sumar: dos capturas simultáneas no
@@ -1755,21 +1769,29 @@ class BordadoIncidenciasViewSet(_EscrituraConCodigoMixin, _OrdenPadreTenantScope
     permiso_borrar = "D-PRODUCCION-OB"
     orden_padre_field = "ob"
 
+    def perform_create(self, serializer):
+        _exigir_codigo(self.request.user, self.permiso_editar, "capturar incidencias")  # EC-899
+        super().perform_create(serializer)
+
     def perform_destroy(self, instance):
         instance.soft_delete()
 
 class _OrdenServicioEditableMixin:
-    """PATCH/DELETE de reflejante y corte de manga: solo producción (#774), y el
-    PATCH con la orden bloqueada para que no pise una cancelación concurrente (#778)."""
+    """PATCH/DELETE de reflejante y corte de manga con ``permiso_editar`` /
+    ``permiso_borrar`` de la sección (EC-899), y el PATCH con la orden bloqueada
+    para que no pise una cancelación concurrente (#778)."""
+
+    permiso_editar = None
+    permiso_borrar = None
 
     def partial_update(self, request, *args, **kwargs):
-        _require_produccion(request.user)
+        _exigir_codigo(request.user, self.permiso_editar, "editar")
         with transaction.atomic():
             list(self.get_queryset().model.objects.select_for_update().filter(pk=kwargs["pk"]).values_list("pk"))
             return super().partial_update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        _require_produccion(request.user)
+        _exigir_codigo(request.user, self.permiso_borrar, "borrar")
         return super().destroy(request, *args, **kwargs)
 
 
@@ -1786,6 +1808,8 @@ class OrdenReflejanteViewSet(
     serializer_class = OrdenReflejanteSerializer
     permission_classes = [IsAuthenticated, LecturaPorCodigo]
     codigos_lectura = _lectura(CODIGOS_PRODUCCION_OR, "onboarding")
+    permiso_editar = "E-PRODUCCION-OR"
+    permiso_borrar = "D-PRODUCCION-OR"
 
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.
@@ -1932,6 +1956,7 @@ class OrdenReflejanteViewSet(
         return Response(serializer.data)
 
     def create(self, request):
+        _exigir_codigo(request.user, "C-PRODUCCION-OR", "crear órdenes")  # EC-899
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         orden_reflejante = OrdenReflejanteService.save(serializer.validated_data, request.user)
@@ -2024,6 +2049,7 @@ class OrdenReflejanteViewSet(
                 "preview": {"folio_or_sugerido": preview_folio},
             })
 
+        _exigir_codigo(request.user, "C-PRODUCCION-OR", "crear órdenes")  # EC-899
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         orden_reflejante = OrdenReflejanteService.save(serializer.validated_data, request.user)
@@ -2049,7 +2075,7 @@ def _avances_de_piezas(modelo, fk, orden, campo_cantidad):
 class _AvancePiezasViewSetMixin:
     """Alta/baja de avances de piezas (reflejante, corte de manga).
 
-    - Mismo gate de escritura que PATCH/DELETE de la orden (``_require_produccion``).
+    - Escritura con el código de la sección (``permiso_editar``/``permiso_borrar``, EC-899).
     - La orden se bloquea (``select_for_update``) y debe seguir abierta.
     - Σ avances activos + nuevo ≤ piezas programadas (Σ renglones de la orden).
     - El usuario sale de la sesión.
@@ -2082,7 +2108,7 @@ class _AvancePiezasViewSetMixin:
             raise ValidationError({self.orden_padre_field: "La orden está cerrada; no admite avances."})
 
     def perform_create(self, serializer):
-        _require_produccion(self.request.user)
+        _exigir_codigo(self.request.user, self.permiso_editar, "capturar avances")  # EC-899
         v = serializer.validated_data
         with transaction.atomic():
             orden = self._orden_bloqueada(v[self.orden_padre_field].pk)
@@ -2108,7 +2134,7 @@ class _AvancePiezasViewSetMixin:
             self._ajustar_estatus(orden)
 
     def perform_destroy(self, instance):
-        _require_produccion(self.request.user)
+        _exigir_codigo(self.request.user, self.permiso_borrar, "borrar avances")  # EC-899
         with transaction.atomic():
             orden = self._orden_bloqueada(getattr(instance, f"{self.orden_padre_field}_id"))
             self._exigir_abierta(orden)
@@ -2121,6 +2147,8 @@ class ReflejanteAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScope
     serializer_class = ReflejanteAvancesSerializer
     permission_classes = [IsAuthenticated, LecturaPorCodigo]
     codigos_lectura = _lectura(CODIGOS_PRODUCCION_OR)
+    permiso_editar = "E-PRODUCCION-OR"
+    permiso_borrar = "D-PRODUCCION-OR"
     orden_padre_field = "orden_r"
     filterset_fields = ["orden_r"]
     orden_model = OrdenesReflejante
@@ -2143,6 +2171,8 @@ class CorteMangaAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScope
     serializer_class = CorteMangaAvancesSerializer
     permission_classes = [IsAuthenticated, LecturaPorCodigo]
     codigos_lectura = _lectura(CODIGOS_PRODUCCION_CM)
+    permiso_editar = "E-PRODUCCION-CM"
+    permiso_borrar = "D-PRODUCCION-CM"
     orden_padre_field = "ocm"
     filterset_fields = ["ocm"]
     orden_model = OrdenesCorteManga
@@ -2159,12 +2189,18 @@ class CorteMangaAvancesViewSet(_AvancePiezasViewSetMixin, _OrdenPadreTenantScope
     def get_queryset(self):
         return super().get_queryset().select_related("usuario").order_by("-fecha", "-id")
 
-class ReflejanteIncidenciasViewSet(_OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
+class ReflejanteIncidenciasViewSet(_EscrituraConCodigoMixin, _OrdenPadreTenantScopedMixin, viewsets.ModelViewSet):
     queryset = ReflejanteIncidencias.objects.filter(activo=True)
     serializer_class = ReflejanteIncidenciasSerializer
     permission_classes = [IsAuthenticated, LecturaPorCodigo]
     codigos_lectura = _lectura(CODIGOS_PRODUCCION_OR)
+    permiso_editar = "E-PRODUCCION-OR"
+    permiso_borrar = "D-PRODUCCION-OR"
     orden_padre_field = "orden_r"
+
+    def perform_create(self, serializer):
+        _exigir_codigo(self.request.user, self.permiso_editar, "capturar incidencias")  # EC-899
+        super().perform_create(serializer)
 
     def perform_destroy(self, instance):
         instance.soft_delete()
@@ -2183,6 +2219,8 @@ class OrdenesCorteMangaViewSet(
     serializer_class = OrdenesCorteMangaSerializer
     permission_classes = [IsAuthenticated, LecturaPorCodigo]
     codigos_lectura = _lectura(CODIGOS_PRODUCCION_CM, "onboarding")
+    permiso_editar = "E-PRODUCCION-CM"
+    permiso_borrar = "D-PRODUCCION-CM"
 
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.
@@ -2285,6 +2323,7 @@ class OrdenesCorteMangaViewSet(
         return Response(serializer.data)
 
     def create(self, request):
+        _exigir_codigo(request.user, "C-PRODUCCION-CM", "crear órdenes")  # EC-899
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         orden_corte_manga = OrdenCorteMangaService.save(serializer.validated_data, request.user)
@@ -2370,6 +2409,7 @@ class OrdenesCorteMangaViewSet(
                 "preview": {"folio_ocm_sugerido": preview_folio},
             })
 
+        _exigir_codigo(request.user, "C-PRODUCCION-CM", "crear órdenes")  # EC-899
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         orden_corte_manga = OrdenCorteMangaService.save(serializer.validated_data, request.user)
