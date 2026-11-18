@@ -5,14 +5,19 @@ Una sola vista informativa (solo lectura) de lo que cada pedido lleva en WMS.
 Reglas (acordadas con operación):
 
 - **Surtido** = lo que WMS ya surtió por picking (``PickingDetalle.cantidad_surtida``
-  de pickings y renglones no cancelados). Lo asignado cuenta como surtido desde
-  que se crea el picking: la TR ya sacó la prenda del almacén origen.
-- **Comprometido** = pedido − surtido (nunca negativo): lo que el pedido todavía
-  le aparta al stock libre. Deja de estar comprometido al hacer picking.
-- **Empacado** y **despachado** son etapas informativas posteriores (packing y
-  despacho no mueven inventario).
-- **Salidas manuales**: salidas de inventario ligadas al pedido fuera de WMS (sin
-  OP). Solo informativas: NO cuentan como surtido, para no contar doble.
+  de pickings y renglones no cancelados) **con talla del pedido**: un renglón de
+  picking sin ``pedido_detalle_talla`` no cuenta, igual que en el listado de
+  pedidos, ``tracker_picking`` y ``disponibilidad`` (#1246). Lo asignado cuenta
+  como surtido desde que se crea el picking: la TR ya sacó la prenda del almacén.
+- **Comprometido** = pedido − surtido **por talla**, nunca negativo; el del pedido
+  es la suma de sus tallas, así que una talla sobre-surtida no compensa a otra
+  (#1247): encabezado = Σ renglones. Deja de estar comprometido al hacer picking.
+- **Empacado** y **despachado** son etapas informativas posteriores; el despacho
+  da salida al inventario (``MovimientoInventario.despacho``).
+- **Salidas manuales**: neto de salidas menos entradas de inventario ligadas al
+  pedido **fuera de WMS**: movimientos activos, sin OP, sin despacho, y entradas
+  que no son de recepción ni transferencia (#1249, #1250); nunca negativo. Solo
+  informativas: NO cuentan como surtido, para no contar doble.
 
 Listado: ``?estatus=3,4`` (por omisión autorizados y en proceso; ``todos`` para
 cualquiera), ``?q=`` (folio o cliente), ``?sucursal=``, ``?pendientes=1`` (con
@@ -21,8 +26,8 @@ Detalle: ``/{pedido_id}/`` con los mismos totales y un renglón por talla.
 """
 from decimal import Decimal
 
-from django.db.models import DecimalField, Exists, F, OuterRef, Q, Subquery, Sum, Value
-from django.db.models.functions import Coalesce, Greatest
+from django.db.models import Case, DecimalField, Exists, F, OuterRef, Q, Subquery, Sum, Value, When
+from django.db.models.functions import Cast, Coalesce, Greatest
 from rest_framework import mixins
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
@@ -48,12 +53,47 @@ def _suma(qs, campo, llave):
 
 
 def _picking_vivo():
-    return PickingDetalle.objects.exclude(picking__estado=Picking.Estado.CANCELADO).exclude(
-        estado=PickingDetalle.EstadoLinea.CANCELADA)
+    # Solo renglones con talla del pedido (#1246), como las otras fuentes de surtido.
+    return PickingDetalle.objects.filter(pedido_detalle_talla__isnull=False).exclude(
+        picking__estado=Picking.Estado.CANCELADO).exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
 
 
 def _packing_vivo():
-    return PackingDetalle.objects.exclude(estado="CANCELADO").exclude(packing__estado="CANCELADO")
+    return PackingDetalle.objects.filter(picking_detalle__pedido_detalle_talla__isnull=False).exclude(
+        estado="CANCELADO").exclude(packing__estado="CANCELADO")
+
+
+def _comprometidas_por_talla():
+    """Σ por talla de ``max(pedida − surtida, 0)`` del pedido ``OuterRef("pk")`` (#1247)."""
+    tallas = (
+        PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=OuterRef("pk"))
+        .annotate(s=_suma(_picking_vivo(), "cantidad_surtida", "pedido_detalle_talla_id"))
+        .annotate(c=Greatest(F("cantidad") - F("s"), CERO, output_field=NUM))
+        .order_by().values("pedido_detalle__pedido_id").annotate(t=Sum("c")).values("t")[:1]
+    )
+    return Coalesce(Subquery(tallas, output_field=NUM), CERO, output_field=NUM)
+
+
+def _salidas_manuales():
+    """Neto SALIDA − ENTRADA fuera de WMS del pedido ``OuterRef("pk")`` (#1249, #1250)."""
+    S, E = "SALIDA", "ENTRADA"
+    movs = (
+        MovimientoInventarioDetalle.objects.filter(
+            movimiento_inventario__pedido_id=OuterRef("pk"), movimiento_inventario__activo=True,
+            movimiento_inventario__op__isnull=True, movimiento_inventario__despacho__isnull=True,
+        )
+        .filter(Q(movimiento_inventario__tipo_movimiento=S) | Q(
+            movimiento_inventario__tipo_movimiento=E, movimiento_inventario__recepcion__isnull=True,
+            movimiento_inventario__transferencia__isnull=True))
+        .order_by().values("movimiento_inventario__pedido_id")
+        .annotate(t=Sum(Case(
+            When(movimiento_inventario__tipo_movimiento=S, then=F("cantidad")),
+            default=-F("cantidad"), output_field=NUM,
+        ))).values("t")[:1]
+    )
+    # Piso en 0: una entrada sin salida previa (p. ej. una devolución) no da negativo.
+    neto = Greatest(Coalesce(Subquery(movs, output_field=NUM), CERO, output_field=NUM), CERO, output_field=NUM)
+    return Cast(neto, NUM)  # 4 decimales, como los demás totales
 
 
 def _despachado(qs):
@@ -75,12 +115,11 @@ def anotar_avance(qs, nivel):
         surtidas=_suma(_picking_vivo(), "cantidad_surtida", llaves["pk"]),
         empacadas=_suma(_packing_vivo(), "cantidad_empacada", llaves["pack"]),
         despachadas=_suma(_despachado(_packing_vivo()), "cantidad_empacada", llaves["pack"]),
-    ).annotate(comprometidas=Greatest(F("pedidas") - F("surtidas"), CERO, output_field=NUM))
+    )
     if nivel == "pedido":
-        qs = qs.annotate(salidas_manuales=_suma(
-            MovimientoInventarioDetalle.objects.filter(
-                movimiento_inventario__tipo_movimiento="SALIDA", movimiento_inventario__op__isnull=True),
-            "cantidad", "movimiento_inventario__pedido_id"))
+        qs = qs.annotate(comprometidas=_comprometidas_por_talla(), salidas_manuales=_salidas_manuales())
+    else:
+        qs = qs.annotate(comprometidas=Greatest(F("pedidas") - F("surtidas"), CERO, output_field=NUM))
     return qs
 
 
@@ -137,7 +176,8 @@ class SurtidoPedidoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gen
                 except ValueError:
                     raise ValidationError({"estatus": "Lista de enteros (p. ej. 3,4) o 'todos'."})
             if p.get("sucursal"):
-                if not str(p["sucursal"]).isdigit():
+                # ``isdecimal`` + ASCII: ``"²".isdigit()`` es True y ``int("²")`` falla (500, #1252).
+                if not (str(p["sucursal"]).isascii() and str(p["sucursal"]).isdecimal()):
                     raise ValidationError({"sucursal": "Debe ser un número entero."})
                 qs = qs.filter(sucursal_id=int(p["sucursal"]))
             if p.get("q"):
@@ -167,7 +207,10 @@ class SurtidoPedidoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gen
             det = t.pedido_detalle
             renglones.append({
                 "pedido_detalle_talla_id": t.pk, "pedido_detalle_id": det.pk,
-                "producto_id": det.producto_id, "producto_nombre": getattr(det.producto, "nombre", None),
+                # Muestras sin producto de catálogo: el nombre capturado (#1248).
+                "producto_id": det.producto_id,
+                "producto_nombre": getattr(det.producto, "nombre", None) or det.producto_nombre_externo,
+                "producto_nombre_externo": det.producto_nombre_externo,
                 "sku": getattr(t.variante, "sku", None), "talla": getattr(t.talla, "nombre", None),
                 "color": getattr(getattr(det, "color", None), "nombre", None),
                 "etapa": _etapa(t), **_totales(t),

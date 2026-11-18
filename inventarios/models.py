@@ -198,6 +198,9 @@ class MovimientoInventario(StatusLifecycleModel):
     recepcion = models.ForeignKey('compras.Recepcion', on_delete=models.CASCADE, null=True, blank=True)
     transferencia = models.ForeignKey('wms.Transferencia', on_delete=models.CASCADE, null=True, blank=True)
     op = models.ForeignKey('produccion.OrdenProduccion', on_delete=models.CASCADE, null=True, blank=True)
+    # Salida del despacho de WMS (#1250): la distingue de una salida manual del pedido.
+    despacho = models.ForeignKey('wms.Despacho', on_delete=models.SET_NULL, null=True, blank=True,
+                                 related_name="movimientos_inventario")
     # Reintegro / redescuento generado por una factura: su documento de origen (#804).
     factura = models.ForeignKey('finanzas.Factura', on_delete=models.SET_NULL, null=True, blank=True, related_name="movimientos_inventario")
 
