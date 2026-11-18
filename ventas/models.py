@@ -126,7 +126,7 @@ class Cotizacion(models.Model):
         NA = 'NA', 'N/A'
 
     class UsoCfdi(models.TextChoices):
-        GO3 = 'G03', 'G03 - GASTOS EN GENERAL (OTROS) (OTROS)'
+        GO3 = 'G03', 'G03 - GASTOS EN GENERAL (OTROS)'
         GO1 = 'G01', 'G01 - ADQUISICIÓN DE MERCANCIAS'
         IO1 = 'I01', 'I01 - CONSTRUCCIONES'
 
@@ -361,7 +361,7 @@ class Pedido(StatusLifecycleModel):
         NA = 'NA', 'N/A'
 
     class UsoCfdi(models.TextChoices):
-        GO3 = 'G03', 'G03 - GASTOS EN GENERAL (OTROS) (OTROS)'
+        GO3 = 'G03', 'G03 - GASTOS EN GENERAL (OTROS)'
         GO1 = 'G01', 'G01 - ADQUISICIÓN DE MERCANCIAS'
         IO1 = 'I01', 'I01 - CONSTRUCCIONES'
 
