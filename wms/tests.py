@@ -2648,7 +2648,8 @@ class SurtidoPedidosTests(TestCase):
 
 
 class TransferenciaPickingBackfillTests(TestCase):
-    """EC-916, migración ``0021``: ``Transferencia.picking`` de las TR históricas.
+    """EC-916: ``Transferencia.picking`` de las TR en null (migración ``0021`` y
+    ``manage.py ligar_transferencias_picking``, ``transferencia_picking_service``).
 
     Solo se liga con el texto exacto del código, un picking del mismo folio,
     empresa y sucursal, y evidencia de que es suya; lo dudoso queda en null.
@@ -2723,8 +2724,9 @@ class TransferenciaPickingBackfillTests(TestCase):
     def _plan(self):
         from auditoria.models import AuditoriaEvento
         from wms.models import Picking, Transferencia
+        from wms.services.transferencia_picking_service import planear
 
-        return self.migracion.planear_backfill(Transferencia, Picking, AuditoriaEvento)
+        return planear(Transferencia, Picking, AuditoriaEvento)
 
     def test_alta_en_la_misma_ventana_se_liga(self):
         tr = self._tr("Traspaso del picking PK-1", segundos=0)
@@ -2774,6 +2776,48 @@ class TransferenciaPickingBackfillTests(TestCase):
         tr2 = self._tr("Traspaso del picking PK-1", segundos=1)
         self._picking("PK-1", segundos=2)
         self.assertEqual(self._plan(), ({}, sorted([tr1.pk, tr2.pk])))
+
+    def test_entre_dos_altas_se_queda_la_de_evidencia_estructural(self):
+        """La TR real del alta (``Picking.transferencia``) se liga; la que solo cae en
+        la ventana de 60 s con el mismo texto se descarta."""
+        real = self._tr("Traspaso del picking PK-1", segundos=0)
+        falsa = self._tr("Traspaso del picking PK-1", segundos=1)
+        picking = self._picking("PK-1", segundos=2, transferencia=real)
+        self.assertEqual(self._plan(), ({real.pk: picking.pk}, [falsa.pk]))
+
+    def test_alta_ya_ligada_descarta_la_falsa_en_la_ventana(self):
+        """Una TR ya ligada por el código cuenta como evidencia estructural."""
+        from wms.models import Transferencia
+
+        real = self._tr("Traspaso del picking PK-1", segundos=0)
+        falsa = self._tr("Traspaso del picking PK-1", segundos=1)
+        picking = self._picking("PK-1", segundos=2)
+        Transferencia.objects.filter(pk=real.pk).update(picking=picking)
+        self.assertEqual(self._plan(), ({}, [falsa.pk]))
+
+    def test_comando_es_idempotente_y_liga_tr_nuevas_sin_fk(self):
+        """Tras la migración, el build anterior puede crear TR sin FK: el comando las
+        liga, y una segunda corrida no cambia nada."""
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        from wms.models import Transferencia
+
+        tr = self._tr("Traspaso del picking PK-1", segundos=0)
+        picking = self._picking("PK-1", segundos=1)
+        salida = StringIO()
+        call_command("ligar_transferencias_picking", "--dry-run", stdout=salida)
+        self.assertIn("TR ligadas: 1", salida.getvalue())
+        self.assertIsNone(Transferencia.objects.get(pk=tr.pk).picking_id)
+
+        call_command("ligar_transferencias_picking", stdout=StringIO())
+        self.assertEqual(Transferencia.objects.get(pk=tr.pk).picking_id, picking.pk)
+        antes = dict(Transferencia.objects.values_list("pk", "picking_id"))
+        salida = StringIO()
+        call_command("ligar_transferencias_picking", stdout=salida)
+        self.assertIn("TR ligadas: 0", salida.getvalue())
+        self.assertEqual(dict(Transferencia.objects.values_list("pk", "picking_id")), antes)
 
     def test_referencia_a_otro_picking_es_conflicto(self):
         tr = self._tr("Traspaso del picking PK-1", segundos=0)
