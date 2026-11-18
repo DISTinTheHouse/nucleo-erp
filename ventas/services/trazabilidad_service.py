@@ -17,6 +17,7 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
+from finanzas.services.facturama.cfdi_payload import q_factura_del_pedido
 from produccion.models import (
     BordadoAvances,
     OrdenBordadoDetalle,
@@ -274,9 +275,8 @@ def _empacado_y_embarcado(pedido_ids):
 
 def _facturado(pedido_ids):
     qs = FacturaDetalle.objects.filter(
+        q_factura_del_pedido("factura__"),  # #1203: solo de la empresa del pedido
         factura__pedido_id__in=pedido_ids,
-        # Solo facturas de la empresa del pedido (#1203, ``facturas_del_pedido``).
-        factura__empresa_id=F("factura__pedido__empresa_id"),
         factura__activo=True,
         factura__estatus=Factura.FacturaStatus.EMITIDA,
         producto__isnull=False,  # piezas, no servicios extras (#744)
@@ -289,8 +289,8 @@ def _cobrado_pct(pedido_ids):
     filas = (
         CuentaPorCobrar.objects
         .filter(
+            q_factura_del_pedido("factura__"),  # #1203
             factura__pedido_id__in=pedido_ids, factura__activo=True,
-            factura__empresa_id=F("factura__pedido__empresa_id"),  # #1203
         )
         .exclude(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
         .exclude(factura__estatus=Factura.FacturaStatus.CANCELADA)
