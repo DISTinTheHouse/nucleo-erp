@@ -2232,19 +2232,9 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         cta = serializer.validated_data.get("cuenta_bancaria")
         _validate_fk_empresa(user, cta, "cuenta_bancaria", empresa)
         detalles_data = serializer.validated_data.pop("pago_detalles", [])
-        for d in detalles_data:
-            # El campo real de ``PagoDetalle`` es ``cxp``: leer
-            # ``cuenta_por_pagar`` devolvía siempre ``None``. Se compara contra la
-            # empresa del documento padre y sin excluir al superusuario, igual que
-            # en ``CobroViewSet``. ``PagoService`` repite el guard, pero sólo con
-            # ``estatus="Aplicado"``; en ``Borrador`` nadie lo cubría. Va antes de
-            # resolver la sucursal: una CxP ajena responde por la CxP, no por su
-            # sucursal (el queryset del serializer ya la descarta, EC-874).
-            cxp = d.get("cxp")
-            if cxp is not None and cxp.empresa_id != empresa.pk:
-                raise ValidationError(
-                    {"pago_detalles": [f"La CxP {cxp.pk} no pertenece a la misma empresa que el pago."]}
-                )
+        # Que cada CxP sea de la empresa lo impone el queryset de ``pago_detalles.cxp``
+        # del serializer (EC-874: una ajena responde como un id inexistente);
+        # ``PagoService`` lo repite al aplicar.
         cxp_ids = [d["cxp"].pk for d in detalles_data if d.get("cxp") is not None]
         # EC-874: la de las facturas de proveedor de las líneas, en una consulta. Sin
         # ``user``: los pagos van por empresa, como las CxP.
