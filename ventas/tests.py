@@ -5768,12 +5768,12 @@ class PedidoDocumentosTests(TestCase):
         )
         otra_sucursal = Sucursal.objects.create(empresa=self.empresa, codigo="CDMX", nombre="CDMX")
         pedido = self._pedido()
-        propios = self._documentos_de_produccion_y_compras(pedido)
-        en_otra = self._documentos_de_produccion_y_compras(pedido, sucursal=otra_sucursal)
         self._documentos_de_produccion_y_compras(pedido, empresa=self.empresa_b)
+        en_otra = self._documentos_de_produccion_y_compras(pedido, sucursal=otra_sucursal)
+        # Al final: la cotización del pedido es una sola, la última asignada (la propia).
+        propios = self._documentos_de_produccion_y_compras(pedido)
         ids = self._ids(self._data(pedido, superuser))
-        # La cotización del pedido es una sola: la última asignada, la de B.
-        self.assertEqual(ids["cotizaciones"], [])
+        self.assertEqual(ids["cotizaciones"], propios["cotizaciones"])
         for bloque in set(self._BLOQUES_EC920) - {"cotizaciones"}:
             self.assertEqual(ids[bloque], sorted(propios[bloque] + en_otra[bloque]), bloque)
 
