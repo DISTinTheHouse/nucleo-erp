@@ -12,7 +12,7 @@ from rest_framework import status, viewsets, mixins
 from rest_framework.decorators import action
 from rest_framework.viewsets import GenericViewSet
 from rest_framework.response import Response
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import MethodNotAllowed, PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 
 from ventas.models import CotizacionDetalle, Pedido, PedidoDetalle, PedidoDetalleTalla
@@ -896,14 +896,21 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    # Alta MANUAL de OP deshabilitada: toda OP nace de una pre-orden
+    # (``pre-ordenes/{id}/crear-op``, que sigue usando ``_crear_op_desde_request``).
+    # Se deja comentado, sin borrar, por si se necesita reactivar.
+    # def create(self, request, *args, **kwargs):
+    #     return self._crear_op_desde_request(request)
     def create(self, request, *args, **kwargs):
-        return self._crear_op_desde_request(request)
+        raise MethodNotAllowed("POST", detail="La OP se genera desde una pre-orden (pre-ordenes/{id}/crear-op/).")
 
-    @action(detail=False, methods=['get', 'post'], url_path='onboarding')
+    # Antes: methods=['get', 'post'] (POST = alta manual de OP, deshabilitada).
+    @action(detail=False, methods=['get'], url_path='onboarding')
     def onboarding(self, request):
-        if request.method == 'GET':
-            return self.get_op_detalle(request)
-        return self._crear_op_desde_request(request)
+        # if request.method == 'GET':
+        #     return self.get_op_detalle(request)
+        # return self._crear_op_desde_request(request)
+        return self.get_op_detalle(request)
 
     def _require_produccion(self, user):
         _require_produccion(user)
