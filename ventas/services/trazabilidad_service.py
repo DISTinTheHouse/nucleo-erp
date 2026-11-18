@@ -603,7 +603,7 @@ def documentos_pedido(pedido, con_finanzas=True):
     envios = _lista(Envio.objects.filter(pedido_id=pk).order_by("id"), "id", "transportista_id")
     facturas = cobros = None  # sin permiso de contabilidad: null
     if con_finanzas:
-        facturas, cobros = _facturas_y_cobros(pk)
+        facturas, cobros = _facturas_y_cobros(pedido)
     return {
         "pre_ordenes": pre_ordenes,
         "salidas_maquila": salidas_maquila,
@@ -616,15 +616,23 @@ def documentos_pedido(pedido, con_finanzas=True):
     }
 
 
-def _facturas_y_cobros(pk):
-    from finanzas.models import CobroDetalle
+def _facturas_y_cobros(pedido):
+    """Facturas y cobros del pedido, solo de SU empresa (EC-916, #1203): una
+    factura de otra empresa que apunta al pedido no es suya
+    (``FacturaService.facturas_del_pedido``). Cobros: los vigentes (activos y no
+    cancelados) aplicados a esas facturas, de la misma empresa."""
+    from finanzas.models import Cobro, CobroDetalle
+    from finanzas.services.factura_service import FacturaService
 
+    facturas_qs = FacturaService.facturas_del_pedido(pedido).filter(activo=True)
     facturas = _lista(
-        Factura.objects.filter(pedido_id=pk, activo=True).order_by("id"),
+        facturas_qs.order_by("id"),
         "id", "folio", "estatus", "fecha_emision", "total",
     )
     cobros = _lista(
-        CobroDetalle.objects.filter(cxc__factura__pedido_id=pk).order_by("cobro_id"),
+        CobroDetalle.objects.filter(
+            cxc__factura__in=facturas_qs, cobro__empresa_id=pedido.empresa_id, cobro__activo=True,
+        ).exclude(cobro__estatus=Cobro.Estatus.CANCELADO).order_by("cobro_id"),
         "cobro_id", "importe_aplicado", folio=F("cobro__folio"), estatus=F("cobro__estatus"),
         fecha=F("cobro__fecha_cobro"), factura_folio=F("cxc__factura__folio"),
     )

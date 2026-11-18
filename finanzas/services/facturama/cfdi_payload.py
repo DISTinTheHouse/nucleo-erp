@@ -79,6 +79,16 @@ def pedido_de_la_factura(factura):
     return pedido
 
 
+def facturas_del_pedido(pedido):
+    """Queryset de las facturas de ``pedido``: la misma regla de
+    ``pedido_de_la_factura`` vista desde el pedido. Una factura de otra empresa
+    que apunta a este pedido (datos previos al candado de escritura, #1203) no es
+    suya. Sin filtros de ``activo`` ni de estatus: eso lo decide quien llama."""
+    from finanzas.models import Factura
+
+    return Factura.objects.filter(pedido_id=pedido.pk, empresa_id=pedido.empresa_id)
+
+
 def receptor_fiscal(pedido, cliente):
     """Datos fiscales del receptor de una factura (EC-904): los que el pedido congeló
     al capturarse y, si vienen vacíos, los del ``Cliente``. El uso de CFDI es el del
