@@ -275,6 +275,8 @@ def _empacado_y_embarcado(pedido_ids):
 def _facturado(pedido_ids):
     qs = FacturaDetalle.objects.filter(
         factura__pedido_id__in=pedido_ids,
+        # Solo facturas de la empresa del pedido (#1203, ``facturas_del_pedido``).
+        factura__empresa_id=F("factura__pedido__empresa_id"),
         factura__activo=True,
         factura__estatus=Factura.FacturaStatus.EMITIDA,
         producto__isnull=False,  # piezas, no servicios extras (#744)
@@ -286,7 +288,10 @@ def _cobrado_pct(pedido_ids):
     """``{pedido_id: % cobrado}`` sobre sus cuentas por cobrar vigentes."""
     filas = (
         CuentaPorCobrar.objects
-        .filter(factura__pedido_id__in=pedido_ids, factura__activo=True)
+        .filter(
+            factura__pedido_id__in=pedido_ids, factura__activo=True,
+            factura__empresa_id=F("factura__pedido__empresa_id"),  # #1203
+        )
         .exclude(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
         .exclude(factura__estatus=Factura.FacturaStatus.CANCELADA)
         .values("factura__pedido_id")

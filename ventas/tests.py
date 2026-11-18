@@ -5502,6 +5502,21 @@ class PedidoDocumentosTests(TestCase):
             self.assertEqual(len(data[bloque]), 1, bloque)
         self.assertEqual(data["despachos"][0]["guia"], "GUIA-1")
 
+    def test_trazabilidad_ignora_factura_de_otra_empresa(self):
+        """#1203 también en ``trazabilidad/``: la factura de B no suma a lo
+        facturado ni a lo cobrado del pedido de A."""
+        pedido = self._pedido(cantidad=10)
+        ajena = self._factura(pedido, empresa=self.empresa_b)
+        FacturaDetalle.objects.create(
+            factura=ajena, pedido_detalle=pedido.detalles.get(), producto=self.producto, cantidad=10,
+        )
+        CuentaPorCobrar.objects.filter(factura=ajena).update(saldo=Decimal("0"))
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resumen = client.get(pedido_trazabilidad_url(pedido.pk)).json()["resumen"]
+        self.assertEqual(resumen["facturado_pct"], 0.0)
+        self.assertIsNone(resumen["cobrado_pct"])
+
     # --- forma y rendimiento -------------------------------------------------
 
     def test_contrato_solo_suma_moneda_codigo(self):
