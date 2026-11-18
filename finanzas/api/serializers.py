@@ -1213,20 +1213,26 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
         fields["cliente"].queryset = Cliente.objects.filter(empresa_id=empresa_id, activo=True)
         fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id, activo=True).select_related("moneda")
-        # #1095: solo sucursales activas. #1096: se fija al crear; cambiarla al editar → 400.
+        # #1095: solo sucursales activas (la enviada). EC-874: la sucursal es la de las
+        # facturas de las líneas; si se manda debe coincidir. Borrador sin líneas: null.
         fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
-        fields["sucursal"].help_text = "Solo al crear; al editar, mandar otra responde 400."
+        fields["sucursal"].help_text = (
+            "Sale de las facturas de las líneas; si se manda debe coincidir (si no, 400). "
+            "Sin líneas: null (la enviada se ignora). Al editar las líneas de un Borrador se recalcula; "
+            "sin líneas nuevas, mandar otra responde 400."
+        )
         cxcs = CuentaPorCobrar.objects.filter(CuentaPorCobrar.q_de_la_empresa(empresa_id))
         user = getattr(self.context.get("request"), "user", None)
         fields["cobro_detalles"].child.fields["cxc"].queryset = por_sucursal(cxcs, user, "factura__sucursal") if user else cxcs
         return fields
 
     def validate(self, attrs):
-        if self.instance is not None:
-            # #1063: la sucursal se fija al crear. #1096: antes se ignoraba en silencio.
+        # EC-874: con líneas nuevas (Borrador) la vista recalcula la sucursal y compara
+        # contra ellas la enviada; sin líneas nuevas no cambia (#1096: otra → 400).
+        if self.instance is not None and "cobro_detalles" not in attrs:
             nueva = attrs.pop("sucursal", None)
             if nueva is not None and nueva.pk != self.instance.sucursal_id:
-                raise ValidationError({"sucursal": "No se puede cambiar: se fija al crear."})
+                raise ValidationError({"sucursal": "No se puede cambiar: sale de las facturas del cobro."})
         req = self.context.get("request")
         if req and hasattr(req, "user"):
             user_empresa = getattr(req.user, "empresa", None)
@@ -1284,9 +1290,14 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
         else:
             request = self.context.get("request")
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
-        # #1095: solo sucursales activas. #1096: se fija al crear; cambiarla al editar → 400.
+        # #1095: solo sucursales activas (la enviada). EC-874: la sucursal es la de las
+        # facturas de proveedor de las líneas; si se manda debe coincidir. Las líneas solo
+        # se escriben al crear, así que al editar no cambia (#1096).
         fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
-        fields["sucursal"].help_text = "Solo al crear; al editar, mandar otra responde 400."
+        fields["sucursal"].help_text = (
+            "Sale de las facturas de proveedor de las líneas; si se manda debe coincidir (si no, 400). "
+            "Sin líneas: null (la enviada se ignora). Al editar, mandar otra responde 400."
+        )
         fields["proveedor"].queryset = Proveedor.objects.filter(empresa_id=empresa_id)
         fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id).select_related("moneda")
         return fields
@@ -1296,7 +1307,7 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
             # #1063: la sucursal se fija al crear. #1096: antes se ignoraba en silencio.
             nueva = attrs.pop("sucursal", None)
             if nueva is not None and nueva.pk != self.instance.sucursal_id:
-                raise ValidationError({"sucursal": "No se puede cambiar: se fija al crear."})
+                raise ValidationError({"sucursal": "No se puede cambiar: sale de las facturas del pago."})
         req = self.context.get("request")
         if req and hasattr(req, "user"):
             user_empresa = getattr(req.user, "empresa", None)

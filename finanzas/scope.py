@@ -5,7 +5,7 @@ Superusuario y admin de empresa ven toda la empresa; el resto, sólo las sucursa
 siguen por empresa: la contabilidad es de la empresa, no de la sucursal.
 """
 
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 from rest_framework.exceptions import ValidationError
 
 
@@ -26,14 +26,21 @@ def por_sucursal(qs, user, campo):
 
 def cobros_por_sucursal(qs, user):
     """Un cobro se ve si su ``sucursal`` es visible y todas sus líneas son de facturas
-    visibles (#1078: antes uno sin líneas lo veían todas las sucursales)."""
+    visibles (#1078).
+
+    EC-874: un Borrador sin líneas no tiene sucursal (``null``): lo ve toda la empresa.
+    Uno con líneas y sin sucursal (no debería existir) no.
+    """
     ids = sucursales_visibles(user)
     if ids is None:
         return qs
     from finanzas.models import CobroDetalle
 
-    ajenas = CobroDetalle.objects.filter(cobro=OuterRef("pk")).exclude(cxc__factura__sucursal_id__in=ids)
-    return qs.filter(sucursal_id__in=ids).exclude(Exists(ajenas))
+    lineas = CobroDetalle.objects.filter(cobro=OuterRef("pk"))
+    ajenas = lineas.exclude(cxc__factura__sucursal_id__in=ids)
+    return qs.filter(
+        Q(sucursal_id__in=ids) | (Q(sucursal__isnull=True) & ~Exists(lineas))
+    ).exclude(Exists(ajenas))
 
 
 def exigir_factura_visible(user, factura):
@@ -43,33 +50,38 @@ def exigir_factura_visible(user, factura):
         raise ValidationError({"factura": "Factura no encontrada."})
 
 
-def resolver_sucursal_documento(user, empresa, sucursal, sucursales_lineas, *, acotar=True, lineas_misma_sucursal=False):
-    """Sucursal de un cobro o pago al crearlo (#1063). Siempre queda una.
+def resolver_sucursal_documento(empresa, enviada, sucursales_lineas, *, documento, user=None):
+    """Sucursal de un cobro o pago (EC-874): la de las facturas de sus líneas.
 
-    - La enviada: debe ser de la empresa y, con ``acotar``, de las sucursales del
-      usuario no admin. Los pagos van con ``acotar=False``: CxP y pagos son por
-      empresa (EC-874).
-    - Si no viene: la de la primera línea (factura de la CxC o de la CxP).
-    - Si no hay líneas: la ``sucursal_default`` del usuario, si es de la empresa.
-    - Con ``lineas_misma_sucursal`` (cobros): todas las facturas de las líneas deben
-      ser de esa sucursal, porque el folio sale de su serie (EC-874).
+    Un cobro o pago es de una sola sucursal; de ella salen su folio y su póliza.
+
+    - Sin líneas (borrador): ``None``. La ``enviada`` se ignora: la sucursal sale de
+      las facturas cuando lleguen.
+    - Facturas de varias sucursales → 400.
+    - La de las facturas debe ser de la empresa → si no, 400. Puede estar inactiva: el
+      cobro o pago salda una deuda que ya existe (la ``enviada`` sí debe estar activa,
+      eso lo valida el queryset del serializer).
+    - Una ``enviada`` distinta de la de las facturas → 400.
+    - Con ``user`` (cobros), además debe ser visible para él. Los pagos van por
+      empresa, como las CxP (``user=None``).
+
+    ``sucursales_lineas`` son los ids de sucursal de las facturas de las líneas.
     """
     from nucleo.models import Sucursal
 
+    ids = {s for s in sucursales_lineas if s}
+    if not ids:
+        return None
+    if len(ids) > 1:
+        raise ValidationError({"sucursal": f"Las facturas son de varias sucursales: haz un {documento} por sucursal."})
     empresa_id = getattr(empresa, "pk", empresa)
-    if sucursal is None:
-        candidatos = [s for s in sucursales_lineas if s] + [getattr(user, "sucursal_default_id", None)]
-        sucursal = next(
-            (s for s in (Sucursal.objects.filter(pk=c, empresa_id=empresa_id).first() for c in candidatos if c) if s),
-            None,
-        )
-        if sucursal is None:
-            raise ValidationError({"sucursal": "Indica la sucursal."})
-    if sucursal.empresa_id != empresa_id:
-        raise ValidationError({"sucursal": "La sucursal no pertenece a la empresa."})
-    ids = sucursales_visibles(user) if acotar else None
-    if ids is not None and sucursal.pk not in ids:
-        raise ValidationError({"sucursal": "No tienes acceso a esa sucursal."})
-    if lineas_misma_sucursal and any(s and s != sucursal.pk for s in sucursales_lineas):
-        raise ValidationError({"sucursal": "Todas las facturas del cobro deben ser de la sucursal del cobro."})
-    return sucursal
+    de_lineas = Sucursal.objects.filter(pk=ids.pop(), empresa_id=empresa_id).first()
+    if de_lineas is None:
+        raise ValidationError({"sucursal": "La sucursal de las facturas no pertenece a la empresa."})
+    if enviada is not None and enviada.pk != de_lineas.pk:
+        raise ValidationError({"sucursal": f"No coincide con la de las facturas ({de_lineas.nombre})."})
+    if user is not None:
+        visibles = sucursales_visibles(user)
+        if visibles is not None and de_lineas.pk not in visibles:
+            raise ValidationError({"sucursal": "No tienes acceso a esa sucursal."})
+    return de_lineas
