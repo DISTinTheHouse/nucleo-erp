@@ -532,18 +532,20 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         )
         serie_folio = SerieFolio.resolve(empresa.pk, instance.sucursal_id, tipo_documento, lock=True)
 
-        if serie_folio:
-            try:
-                folio_formateado, nuevo_consecutivo, anio_actual = serie_folio.get_siguiente_folio()
-                serie_folio.folio_actual = nuevo_consecutivo
-                serie_folio.ultimo_anio = anio_actual
-                serie_folio.save(update_fields=["folio_actual", "ultimo_anio"])
-                instance.folio = folio_formateado
-                return
-            except Exception:
-                pass
-
-        instance.folio = f"{prefijo_respaldo}-{empresa.pk}-{instance.id}"
+        # Sin respaldo silencioso (#1142): antes armaba ``OC-{empresa}-{id}``, otro
+        # formato sin aviso. Sin serie, o con la serie agotada, la aceptación falla.
+        nombre_doc = tipo_documento[-1] if isinstance(tipo_documento, (list, tuple)) else tipo_documento
+        if serie_folio is None:
+            raise ValidationError({"folio": [
+                f"La sucursal no tiene serie de folios activa para {nombre_doc}. Configúrala en Series y folios."]})
+        try:
+            folio_formateado, nuevo_consecutivo, anio_actual = serie_folio.get_siguiente_folio()
+        except ValueError as exc:
+            raise ValidationError({"folio": [f"Serie {serie_folio.serie}: {exc}."]})
+        serie_folio.folio_actual = nuevo_consecutivo
+        serie_folio.ultimo_anio = anio_actual
+        serie_folio.save(update_fields=["folio_actual", "ultimo_anio"])
+        instance.folio = folio_formateado
 
     @staticmethod
     def _sucursales_del_usuario(user, empresa):
