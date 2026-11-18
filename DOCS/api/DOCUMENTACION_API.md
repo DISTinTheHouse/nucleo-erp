@@ -2167,6 +2167,7 @@ Cada documento que nació del pedido, para la pestaña "Documentos" del detalle.
 
 - **Endpoint**: `GET /api/v1/ventas/pedidos/{id}/documentos/`
 - Solo lectura. Mismo alcance que `trazabilidad/` (`404` para un pedido de otra empresa). Cada bloque, además, solo trae documentos de la empresa del pedido (EC-916).
+- **Por sucursal** (EC-920, regla #536 de `pedido.documentos`): para quien no es admin ni superusuario, `ordenes_bordado`, `ordenes_reflejante`, `ordenes_corte_manga`, `packings` y `pickings` solo traen documentos de sus sucursales (`sucursales_permitidas()`), y `despachos` solo los de un packing visible (ni su `packing_id` ni su `packing_folio` salen si no). Admin y superusuario, todas las sucursales de la empresa activa. `movimientos_inventario`, `pre_ordenes`, `salidas_maquila`, `facturas` y `cobros` todavía no se acotan por sucursal (#1243): una TR puede ir entre almacenes de sucursales distintas y falta decidir qué sucursal cuenta.
 - Número fijo de consultas, sin importar cuántos documentos tenga el pedido.
 - **Respuesta** (`200`), siempre con las 15 llaves; una lista vacía es "sin registros":
   ```json
