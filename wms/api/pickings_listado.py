@@ -76,15 +76,28 @@ def filtrar(request, qs):
     return qs
 
 
+# Anotación de ``search_fields`` con el operador tal como lo pinta la fila
+# (``OPERADOR_NOMBRE``): el correo sólo cuenta cuando el operador no tiene nombre.
+CAMPO_BUSQUEDA_OPERADOR = "busqueda_operador_nombre"
+
+
 class BusquedaPickingsFilter(SearchFilter):
     """``?search=`` sólo en ``ACCIONES_FILTRADAS``. ``get_object()`` también pasa por
     los filter backends: sin esto, ``GET /pickings/{id}/?search=x`` (o ``trasladar``)
-    respondía 404 sobre un picking visible."""
+    respondía 404 sobre un picking visible.
+
+    Anota ``CAMPO_BUSQUEDA_OPERADOR`` sólo cuando hay búsqueda; ``SearchFilter`` acepta
+    anotaciones en ``search_fields`` (``icontains`` sobre la expresión)."""
 
     def get_search_fields(self, view, request):
         if getattr(view, "action", None) not in ACCIONES_FILTRADAS:
             return None
         return super().get_search_fields(view, request)
+
+    def filter_queryset(self, request, queryset, view):
+        if self.get_search_fields(view, request) and self.get_search_terms(request):
+            queryset = queryset.annotate(**{CAMPO_BUSQUEDA_OPERADOR: OPERADOR_NOMBRE})
+        return super().filter_queryset(request, queryset, view)
 
 
 # --- Ordenamiento ----------------------------------------------------------------

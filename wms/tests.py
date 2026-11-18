@@ -2992,7 +2992,11 @@ class PickingListadoServidorTests(TestCase):
             "P-ZZZ": [self.alta1],
             "zoe": [self.alta1, self.media1],
             "Ana Zamora": [self.baja1, self.alta2],
+            # Sin nombre, la fila pinta el correo: se busca por él.
             "op-anonimo": [self.baja2, self.raro],
+            # Con nombre, el correo no se pinta ni se busca.
+            "op-zoe": [],
+            "example.com": [self.base, self.baja2, self.raro],
         }
         for termino, esperados in casos.items():
             with self.subTest(search=termino):

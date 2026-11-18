@@ -155,9 +155,9 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
         pickings_listado.BusquedaPickingsFilter,
         pickings_listado.OrdenamientoPickingsFilter,
     ]
-    # Lo que busca la caja del front ("folio, pedido u operador"); el operador por
-    # nombre, apellido o el correo que se muestra cuando no tiene nombre.
-    search_fields = ["folio", "pedido__folio", "operador__first_name", "operador__last_name", "operador__email"]
+    # Lo que busca la caja del front ("folio, pedido u operador"); el operador por el
+    # nombre que pinta la fila (el correo sólo si no tiene nombre).
+    search_fields = ["folio", "pedido__folio", pickings_listado.CAMPO_BUSQUEDA_OPERADOR]
     # Columnas de la tabla con el nombre que usa el front (``pedido_folio``,
     # ``operador_nombre``) y ``prioridad`` por urgencia (``OrdenamientoPickingsFilter``).
     ordering_fields = list(pickings_listado.CAMPOS_ORDEN)
