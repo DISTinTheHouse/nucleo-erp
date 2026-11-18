@@ -2168,7 +2168,7 @@ Cada documento que nació del pedido, para la pestaña "Documentos" del detalle.
 - **Endpoint**: `GET /api/v1/ventas/pedidos/{id}/documentos/`
 - Solo lectura. Mismo alcance que `trazabilidad/` (`404` para un pedido de otra empresa). Cada bloque, además, solo trae documentos de la empresa del pedido (EC-916).
 - Número fijo de consultas, sin importar cuántos documentos tenga el pedido.
-- **Respuesta** (`200`), siempre con las 8 llaves; una lista vacía es "sin registros":
+- **Respuesta** (`200`), siempre con las 15 llaves; una lista vacía es "sin registros":
   ```json
   {
     "pre_ordenes": [{ "id": 3, "origen": "pedido", "estatus": "pendiente_validar", "op_id": null, "created_at": "...", "op_folio": null }],
@@ -2178,17 +2178,25 @@ Cada documento que nació del pedido, para la pestaña "Documentos" del detalle.
     "pickings": [{ "id": 93, "folio": "PICK-000029", "estado": "Completado", "almacen_actual": "APARTADOS" }],
     "movimientos_inventario": [{ "id": 501, "tipo_movimiento": "TRANSFERENCIA", "fecha_movimiento": "...", "observaciones": "...",
                                  "transferencia_folio": "TR-00014", "origen": "PT", "destino": "APARTADOS" }],
-    "despachos": [{ "id": 12, "guia": "GUIA-1", "envio_id": null, "packing_folio": "PACK-00012" }],
+    "despachos": [{ "id": 12, "guia": "GUIA-1", "envio_id": null, "packing_id": 12, "packing_folio": "PACK-00012" }],
     "envios": [{ "id": 4, "transportista_id": 2 }],
     "facturas": [{ "id": 34, "folio": "FAC-00028", "estatus": "Emitida", "fecha_emision": "2026-11-12", "total": "1160.00", "moneda_codigo": "MXN" }],
     "cobros": [{ "cobro_id": 9, "importe_aplicado": "500.00", "folio": "COB-00009", "estatus": "Aplicado", "fecha": "2026-11-15",
-                 "factura_folio": "FAC-00028", "moneda_codigo": "MXN" }]
+                 "factura_folio": "FAC-00028", "moneda_codigo": "MXN" }],
+    "cotizaciones": [{ "id": 51, "folio": null, "estatus": 3, "estatus_label": "AUTORIZADA", "fecha": "2026-11-01T17:02:11Z" }],
+    "ordenes_compra": [{ "id": 235, "folio": "O-00002", "estatus": 3, "estatus_label": "Autorizada", "fecha": "2026-11-05" }],
+    "ordenes_produccion": [{ "id": 8, "folio": "OP-00008", "estatus": 1, "estatus_label": "Pendiente", "fecha": "..." }],
+    "ordenes_bordado": [{ "id": 45, "folio": "OB-00045", "estatus": 2, "estatus_label": "Programado", "fecha": "..." }],
+    "ordenes_reflejante": [],
+    "ordenes_corte_manga": [],
+    "packings": [{ "id": 12, "folio": "PACK-00012", "estatus": "COMPLETADO", "estatus_label": "Completado", "fecha": "..." }]
   }
   ```
+- **`cotizaciones`, `ordenes_compra`, `ordenes_produccion`, `ordenes_bordado`, `ordenes_reflejante`, `ordenes_corte_manga`, `packings`** (EC-920): los mismos documentos que `documentos[]` del detalle del pedido (`GET /pedidos/{id}/`), con la misma relación y el mismo alcance (`documentos_visibles` en `ventas/services/pedido_documentos_service.py`): activos, de la empresa del pedido y, para quien no es admin ni superusuario, las OB/OR/OCM y packings solo de sus sucursales (#536). La OC es la ligada por `OrdenCompra.pedido` (el primer pedido de la OC); la OP, la principal o ligada por `pedidos_ids`. `folio` es `null` en la cotización (el modelo no tiene folio; se identifica por `id`). `estatus` es el valor guardado (entero o texto según el documento) y `estatus_label` su etiqueta; `fecha` es `created_at` (cotización y packing), `fecha_oc` (OC, solo fecha) o `fecha_inicio` (órdenes de producción). Sin importes: la pestaña no los necesita.
 - **`facturas` / `cobros`**: `null` si el usuario no puede ver contabilidad (`puede_ver_contabilidad`): ocultar esas secciones. Facturas activas; cobros activos y no cancelados aplicados a ellas. `moneda_codigo` es el código ISO (en un cobro sin moneda, la de su cuenta bancaria).
 - **`salidas_maquila[].total`**: `null` sin `R-PRODUCCION-COSTOS` (mismo permiso que `GET /produccion/salidas-maquila/`). Es el total del documento SM, que puede cubrir más de un pedido; no es la parte de este pedido.
 - **`movimientos_inventario`**: los ligados al pedido (p. ej. la salida del despacho) y los de las transferencias (TR) de sus pickings, alta y cada traslado, por `Transferencia.picking` (EC-916). Una TR manual nunca aparece aunque su texto mencione un picking.
-- **`envios`**: el modelo no guarda transportista con nombre, guía ni fecha; la guía está en `despachos[].guia`.
+- **`envios`**: el modelo no guarda guía ni fecha, y `Transportista` no tiene nombre (solo `empresa`), así que solo va `transportista_id`; la guía está en `despachos[].guia`.
 
 ---
 
