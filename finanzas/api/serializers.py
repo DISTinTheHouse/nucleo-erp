@@ -1196,6 +1196,15 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
         source="cuenta_bancaria.moneda.codigo_iso", read_only=True, allow_null=True
     )
     cuenta_bancaria_activo = serializers.BooleanField(source="cuenta_bancaria.activo", read_only=True)
+    # EC-874: nombre y código de la sucursal junto al id (null sin líneas).
+    sucursal_nombre = serializers.CharField(
+        source="sucursal.nombre", read_only=True, allow_null=True, default=None,
+        help_text="Nombre de la sucursal del cobro; null si aún no tiene líneas.",
+    )
+    sucursal_codigo = serializers.CharField(
+        source="sucursal.codigo", read_only=True, allow_null=True, default=None,
+        help_text="Código de la sucursal del cobro; null si aún no tiene líneas.",
+    )
 
     class Meta:
         model = Cobro
@@ -1213,20 +1222,27 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
         fields["cliente"].queryset = Cliente.objects.filter(empresa_id=empresa_id, activo=True)
         fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id, activo=True).select_related("moneda")
-        # #1095: solo sucursales activas. #1096: se fija al crear; cambiarla al editar → 400.
-        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
-        fields["sucursal"].help_text = "Solo al crear; al editar, mandar otra responde 400."
+        # EC-874: la sucursal es la de las facturas de las líneas; la enviada nunca se
+        # asigna, solo se compara, así que se acepta inactiva (reenviar la actual de un
+        # cobro de una sucursal dada de baja no da 400). Borrador sin líneas: null.
+        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id)
+        fields["sucursal"].help_text = (
+            "Sale de las facturas de las líneas; si se manda debe coincidir (si no, 400). "
+            "Sin líneas: null (la enviada se ignora). Al editar las líneas de un Borrador se recalcula; "
+            "sin líneas nuevas, mandar otra responde 400."
+        )
         cxcs = CuentaPorCobrar.objects.filter(CuentaPorCobrar.q_de_la_empresa(empresa_id))
         user = getattr(self.context.get("request"), "user", None)
         fields["cobro_detalles"].child.fields["cxc"].queryset = por_sucursal(cxcs, user, "factura__sucursal") if user else cxcs
         return fields
 
     def validate(self, attrs):
-        if self.instance is not None:
-            # #1063: la sucursal se fija al crear. #1096: antes se ignoraba en silencio.
+        # EC-874: con líneas nuevas (Borrador) la vista recalcula la sucursal y compara
+        # contra ellas la enviada; sin líneas nuevas no cambia (#1096: otra → 400).
+        if self.instance is not None and "cobro_detalles" not in attrs:
             nueva = attrs.pop("sucursal", None)
             if nueva is not None and nueva.pk != self.instance.sucursal_id:
-                raise ValidationError({"sucursal": "No se puede cambiar: se fija al crear."})
+                raise ValidationError({"sucursal": "No se puede cambiar: sale de las facturas del cobro."})
         req = self.context.get("request")
         if req and hasattr(req, "user"):
             user_empresa = getattr(req.user, "empresa", None)
@@ -1270,6 +1286,15 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
     pago_detalles = PagoDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)
+    # EC-874: nombre y código de la sucursal junto al id (null sin líneas).
+    sucursal_nombre = serializers.CharField(
+        source="sucursal.nombre", read_only=True, allow_null=True, default=None,
+        help_text="Nombre de la sucursal del pago; null si aún no tiene líneas.",
+    )
+    sucursal_codigo = serializers.CharField(
+        source="sucursal.codigo", read_only=True, allow_null=True, default=None,
+        help_text="Código de la sucursal del pago; null si aún no tiene líneas.",
+    )
 
     class Meta:
         model = Pago
@@ -1284,11 +1309,20 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
         else:
             request = self.context.get("request")
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
-        # #1095: solo sucursales activas. #1096: se fija al crear; cambiarla al editar → 400.
-        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
-        fields["sucursal"].help_text = "Solo al crear; al editar, mandar otra responde 400."
+        # EC-874: la sucursal es la de las facturas de proveedor de las líneas; la enviada
+        # nunca se asigna, solo se compara, así que se acepta inactiva. Las líneas solo
+        # se escriben al crear, así que al editar no cambia (#1096).
+        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id)
+        fields["sucursal"].help_text = (
+            "Sale de las facturas de proveedor de las líneas; si se manda debe coincidir (si no, 400). "
+            "Sin líneas: null (la enviada se ignora). Al editar, mandar otra responde 400."
+        )
         fields["proveedor"].queryset = Proveedor.objects.filter(empresa_id=empresa_id)
         fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id).select_related("moneda")
+        # EC-874: una CxP de otra empresa responde igual que un id inexistente (#570).
+        detalles = fields.get("pago_detalles")
+        if detalles is not None and not detalles.read_only:
+            detalles.child.fields["cxp"].queryset = CuentaPorPagar.objects.filter(empresa_id=empresa_id)
         return fields
 
     def validate(self, attrs):
@@ -1296,7 +1330,7 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
             # #1063: la sucursal se fija al crear. #1096: antes se ignoraba en silencio.
             nueva = attrs.pop("sucursal", None)
             if nueva is not None and nueva.pk != self.instance.sucursal_id:
-                raise ValidationError({"sucursal": "No se puede cambiar: se fija al crear."})
+                raise ValidationError({"sucursal": "No se puede cambiar: sale de las facturas del pago."})
         req = self.context.get("request")
         if req and hasattr(req, "user"):
             user_empresa = getattr(req.user, "empresa", None)

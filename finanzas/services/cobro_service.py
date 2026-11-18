@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.services.cobro_poliza_service import CobroPolizaService
+from finanzas.scope import exigir_sucursal_unica
 from finanzas.utils.folios import generate_cobro_folio
 from finanzas.models import (
     Cobro,
@@ -113,16 +114,17 @@ class CobroService:
                 }
             )
 
-        # #644: el folio se consume al aplicar (no en Borrador), con la serie de la
-        # sucursal del cobro (EC-874; antes, la de la factura de la primera línea). Sin serie no se aplica (#662) y un folio
+        # EC-874: un cobro aplicado es de una sola sucursal, la de sus facturas. La vista
+        # ya la fijó; aquí se garantiza que no se aplique sin ella ni con otra.
+        exigir_sucursal_unica(
+            cobro.sucursal_id, [cxc.factura.sucursal_id for cxc in cxcs.values()], documento="cobro", requerida=True,
+        )
+
+        # #644: el folio se consume al aplicar (no en Borrador), con la serie COBROS de
+        # la sucursal del cobro (EC-874). Sin serie no se aplica (#662) y un folio
         # repetido en la empresa se rechaza (#663; la BD también lo impide).
         if not cobro.folio:
-            if cobro.sucursal_id is None:  # cobros previos a #1063
-                sucursal = cxcs[detalles[0].cxc_id].factura.sucursal
-            elif any(cxcs[d.cxc_id].factura.sucursal_id != cobro.sucursal_id for d in detalles):
-                raise ErrorDeNegocio({"sucursal": "Todas las facturas del cobro deben ser de la sucursal del cobro."})
-            else:
-                sucursal = cobro.sucursal
+            sucursal = cobro.sucursal
             folio = generate_cobro_folio(cobro.empresa_id, sucursal.pk)
             if not folio:
                 raise ErrorDeNegocio({"folio": f"La sucursal {sucursal.nombre} no tiene serie COBROS activa: dala de alta en series y folios."})

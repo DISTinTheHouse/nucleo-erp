@@ -625,8 +625,9 @@ class Cobro(models.Model):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.PROTECT, related_name="cobros")
     cliente = models.ForeignKey('terceros.Cliente', on_delete=models.PROTECT, related_name="cobros")
     cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.PROTECT, related_name="cobros")
-    # Sucursal del cobro (#1063): la manda el cliente o sale de la factura de la
-    # primera línea. Nula solo en filas previas a la migración que no la tenían.
+    # Sucursal del cobro (EC-874): la de las facturas de sus líneas, todas de una
+    # misma sucursal (si se manda, debe coincidir). Nula mientras el Borrador no tiene
+    # líneas; en Borrador se recalcula al cambiarlas.
     sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.PROTECT, related_name="cobros", null=True, blank=True)
 
     fecha_cobro = models.DateField(default=timezone.localdate)
@@ -639,7 +640,7 @@ class Cobro(models.Model):
     # cambio (MXN por unidad) va al REP; en MXN siempre es 1.
     moneda = models.ForeignKey('nucleo.Moneda', on_delete=models.PROTECT, related_name="cobros", null=True, blank=True)
     tipo_cambio = models.DecimalField(max_digits=18, decimal_places=6, default=1)
-    # Serie ``COBROS`` de la sucursal de la primera factura cobrada (nulo si no hay serie).
+    # Serie ``COBROS`` de la sucursal del cobro (EC-874); se asigna al aplicar (#644).
     folio = models.CharField(max_length=30, null=True, blank=True)
     estatus = models.CharField(max_length=30, choices=Estatus.choices, default=Estatus.APLICADO)
     observaciones = models.TextField(null=True, blank=True)
@@ -697,8 +698,8 @@ class Pago(models.Model):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.PROTECT, related_name="pagos")
     proveedor = models.ForeignKey('terceros.Proveedor', on_delete=models.PROTECT, related_name="pagos")
     cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.PROTECT, related_name="pagos")
-    # Sucursal del pago (#1063): la manda el cliente o sale de la factura de
-    # proveedor de la primera línea.
+    # Sucursal del pago (EC-874): la de las facturas de proveedor de sus líneas, todas
+    # de una misma sucursal (si se manda, debe coincidir). Nula si se crea sin líneas.
     sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.PROTECT, related_name="pagos", null=True, blank=True)
     fecha_pago = models.DateField(default=timezone.localdate)
     metodo_pago = models.CharField(max_length=30, choices=MetodoPago.choices, default=MetodoPago.TRANSFERENCIA)

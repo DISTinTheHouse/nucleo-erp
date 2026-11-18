@@ -112,7 +112,15 @@ from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
 from finanzas.services.reporte_contable_service import LIMITE_OMISION, ReporteContableService
-from finanzas.scope import cobros_por_sucursal, exigir_factura_visible, por_sucursal, resolver_sucursal_documento, sucursales_visibles
+from finanzas.scope import (
+    cobros_por_sucursal,
+    exigir_factura_visible,
+    por_sucursal,
+    resolver_sucursal_documento,
+    sucursales_de_cxcs,
+    sucursales_de_cxps,
+    sucursales_visibles,
+)
 from finanzas.utils.folios import generate_factura_folio
 from nucleo.kpis import entero_estricto
 from nucleo.models import Moneda, Sucursal
@@ -1945,7 +1953,8 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         qs = self._cobros_visibles()
         if self._es_lectura():
             # EC-904: cada línea con la factura de su CxC (folio) en la misma consulta.
-            qs = qs.select_related("cliente", "cuenta_bancaria__moneda").prefetch_related(
+            # EC-874: y la sucursal (``sucursal_nombre``/``sucursal_codigo``).
+            qs = qs.select_related("cliente", "cuenta_bancaria__moneda", "sucursal").prefetch_related(
                 Prefetch("cobro_detalles", queryset=CobroDetalle.objects.select_related("cxc__factura"))
             )
         qp = self.request.query_params
@@ -2044,15 +2053,17 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         cta = serializer.validated_data.get("cuenta_bancaria")
         _validate_fk_empresa(user, cta, "cuenta_bancaria", empresa)
         detalles_data = serializer.validated_data.pop("cobro_detalles", [])
-        sucursal = resolver_sucursal_documento(
-            user, empresa, serializer.validated_data.pop("sucursal", None),
-            [getattr(getattr(d.get("cxc"), "factura", None), "sucursal_id", None) for d in detalles_data],
-            lineas_misma_sucursal=True,
-        )
+        sucursal = self._sucursal(user, empresa, serializer.validated_data.pop("sucursal", None), detalles_data)
         cobro = serializer.save(empresa=empresa, sucursal=sucursal)
         self._guardar_detalles(cobro, detalles_data)
         if cobro.estatus == Cobro.Estatus.APLICADO:
             CobroService.aplicar_cobro(cobro, user)
+
+    @staticmethod
+    def _sucursal(user, empresa, enviada, detalles_data):
+        """La de las facturas de las líneas (EC-874), en una sola consulta."""
+        cxc_ids = [d["cxc"].pk for d in detalles_data if d.get("cxc") is not None]
+        return resolver_sucursal_documento(empresa, enviada, sucursales_de_cxcs(cxc_ids), documento="cobro", user=user)
 
     @staticmethod
     def _guardar_detalles(cobro, detalles_data):
@@ -2104,7 +2115,13 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             # ``save()`` ya lo hubiera cambiado, ``cancelar_cobro`` saldría por su
             # guard de idempotencia sin devolver saldos ni banco.
             serializer.validated_data["estatus"] = anterior_estatus
-        cobro = serializer.save()
+        extra = {}
+        if detalles_data is not None:
+            # EC-874: líneas nuevas en Borrador → la sucursal se recalcula con ellas.
+            extra["sucursal"] = self._sucursal(
+                user, bloqueado.empresa_id, serializer.validated_data.pop("sucursal", None), detalles_data,
+            )
+        cobro = serializer.save(**extra)
         if detalles_data is not None:
             cobro.cobro_detalles.all().delete()  # líneas de Borrador: aún no mueven saldos
             self._guardar_detalles(cobro, detalles_data)
@@ -2181,7 +2198,8 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             # EC-904: proveedor, cuenta (con su moneda) y líneas (con el folio de su
             # factura de proveedor) en bloque; antes eran ~3 consultas por fila del
             # listado. Sólo al leer, como en ``CobroViewSet``.
-            qs = qs.select_related("proveedor", "cuenta_bancaria__moneda").prefetch_related(
+            # EC-874: y la sucursal (``sucursal_nombre``/``sucursal_codigo``).
+            qs = qs.select_related("proveedor", "cuenta_bancaria__moneda", "sucursal").prefetch_related(
                 Prefetch("pago_detalles", queryset=PagoDetalle.objects.select_related("cxp__factura_proveedor"))
             )
         qp = self.request.query_params
@@ -2214,24 +2232,17 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         cta = serializer.validated_data.get("cuenta_bancaria")
         _validate_fk_empresa(user, cta, "cuenta_bancaria", empresa)
         detalles_data = serializer.validated_data.pop("pago_detalles", [])
+        # Que cada CxP sea de la empresa lo impone el queryset de ``pago_detalles.cxp``
+        # del serializer (EC-874: una ajena responde como un id inexistente);
+        # ``PagoService`` lo repite al aplicar.
+        cxp_ids = [d["cxp"].pk for d in detalles_data if d.get("cxp") is not None]
+        # EC-874: la de las facturas de proveedor de las líneas, en una consulta. Sin
+        # ``user``: los pagos van por empresa, como las CxP.
         sucursal = resolver_sucursal_documento(
-            user, empresa, serializer.validated_data.pop("sucursal", None),
-            [getattr(getattr(d.get("cxp"), "factura_proveedor", None), "sucursal_id", None) for d in detalles_data],
-            acotar=False,
+            empresa, serializer.validated_data.pop("sucursal", None), sucursales_de_cxps(cxp_ids), documento="pago",
         )
         pago = serializer.save(empresa=empresa, sucursal=sucursal)
         for d in detalles_data:
-            # El campo real de ``PagoDetalle`` es ``cxp``: leer
-            # ``cuenta_por_pagar`` devolvía siempre ``None``. Se compara contra la
-            # empresa del documento padre y sin excluir al superusuario, igual que
-            # en ``CobroViewSet``. ``PagoService`` repite el guard, pero sólo con
-            # ``estatus="Aplicado"``; en ``Borrador`` nadie lo cubría.
-            cxp = d.get("cxp")
-            if cxp is not None:
-                if cxp.empresa_id != pago.empresa_id:
-                    raise ValidationError(
-                        {"pago_detalles": [f"La CxP {cxp.pk} no pertenece a la misma empresa que el pago."]}
-                    )
             PagoDetalle.objects.create(pago=pago, **d)
         if pago.estatus == Pago.Estatus.APLICADO:
             PagoService.aplicar_pago(pago, user)

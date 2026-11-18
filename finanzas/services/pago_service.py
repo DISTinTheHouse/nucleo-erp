@@ -12,6 +12,7 @@ from finanzas.models import (
     Pago,
     PagoDetalle,
 )
+from finanzas.scope import exigir_sucursal_unica
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
 from finanzas.services.pago_poliza_service import PagoPolizaService
 
@@ -41,6 +42,12 @@ class PagoService:
             raise ErrorDeNegocio(
                 {"pago_detalles": "El pago debe tener al menos un detalle."}
             )
+        # EC-874: un pago aplicado es de una sola sucursal, la de sus facturas de
+        # proveedor. La vista ya la fijó; aquí se garantiza que no se aplique sin ella
+        # ni con otra.
+        exigir_sucursal_unica(
+            pago.sucursal_id, [factura.sucursal_id for factura in facturas.values()], documento="pago", requerida=True,
+        )
 
         cxp_ids = [d.cxp_id for d in detalles]
         cxps = {
