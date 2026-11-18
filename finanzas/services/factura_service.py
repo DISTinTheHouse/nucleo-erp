@@ -7,7 +7,7 @@ from django.db.models import Sum
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import Factura, FacturaDetalle
-from finanzas.services.facturama.cfdi_payload import pedido_de_la_factura, receptor_fiscal
+from finanzas.services.facturama.cfdi_payload import facturas_del_pedido, pedido_de_la_factura, receptor_fiscal
 from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.utils.folios import TIPOS_DOCUMENTO_FACTURA, generate_factura_folio
 from nucleo.models import SerieFolio
@@ -136,6 +136,12 @@ class FacturaService:
         (datos previos al candado de escritura): ese no se lee. Misma regla
         que el timbrado (#1203)."""
         return pedido_de_la_factura(factura)
+
+    @staticmethod
+    def facturas_del_pedido(pedido):
+        """Facturas de ``pedido`` acotadas a su empresa: la regla de
+        ``pedido_de_la_factura`` para muchas facturas (EC-916)."""
+        return facturas_del_pedido(pedido)
 
     @staticmethod
     def datos_fiscales(factura, pedido):

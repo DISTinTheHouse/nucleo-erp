@@ -58,7 +58,8 @@ class TransferenciaSerializer(serializers.ModelSerializer):
     class Meta:
         model = Transferencia
         fields = "__all__"
-        read_only_fields = ["empresa", "sucursal", "folio", "usuario", "status"]
+        # ``picking`` lo fija el servidor (EC-916): una TR manual no se liga a un picking.
+        read_only_fields = ["empresa", "sucursal", "folio", "usuario", "status", "picking"]
 
     def validate(self, attrs):
         almacen_origen = attrs.get("almacen_origen")

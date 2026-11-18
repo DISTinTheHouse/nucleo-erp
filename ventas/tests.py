@@ -5236,6 +5236,393 @@ class PedidoTrazabilidadTests(TestCase):
         self.assertEqual(len(vacio), len(lleno))
 
 
+class PedidoDocumentosTests(TestCase):
+    """``GET /pedidos/{id}/documentos/`` (vista 360, EC-916): cada bloque solo de
+    la empresa del pedido, TR por ``Transferencia.picking``, ``moneda_codigo`` en
+    facturas y cobros y el ``total`` de las SM solo con ``R-PRODUCCION-COSTOS``.
+
+    Reusa los datos y helpers de ``PedidoTrazabilidadTests``; añade una empresa B
+    cuyos documentos apuntan (como dato legado) a pedidos de la empresa A.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from nucleo.models import SatFormaPago, SatMetodoPago, SatRegimenFiscal
+        from terceros.models import Proveedor
+
+        PedidoTrazabilidadTests.setUpTestData.__func__(cls)
+        cls.usd = Moneda.objects.create(codigo_iso="USD", nombre="Dolar")
+        cls.empresa_b = Empresa.objects.create(codigo="beta", razon_social="Beta SA")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="GDL", nombre="GDL")
+        cls.cliente_b = Cliente.objects.create(empresa=cls.empresa_b, nombre="Cliente Beta")
+        cls.almacen_b = Almacen.objects.create(
+            empresa=cls.empresa_b, sucursal=cls.sucursal_b, codigo="ALM-B", nombre="Almacen B",
+        )
+        cls.almacen2 = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="APA", nombre="Apartados",
+        )
+        cls.costos = Usuario.objects.create(
+            username="costos@acme.test", email="costos@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        UsuarioPermiso.objects.create(
+            usuario=cls.costos, permiso=_permiso("R-PRODUCCION-COSTOS"),
+            tipo=UsuarioPermiso.TIPO_GRANT, empresa=cls.empresa,
+        )
+        cls.maquilero = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="Maquila SA", es_maquilero=True, moneda=cls.moneda,
+            sat_regimen_fiscal=SatRegimenFiscal.objects.get_or_create(
+                codigo="601", defaults={"descripcion": "General de Ley"})[0],
+            sat_forma_pago=SatFormaPago.objects.get_or_create(
+                codigo="03", defaults={"descripcion": "Transferencia"})[0],
+            sat_metodo_pago=SatMetodoPago.objects.get_or_create(
+                codigo="PUE", defaults={"descripcion": "Pago en una sola exhibición"})[0],
+        )
+
+    setUp = PedidoTrazabilidadTests.setUp
+    _siguiente = PedidoTrazabilidadTests._siguiente
+    _pedido = PedidoTrazabilidadTests._pedido
+    _ob = PedidoTrazabilidadTests._ob
+
+    # --- helpers -----------------------------------------------------------
+
+    def _data(self, pedido, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.admin)
+        resp = client.get(f"/api/v1/ventas/pedidos/{pedido.pk}/documentos/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def _factura(self, pedido, empresa=None, activo=True):
+        empresa = empresa or self.empresa
+        b = empresa == self.empresa_b
+        factura = Factura.objects.create(
+            empresa=empresa, sucursal=self.sucursal_b if b else self.sucursal,
+            cliente=self.cliente_b if b else self.cliente, moneda=self.moneda, pedido=pedido,
+            folio=self._siguiente("F"), estatus=Factura.FacturaStatus.EMITIDA, total=Decimal("100"),
+            activo=activo,
+        )
+        CuentaPorCobrar.objects.create(
+            empresa=empresa, cliente=factura.cliente, factura=factura,
+            total=Decimal("100"), saldo=Decimal("100"),
+        )
+        return factura
+
+    def _cobro(self, factura, empresa=None, moneda=None, **extra):
+        from finanzas.models import Banco, Cobro, CobroDetalle, CuentaBancaria
+
+        empresa = empresa or factura.empresa
+        cuenta = CuentaBancaria.objects.create(
+            empresa=empresa, banco=Banco.objects.create(empresa=empresa, nombre="Banco"), moneda=self.moneda,
+        )
+        cobro = Cobro.objects.create(
+            empresa=empresa, cliente=factura.cliente, cuenta_bancaria=cuenta, moneda=moneda,
+            folio=self._siguiente("C"), **extra,
+        )
+        CobroDetalle.objects.create(
+            cobro=cobro, cxc=factura.cuentas_por_cobrar.get(), importe_aplicado=Decimal("10"),
+        )
+        return cobro
+
+    def _picking(self, pedido, empresa=None):
+        b = empresa == self.empresa_b
+        return Picking.objects.create(
+            folio=self._siguiente("PK"), empresa=empresa or self.empresa,
+            sucursal=self.sucursal_b if b else self.sucursal, pedido=pedido, operador=self.usuario,
+            usuario=self.usuario, almacen=self.almacen_b if b else self.almacen,
+        )
+
+    def _tr(self, picking=None, observaciones="", empresa=None):
+        from wms.models import Transferencia
+
+        b = empresa == self.empresa_b
+        tr = Transferencia.objects.create(
+            empresa=empresa or self.empresa, sucursal=self.sucursal_b if b else self.sucursal,
+            almacen_origen=self.almacen_b if b else self.almacen,
+            almacen_destino=self.almacen_b if b else self.almacen2,
+            folio=self._siguiente("TR"), usuario=self.usuario, observaciones=observaciones, picking=picking,
+        )
+        MovimientoInventario.objects.create(
+            empresa=tr.empresa, sucursal=tr.sucursal, usuario=self.usuario, transferencia=tr,
+        )
+        return tr
+
+    def _sm(self, pedido, total="123.45"):
+        from produccion.models import SalidaMaquila
+
+        return SalidaMaquila.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, ob=self._ob(pedido),
+            centro_confeccion=self.maquilero, folio=self._siguiente("SM"),
+            fecha_envio=timezone.localdate(), total=Decimal(total),
+        )
+
+    # --- facturas y cobros ---------------------------------------------------
+
+    def test_factura_y_cobro_de_otra_empresa_no_aparecen(self):
+        """#1203: una factura de B que apunta al pedido de A no es de A."""
+        pedido = self._pedido()
+        propia = self._factura(pedido)
+        cobro = self._cobro(propia)
+        ajena = self._factura(pedido, empresa=self.empresa_b)
+        self._cobro(ajena)
+        data = self._data(pedido)
+        self.assertEqual([f["id"] for f in data["facturas"]], [propia.pk])
+        self.assertEqual([c["cobro_id"] for c in data["cobros"]], [cobro.pk])
+
+    def test_cobro_de_otra_empresa_sobre_factura_propia_no_aparece(self):
+        pedido = self._pedido()
+        factura = self._factura(pedido)
+        self._cobro(factura, empresa=self.empresa_b)
+        self.assertEqual(self._data(pedido)["cobros"], [])
+
+    def test_cobros_cancelados_inactivos_o_de_factura_inactiva_no_aparecen(self):
+        from finanzas.models import Cobro
+
+        pedido = self._pedido()
+        factura = self._factura(pedido)
+        vigente = self._cobro(factura)
+        self._cobro(factura, estatus=Cobro.Estatus.CANCELADO)
+        self._cobro(factura, activo=False)
+        self._cobro(self._factura(pedido, activo=False))
+        data = self._data(pedido)
+        self.assertEqual([c["cobro_id"] for c in data["cobros"]], [vigente.pk])
+        self.assertEqual([f["id"] for f in data["facturas"]], [factura.pk])
+
+    def test_moneda_codigo_en_facturas_y_cobros(self):
+        pedido = self._pedido()
+        factura = self._factura(pedido)
+        en_usd = self._cobro(factura, moneda=self.usd)
+        sin_moneda = self._cobro(factura)  # cobro previo a EC-537: la de su cuenta
+        data = self._data(pedido)
+        self.assertEqual(data["facturas"][0]["moneda_codigo"], "MXN")
+        monedas = {c["cobro_id"]: c["moneda_codigo"] for c in data["cobros"]}
+        self.assertEqual(monedas, {en_usd.pk: "USD", sin_moneda.pk: "MXN"})
+
+    def test_sin_contabilidad_facturas_y_cobros_en_null(self):
+        pedido = self._pedido()
+        self._cobro(self._factura(pedido))
+        data = self._data(pedido, self.usuario)
+        self.assertIsNone(data["facturas"])
+        self.assertIsNone(data["cobros"])
+
+    # --- movimientos de inventario ------------------------------------------
+
+    def test_tr_ligada_por_fk_aparece_y_la_falsificada_no(self):
+        pedido = self._pedido()
+        picking = self._picking(pedido)
+        propia = self._tr(picking=picking, observaciones=f"Traspaso del picking {picking.folio}")
+        # Mismo texto que generaba el código, sin FK: en la misma empresa y en otra.
+        self._tr(observaciones=f"Traslado del picking {picking.folio}")
+        self._tr(observaciones=f"Traspaso del picking {picking.folio}", empresa=self.empresa_b)
+        movimientos = self._data(pedido)["movimientos_inventario"]
+        self.assertEqual([m["transferencia_folio"] for m in movimientos], [propia.folio])
+
+    def test_tr_de_otra_empresa_ligada_al_picking_no_aparece(self):
+        pedido = self._pedido()
+        picking = self._picking(pedido)
+        self._tr(picking=picking, empresa=self.empresa_b)
+        self.assertEqual(self._data(pedido)["movimientos_inventario"], [])
+
+    def test_movimiento_inactivo_o_de_otra_empresa_no_aparece(self):
+        pedido = self._pedido()
+        vigente = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, usuario=self.usuario, pedido=pedido,
+        )
+        MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, usuario=self.usuario, pedido=pedido, activo=False,
+        )
+        MovimientoInventario.objects.create(
+            empresa=self.empresa_b, sucursal=self.sucursal_b, usuario=self.usuario, pedido=pedido,
+        )
+        self.assertEqual([m["id"] for m in self._data(pedido)["movimientos_inventario"]], [vigente.pk])
+
+    # --- salidas a maquila ---------------------------------------------------
+
+    def test_total_de_sm_solo_con_permiso_de_costos(self):
+        pedido = self._pedido(lleva_bordado=True)
+        sm = self._sm(pedido)
+        sin = self._data(pedido, self.usuario)["salidas_maquila"]
+        self.assertEqual([s["id"] for s in sin], [sm.pk])
+        self.assertIn("total", sin[0])
+        self.assertIsNone(sin[0]["total"])
+        for user in (self.costos, self.admin):
+            con = self._data(pedido, user)["salidas_maquila"]
+            self.assertEqual(Decimal(str(con[0]["total"])), Decimal("123.45"))
+
+    # --- resto de bloques ----------------------------------------------------
+
+    def test_bloques_de_otra_empresa_no_aparecen(self):
+        """Datos legados de B que apuntan al pedido de A: ninguno sale."""
+        from logistica.models import Envio
+        from produccion.models import PreOrdenProduccion, SalidaMaquila
+        from terceros.models import Transportista
+
+        pedido = self._pedido(lleva_bordado=True)
+        PreOrdenProduccion.objects.create(empresa=self.empresa_b, sucursal=self.sucursal_b, pedido=pedido)
+        PreOrdenProduccion.objects.create(
+            empresa=self.empresa_b, sucursal=self.sucursal_b,
+        ).pedidos.add(pedido)
+        picking_b = self._picking(pedido, empresa=self.empresa_b)
+        packing_b = Packing.objects.create(
+            folio=self._siguiente("PA"), empresa=self.empresa_b, sucursal=self.sucursal_b, pedido=pedido,
+            picking=picking_b, operador=self.usuario, usuario=self.usuario,
+        )
+        Despacho.objects.create(packing=packing_b)
+        Envio.objects.create(
+            empresa=self.empresa_b, sucursal=self.sucursal_b, pedido=pedido,
+            transportista=Transportista.objects.create(empresa=self.empresa_b),
+        )
+        sm = self._sm(pedido)
+        SalidaMaquila.objects.filter(pk=sm.pk).update(empresa=self.empresa_b, sucursal=self.sucursal_b)
+
+        data = self._data(pedido)
+        for bloque in ("pre_ordenes", "salidas_maquila", "pickings", "despachos", "envios"):
+            self.assertEqual(data[bloque], [], bloque)
+
+    def test_bloques_propios_aparecen(self):
+        from logistica.models import Envio
+        from produccion.models import PreOrdenProduccion
+        from terceros.models import Transportista
+
+        pedido = self._pedido(lleva_bordado=True)
+        PreOrdenProduccion.objects.create(empresa=self.empresa, sucursal=self.sucursal, pedido=pedido)
+        picking = self._picking(pedido)
+        packing = Packing.objects.create(
+            folio=self._siguiente("PA"), empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+            picking=picking, operador=self.usuario, usuario=self.usuario,
+        )
+        Despacho.objects.create(packing=packing, guia="GUIA-1")
+        Envio.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+            transportista=Transportista.objects.create(empresa=self.empresa),
+        )
+        self._sm(pedido)
+        data = self._data(pedido)
+        for bloque in ("pre_ordenes", "salidas_maquila", "pickings", "despachos", "envios"):
+            self.assertEqual(len(data[bloque]), 1, bloque)
+        self.assertEqual(data["despachos"][0]["guia"], "GUIA-1")
+
+    def test_detalle_del_pedido_no_lista_documentos_de_otra_empresa(self):
+        """``documentos[]`` de ``GET /pedidos/{id}/`` (la lista que hoy pinta el
+        front) sigue la misma regla: la factura, el envío y el movimiento de B que
+        apuntan al pedido de A no salen; los de A sí."""
+        from logistica.models import Envio
+        from terceros.models import Transportista
+
+        pedido = self._pedido()
+        propia = self._factura(pedido)
+        ajena = self._factura(pedido, empresa=self.empresa_b)
+        envio_b = Envio.objects.create(
+            empresa=self.empresa_b, sucursal=self.sucursal_b, pedido=pedido,
+            transportista=Transportista.objects.create(empresa=self.empresa_b),
+        )
+        mov_a = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, usuario=self.usuario, pedido=pedido,
+        )
+        mov_b = MovimientoInventario.objects.create(
+            empresa=self.empresa_b, sucursal=self.sucursal_b, usuario=self.usuario, pedido=pedido,
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resp = client.get(f"/api/v1/ventas/pedidos/{pedido.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        docs = {(d["tipo"], d["id"]) for d in resp.json()["documentos"]}
+        self.assertIn(("factura", propia.pk), docs)
+        self.assertIn(("movimiento_inventario", mov_a.pk), docs)
+        for ajeno in (("factura", ajena.pk), ("envio", envio_b.pk), ("movimiento_inventario", mov_b.pk)):
+            self.assertNotIn(ajeno, docs)
+
+    def test_trazabilidad_ignora_factura_de_otra_empresa(self):
+        """#1203 también en ``trazabilidad/``: la factura de B no suma a lo
+        facturado ni a lo cobrado del pedido de A."""
+        pedido = self._pedido(cantidad=10)
+        ajena = self._factura(pedido, empresa=self.empresa_b)
+        FacturaDetalle.objects.create(
+            factura=ajena, pedido_detalle=pedido.detalles.get(), producto=self.producto, cantidad=10,
+        )
+        CuentaPorCobrar.objects.filter(factura=ajena).update(saldo=Decimal("0"))
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resumen = client.get(pedido_trazabilidad_url(pedido.pk)).json()["resumen"]
+        self.assertEqual(resumen["facturado_pct"], 0.0)
+        self.assertIsNone(resumen["cobrado_pct"])
+
+    # --- forma y rendimiento -------------------------------------------------
+
+    def test_contrato_solo_suma_moneda_codigo(self):
+        pedido = self._pedido(lleva_bordado=True)
+        picking = self._picking(pedido)
+        self._tr(picking=picking)
+        self._cobro(self._factura(pedido))
+        self._sm(pedido)
+        data = self._data(pedido)
+        self.assertEqual(
+            list(data),
+            ["pre_ordenes", "salidas_maquila", "pickings", "movimientos_inventario", "despachos",
+             "envios", "facturas", "cobros"],
+        )
+        self.assertEqual(
+            set(data["facturas"][0]), {"id", "folio", "estatus", "fecha_emision", "total", "moneda_codigo"},
+        )
+        self.assertEqual(
+            set(data["cobros"][0]),
+            {"cobro_id", "importe_aplicado", "folio", "estatus", "fecha", "factura_folio", "moneda_codigo"},
+        )
+        self.assertEqual(
+            set(data["salidas_maquila"][0]),
+            {"id", "folio", "estatus", "fecha_envio", "fecha_recepcion", "total_piezas", "total",
+             "centro_confeccion_nombre", "op_folio", "ob_folio", "or_folio"},
+        )
+        self.assertEqual(
+            set(data["movimientos_inventario"][0]),
+            {"id", "tipo_movimiento", "fecha_movimiento", "observaciones", "transferencia_folio",
+             "origen", "destino"},
+        )
+
+    def test_consultas_no_crecen_con_los_documentos(self):
+        pedido = self._pedido(lleva_bordado=True)
+        with CaptureQueriesContext(connection) as uno:
+            self._data(pedido)
+        for _ in range(3):
+            picking = self._picking(pedido)
+            self._tr(picking=picking)
+            self._cobro(self._factura(pedido))
+            self._sm(pedido)
+        with CaptureQueriesContext(connection) as varios:
+            self._data(pedido)
+        self.assertEqual(len(uno), len(varios))
+
+    def test_consultas_no_crecen_para_un_usuario_no_admin(self):
+        """Mismo control para el caso común: no admin, con contabilidad por
+        departamento (CONTAVENTAS) y ``R-PRODUCCION-COSTOS`` por rol, que sí resuelve
+        sus permisos en la petición."""
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="conta-ventas-doc", nombre="Conta ventas",
+            estatus=Rol.Estatus.ACTIVO, clave_departamento="CONTAVENTAS",
+        )
+        _con_claves(rol, ["R-PRODUCCION-COSTOS"])
+        conta = Usuario.objects.create(
+            username="conta@acme.test", email="conta@acme.test",
+            empresa=self.empresa, sucursal_default=self.sucursal,
+        )
+        UsuarioRol.objects.create(usuario=conta, rol=rol, empresa=self.empresa)
+
+        pedido = self._pedido(lleva_bordado=True)
+        self._cobro(self._factura(pedido))
+        self._sm(pedido)
+        with CaptureQueriesContext(connection) as uno:
+            data = self._data(pedido, conta)
+        self.assertIsNotNone(data["facturas"])
+        self.assertIsNotNone(data["salidas_maquila"][0]["total"])
+        for _ in range(3):
+            self._tr(picking=self._picking(pedido))
+            self._cobro(self._factura(pedido))
+            self._sm(pedido)
+        with CaptureQueriesContext(connection) as varios:
+            self._data(pedido, conta)
+        self.assertEqual(len(uno), len(varios))
+
+
 class PedidoDetalleSkuBaseTests(TestCase):
     """``sku_base`` de cada renglón en ``GET /pedidos/{id}/``.
 

@@ -17,6 +17,7 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from finanzas.models import CuentaPorCobrar, Factura, FacturaDetalle
+from finanzas.services.facturama.cfdi_payload import q_factura_del_pedido
 from produccion.models import (
     BordadoAvances,
     OrdenBordadoDetalle,
@@ -274,6 +275,7 @@ def _empacado_y_embarcado(pedido_ids):
 
 def _facturado(pedido_ids):
     qs = FacturaDetalle.objects.filter(
+        q_factura_del_pedido("factura__"),  # #1203: solo de la empresa del pedido
         factura__pedido_id__in=pedido_ids,
         factura__activo=True,
         factura__estatus=Factura.FacturaStatus.EMITIDA,
@@ -286,7 +288,10 @@ def _cobrado_pct(pedido_ids):
     """``{pedido_id: % cobrado}`` sobre sus cuentas por cobrar vigentes."""
     filas = (
         CuentaPorCobrar.objects
-        .filter(factura__pedido_id__in=pedido_ids, factura__activo=True)
+        .filter(
+            q_factura_del_pedido("factura__"),  # #1203
+            factura__pedido_id__in=pedido_ids, factura__activo=True,
+        )
         .exclude(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
         .exclude(factura__estatus=Factura.FacturaStatus.CANCELADA)
         .values("factura__pedido_id")
@@ -552,32 +557,40 @@ def _lista(qs, *campos, **alias):
     return [dict(f) for f in qs.values(*campos, **alias)]
 
 
-def documentos_pedido(pedido, con_finanzas=True):
+def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
     """Vista 360: cada documento que nació del pedido, una consulta por tipo
     (constante, sin importar cuántos haya). Endpoint aparte de la trazabilidad
-    para no hacerla más lenta: el frontend lo pide al abrir la pestaña."""
-    import re
+    para no hacerla más lenta: el frontend lo pide al abrir la pestaña.
 
+    ``con_finanzas=False``: ``facturas`` y ``cobros`` en null. ``con_costos=False``
+    (sin ``R-PRODUCCION-COSTOS``, como el endpoint de SM, #1226): el ``total`` de
+    cada salida a maquila en null. Ese total es el del documento SM, no la parte
+    del pedido."""
     from logistica.models import Envio
     from produccion.models import PreOrdenProduccion, SalidaMaquila
     from inventarios.models import MovimientoInventario
     from wms.models import Despacho, Picking
 
-    pk = pedido.pk
+    # Cada bloque, además, de la empresa del pedido (EC-916): las escrituras ya lo
+    # validan, esto evita que un dato legado de otra empresa se cuele en la lectura.
+    pk, empresa_id = pedido.pk, pedido.empresa_id
     pre_ordenes = _lista(
-        PreOrdenProduccion.objects.filter(Q(pedido_id=pk) | Q(pedidos=pk)).distinct().order_by("id"),
+        PreOrdenProduccion.objects.filter(Q(pedido_id=pk) | Q(pedidos=pk), empresa_id=empresa_id).distinct().order_by("id"),
         "id", "origen", "estatus", "op_id", "created_at", op_folio=F("op__folio_op"),
     )
     salidas_maquila = _lista(
-        SalidaMaquila.objects.filter(activo=True).filter(
+        SalidaMaquila.objects.filter(activo=True, empresa_id=empresa_id).filter(
             Q(op__op_pedidos__pedido_id=pk) | Q(ob__pedido_id=pk) | Q(orden_r__pedido_id=pk)
         ).distinct().order_by("id"),
         "id", "folio", "estatus", "fecha_envio", "fecha_recepcion", "total_piezas", "total",
         centro_confeccion_nombre=F("centro_confeccion__nombre"), op_folio=F("op__folio_op"),
         ob_folio=F("ob__folio_bordado"), or_folio=F("orden_r__folio_reflejante"),
     )
+    if not con_costos:
+        for fila in salidas_maquila:
+            fila["total"] = None
     pickings = list(
-        Picking.objects.filter(pedido_id=pk).select_related("almacen", "almacen_destino", "transferencia")
+        Picking.objects.filter(pedido_id=pk, empresa_id=empresa_id).select_related("almacen", "almacen_destino", "transferencia")
         .order_by("id")
     )
     filas_picking = [
@@ -585,25 +598,30 @@ def documentos_pedido(pedido, con_finanzas=True):
         for p in pickings
     ]
     # Movimientos del pedido: los ligados por FK (salida del despacho, etc.) y las
-    # TR de sus pickings (alta y cada traslado, que la TR nombra por folio).
-    filtro = Q(pedido_id=pk)
-    folios = [p.folio for p in pickings if p.folio]
-    if folios:
-        filtro |= Q(transferencia__observaciones__iregex=r"del picking (%s)$" % "|".join(map(re.escape, folios)))
+    # TR de sus pickings (alta y cada traslado) por ``Transferencia.picking``
+    # (EC-916; antes un regex sobre ``observaciones``, texto libre en la API). La
+    # TR, además, de la empresa y sucursal de su picking; y todo, de la empresa
+    # del pedido y vigente.
+    filtro = Q(pedido_id=pk) | Q(
+        transferencia__picking__pedido_id=pk,
+        transferencia__picking__empresa_id=empresa_id,
+        transferencia__empresa_id=empresa_id,
+        transferencia__sucursal_id=F("transferencia__picking__sucursal_id"),
+    )
     movimientos = _lista(
-        MovimientoInventario.objects.filter(filtro).order_by("id"),
+        MovimientoInventario.objects.filter(filtro, empresa_id=empresa_id, activo=True).order_by("id"),
         "id", "tipo_movimiento", "fecha_movimiento", "observaciones",
         transferencia_folio=F("transferencia__folio"), origen=F("transferencia__almacen_origen__nombre"),
         destino=F("transferencia__almacen_destino__nombre"),
     )
     despachos = _lista(
-        Despacho.objects.filter(packing__pedido_id=pk).order_by("id"),
+        Despacho.objects.filter(packing__pedido_id=pk, packing__empresa_id=empresa_id).order_by("id"),
         "id", "guia", "envio_id", packing_folio=F("packing__folio"),
     )
-    envios = _lista(Envio.objects.filter(pedido_id=pk).order_by("id"), "id", "transportista_id")
+    envios = _lista(Envio.objects.filter(pedido_id=pk, empresa_id=empresa_id).order_by("id"), "id", "transportista_id")
     facturas = cobros = None  # sin permiso de contabilidad: null
     if con_finanzas:
-        facturas, cobros = _facturas_y_cobros(pk)
+        facturas, cobros = _facturas_y_cobros(pedido)
     return {
         "pre_ordenes": pre_ordenes,
         "salidas_maquila": salidas_maquila,
@@ -616,17 +634,31 @@ def documentos_pedido(pedido, con_finanzas=True):
     }
 
 
-def _facturas_y_cobros(pk):
-    from finanzas.models import CobroDetalle
+def _facturas_y_cobros(pedido):
+    """Facturas y cobros del pedido, solo de SU empresa (EC-916, #1203): una
+    factura de otra empresa que apunta al pedido no es suya
+    (``FacturaService.facturas_del_pedido``). Cobros: los vigentes (activos y no
+    cancelados) aplicados a esas facturas, de la misma empresa."""
+    from finanzas.models import Cobro, CobroDetalle
+    from finanzas.services.factura_service import FacturaService
 
+    facturas_qs = FacturaService.facturas_del_pedido(pedido).filter(activo=True)
     facturas = _lista(
-        Factura.objects.filter(pedido_id=pk, activo=True).order_by("id"),
-        "id", "folio", "estatus", "fecha_emision", "total",
+        facturas_qs.order_by("id"),
+        "id", "folio", "estatus", "fecha_emision", "total", moneda_codigo=F("moneda__codigo_iso"),
     )
+    # ``moneda_codigo`` como en el detalle del pedido. ``Cobro.moneda`` es nullable
+    # (cobros previos a EC-537): entonces la de su cuenta bancaria, que es la que
+    # el servidor le fija. JOINs en la misma consulta, sin viajes por fila.
     cobros = _lista(
-        CobroDetalle.objects.filter(cxc__factura__pedido_id=pk).order_by("cobro_id"),
+        CobroDetalle.objects.filter(
+            cxc__factura__in=facturas_qs, cobro__empresa_id=pedido.empresa_id, cobro__activo=True,
+        ).exclude(cobro__estatus=Cobro.Estatus.CANCELADO).order_by("cobro_id"),
         "cobro_id", "importe_aplicado", folio=F("cobro__folio"), estatus=F("cobro__estatus"),
         fecha=F("cobro__fecha_cobro"), factura_folio=F("cxc__factura__folio"),
+        moneda_codigo=Coalesce(
+            F("cobro__moneda__codigo_iso"), F("cobro__cuenta_bancaria__moneda__codigo_iso"),
+        ),
     )
     return facturas, cobros
 

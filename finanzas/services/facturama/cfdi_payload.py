@@ -18,7 +18,7 @@ import re
 from decimal import Decimal
 from typing import NamedTuple
 
-from django.db.models import Sum
+from django.db.models import F, Q, Sum
 from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
@@ -77,6 +77,25 @@ def pedido_de_la_factura(factura):
     if pedido is not None and pedido.empresa_id != factura.empresa_id:
         return None
     return pedido
+
+
+def q_factura_del_pedido(prefijo=""):
+    """``Q`` de la regla de ``pedido_de_la_factura`` para filtrar querysets: la
+    factura es de su pedido solo si comparten empresa (#1203). ``prefijo`` es la
+    ruta hasta la factura (``""`` sobre ``Factura``, ``"factura__"`` sobre
+    ``FacturaDetalle``/``CuentaPorCobrar``). Única definición de la regla en
+    consultas (EC-916): ``facturas_del_pedido`` y la trazabilidad la usan."""
+    return Q(**{f"{prefijo}empresa_id": F(f"{prefijo}pedido__empresa_id")})
+
+
+def facturas_del_pedido(pedido):
+    """Queryset de las facturas de ``pedido``: la misma regla de
+    ``pedido_de_la_factura`` vista desde el pedido. Una factura de otra empresa
+    que apunta a este pedido (datos previos al candado de escritura, #1203) no es
+    suya. Sin filtros de ``activo`` ni de estatus: eso lo decide quien llama."""
+    from finanzas.models import Factura
+
+    return Factura.objects.filter(q_factura_del_pedido(), pedido_id=pedido.pk)
 
 
 def receptor_fiscal(pedido, cliente):

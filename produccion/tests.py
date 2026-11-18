@@ -8961,8 +8961,14 @@ class SalidaMaquilaAlcanceTests(TestCase):
     def test_otra_sucursal_no_ve_la_sm(self):
         self.assertEqual(self._post().status_code, 201)
         sm = SalidaMaquila.objects.get(op=self.op)
-        otro = self._cliente(self._usuario_sucursal2())
-        self.assertEqual(otro.get(self.URL).json(), [])
+        # #1226: leer SM exige R-PRODUCCION-OP. Con el permiso, lo que se mide es
+        # el alcance por sucursal, no el 403.
+        usuario = self._usuario_sucursal2()
+        _conceder_permisos(usuario, self.empresa, ["R-PRODUCCION-OP"])
+        otro = self._cliente(usuario)
+        resp = otro.get(self.URL)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json(), [])
         self.assertEqual(otro.get(f"{self.URL}{sm.pk}/").status_code, 404)
 
     def test_alta_sobre_op_de_otra_sucursal_rechaza(self):

@@ -8,7 +8,7 @@ from rest_framework.exceptions import ValidationError
 from auditoria.models import AuditoriaEvento
 from ventas.models import PedidoDetalleTalla
 from ventas.services.sku_produccion_service import es_muestra
-from wms.models import Estado as PackingEstado, Picking, PickingDetalle
+from wms.models import Estado as PackingEstado, Picking, PickingDetalle, Transferencia
 from wms.services.existencia_service import ExistenciaService
 from wms.services.transferencia_service import TransferenciaService
 from wms.services.picking_pipeline.catalogs import (
@@ -374,6 +374,11 @@ class PickingService:
             total_lineas_completas=0,
             **data,
         )
+        # La TR nació antes que el picking (paso 4): se liga ahora (EC-916). Con
+        # ``update()``: una consulta, sin fila de historial ni bitácora (ligarla no
+        # es un cambio de estado).
+        Transferencia.objects.filter(pk=transferencia.pk).update(picking=picking)
+        transferencia.picking = picking
 
         # 6. bulk_create PickingDetalle + contar líneas completas. Crear la orden
         #    de surtido es surtir: lo asignado queda como surtido en ese momento.
@@ -484,6 +489,7 @@ class PickingService:
                     "almacen_origen": actual,
                     "almacen_destino": almacen,
                     "observaciones": f"Traslado del picking {picking.folio}",
+                    "picking": picking,  # EC-916: la TR recuerda su picking
                     "transferencia_detalle": lineas,
                 },
                 user,

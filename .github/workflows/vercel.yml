@@ -119,6 +119,32 @@ jobs:
           vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
           vercel deploy --prod --token="$VERCEL_TOKEN"
 
+  # Mientras se despliega sigue sirviendo el build anterior, que no fija
+  # Transferencia.picking (EC-916): este paso liga esas TR ya con el build nuevo
+  # arriba. Idempotente (solo TR en null, solo las que no dejan duda).
+  post_deploy_production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [deploy_production]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ligar TR con su picking (Supabase)
+        env:
+          SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
+          DEBUG: "false"
+          ENVIRONMENT: "production"
+          USE_REMOTE_DB: "true"
+          SUPABASE_DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: python manage.py ligar_transferencias_picking
+
   maintenance:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -165,6 +191,9 @@ jobs:
           elif [ "${{ github.event.inputs.task }}" = "auto_repair" ]; then
             echo "Reparando drift de migraciones automáticamente..."
             python manage.py reparar_drift
+          elif [ "${{ github.event.inputs.task }}" = "ligar_transferencias_picking" ]; then
+            echo "Ligando TR con su picking (EC-916; p. ej. tras un rollback)..."
+            python manage.py ligar_transferencias_picking
           else
             echo "Tarea de mantenimiento no soportada: ${{ github.event.inputs.task }}"
             exit 1

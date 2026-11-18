@@ -36,6 +36,13 @@ flowchart TD
         D1 --> D2 --> D3
     end
 
+    DEP --> POST
+
+    subgraph POST["job: post_deploy_production (needs: deploy_production)"]
+        P1["manage.py ligar_transferencias_picking
+contra Supabase real"]
+    end
+
     WD["workflow_dispatch manual\n(task=fake_migration)"] --> MAINT
 
     subgraph MAINT["job: maintenance"]
@@ -80,9 +87,13 @@ No hay paso de rollback si `migrate` deja el esquema a medias — depende de que
 
 El `git log` de ambos archivos lo confirma: `api/index.py` no tiene commits después de `92c60e0` ("second try with vercel"), mientras `vercel.json` se siguió tocando después (`f697996 Fix Vercel deployment: Restore builds config...`) — el patrón de "zero-config vía `/api`" se abandonó a favor del `builds` explícito, y `api/index.py` quedó de código muerto sin que nadie lo borrara. Verificar contra el dashboard de Vercel antes de borrarlo (por si acaso se usa una función serverless separada para algo puntual), pero como entrypoint principal del sitio no está en la ruta activa.
 
+### `post_deploy_production` — solo si `deploy_production` tuvo éxito
+
+`vercel deploy --prod` espera a que el build nuevo quede listo; hasta entonces sirve el anterior. Ese build anterior no fija `Transferencia.picking` (EC-916), así que este job corre `manage.py ligar_transferencias_picking` contra Supabase para ligar las TR que creó en esa ventana. Es idempotente: solo toca TR con `picking` en null y solo las que no dejan duda (reglas en `wms/services/transferencia_picking_service.py`); en las demás corridas no cambia nada.
+
 ## 4. `maintenance` — manual, `workflow_dispatch`
 
-Único caso soportado hoy: `fake_migration` — aplica `manage.py migrate <app> <migracion> --fake` y luego `migrate --noinput`. Existe para cuando el estado de Supabase diverge del historial de migraciones (p. ej. alguien migró a mano, o una migración se aplicó parcialmente). Cualquier otro valor de `task` sale con `exit 1` explícito — no falla en silencio.
+Tareas: `fake_migration` — aplica `manage.py migrate <app> <migracion> --fake` y luego `migrate --noinput`; `auto_repair` — `reparar_drift`; `ligar_transferencias_picking` — el mismo paso que `post_deploy_production`, para correrlo a mano (p. ej. tras un rollback a un build que no fija `Transferencia.picking`). Existe para cuando el estado de Supabase diverge del historial de migraciones (p. ej. alguien migró a mano, o una migración se aplicó parcialmente). Cualquier otro valor de `task` sale con `exit 1` explícito — no falla en silencio.
 
 ## 5. Post-deploy: `/healthz/` y `/readyz/`
 

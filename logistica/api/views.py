@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
 from logistica.models import Envio
+from nucleo.scope import visibles_en_empresa_activa
 from logistica.api.serializers import EnvioSerializer, EnvioCreateSerializer
 
 
@@ -17,17 +18,12 @@ class EnvioViewSet(
     serializer_class = EnvioSerializer
 
     def get_queryset(self):
-        user = self.request.user
+        # Empresa activa, superusuario incluido (EC-816/EC-798): el superusuario ya
+        # no ve envíos de otras empresas. Dentro de ella, superusuario y admin ven
+        # todas las sucursales; el resto, las suyas. Mismo predicado que WMS y
+        # producción (``nucleo.scope.visibles_en_empresa_activa``).
         qs = super().get_queryset().select_related("pedido", "transportista", "sucursal")
-        if getattr(user, "is_superuser", False):
-            return qs
-        empresa = getattr(user, "empresa", None)
-        if not empresa:
-            return qs.none()
-        qs = qs.filter(empresa=empresa)
-        if getattr(user, "is_admin_empresa", False):
-            return qs
-        return qs.filter(sucursal_id__in=user.sucursales_permitidas())
+        return visibles_en_empresa_activa(qs, self.request.user)
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -37,15 +33,14 @@ class EnvioViewSet(
     def create(self, request, *args, **kwargs):
         user = request.user
         empresa = getattr(user, "empresa", None)
-        if not empresa and not getattr(user, "is_superuser", False):
+        # Superusuario incluido (EC-798): sin empresa activa no escribe en ninguna.
+        if not empresa:
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        # El serializer ya acota ``pedido`` y ``transportista`` a la empresa activa.
         pedido = serializer.validated_data["pedido"]
-
-        if empresa and pedido.empresa_id != empresa.pk:
-            raise ValidationError({"pedido": "No pertenece a tu empresa."})
 
         es_staff = getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)
         if not es_staff and pedido.sucursal_id not in user.sucursales_permitidas():
