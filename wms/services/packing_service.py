@@ -11,6 +11,19 @@ from wms.utils.folios import generate_folio
 from wms.models import Packing, PackingDetalle, Picking, PickingDetalle
 
 
+ALMACEN_APARTADOS = "APARTADOS"
+
+
+def en_apartados_q():
+    """Pickings cuyas prendas están hoy en APARTADOS (misma regla que ``Picking.almacen_actual``)."""
+    from django.db.models import Q
+    from wms.models import Transferencia
+    movido = Q(transferencia__isnull=False, almacen_destino__isnull=False,
+               transferencia__status=Transferencia.TransferenciaStatus.COMPLETADA)
+    return (movido & Q(almacen_destino__nombre__iexact=ALMACEN_APARTADOS)) | (
+        ~movido & Q(almacen__nombre__iexact=ALMACEN_APARTADOS))
+
+
 class PackingService:
     _normalize_quantity = staticmethod(normalizar_decimal)
 
@@ -95,7 +108,8 @@ class PackingService:
         # Un picking ya totalmente empacado no tiene nada más que ofrecer en
         # este onboarding: fuera de la lista de candidatos.
         pickings_qs = (
-            pickings_qs.exclude(pk__in=cls._pickings_totalmente_empacados(pickings_qs))
+            pickings_qs.filter(en_apartados_q())
+            .exclude(pk__in=cls._pickings_totalmente_empacados(pickings_qs))
             .select_related(
                 "pedido",
                 "pedido__cliente",
@@ -360,11 +374,18 @@ class PackingService:
         Pedido.objects.select_for_update(of=("self",)).filter(pk=picking_input.pedido_id).first()
         picking = (
             Picking.objects.select_for_update(of=("self",))
-            .select_related("empresa", "sucursal", "pedido", "operador")
+            .select_related("empresa", "sucursal", "pedido", "operador", "almacen", "almacen_destino",
+                            "transferencia")
             .get(pk=picking_input.pk)
         )
 
         PackingService._validate_context(picking, user)
+        # Solo se empaca lo que ya llegó a APARTADOS: antes el picking puede ir y
+        # venir entre almacenes (bordados, etc.) y el despacho saca de donde esté.
+        actual = picking.almacen_actual
+        if (actual.nombre or "").strip().upper() != ALMACEN_APARTADOS:
+            raise ValidationError({"picking": (
+                f"El picking {picking.folio} está en {actual.nombre}; trasládalo a APARTADOS para empacarlo.")})
         resolved_rows = PackingService._resolve_requested_rows(picking, packing_detalle)
 
         folio = generate_folio(picking.empresa, picking.sucursal, "Packing")
