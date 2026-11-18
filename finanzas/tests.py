@@ -11198,7 +11198,7 @@ class FacturaDatosFiscalesPdfTests(DatosPdfBase):
             {
                 "forma_pago": "03", "forma_pago_nombre": "03 - TRANSFERENCIA",
                 "metodo_pago": "PUE", "metodo_pago_nombre": "PUE - PAGO EN UNA SOLA EXHIBICIÓN",
-                "uso_cfdi": "G03", "uso_cfdi_nombre": "G03 - GASTOS EN GENERAL (OTROS) (OTROS)",
+                "uso_cfdi": "G03", "uso_cfdi_nombre": "G03 - GASTOS EN GENERAL (OTROS)",
             },
         )
         desglose = self._desglose(factura)["pedido"]
@@ -11260,7 +11260,7 @@ class FacturaDatosFiscalesPdfTests(DatosPdfBase):
             with self.subTest(fuente=fuente):
                 self.assertEqual({k: receptor[k] for k in esperado}, esperado)
                 self.assertEqual(
-                    (pago["uso_cfdi"], pago["uso_cfdi_nombre"]), ("G03", "G03 - GASTOS EN GENERAL (OTROS) (OTROS)"),
+                    (pago["uso_cfdi"], pago["uso_cfdi_nombre"]), ("G03", "G03 - GASTOS EN GENERAL (OTROS)"),
                 )
 
     def test_mismo_receptor_que_el_timbrado(self):
