@@ -1222,9 +1222,10 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
         fields["cliente"].queryset = Cliente.objects.filter(empresa_id=empresa_id, activo=True)
         fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id, activo=True).select_related("moneda")
-        # #1095: solo sucursales activas (la enviada). EC-874: la sucursal es la de las
-        # facturas de las líneas; si se manda debe coincidir. Borrador sin líneas: null.
-        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
+        # EC-874: la sucursal es la de las facturas de las líneas; la enviada nunca se
+        # asigna, solo se compara, así que se acepta inactiva (reenviar la actual de un
+        # cobro de una sucursal dada de baja no da 400). Borrador sin líneas: null.
+        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id)
         fields["sucursal"].help_text = (
             "Sale de las facturas de las líneas; si se manda debe coincidir (si no, 400). "
             "Sin líneas: null (la enviada se ignora). Al editar las líneas de un Borrador se recalcula; "
@@ -1308,10 +1309,10 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
         else:
             request = self.context.get("request")
             empresa_id = getattr(getattr(request, "user", None), "empresa_id", None)
-        # #1095: solo sucursales activas (la enviada). EC-874: la sucursal es la de las
-        # facturas de proveedor de las líneas; si se manda debe coincidir. Las líneas solo
+        # EC-874: la sucursal es la de las facturas de proveedor de las líneas; la enviada
+        # nunca se asigna, solo se compara, así que se acepta inactiva. Las líneas solo
         # se escriben al crear, así que al editar no cambia (#1096).
-        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id, activo=True)
+        fields["sucursal"].queryset = Sucursal.objects.filter(empresa_id=empresa_id)
         fields["sucursal"].help_text = (
             "Sale de las facturas de proveedor de las líneas; si se manda debe coincidir (si no, 400). "
             "Sin líneas: null (la enviada se ignora). Al editar, mandar otra responde 400."
