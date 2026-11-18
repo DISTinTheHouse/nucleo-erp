@@ -1147,6 +1147,7 @@ class PickingGeneraTransferenciaTests(TestCase):
         picking, _ = PickingService.handle_store(self._data(self.Decimal("3")), self.usuario)
 
         self.assertIsNotNone(picking.transferencia_id)
+        self.assertEqual(picking.transferencia.picking_id, picking.pk)  # EC-916
         self.assertTrue(picking.transferencia.folio.startswith("TR"))
         self.assertEqual(picking.transferencia.almacen_origen, self.origen)
         self.assertEqual(picking.transferencia.almacen_destino, self.destino)
@@ -1744,6 +1745,7 @@ class PackingDespachoEC574Tests(TestCase):
             return sum(e.cantidad for e in Existencia.objects.filter(almacen=almacen))
 
         tr_alta = self.picking.transferencia_id
+        trs = [tr_alta]
         for almacen in (self.otro, self.destino):  # ida y vuelta: cada traslado deja su TR
             resp = self.api.post(
                 f"/api/v1/wms/pickings/{self.picking.pk}/trasladar/", {"almacen": almacen.pk}, format="json"
@@ -1754,7 +1756,11 @@ class PackingDespachoEC574Tests(TestCase):
             self.assertNotEqual(self.picking.transferencia_id, tr_alta)
             self.assertEqual(self.picking.transferencia.almacen_destino_id, almacen.pk)
             tr_alta = self.picking.transferencia_id
+            trs.append(tr_alta)
 
+        # EC-916: ``Picking.transferencia`` solo guarda la última; cada TR (alta y
+        # traslados) conserva su picking en ``Transferencia.picking``.
+        self.assertEqual(sorted(self.picking.transferencias.values_list("pk", flat=True)), sorted(trs))
         self.assertEqual((cantidad(self.origen), cantidad(self.otro), cantidad(self.destino)), (14, 0, 6))
         resp = self.api.post(
             f"/api/v1/wms/pickings/{self.picking.pk}/trasladar/", {"almacen": self.destino.pk}, format="json"
@@ -2639,3 +2645,168 @@ class SurtidoPedidosTests(TestCase):
         PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(cantidad_surtida=9)
         sobre = disponibilidad(self.d["empresa"].pk, self.d["sucursal"].pk, [variante])[variante]
         self.assertEqual(sobre["comprometido"], Decimal("0"))
+
+
+class TransferenciaPickingBackfillTests(TestCase):
+    """EC-916, migración ``0021``: ``Transferencia.picking`` de las TR históricas.
+
+    Solo se liga con el texto exacto del código, un picking del mismo folio,
+    empresa y sucursal, y evidencia de que es suya; lo dudoso queda en null.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from inventarios.models import Almacen
+        from nucleo.models import Moneda
+        from terceros.models import Cliente
+        from ventas.models import Pedido
+
+        cls.empresa = Empresa.objects.create(codigo="bkf", razon_social="Backfill SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="B1", nombre="B1")
+        cls.sucursal2 = Sucursal.objects.create(empresa=cls.empresa, codigo="B2", nombre="B2")
+        cls.usuario = Usuario.objects.create(
+            username="bkf", email="bkf@example.com", empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.a = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="A", nombre="A")
+        cls.b = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="B", nombre="B")
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal,
+            cliente=Cliente.objects.create(empresa=cls.empresa, nombre="Cliente"),
+            moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"),
+        )
+
+    def setUp(self):
+        import importlib
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        self.migracion = importlib.import_module("wms.migrations.0021_transferencia_picking")
+        self.t0 = timezone.now() - timedelta(days=1)
+
+    def _picking(self, folio, sucursal=None, segundos=0, transferencia=None):
+        from datetime import timedelta
+
+        from wms.models import Picking
+
+        picking = Picking.objects.create(
+            folio=folio, empresa=self.empresa, sucursal=sucursal or self.sucursal, pedido=self.pedido,
+            operador=self.usuario, usuario=self.usuario, almacen=self.a, transferencia=transferencia,
+        )
+        Picking.objects.filter(pk=picking.pk).update(created_at=self.t0 + timedelta(seconds=segundos))
+        return picking
+
+    def _tr(self, observaciones, segundos=0, sucursal=None):
+        from datetime import timedelta
+
+        from wms.models import Transferencia
+
+        tr = Transferencia.objects.create(
+            empresa=self.empresa, sucursal=sucursal or self.sucursal, almacen_origen=self.a,
+            almacen_destino=self.b, folio=f"TR-{Transferencia.objects.count() + 1}", usuario=self.usuario,
+            observaciones=observaciones,
+        )
+        Transferencia.objects.filter(pk=tr.pk).update(
+            fecha_creacion=self.t0 + timedelta(seconds=segundos)
+        )
+        return tr
+
+    def _auditoria(self, picking, antes=None, despues=None):
+        from auditoria.models import AuditoriaEvento
+
+        AuditoriaEvento.objects.create(
+            empresa=self.empresa, usuario=self.usuario, modulo="wms", accion="TRASLADO_PICKING",
+            tabla="picking", id_registro=str(picking.pk),
+            antes_json={"transferencia_id": antes}, despues_json={"transferencia_id": despues},
+        )
+
+    def _plan(self):
+        from auditoria.models import AuditoriaEvento
+        from wms.models import Picking, Transferencia
+
+        return self.migracion.planear_backfill(Transferencia, Picking, AuditoriaEvento)
+
+    def test_alta_en_la_misma_ventana_se_liga(self):
+        tr = self._tr("Traspaso del picking PK-1", segundos=0)
+        picking = self._picking("PK-1", segundos=2)
+        self.assertEqual(self._plan(), ({tr.pk: picking.pk}, []))
+
+    def test_alta_falsificada_fuera_de_la_ventana_queda_en_null(self):
+        tr = self._tr("Traspaso del picking PK-1", segundos=3600)  # escrita después, a mano
+        self._picking("PK-1", segundos=0)
+        self.assertEqual(self._plan(), ({}, [tr.pk]))
+
+    def test_alta_confirmada_por_picking_transferencia(self):
+        tr = self._tr("Traspaso del picking PK-1", segundos=-7200)
+        picking = self._picking("PK-1", transferencia=tr)
+        self.assertEqual(self._plan(), ({tr.pk: picking.pk}, []))
+
+    def test_traslados_se_ligan_por_la_auditoria(self):
+        alta = self._tr("Traspaso del picking PK-1", segundos=0)
+        picking = self._picking("PK-1", segundos=1)
+        t1 = self._tr("Traslado del picking PK-1", segundos=100)
+        t2 = self._tr("Traslado del picking PK-1", segundos=200)
+        self._auditoria(picking, antes=alta.pk, despues=t1.pk)
+        self._auditoria(picking, antes=t1.pk, despues=t2.pk)
+        asignaciones, ambiguas = self._plan()
+        self.assertEqual(asignaciones, {alta.pk: picking.pk, t1.pk: picking.pk, t2.pk: picking.pk})
+        self.assertEqual(ambiguas, [])
+
+    def test_traslado_sin_auditoria_queda_en_null(self):
+        """Todo traslado real deja su auditoría: sin ella, el texto no basta."""
+        self._picking("PK-1")
+        tr = self._tr("Traslado del picking PK-1", segundos=100)
+        self.assertEqual(self._plan(), ({}, [tr.pk]))
+
+    def test_mismo_folio_en_otra_sucursal_no_se_liga(self):
+        tr = self._tr("Traspaso del picking PK-1", segundos=0)
+        self._picking("PK-1", sucursal=self.sucursal2, segundos=1)
+        self.assertEqual(self._plan(), ({}, [tr.pk]))
+
+    def test_mismo_folio_en_dos_sucursales_elige_la_de_la_tr(self):
+        tr = self._tr("Traspaso del picking PK-1", segundos=0, sucursal=self.sucursal2)
+        self._picking("PK-1", segundos=1)
+        propio = self._picking("PK-1", sucursal=self.sucursal2, segundos=1)
+        self.assertEqual(self._plan(), ({tr.pk: propio.pk}, []))
+
+    def test_dos_altas_para_un_picking_quedan_en_null(self):
+        tr1 = self._tr("Traspaso del picking PK-1", segundos=0)
+        tr2 = self._tr("Traspaso del picking PK-1", segundos=1)
+        self._picking("PK-1", segundos=2)
+        self.assertEqual(self._plan(), ({}, sorted([tr1.pk, tr2.pk])))
+
+    def test_referencia_a_otro_picking_es_conflicto(self):
+        tr = self._tr("Traspaso del picking PK-1", segundos=0)
+        self._picking("PK-1", segundos=1)
+        self._picking("PK-9", transferencia=tr)  # la FK dice otra cosa que el texto
+        self.assertEqual(self._plan(), ({}, [tr.pk]))
+
+    def test_tr_manual_no_se_toca(self):
+        manual = self._tr("PRUEBA QA vaciar almacén", segundos=0)
+        self._picking("PK-1", segundos=1, transferencia=manual)
+        self.assertEqual(self._plan(), ({}, []))
+
+    def test_ligar_transferencias_escribe_y_no_pisa(self):
+        from django.apps import apps
+
+        from wms.models import Transferencia
+
+        tr = self._tr("Traspaso del picking PK-1", segundos=0)
+        picking = self._picking("PK-1", segundos=1)
+        ya_ligada = self._tr("Traspaso del picking PK-2", segundos=0)
+        self._picking("PK-2", segundos=1)
+        otro = self._picking("PK-3")
+        Transferencia.objects.filter(pk=ya_ligada.pk).update(picking=otro)
+        dudosa = self._tr("Traslado del picking PK-1", segundos=50)
+
+        self.migracion.ligar_transferencias(apps, None)
+
+        valores = dict(Transferencia.objects.values_list("pk", "picking_id"))
+        self.assertEqual(valores[tr.pk], picking.pk)
+        self.assertEqual(valores[ya_ligada.pk], otro.pk)
+        self.assertIsNone(valores[dudosa.pk])
+
+    def test_picking_es_de_solo_lectura_en_la_api(self):
+        from wms.api.serializers import TransferenciaSerializer
+
+        self.assertTrue(TransferenciaSerializer().fields["picking"].read_only)
