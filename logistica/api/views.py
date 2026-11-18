@@ -39,13 +39,8 @@ class EnvioViewSet(
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        # El serializer ya acota ``pedido`` y ``transportista`` a la empresa activa.
         pedido = serializer.validated_data["pedido"]
-        transportista = serializer.validated_data["transportista"]
-
-        if pedido.empresa_id != empresa.pk:
-            raise ValidationError({"pedido": "No pertenece a tu empresa."})
-        if transportista.empresa_id != empresa.pk:
-            raise ValidationError({"transportista": "No pertenece a tu empresa."})
 
         es_staff = getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)
         if not es_staff and pedido.sucursal_id not in user.sucursales_permitidas():

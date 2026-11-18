@@ -71,19 +71,41 @@ class EnvioAlcanceTests(TestCase):
         self.assertEqual(self._ids(self.usuario), {self.propio.pk})
         self.assertEqual(self._client(self.usuario).get(f"{URL}{self.otra_sucursal.pk}/").status_code, 404)
 
-    def test_alta_exige_empresa_activa_y_datos_de_ella(self):
-        pedido = self.propio.pedido
+    def test_alta_exige_empresa_activa(self):
+        propio = Transportista.objects.create(empresa=self.empresa)
+        resp = self._client(self.sin_empresa).post(
+            URL, {"pedido": self.propio.pedido_id, "transportista": propio.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("empresa", resp.json())
+
+    def test_pedido_o_transportista_ajeno_responde_como_inexistente(self):
+        """#510: un id de otra empresa no se distingue de uno que no existe."""
         propio = Transportista.objects.create(empresa=self.empresa)
         ajeno = Transportista.objects.create(empresa=self.otra)
-        cases = [
-            (self.sin_empresa, pedido.pk, propio.pk, "empresa"),
-            (self.superusuario, self.ajeno.pedido_id, propio.pk, "pedido"),
-            (self.superusuario, pedido.pk, ajeno.pk, "transportista"),
-        ]
-        for user, pedido_id, transportista_id, campo in cases:
-            resp = self._client(user).post(URL, {"pedido": pedido_id, "transportista": transportista_id}, format="json")
+        inexistente = 999999
+
+        def error(pedido_id, transportista_id, campo):
+            resp = self._client(self.superusuario).post(
+                URL, {"pedido": pedido_id, "transportista": transportista_id}, format="json"
+            )
             self.assertEqual(resp.status_code, 400, resp.content)
-            self.assertIn(campo, resp.json())
-        resp = self._client(self.superusuario).post(URL, {"pedido": pedido.pk, "transportista": propio.pk}, format="json")
+            self.assertEqual(list(resp.json()), [campo])
+            return [m.replace(str(pedido_id if campo == "pedido" else transportista_id), "N")
+                    for m in resp.json()[campo]]
+
+        pedido = self.propio.pedido_id
+        self.assertEqual(
+            error(self.ajeno.pedido_id, propio.pk, "pedido"), error(inexistente, propio.pk, "pedido"),
+        )
+        self.assertEqual(
+            error(pedido, ajeno.pk, "transportista"), error(pedido, inexistente, "transportista"),
+        )
+
+    def test_alta_en_la_empresa_activa(self):
+        propio = Transportista.objects.create(empresa=self.empresa)
+        resp = self._client(self.superusuario).post(
+            URL, {"pedido": self.propio.pedido_id, "transportista": propio.pk}, format="json"
+        )
         self.assertEqual(resp.status_code, 201, resp.content)
         self.assertEqual(Envio.objects.get(pk=resp.json()["id"]).empresa_id, self.empresa.pk)
