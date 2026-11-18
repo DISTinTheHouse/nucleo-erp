@@ -324,6 +324,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                         "producto_variante__talla",
                         "ubicacion",
                         "ubicacion__almacen",
+                        "lote",  # lote_codigo / numero_serie (#1122)
+                        "serie",
                     ).order_by("id"),
                 ),
                 Prefetch(
@@ -1636,6 +1638,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         "producto_variante__talla",
                         "ubicacion",
                         "ubicacion__almacen",
+                        "lote",  # lote_codigo / numero_serie (#1122)
+                        "serie",
                     ).order_by("id"),
                 )
             )
