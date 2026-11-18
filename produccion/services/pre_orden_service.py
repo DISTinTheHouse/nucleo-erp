@@ -787,6 +787,10 @@ def disponibilidad(empresa_id, sucursal_id, variante_ids):
         pedido_detalle__pedido__estatus__in=[Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO],
     ).exclude(pedido_detalle__pedido_id__in=_pedidos_cubiertos(empresa_id, sucursal_id)), "variante_id", "cantidad").items():
         comprometido[k] += v
+    # Lo ya surtido por picking dejó de estar comprometido (comprometido = pedido − surtido).
+    for k, v in suma(_surtido_pedidos(empresa_id, sucursal_id).filter(pedido_detalle_talla__variante_id__in=ids),
+                     "pedido_detalle_talla__variante_id", "cantidad_surtida").items():
+        comprometido[k] = max(comprometido[k] - v, CERO)
     for k, v in suma(PreOrdenProduccionDetalle.objects.filter(
         producto_variante_id__in=ids, pre_orden__empresa_id=empresa_id, pre_orden__sucursal_id=sucursal_id,
         pre_orden__origen=PreOrdenProduccion.Origen.RESURTIDO, pre_orden__estatus__in=CANCELABLES,
@@ -844,6 +848,9 @@ def disponibilidad_productos(empresa_id, sucursal_id, producto_ids):
         pedido_detalle__pedido__estatus__in=[Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO],
     ).exclude(pedido_detalle__pedido_id__in=_pedidos_cubiertos(empresa_id, sucursal_id)), "variante__producto_id", "pedido_detalle__producto_id", "cantidad").items():
         comprometido[k] += v
+    for k, v in suma(_surtido_pedidos(empresa_id, sucursal_id), "pedido_detalle_talla__variante__producto_id",
+                     "pedido_detalle__producto_id", "cantidad_surtida").items():
+        comprometido[k] = max(comprometido[k] - v, CERO)
     for k, v in suma(PreOrdenProduccionDetalle.objects.filter(
         pre_orden__empresa_id=empresa_id, pre_orden__sucursal_id=sucursal_id,
         pre_orden__origen=PreOrdenProduccion.Origen.RESURTIDO, pre_orden__estatus__in=CANCELABLES,
@@ -877,3 +884,17 @@ def liberar_necesidades_oc(oc_id):
     cerradas = base.filter(estatus__in=[N.Estatus.EN_OC, N.Estatus.HUERFANA]).update(
         estatus=N.Estatus.CANCELADA, updated_at=ahora)
     return abiertas, cerradas
+
+
+def _surtido_pedidos(empresa_id, sucursal_id):
+    """Picking vivo de los pedidos que cuentan como comprometidos (mismos filtros):
+    lo surtido se resta del comprometido. Ver ``wms/api/surtido.py``."""
+    from ventas.models import Pedido
+    from wms.models import Picking, PickingDetalle
+    return PickingDetalle.objects.filter(
+        pedido_detalle_talla__isnull=False,
+        pedido_detalle__pedido__empresa_id=empresa_id, pedido_detalle__pedido__sucursal_id=sucursal_id,
+        pedido_detalle__pedido__estatus__in=[Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO],
+    ).exclude(picking__estado=Picking.Estado.CANCELADO).exclude(
+        estado=PickingDetalle.EstadoLinea.CANCELADA,
+    ).exclude(pedido_detalle__pedido_id__in=_pedidos_cubiertos(empresa_id, sucursal_id))
