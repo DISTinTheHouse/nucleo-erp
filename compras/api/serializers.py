@@ -593,6 +593,8 @@ class RecepcionRetrieveSerializer(serializers.ModelSerializer):
 class RecepcionOnboardingHeaderSerializer(serializers.Serializer):
     orden_compra = serializers.IntegerField(required=False, allow_null=True)
     orden_produccion = serializers.IntegerField(required=False, allow_null=True)
+    # Regreso de maquila: con OP se recibe la OP; de OB/OR solo se cierra la SM.
+    salida_maquila = serializers.IntegerField(required=False, allow_null=True)
     almacen = serializers.IntegerField()
     serie_codigo = serializers.CharField(required=False, allow_blank=True)
     fecha_recepcion = serializers.DateTimeField(required=False, allow_null=True)
@@ -620,7 +622,9 @@ class RecepcionOnboardingSerializer(serializers.Serializer):
         # Se valida aquí, antes de consumir folio, crear la recepción o cambiar
         # el estatus de la OC/OP. El error va plano (``{"detalle": ["..."]}``)
         # y numera el renglón desde 1, igual que los demás de la vista.
-        if not detalle:
+        # Excepción: el regreso de una SM de OB/OR no lleva renglones (sin inventario);
+        # la vista lo distingue y la de OP sigue exigiéndolos.
+        if not detalle and not (self.initial_data.get("recepcion") or {}).get("salida_maquila"):
             raise serializers.ValidationError(
                 "La recepción debe tener al menos un renglón con cantidad recibida."
             )

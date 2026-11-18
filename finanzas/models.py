@@ -411,7 +411,11 @@ class FacturaProveedor(models.Model):
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.PROTECT, related_name="facturas_proveedores")
     sucursal = models.ForeignKey('nucleo.Sucursal', on_delete=models.PROTECT, related_name="facturas_proveedores")
     proveedor = models.ForeignKey('terceros.Proveedor', on_delete=models.PROTECT, related_name="facturas_proveedores")
-    oc = models.ForeignKey('compras.OrdenCompra', on_delete=models.PROTECT, related_name="facturas_proveedores")
+    # Sin OC cuando es la factura de maquila de una SM.
+    oc = models.ForeignKey('compras.OrdenCompra', on_delete=models.PROTECT, related_name="facturas_proveedores",
+                           null=True, blank=True)
+    salida_maquila = models.ForeignKey('produccion.SalidaMaquila', on_delete=models.PROTECT, null=True, blank=True,
+                                       related_name="facturas_proveedores")
     recepcion = models.ForeignKey('compras.Recepcion', on_delete=models.PROTECT, related_name="facturas_proveedores")
     moneda = models.ForeignKey('nucleo.Moneda', on_delete=models.PROTECT, related_name="facturas_proveedores")
     fecha_emision = models.DateField(default=timezone.localdate)
