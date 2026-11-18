@@ -1945,7 +1945,8 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         qs = self._cobros_visibles()
         if self._es_lectura():
             # EC-904: cada línea con la factura de su CxC (folio) en la misma consulta.
-            qs = qs.select_related("cliente", "cuenta_bancaria__moneda").prefetch_related(
+            # EC-874: y la sucursal (``sucursal_nombre``/``sucursal_codigo``).
+            qs = qs.select_related("cliente", "cuenta_bancaria__moneda", "sucursal").prefetch_related(
                 Prefetch("cobro_detalles", queryset=CobroDetalle.objects.select_related("cxc__factura"))
             )
         qp = self.request.query_params
@@ -2193,7 +2194,8 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             # EC-904: proveedor, cuenta (con su moneda) y líneas (con el folio de su
             # factura de proveedor) en bloque; antes eran ~3 consultas por fila del
             # listado. Sólo al leer, como en ``CobroViewSet``.
-            qs = qs.select_related("proveedor", "cuenta_bancaria__moneda").prefetch_related(
+            # EC-874: y la sucursal (``sucursal_nombre``/``sucursal_codigo``).
+            qs = qs.select_related("proveedor", "cuenta_bancaria__moneda", "sucursal").prefetch_related(
                 Prefetch("pago_detalles", queryset=PagoDetalle.objects.select_related("cxp__factura_proveedor"))
             )
         qp = self.request.query_params

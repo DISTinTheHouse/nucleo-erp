@@ -1196,6 +1196,15 @@ class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin
         source="cuenta_bancaria.moneda.codigo_iso", read_only=True, allow_null=True
     )
     cuenta_bancaria_activo = serializers.BooleanField(source="cuenta_bancaria.activo", read_only=True)
+    # EC-874: nombre y código de la sucursal junto al id (null sin líneas).
+    sucursal_nombre = serializers.CharField(
+        source="sucursal.nombre", read_only=True, allow_null=True, default=None,
+        help_text="Nombre de la sucursal del cobro; null si aún no tiene líneas.",
+    )
+    sucursal_codigo = serializers.CharField(
+        source="sucursal.codigo", read_only=True, allow_null=True, default=None,
+        help_text="Código de la sucursal del cobro; null si aún no tiene líneas.",
+    )
 
     class Meta:
         model = Cobro
@@ -1276,6 +1285,15 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
     pago_detalles = PagoDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)
+    # EC-874: nombre y código de la sucursal junto al id (null sin líneas).
+    sucursal_nombre = serializers.CharField(
+        source="sucursal.nombre", read_only=True, allow_null=True, default=None,
+        help_text="Nombre de la sucursal del pago; null si aún no tiene líneas.",
+    )
+    sucursal_codigo = serializers.CharField(
+        source="sucursal.codigo", read_only=True, allow_null=True, default=None,
+        help_text="Código de la sucursal del pago; null si aún no tiene líneas.",
+    )
 
     class Meta:
         model = Pago
