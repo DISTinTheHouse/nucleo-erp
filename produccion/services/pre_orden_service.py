@@ -787,9 +787,10 @@ def disponibilidad(empresa_id, sucursal_id, variante_ids):
         pedido_detalle__pedido__estatus__in=[Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO],
     ).exclude(pedido_detalle__pedido_id__in=_pedidos_cubiertos(empresa_id, sucursal_id)), "variante_id", "cantidad").items():
         comprometido[k] += v
-    # Lo ya surtido por picking dejó de estar comprometido (comprometido = pedido − surtido).
-    for k, v in suma(_surtido_pedidos(empresa_id, sucursal_id).filter(pedido_detalle_talla__variante_id__in=ids),
-                     "pedido_detalle_talla__variante_id", "cantidad_surtida").items():
+    # Lo ya surtido por picking dejó de estar comprometido: pedido − surtido por
+    # talla, sin que una talla sobre-surtida compense a otra (#1247).
+    for k, v in suma(_surtido_aplicado(empresa_id, sucursal_id).filter(variante_id__in=ids),
+                     "variante_id", "aplicado").items():
         comprometido[k] = max(comprometido[k] - v, CERO)
     for k, v in suma(PreOrdenProduccionDetalle.objects.filter(
         producto_variante_id__in=ids, pre_orden__empresa_id=empresa_id, pre_orden__sucursal_id=sucursal_id,
@@ -848,8 +849,8 @@ def disponibilidad_productos(empresa_id, sucursal_id, producto_ids):
         pedido_detalle__pedido__estatus__in=[Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO],
     ).exclude(pedido_detalle__pedido_id__in=_pedidos_cubiertos(empresa_id, sucursal_id)), "variante__producto_id", "pedido_detalle__producto_id", "cantidad").items():
         comprometido[k] += v
-    for k, v in suma(_surtido_pedidos(empresa_id, sucursal_id), "pedido_detalle_talla__variante__producto_id",
-                     "pedido_detalle__producto_id", "cantidad_surtida").items():
+    for k, v in suma(_surtido_aplicado(empresa_id, sucursal_id), "variante__producto_id",
+                     "pedido_detalle__producto_id", "aplicado").items():
         comprometido[k] = max(comprometido[k] - v, CERO)
     for k, v in suma(PreOrdenProduccionDetalle.objects.filter(
         pre_orden__empresa_id=empresa_id, pre_orden__sucursal_id=sucursal_id,
@@ -886,15 +887,22 @@ def liberar_necesidades_oc(oc_id):
     return abiertas, cerradas
 
 
-def _surtido_pedidos(empresa_id, sucursal_id):
-    """Picking vivo de los pedidos que cuentan como comprometidos (mismos filtros):
-    lo surtido se resta del comprometido. Ver ``wms/api/surtido.py``."""
-    from ventas.models import Pedido
+def _surtido_aplicado(empresa_id, sucursal_id):
+    """Tallas de los pedidos que cuentan como comprometidos (mismos filtros) con
+    ``aplicado`` = ``min(pedida, surtida por picking vivo)``. Restarlo del comprometido
+    da Σ por talla de ``max(pedida − surtida, 0)``, la regla de
+    ``wms/api/surtido.py`` (#1247): lo sobre-surtido de una talla no libera otra."""
+    from django.db.models.functions import Least
     from wms.models import Picking, PickingDetalle
-    return PickingDetalle.objects.filter(
-        pedido_detalle_talla__isnull=False,
+    num = models.DecimalField(max_digits=18, decimal_places=4)
+    surtida = Coalesce(Subquery(
+        PickingDetalle.objects.filter(pedido_detalle_talla_id=OuterRef("pk"))
+        .exclude(picking__estado=Picking.Estado.CANCELADO).exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
+        .order_by().values("pedido_detalle_talla_id").annotate(t=Sum("cantidad_surtida")).values("t")[:1],
+        output_field=num,
+    ), models.Value(CERO, output_field=num), output_field=num)
+    return PedidoDetalleTalla.objects.filter(
         pedido_detalle__pedido__empresa_id=empresa_id, pedido_detalle__pedido__sucursal_id=sucursal_id,
         pedido_detalle__pedido__estatus__in=[Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO],
-    ).exclude(picking__estado=Picking.Estado.CANCELADO).exclude(
-        estado=PickingDetalle.EstadoLinea.CANCELADA,
-    ).exclude(pedido_detalle__pedido_id__in=_pedidos_cubiertos(empresa_id, sucursal_id))
+    ).exclude(pedido_detalle__pedido_id__in=_pedidos_cubiertos(empresa_id, sucursal_id)).annotate(
+        aplicado=Least(models.F("cantidad"), surtida, output_field=num))

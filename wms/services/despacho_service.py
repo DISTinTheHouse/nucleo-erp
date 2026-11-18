@@ -503,6 +503,7 @@ class DespachoService:
             existencia.save(update_fields=["cantidad"])
         mov = MovimientoInventario.objects.create(
             empresa_id=packing.empresa_id, sucursal_id=packing.sucursal_id, pedido_id=packing.pedido_id,
+            despacho=despacho,  # salida de WMS, no manual (#1250)
             tipo_movimiento=TipoMovimiento.SALIDA, usuario=user,
             observaciones=f"Despacho {despacho.pk} del pedido {packing.pedido.folio or packing.pedido_id}"[:150],
         )

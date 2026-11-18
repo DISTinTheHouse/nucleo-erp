@@ -2517,3 +2517,125 @@ class DocumentosWmsClienteTests(TestCase):
                 {fila["pedido_vinculado"]["cliente"]["nombre"] for fila in cuerpos[recurso]},
                 {self.d["cliente"].nombre, "Otro cliente"},
             )
+
+
+SURTIDO_URL = "/api/v1/wms/surtido-pedidos/"
+
+
+class SurtidoPedidosTests(TestCase):
+    """``/api/v1/wms/surtido-pedidos/`` (#1223) y la resta de surtido en
+    ``disponibilidad`` (#1251). Reglas en el docstring de ``wms/api/surtido.py``.
+
+    Fixture ``_documentos_wms``: pedido con una talla de catálogo (2 pzas, 2
+    surtidas y empacadas) y una de muestra (1 pza, 1 surtida y empacada).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.d = _documentos_wms("srt")
+        cls.otra = _documentos_wms("srt2")
+
+    def setUp(self):
+        self.api = _api_de(self.d["usuario"])
+
+    def _detalle(self):
+        r = self.api.get(f"{SURTIDO_URL}{self.d['pedido'].pk}/")
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.data
+
+    def _suma(self, data, campo):
+        return sum((Decimal(str(x[campo])) for x in data["renglones"]), Decimal("0"))
+
+    def test_encabezado_igual_a_la_suma_de_renglones(self):
+        data = self._detalle()
+        for campo in ("pedidas", "surtidas", "comprometidas", "empacadas", "despachadas"):
+            self.assertEqual(Decimal(str(data[campo])), self._suma(data, campo), campo)
+        self.assertEqual(data["etapa"], "SURTIDO")
+
+    def test_picking_sin_talla_no_cuenta(self):
+        """#1246: un renglón de picking sin ``pedido_detalle_talla`` no suma al encabezado."""
+        from wms.models import PickingDetalle
+
+        PickingDetalle.objects.create(
+            picking=self.d["picking"], pedido_detalle=self.d["pk_catalogo"].pedido_detalle,
+            pedido_detalle_talla=None, cantidad_solicitada=5, cantidad_surtida=5,
+        )
+        data = self._detalle()
+        self.assertEqual(Decimal(str(data["surtidas"])), Decimal("3"))
+        self.assertEqual(Decimal(str(data["surtidas"])), self._suma(data, "surtidas"))
+
+    def test_talla_sobre_surtida_no_compensa_a_otra(self):
+        """#1247: comprometido del pedido = Σ por talla de max(pedida − surtida, 0)."""
+        from wms.models import PickingDetalle
+
+        PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(cantidad_surtida=5)  # 2 pedidas
+        PickingDetalle.objects.filter(pk=self.d["pk_muestra"].pk).update(cantidad_surtida=0)  # 1 pedida
+        data = self._detalle()
+        self.assertEqual(Decimal(str(data["comprometidas"])), Decimal("1"))
+        self.assertEqual(self._suma(data, "comprometidas"), Decimal("1"))
+        r = self.api.get(SURTIDO_URL, {"pendientes": "1"})
+        self.assertIn(self.d["pedido"].pk, [x["id"] for x in r.data["results"]])
+
+    def test_muestra_trae_nombre_externo(self):
+        """#1248."""
+        from ventas.models import PedidoDetalle
+
+        PedidoDetalle.objects.filter(pk=self.d["pk_muestra"].pedido_detalle_id).update(producto_nombre_externo="Bata muestra")
+        renglon = next(x for x in self._detalle()["renglones"] if x["pedido_detalle_id"] == self.d["pk_muestra"].pedido_detalle_id)
+        self.assertEqual(renglon["producto_nombre"], "Bata muestra")
+        self.assertEqual(renglon["producto_nombre_externo"], "Bata muestra")
+
+    def test_salidas_manuales_netas_activas_y_sin_despacho(self):
+        """#1249 / #1250."""
+        from inventarios.models import MovimientoInventario, MovimientoInventarioDetalle
+        from wms.models import Despacho
+
+        comun = dict(empresa=self.d["empresa"], sucursal=self.d["sucursal"], pedido=self.d["pedido"], usuario=self.d["usuario"])
+        salida = MovimientoInventario.objects.create(tipo_movimiento="SALIDA", **comun)
+        MovimientoInventarioDetalle.objects.create(movimiento_inventario=salida, cantidad=5)
+        self.assertEqual(Decimal(str(self._detalle()["salidas_manuales"])), Decimal("5"))
+        entrada = MovimientoInventario.objects.create(tipo_movimiento="ENTRADA", **comun)
+        MovimientoInventarioDetalle.objects.create(movimiento_inventario=entrada, cantidad=2)
+        self.assertEqual(Decimal(str(self._detalle()["salidas_manuales"])), Decimal("3"))
+        MovimientoInventario.objects.filter(pk=salida.pk).update(activo=False)
+        self.assertEqual(Decimal(str(self._detalle()["salidas_manuales"])), Decimal("0"))  # piso en 0
+        despacho = Despacho.objects.create(packing=self.d["packing"])
+        MovimientoInventario.objects.filter(pk=salida.pk).update(activo=True, despacho=despacho)
+        self.assertEqual(Decimal(str(self._detalle()["salidas_manuales"])), Decimal("0"))
+
+    def test_filtros_y_validaciones(self):
+        self.assertEqual(self.api.get(SURTIDO_URL, {"sucursal": "²"}).status_code, 400)  # #1252
+        self.assertEqual(self.api.get(SURTIDO_URL, {"sucursal": "x"}).status_code, 400)
+        self.assertEqual(self.api.get(SURTIDO_URL, {"estatus": "a,b"}).status_code, 400)
+        r = self.api.get(SURTIDO_URL, {"q": self.d["pedido"].folio, "sucursal": self.d["sucursal"].pk})
+        self.assertEqual([x["id"] for x in r.data["results"]], [self.d["pedido"].pk])
+
+    def test_alcance_multi_tenant(self):
+        r = self.api.get(SURTIDO_URL, {"estatus": "todos"})
+        self.assertNotIn(self.otra["pedido"].pk, [x["id"] for x in r.data["results"]])
+        self.assertEqual(self.api.get(f"{SURTIDO_URL}{self.otra['pedido'].pk}/").status_code, 404)
+
+    def test_consultas_constantes_por_pagina(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as una:
+            self.api.get(SURTIDO_URL, {"estatus": "todos"})
+        _documentos_wms("srt3")
+        from ventas.models import Pedido
+
+        Pedido.objects.filter(folio="P-srt3").update(empresa=self.d["empresa"])
+        with CaptureQueriesContext(connection) as dos:
+            self.api.get(SURTIDO_URL, {"estatus": "todos"})
+        self.assertEqual(len(una), len(dos))
+
+    def test_disponibilidad_resta_lo_surtido_sin_negativos(self):
+        from produccion.services.pre_orden_service import disponibilidad
+        from wms.models import PickingDetalle
+
+        variante = self.d["variante"].pk
+        base = disponibilidad(self.d["empresa"].pk, self.d["sucursal"].pk, [variante])[variante]
+        self.assertEqual(base["comprometido"], Decimal("0"))  # 2 pedidas, 2 surtidas
+        PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(cantidad_surtida=9)
+        sobre = disponibilidad(self.d["empresa"].pk, self.d["sucursal"].pk, [variante])[variante]
+        self.assertEqual(sobre["comprometido"], Decimal("0"))
