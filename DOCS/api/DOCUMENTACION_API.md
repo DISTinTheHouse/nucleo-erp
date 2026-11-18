@@ -2159,6 +2159,36 @@ En qué paso va el pedido, cuánto lleva y si va a tiempo. Todo se calcula en el
   - `facturado_pct`: piezas en facturas emitidas.
 - **Semáforo** (plazo = `fecha_confirmacion` → `fecha_compromiso`): rojo si ya venció o el avance va 30+ puntos atrás del plazo consumido; amarillo si va 10+ puntos atrás, hay una orden detenida, o quedan piezas sin orden de trabajo con más del 25% del plazo consumido; si no, verde.
 - **Uso en Next.js**: una sola llamada. Tracker = `pasos.map(...)` (color por `estado`), semáforo = `resumen.semaforo` + `resumen.motivos`, y al expandir Maquila, `procesos[].ordenes[]` (cada orden se abre en su detalle por `tipo` + `id`).
+- **Facturado y cobrado** solo cuentan las facturas de la empresa del pedido: una factura de otra empresa que apunta al pedido (dato legado, #1203) se ignora.
+
+### Documentos del pedido (vista 360)
+
+Cada documento que nació del pedido, para la pestaña "Documentos" del detalle. Endpoint aparte de `trazabilidad/` para no hacerla más lenta: pedirlo al abrir la pestaña.
+
+- **Endpoint**: `GET /api/v1/ventas/pedidos/{id}/documentos/`
+- Solo lectura. Mismo alcance que `trazabilidad/` (`404` para un pedido de otra empresa). Cada bloque, además, solo trae documentos de la empresa del pedido (EC-916).
+- Número fijo de consultas, sin importar cuántos documentos tenga el pedido.
+- **Respuesta** (`200`), siempre con las 8 llaves; una lista vacía es "sin registros":
+  ```json
+  {
+    "pre_ordenes": [{ "id": 3, "origen": "pedido", "estatus": "pendiente_validar", "op_id": null, "created_at": "...", "op_folio": null }],
+    "salidas_maquila": [{ "id": 7, "folio": "SM-00007", "estatus": "ENVIADA", "fecha_envio": "2026-11-10", "fecha_recepcion": null,
+                          "total_piezas": "120.00", "total": null, "centro_confeccion_nombre": "Maquila SA",
+                          "op_folio": null, "ob_folio": "OB-00045", "or_folio": null }],
+    "pickings": [{ "id": 93, "folio": "PICK-000029", "estado": "Completado", "almacen_actual": "APARTADOS" }],
+    "movimientos_inventario": [{ "id": 501, "tipo_movimiento": "TRANSFERENCIA", "fecha_movimiento": "...", "observaciones": "...",
+                                 "transferencia_folio": "TR-00014", "origen": "PT", "destino": "APARTADOS" }],
+    "despachos": [{ "id": 12, "guia": "GUIA-1", "envio_id": null, "packing_folio": "PACK-00012" }],
+    "envios": [{ "id": 4, "transportista_id": 2 }],
+    "facturas": [{ "id": 34, "folio": "FAC-00028", "estatus": "Emitida", "fecha_emision": "2026-11-12", "total": "1160.00", "moneda_codigo": "MXN" }],
+    "cobros": [{ "cobro_id": 9, "importe_aplicado": "500.00", "folio": "COB-00009", "estatus": "Aplicado", "fecha": "2026-11-15",
+                 "factura_folio": "FAC-00028", "moneda_codigo": "MXN" }]
+  }
+  ```
+- **`facturas` / `cobros`**: `null` si el usuario no puede ver contabilidad (`puede_ver_contabilidad`): ocultar esas secciones. Facturas activas; cobros activos y no cancelados aplicados a ellas. `moneda_codigo` es el código ISO (en un cobro sin moneda, la de su cuenta bancaria).
+- **`salidas_maquila[].total`**: `null` sin `R-PRODUCCION-COSTOS` (mismo permiso que `GET /produccion/salidas-maquila/`). Es el total del documento SM, que puede cubrir más de un pedido; no es la parte de este pedido.
+- **`movimientos_inventario`**: los ligados al pedido (p. ej. la salida del despacho) y los de las transferencias (TR) de sus pickings, alta y cada traslado, por `Transferencia.picking` (EC-916). Una TR manual nunca aparece aunque su texto mencione un picking.
+- **`envios`**: el modelo no guarda transportista con nombre, guía ni fecha; la guía está en `despachos[].guia`.
 
 ---
 
