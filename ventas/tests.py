@@ -5502,6 +5502,8 @@ class PedidoDocumentosTests(TestCase):
         for bloque in ("pre_ordenes", "salidas_maquila", "pickings", "despachos", "envios"):
             self.assertEqual(len(data[bloque]), 1, bloque)
         self.assertEqual(data["despachos"][0]["guia"], "GUIA-1")
+        self.assertEqual(data["despachos"][0]["packing_id"], packing.pk)  # EC-920
+        self.assertEqual(data["despachos"][0]["packing_folio"], packing.folio)
 
     def test_detalle_del_pedido_no_lista_documentos_de_otra_empresa(self):
         """``documentos[]`` de ``GET /pedidos/{id}/`` (la lista que hoy pinta el

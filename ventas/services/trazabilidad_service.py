@@ -653,7 +653,7 @@ def documentos_pedido(pedido, con_finanzas=True, con_costos=True, user=None):
     )
     despachos = _lista(
         Despacho.objects.filter(packing__pedido_id=pk, packing__empresa_id=empresa_id).order_by("id"),
-        "id", "guia", "envio_id", packing_folio=F("packing__folio"),
+        "id", "guia", "envio_id", "packing_id", packing_folio=F("packing__folio"),
     )
     envios = _lista(Envio.objects.filter(pedido_id=pk, empresa_id=empresa_id).order_by("id"), "id", "transportista_id")
     facturas = cobros = None  # sin permiso de contabilidad: null
