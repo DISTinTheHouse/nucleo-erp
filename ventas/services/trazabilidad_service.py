@@ -566,13 +566,15 @@ def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
     from inventarios.models import MovimientoInventario
     from wms.models import Despacho, Picking
 
+    # Cada bloque, además, de la empresa del pedido (EC-916): las escrituras ya lo
+    # validan, esto evita que un dato legado de otra empresa se cuele en la lectura.
     pk, empresa_id = pedido.pk, pedido.empresa_id
     pre_ordenes = _lista(
-        PreOrdenProduccion.objects.filter(Q(pedido_id=pk) | Q(pedidos=pk)).distinct().order_by("id"),
+        PreOrdenProduccion.objects.filter(Q(pedido_id=pk) | Q(pedidos=pk), empresa_id=empresa_id).distinct().order_by("id"),
         "id", "origen", "estatus", "op_id", "created_at", op_folio=F("op__folio_op"),
     )
     salidas_maquila = _lista(
-        SalidaMaquila.objects.filter(activo=True).filter(
+        SalidaMaquila.objects.filter(activo=True, empresa_id=empresa_id).filter(
             Q(op__op_pedidos__pedido_id=pk) | Q(ob__pedido_id=pk) | Q(orden_r__pedido_id=pk)
         ).distinct().order_by("id"),
         "id", "folio", "estatus", "fecha_envio", "fecha_recepcion", "total_piezas", "total",
@@ -583,7 +585,7 @@ def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
         for fila in salidas_maquila:
             fila["total"] = None
     pickings = list(
-        Picking.objects.filter(pedido_id=pk).select_related("almacen", "almacen_destino", "transferencia")
+        Picking.objects.filter(pedido_id=pk, empresa_id=empresa_id).select_related("almacen", "almacen_destino", "transferencia")
         .order_by("id")
     )
     filas_picking = [
@@ -608,10 +610,10 @@ def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
         destino=F("transferencia__almacen_destino__nombre"),
     )
     despachos = _lista(
-        Despacho.objects.filter(packing__pedido_id=pk).order_by("id"),
+        Despacho.objects.filter(packing__pedido_id=pk, packing__empresa_id=empresa_id).order_by("id"),
         "id", "guia", "envio_id", packing_folio=F("packing__folio"),
     )
-    envios = _lista(Envio.objects.filter(pedido_id=pk).order_by("id"), "id", "transportista_id")
+    envios = _lista(Envio.objects.filter(pedido_id=pk, empresa_id=empresa_id).order_by("id"), "id", "transportista_id")
     facturas = cobros = None  # sin permiso de contabilidad: null
     if con_finanzas:
         facturas, cobros = _facturas_y_cobros(pedido)
