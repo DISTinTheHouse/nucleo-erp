@@ -5592,6 +5592,36 @@ class PedidoDocumentosTests(TestCase):
             self._data(pedido)
         self.assertEqual(len(uno), len(varios))
 
+    def test_consultas_no_crecen_para_un_usuario_no_admin(self):
+        """Mismo control para el caso común: no admin, con contabilidad por
+        departamento (CONTAVENTAS) y ``R-PRODUCCION-COSTOS`` por rol, que sí resuelve
+        sus permisos en la petición."""
+        rol = Rol.objects.create(
+            empresa=self.empresa, codigo="conta-ventas-doc", nombre="Conta ventas",
+            estatus=Rol.Estatus.ACTIVO, clave_departamento="CONTAVENTAS",
+        )
+        _con_claves(rol, ["R-PRODUCCION-COSTOS"])
+        conta = Usuario.objects.create(
+            username="conta@acme.test", email="conta@acme.test",
+            empresa=self.empresa, sucursal_default=self.sucursal,
+        )
+        UsuarioRol.objects.create(usuario=conta, rol=rol, empresa=self.empresa)
+
+        pedido = self._pedido(lleva_bordado=True)
+        self._cobro(self._factura(pedido))
+        self._sm(pedido)
+        with CaptureQueriesContext(connection) as uno:
+            data = self._data(pedido, conta)
+        self.assertIsNotNone(data["facturas"])
+        self.assertIsNotNone(data["salidas_maquila"][0]["total"])
+        for _ in range(3):
+            self._tr(picking=self._picking(pedido))
+            self._cobro(self._factura(pedido))
+            self._sm(pedido)
+        with CaptureQueriesContext(connection) as varios:
+            self._data(pedido, conta)
+        self.assertEqual(len(uno), len(varios))
+
 
 class PedidoDetalleSkuBaseTests(TestCase):
     """``sku_base`` de cada renglón en ``GET /pedidos/{id}/``.
