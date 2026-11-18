@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.services.cobro_poliza_service import CobroPolizaService
+from finanzas.scope import exigir_sucursal_unica
 from finanzas.utils.folios import generate_cobro_folio
 from finanzas.models import (
     Cobro,
@@ -115,13 +116,9 @@ class CobroService:
 
         # EC-874: un cobro aplicado es de una sola sucursal, la de sus facturas. La vista
         # ya la fijó; aquí se garantiza que no se aplique sin ella ni con otra.
-        sucursales = {cxc.factura.sucursal_id for cxc in cxcs.values()}
-        if len(sucursales) > 1:
-            raise ErrorDeNegocio({"sucursal": "Las facturas son de varias sucursales: haz un cobro por sucursal."})
-        if cobro.sucursal_id is None:
-            raise ErrorDeNegocio({"sucursal": "El cobro no tiene sucursal: vuelve a capturar sus líneas."})
-        if sucursales != {cobro.sucursal_id}:
-            raise ErrorDeNegocio({"sucursal": "La sucursal del cobro no coincide con la de sus facturas."})
+        exigir_sucursal_unica(
+            cobro.sucursal_id, [cxc.factura.sucursal_id for cxc in cxcs.values()], documento="cobro", requerida=True,
+        )
 
         # #644: el folio se consume al aplicar (no en Borrador), con la serie COBROS de
         # la sucursal del cobro (EC-874). Sin serie no se aplica (#662) y un folio

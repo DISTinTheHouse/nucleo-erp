@@ -112,7 +112,15 @@ from finanzas.services.factura_poliza_service import FacturaPolizaService
 from finanzas.services.factura_proveedor_poliza_service import FacturaProveedorPolizaService
 from finanzas.services.poliza_service import PolizaService
 from finanzas.services.reporte_contable_service import LIMITE_OMISION, ReporteContableService
-from finanzas.scope import cobros_por_sucursal, exigir_factura_visible, por_sucursal, resolver_sucursal_documento, sucursales_visibles
+from finanzas.scope import (
+    cobros_por_sucursal,
+    exigir_factura_visible,
+    por_sucursal,
+    resolver_sucursal_documento,
+    sucursales_de_cxcs,
+    sucursales_de_cxps,
+    sucursales_visibles,
+)
 from finanzas.utils.folios import generate_factura_folio
 from nucleo.kpis import entero_estricto
 from nucleo.models import Moneda, Sucursal
@@ -2055,11 +2063,7 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
     def _sucursal(user, empresa, enviada, detalles_data):
         """La de las facturas de las líneas (EC-874), en una sola consulta."""
         cxc_ids = [d["cxc"].pk for d in detalles_data if d.get("cxc") is not None]
-        sucursales = (
-            CuentaPorCobrar.objects.filter(pk__in=cxc_ids).values_list("factura__sucursal_id", flat=True)
-            if cxc_ids else []
-        )
-        return resolver_sucursal_documento(empresa, enviada, sucursales, documento="cobro", user=user)
+        return resolver_sucursal_documento(empresa, enviada, sucursales_de_cxcs(cxc_ids), documento="cobro", user=user)
 
     @staticmethod
     def _guardar_detalles(cobro, detalles_data):
@@ -2245,10 +2249,7 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         # EC-874: la de las facturas de proveedor de las líneas, en una consulta. Sin
         # ``user``: los pagos van por empresa, como las CxP.
         sucursal = resolver_sucursal_documento(
-            empresa, serializer.validated_data.pop("sucursal", None),
-            CuentaPorPagar.objects.filter(pk__in=cxp_ids).values_list("factura_proveedor__sucursal_id", flat=True)
-            if cxp_ids else [],
-            documento="pago",
+            empresa, serializer.validated_data.pop("sucursal", None), sucursales_de_cxps(cxp_ids), documento="pago",
         )
         pago = serializer.save(empresa=empresa, sucursal=sucursal)
         for d in detalles_data:
