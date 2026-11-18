@@ -69,6 +69,16 @@ def _primer_texto(*valores):
     return None if valores[-1] is None else ""
 
 
+def pedido_de_la_factura(factura):
+    """El pedido de la factura, o ``None`` si no tiene o es de otra empresa
+    (datos previos al candado de escritura): ese no se lee. Lo usan el timbrado
+    (#1203), ``desglose/`` y el detalle, para que el CFDI y la pantalla coincidan."""
+    pedido = factura.pedido
+    if pedido is not None and pedido.empresa_id != factura.empresa_id:
+        return None
+    return pedido
+
+
 def receptor_fiscal(pedido, cliente):
     """Datos fiscales del receptor de una factura (EC-904): los que el pedido congeló
     al capturarse y, si vienen vacíos, los del ``Cliente``. El uso de CFDI es el del
@@ -76,8 +86,8 @@ def receptor_fiscal(pedido, cliente):
 
     Es la regla del timbrado (``_receptor``) y la misma que muestran ``desglose/`` y el
     detalle de la factura, para que el PDF no se separe de lo timbrado. ``pedido``
-    lo elige quien llama: el timbrado usa ``factura.pedido``; ``desglose/`` y el
-    detalle ignoran uno de otra empresa.
+    lo elige quien llama con ``pedido_de_la_factura`` (timbrado, ``desglose/`` y el
+    detalle), que ignora uno de otra empresa.
     """
     uso_pedido = _texto(getattr(pedido, "uso_cfdi", None))
     return ReceptorFiscal(
@@ -91,7 +101,7 @@ def receptor_fiscal(pedido, cliente):
 
 
 def _receptor(factura, errores):
-    datos = receptor_fiscal(factura.pedido, factura.cliente)
+    datos = receptor_fiscal(pedido_de_la_factura(factura), factura.cliente)
     rfc, nombre, regimen = _texto(datos.rfc), _texto(datos.razon_social), datos.regimen
     cp, uso = _texto(datos.codigo_postal), datos.uso_cfdi
 
@@ -204,7 +214,7 @@ def _conceptos(factura, errores):
 def construir_payload_cfdi(factura):
     """Payload de Facturama; levanta ``ErrorDeNegocio`` con todos los faltantes juntos."""
     errores = {}
-    pedido = factura.pedido
+    pedido = pedido_de_la_factura(factura)
 
     lugar = _texto(factura.sucursal.cp)
     if not CP_RE.match(lugar):
@@ -322,7 +332,7 @@ def construir_payload_rep(cobro):
         })
 
     factura = detalles[0].cxc.factura if detalles else None
-    rfcs = {_texto(receptor_fiscal(d.cxc.factura.pedido, d.cxc.factura.cliente).rfc).upper() for d in detalles}
+    rfcs = {_texto(receptor_fiscal(pedido_de_la_factura(d.cxc.factura), d.cxc.factura.cliente).rfc).upper() for d in detalles}
     if len(rfcs) > 1:  # #582: un REP tiene un solo receptor
         errores["receptor"] = "Las facturas del cobro tienen distinto RFC receptor: haz un cobro por receptor."
     receptor = _receptor(factura, errores) if factura else {}
@@ -399,7 +409,7 @@ def construir_payload_nota_credito(nota):
         errores["factura"] = f"La factura {factura.folio} no está timbrada."
     if (nota.total or 0) <= 0:
         errores["total"] = "La nota debe tener un total mayor a 0."
-    forma = _texto(getattr(factura.pedido, "forma_pago", None))
+    forma = _texto(getattr(pedido_de_la_factura(factura), "forma_pago", None))
     if not forma:
         errores["forma_pago"] = "El pedido de la factura no tiene forma de pago."
     lugar = _texto(factura.sucursal.cp)

@@ -7,7 +7,7 @@ from django.db.models import Sum
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import Factura, FacturaDetalle
-from finanzas.services.facturama.cfdi_payload import receptor_fiscal
+from finanzas.services.facturama.cfdi_payload import pedido_de_la_factura, receptor_fiscal
 from finanzas.services.factura_inventario_service import FacturaInventarioService
 from finanzas.utils.folios import TIPOS_DOCUMENTO_FACTURA, generate_factura_folio
 from nucleo.models import SerieFolio
@@ -133,11 +133,9 @@ class FacturaService:
     @staticmethod
     def pedido_de_la_factura(factura):
         """El pedido de la factura, o ``None`` si no tiene o es de otra empresa
-        (datos previos al candado de escritura): ese no se lee."""
-        pedido = factura.pedido
-        if pedido is not None and pedido.empresa_id != factura.empresa_id:
-            return None
-        return pedido
+        (datos previos al candado de escritura): ese no se lee. Misma regla
+        que el timbrado (#1203)."""
+        return pedido_de_la_factura(factura)
 
     @staticmethod
     def datos_fiscales(factura, pedido):

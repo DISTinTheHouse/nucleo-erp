@@ -826,12 +826,21 @@ class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSeri
         # Si la OP tiene ``pedido`` (el del body o, en PATCH, el de la
         # instancia), cada ``pedido_detalle`` de sus renglones debe ser de ESE
         # pedido. La empresa del renglón ya la validó el serializer hijo. Sin
-        # ``pedido`` en la OP no se exige nada más: rechazar o no esa
-        # combinación es una decisión de negocio pendiente.
+        # ``pedido`` en la OP, un renglón ligado a una línea de pedido (muestra)
+        # se rechaza (#1178): bloqueaba ese pedido en Mesa de Control sin que la
+        # OP apareciera en él.
         pedido = attrs['pedido'] if 'pedido' in attrs else getattr(self.instance, 'pedido', None)
         # Varios pedidos: sin principal explícito, el principal es el primero.
         if pedido is None and attrs.get('pedidos_ids'):
             pedido = attrs['pedido'] = attrs['pedidos_ids'][0]
+        if pedido is None:
+            sueltos = [
+                {'pedido_detalle': ['Este renglón es de un pedido: liga la orden de producción a ese pedido.']}
+                if renglon.get('pedido_detalle') is not None else {}
+                for renglon in attrs.get('orden_produccion_detalle', [])
+            ]
+            if any(sueltos):
+                raise serializers.ValidationError({'orden_produccion_detalle': sueltos})
         if pedido is not None:
             # Pedidos de la OP tras este request: los del body o, sin
             # ``pedidos_ids``, los ya ligados (consulta solo si hace falta).
