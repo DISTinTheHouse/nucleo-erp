@@ -41,6 +41,7 @@ from produccion.models import (
     OrdenBordadoDetalle,
     OrdenesBordado,
     OrdenesCorteManga,
+    OrdenesReflejante,
     OrdenProduccion,
     OrdenProduccionPedido,
     OrdenProduccionRutaCritica,
@@ -61,6 +62,7 @@ from ventas.models import (
     PedidoDetalleTalla,
     PedidoServicioExtra,
 )
+from ventas.services.trazabilidad_service import BLOQUES_DE_PEDIDO_DOCUMENTOS
 from ventas.servicios_bordado import TipoServicioBordado, validar_tipos_servicio_array
 from ventas.utils.helpers import _save_cotizacion_detalle
 
@@ -5501,6 +5503,8 @@ class PedidoDocumentosTests(TestCase):
         for bloque in ("pre_ordenes", "salidas_maquila", "pickings", "despachos", "envios"):
             self.assertEqual(len(data[bloque]), 1, bloque)
         self.assertEqual(data["despachos"][0]["guia"], "GUIA-1")
+        self.assertEqual(data["despachos"][0]["packing_id"], packing.pk)  # EC-920
+        self.assertEqual(data["despachos"][0]["packing_folio"], packing.folio)
 
     def test_detalle_del_pedido_no_lista_documentos_de_otra_empresa(self):
         """``documentos[]`` de ``GET /pedidos/{id}/`` (la lista que hoy pinta el
@@ -5549,7 +5553,9 @@ class PedidoDocumentosTests(TestCase):
 
     # --- forma y rendimiento -------------------------------------------------
 
-    def test_contrato_solo_suma_moneda_codigo(self):
+    def test_contrato_solo_agrega_llaves(self):
+        """EC-916 sumó ``moneda_codigo``; EC-920, los bloques de ``pedido.documentos``
+        al final. Las llaves que ya existían no cambian."""
         pedido = self._pedido(lleva_bordado=True)
         picking = self._picking(pedido)
         self._tr(picking=picking)
@@ -5559,7 +5565,8 @@ class PedidoDocumentosTests(TestCase):
         self.assertEqual(
             list(data),
             ["pre_ordenes", "salidas_maquila", "pickings", "movimientos_inventario", "despachos",
-             "envios", "facturas", "cobros"],
+             "envios", "facturas", "cobros", "cotizaciones", "ordenes_compra", "ordenes_produccion",
+             "ordenes_bordado", "ordenes_reflejante", "ordenes_corte_manga", "packings"],
         )
         self.assertEqual(
             set(data["facturas"][0]), {"id", "folio", "estatus", "fecha_emision", "total", "moneda_codigo"},
@@ -5620,6 +5627,227 @@ class PedidoDocumentosTests(TestCase):
             self._sm(pedido)
         with CaptureQueriesContext(connection) as varios:
             self._data(pedido, conta)
+        self.assertEqual(len(uno), len(varios))
+
+    # --- bloques que ya lista ``pedido.documentos`` (EC-920) -----------------
+
+    #: ``{bloque: tipo}``, el mismo mapa del servicio.
+    _BLOQUES_EC920 = dict(BLOQUES_DE_PEDIDO_DOCUMENTOS)
+
+    def _documentos_de_produccion_y_compras(self, pedido, empresa=None, sucursal=None, **extra):
+        """Cotización, OC, OP (principal y ligada por ``pedidos_ids``), OB, OR,
+        OCM y packing del pedido, en ``empresa``/``sucursal``. ``{bloque: [ids]}``."""
+        from compras.models import OrdenCompra
+
+        empresa = empresa or self.empresa
+        b = empresa == self.empresa_b
+        sucursal = sucursal or (self.sucursal_b if b else self.sucursal)
+        base = {"empresa": empresa, "sucursal": sucursal, **extra}
+        # Cotización y packing no tienen ``activo``: ``extra`` solo va a las órdenes.
+        cotizacion = Cotizacion.objects.create(
+            empresa=empresa, sucursal=sucursal, cliente=self.cliente_b if b else self.cliente,
+            moneda=self.moneda, vendedor=self.usuario,
+        )
+        Pedido.objects.filter(pk=pedido.pk).update(cotizacion=cotizacion)
+        oc = OrdenCompra.objects.create(
+            moneda=self.moneda, usuario=self.usuario, fecha_oc=timezone.localdate(), pedido=pedido,
+            folio=self._siguiente("OC"), total=Decimal("999"), **base,
+        )
+        op = OrdenProduccion.objects.create(pedido=pedido, folio_op=self._siguiente("OP"), **base)
+        OrdenProduccionPedido.objects.create(op=op, pedido=pedido)
+        # OP de otro pedido que también cubre a éste (#1086).
+        op_ligada = OrdenProduccion.objects.create(folio_op=self._siguiente("OP"), **base)
+        OrdenProduccionPedido.objects.create(op=op_ligada, pedido=pedido)
+        ob = OrdenesBordado.objects.create(pedido=pedido, folio_bordado=self._siguiente("OB"), **base)
+        orden_r = OrdenesReflejante.objects.create(
+            pedido=pedido, folio_reflejante=self._siguiente("OR"), **base,
+        )
+        ocm = OrdenesCorteManga.objects.create(pedido=pedido, folio_ocm=self._siguiente("OCM"), **base)
+        picking = Picking.objects.create(
+            folio=self._siguiente("PK"), pedido=pedido, operador=self.usuario, usuario=self.usuario,
+            almacen=self.almacen_b if b else self.almacen, empresa=empresa, sucursal=sucursal,
+        )
+        packing = Packing.objects.create(
+            folio=self._siguiente("PA"), pedido=pedido, picking=picking, operador=self.usuario,
+            usuario=self.usuario, empresa=empresa, sucursal=sucursal,
+        )
+        return {
+            "cotizaciones": [cotizacion.pk],
+            "ordenes_compra": [oc.pk],
+            "ordenes_produccion": sorted([op.pk, op_ligada.pk]),
+            "ordenes_bordado": [ob.pk],
+            "ordenes_reflejante": [orden_r.pk],
+            "ordenes_corte_manga": [ocm.pk],
+            "packings": [packing.pk],
+        }
+
+    def _ids(self, data):
+        return {bloque: [fila["id"] for fila in data[bloque]] for bloque in self._BLOQUES_EC920}
+
+    def _detalle_documentos(self, pedido, user):
+        """``{bloque: [ids]}`` de ``pedido.documentos`` en ``GET /pedidos/{id}/``."""
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get(f"/api/v1/ventas/pedidos/{pedido.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        por_tipo = {tipo: bloque for bloque, tipo in self._BLOQUES_EC920.items()}
+        ids = {bloque: [] for bloque in self._BLOQUES_EC920}
+        for doc in resp.json()["documentos"]:
+            if doc["tipo"] in por_tipo:
+                ids[por_tipo[doc["tipo"]]].append(doc["id"])
+        return {bloque: sorted(v) for bloque, v in ids.items()}
+
+    def test_bloques_de_pedido_documentos_propios(self):
+        pedido = self._pedido()
+        esperados = self._documentos_de_produccion_y_compras(pedido)
+        data = self._data(pedido)
+        self.assertEqual(self._ids(data), esperados)
+        ob = data["ordenes_bordado"][0]
+        self.assertEqual(ob["estatus"], OrdenesBordado.EstatusBordado.SIN_TRABAJAR)
+        self.assertEqual(ob["estatus_label"], OrdenesBordado.EstatusBordado.SIN_TRABAJAR.label)
+        self.assertTrue(ob["folio"].startswith("OB-"))
+        self.assertIsNotNone(ob["fecha"])
+        self.assertEqual(data["ordenes_compra"][0]["fecha"], timezone.localdate().isoformat())
+        self.assertIsNone(data["cotizaciones"][0]["folio"])  # el modelo no tiene folio
+
+    def test_bloques_de_pedido_documentos_sin_importes(self):
+        """La pestaña no necesita montos: ningún bloque nuevo los trae, ni para
+        el admin (EC-784)."""
+        pedido = self._pedido()
+        self._documentos_de_produccion_y_compras(pedido)
+        data = self._data(pedido)
+        for bloque in self._BLOQUES_EC920:
+            self.assertEqual(set(data[bloque][0]), {"id", "folio", "estatus", "estatus_label", "fecha"}, bloque)
+
+    def test_bloques_de_pedido_documentos_de_otra_empresa_no_aparecen(self):
+        """Datos legados de B ligados al pedido de A por cualquier camino (FK
+        del documento, cotización del pedido, ``OrdenProduccionPedido``)."""
+        pedido = self._pedido()
+        self._documentos_de_produccion_y_compras(pedido, empresa=self.empresa_b)
+        data = self._data(pedido)
+        for bloque in self._BLOQUES_EC920:
+            self.assertEqual(data[bloque], [], bloque)
+
+    def test_bloques_de_pedido_documentos_inactivos_no_aparecen(self):
+        pedido = self._pedido()
+        self._documentos_de_produccion_y_compras(pedido, activo=False)
+        data = self._data(pedido)
+        for bloque in ("ordenes_compra", "ordenes_produccion", "ordenes_bordado",
+                       "ordenes_reflejante", "ordenes_corte_manga"):
+            self.assertEqual(data[bloque], [], bloque)
+
+    def test_bloques_iguales_a_pedido_documentos(self):
+        """Misma relación y mismo alcance que ``pedido.documentos``, para el
+        admin y para un usuario sin acceso a la otra sucursal: las órdenes de
+        bordado/reflejante/corte y el packing de esa sucursal no le salen en
+        ninguno de los dos (#536). Una OC ligada solo por ``pedidos`` (M2M) sigue
+        la misma regla que el detalle."""
+        from compras.models import OrdenCompra
+
+        otra_sucursal = Sucursal.objects.create(empresa=self.empresa, codigo="CDMX", nombre="CDMX")
+        pedido = self._pedido()
+        propios = self._documentos_de_produccion_y_compras(pedido)
+        ajenos = self._documentos_de_produccion_y_compras(pedido, sucursal=otra_sucursal)
+        OrdenCompra.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, moneda=self.moneda, usuario=self.usuario,
+            fecha_oc=timezone.localdate(), folio=self._siguiente("OC"),
+        ).pedidos.add(pedido)
+        for user in (self.admin, self.usuario):
+            self.assertEqual(self._ids(self._data(pedido, user)), self._detalle_documentos(pedido, user))
+        sin_otra_sucursal = self._ids(self._data(pedido, self.usuario))
+        con_todas = self._ids(self._data(pedido, self.admin))
+        for bloque in ("ordenes_bordado", "ordenes_reflejante", "ordenes_corte_manga", "packings"):
+            self.assertEqual(sin_otra_sucursal[bloque], propios[bloque], bloque)
+            self.assertEqual(con_todas[bloque], sorted(propios[bloque] + ajenos[bloque]), bloque)
+
+    def test_superusuario_con_empresa_activa(self):
+        """Superusuario: la empresa activa, todas sus sucursales; nada de B, y
+        un pedido de B es 404."""
+        superuser = Usuario.objects.create(
+            username="root@acme.test", email="root@acme.test", empresa=self.empresa, is_superuser=True,
+        )
+        otra_sucursal = Sucursal.objects.create(empresa=self.empresa, codigo="CDMX", nombre="CDMX")
+        pedido = self._pedido()
+        self._documentos_de_produccion_y_compras(pedido, empresa=self.empresa_b)
+        en_otra = self._documentos_de_produccion_y_compras(pedido, sucursal=otra_sucursal)
+        # Al final: la cotización del pedido es una sola, la última asignada (la propia).
+        propios = self._documentos_de_produccion_y_compras(pedido)
+        ids = self._ids(self._data(pedido, superuser))
+        self.assertEqual(ids["cotizaciones"], propios["cotizaciones"])
+        for bloque in set(self._BLOQUES_EC920) - {"cotizaciones"}:
+            self.assertEqual(ids[bloque], sorted(propios[bloque] + en_otra[bloque]), bloque)
+
+        pedido_b = Pedido.objects.create(
+            empresa=self.empresa_b, sucursal=self.sucursal_b, cliente=self.cliente_b, moneda=self.moneda,
+            folio=self._siguiente("P"),
+        )
+        client = APIClient()
+        client.force_authenticate(user=superuser)
+        self.assertEqual(client.get(f"/api/v1/ventas/pedidos/{pedido_b.pk}/documentos/").status_code, 404)
+
+    def test_pickings_y_despachos_solo_de_las_sucursales_del_usuario(self):
+        """La regla por sucursal de ``pedido.documentos`` (#536) también en
+        ``pickings`` y ``despachos`` (un despacho, si su packing es visible): sin
+        admin, ni el picking ni el despacho de otra sucursal, ni su ``packing_id``
+        o ``packing_folio``. Admin y superusuario, todas las de la empresa."""
+        superuser = Usuario.objects.create(
+            username="root@acme.test", email="root@acme.test", empresa=self.empresa, is_superuser=True,
+        )
+        otra = Sucursal.objects.create(empresa=self.empresa, codigo="CDMX", nombre="CDMX")
+        almacen_otra = Almacen.objects.create(
+            empresa=self.empresa, sucursal=otra, codigo="ALM-CDMX", nombre="Almacen CDMX",
+        )
+        pedido = self._pedido()
+        creados = {}
+        for clave, sucursal, almacen in (("propio", self.sucursal, self.almacen), ("ajeno", otra, almacen_otra)):
+            picking = Picking.objects.create(
+                folio=self._siguiente("PK"), empresa=self.empresa, sucursal=sucursal, pedido=pedido,
+                operador=self.usuario, usuario=self.usuario, almacen=almacen,
+            )
+            packing = Packing.objects.create(
+                folio=self._siguiente("PA"), empresa=self.empresa, sucursal=sucursal, pedido=pedido,
+                picking=picking, operador=self.usuario, usuario=self.usuario,
+            )
+            despacho = Despacho.objects.create(packing=packing, guia=self._siguiente("G"))
+            creados[clave] = (picking, packing, despacho)
+        picking, packing, despacho = creados["propio"]
+        picking_ajeno, packing_ajeno, despacho_ajeno = creados["ajeno"]
+
+        data = self._data(pedido, self.usuario)
+        self.assertEqual([p["id"] for p in data["pickings"]], [picking.pk])
+        self.assertEqual(
+            [(d["id"], d["packing_id"], d["packing_folio"]) for d in data["despachos"]],
+            [(despacho.pk, packing.pk, packing.folio)],
+        )
+        self.assertEqual([p["id"] for p in data["packings"]], [packing.pk])
+
+        for user in (self.admin, superuser):
+            data = self._data(pedido, user)
+            self.assertEqual([p["id"] for p in data["pickings"]], [picking.pk, picking_ajeno.pk])
+            self.assertEqual([d["id"] for d in data["despachos"]], [despacho.pk, despacho_ajeno.pk])
+            self.assertEqual(
+                [d["packing_id"] for d in data["despachos"]], [packing.pk, packing_ajeno.pk],
+            )
+
+    def test_documentos_pedido_sin_usuario_falla_cerrado(self):
+        """Sin usuario no hay alcance por sucursal que aplicar: no devuelve todo."""
+        from ventas.services.trazabilidad_service import documentos_pedido
+
+        pedido = self._pedido()
+        with self.assertRaises(TypeError):
+            documentos_pedido(pedido)
+        with self.assertRaises(ValueError):
+            documentos_pedido(pedido, user=None)
+
+    def test_consultas_no_crecen_con_los_bloques_de_pedido_documentos(self):
+        pedido = self._pedido()
+        self._documentos_de_produccion_y_compras(pedido)
+        with CaptureQueriesContext(connection) as uno:
+            self._data(pedido, self.usuario)
+        for _ in range(3):
+            self._documentos_de_produccion_y_compras(pedido)
+        with CaptureQueriesContext(connection) as varios:
+            self._data(pedido, self.usuario)
         self.assertEqual(len(uno), len(varios))
 
 

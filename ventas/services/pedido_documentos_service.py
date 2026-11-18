@@ -194,13 +194,16 @@ def documentos_related_prefetch_args():
     return args
 
 
-def _docs_relacionados(pedido, cfg):
+def _docs_relacionados(pedido, cfg, solo_campos=False):
     if cfg.get("via"):
         filas = getattr(pedido, cfg["prefetch_attr"], None)
         if filas is None:
             filas = _ops_del_pedido_qs().filter(pedido=pedido)
+            if solo_campos:
+                filas = _solo_campos(filas, cfg)
         return [getattr(f, cfg["via"]) for f in filas]
-    return getattr(pedido, cfg["related_name"]).all()
+    manager = getattr(pedido, cfg["related_name"])
+    return _solo_campos(manager.all(), cfg, manager.field.name) if solo_campos else manager.all()
 
 
 # Documentos cuyo detalle se acota por sucursal: listarlos fuera del alcance
@@ -208,8 +211,9 @@ def _docs_relacionados(pedido, cfg):
 TIPOS_POR_SUCURSAL = {"orden_bordado", "orden_reflejante", "orden_corte_manga", "picking", "packing"}
 
 
-def _alcance(user):
-    """``(ve_facturas, sucursales)``; ``sucursales`` es ``None`` si ve todas."""
+def alcance_documentos(user):
+    """``(ve_facturas, sucursales)``; ``sucursales`` es ``None`` si ve todas.
+    Sin ``user`` (``pedido.documentos`` sin petición), todo."""
     from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
 
     if user is None:
@@ -245,34 +249,79 @@ def _visible(doc, cfg, alcance, pedido):
     return True
 
 
-def listar_documentos_pedido(pedido, user=None, tipos=None):
-    """Documentos del pedido. Con ``user``: sin bajas, sin facturas si no ve
-    contabilidad y, en los tipos por sucursal, solo los de sus sucursales.
-    ``tipos``: solo esos (un pedido recién creado solo puede tener su cotización)."""
-    documentos = []
-    alcance = _alcance(user)
+def _cfg(tipo):
+    return next(c for c in DOCUMENTOS_CONFIG if c["tipo"] == tipo)
+
+
+def campos_de_documento(cfg, modelo):
+    """Columnas que leen ``_visible`` y ``fila_de_documento``: el resto puede
+    diferirse (``.only()``) cuando no hay prefetch que aprovechar."""
+    existentes = {f.name for f in modelo._meta.concrete_fields}
+    leidos = {
+        modelo._meta.pk.name, cfg["folio_field"], cfg["estatus_field"], cfg["fecha_field"],
+        "activo", "empresa", "sucursal",
+    }
+    return sorted(c for c in leidos if c in existentes)
+
+
+def campos_diferidos_de_la_cotizacion():
+    """``Pedido.cotizacion__<campo>`` que el bloque de la cotización no lee, para
+    ``select_related("cotizacion").defer(...)``: sin cargar sus snapshots JSON."""
+    from ventas.models import Pedido
+
+    cfg = _cfg("cotizacion")
+    modelo = Pedido._meta.get_field(cfg["related_name"]).related_model
+    leidos = set(campos_de_documento(cfg, modelo))
+    return [
+        f"{cfg['related_name']}__{f.name}" for f in modelo._meta.concrete_fields if f.name not in leidos
+    ]
+
+
+def fila_de_documento(cfg, doc):
+    """Fila de un documento en ``documentos/`` (EC-920): valor guardado del
+    estatus y su etiqueta. ``Cotizacion`` no tiene folio: null, no el ``str(pk)``
+    de ``pedido.documentos``."""
+    return {
+        "id": doc.pk,
+        "folio": getattr(doc, cfg["folio_field"], None),
+        "estatus": getattr(doc, cfg["estatus_field"]),
+        "estatus_label": _estatus_label(doc, cfg["estatus_field"], cfg["estatus_label_field"]),
+        "fecha": getattr(doc, cfg["fecha_field"]),
+    }
+
+
+def _solo_campos(qs, cfg, fk_al_pedido=None):
+    """``fk_al_pedido``: la FK del manager inverso. El manager la asigna en cada
+    fila leyendo su columna; diferida, sería una consulta por fila."""
+    if cfg.get("via"):
+        modelo = qs.model._meta.get_field(cfg["via"]).related_model
+        campos = [f"{cfg['via']}__{c}" for c in campos_de_documento(cfg, modelo)]
+        return qs.only(cfg["via"], *campos)
+    return qs.only(fk_al_pedido, *campos_de_documento(cfg, qs.model))
+
+
+def documentos_visibles(pedido, user=None, tipos=None, alcance=None, solo_campos=False):
+    """``(cfg, doc)`` de cada documento del pedido, en el orden de
+    ``DOCUMENTOS_CONFIG``: la relación y las reglas de visibilidad de
+    ``listar_documentos_pedido`` (``pedido.documentos``), en un solo lugar para
+    que ``documentos/`` (EC-920) no las redefina. Con ``user``: sin bajas, sin
+    facturas si no ve contabilidad y, en los tipos por sucursal, solo los de sus
+    sucursales; siempre de la empresa del pedido (EC-916). ``tipos``: solo esos.
+    Una consulta por tipo, salvo lo que ya venga precargado. ``alcance``: el de
+    ``alcance_documentos(user)`` ya calculado. ``solo_campos``: carga solo las
+    columnas de ``campos_de_documento`` (sin prefetch de por medio)."""
+    if alcance is None:
+        alcance = alcance_documentos(user)
     for cfg in DOCUMENTOS_CONFIG:
         if tipos is not None and cfg["tipo"] not in tipos:
             continue
         if cfg["is_single"]:
             doc = getattr(pedido, cfg["related_name"], None)
-            if doc is None or not _visible(doc, cfg, alcance, pedido):
-                continue
-            documentos.append(
-                {
-                    "id": doc.pk,
-                    "tipo": cfg["tipo"],
-                    "label": cfg["label"],
-                    "folio": _folio(doc, cfg["folio_field"]),
-                    "fecha": _fecha(doc, cfg["fecha_field"]),
-                    "estatus": _estatus_label(
-                        doc, cfg["estatus_field"], cfg["estatus_label_field"]
-                    ),
-                }
-            )
+            if doc is not None and _visible(doc, cfg, alcance, pedido):
+                yield cfg, doc
             continue
         try:
-            qs = _docs_relacionados(pedido, cfg)
+            qs = _docs_relacionados(pedido, cfg, solo_campos)
         except Exception:
             continue
         # Iteración directa, NO ``.iterator()``: ``PedidoViewSet.retrieve()``
@@ -280,18 +329,22 @@ def listar_documentos_pedido(pedido, user=None, tipos=None):
         # y ``.iterator()`` nunca lee ``_result_cache`` — re-ejecutaba una
         # consulta por tipo de documento y desperdiciaba todo ese prefetch.
         for doc in qs:
-            if not _visible(doc, cfg, alcance, pedido):
-                continue
-            documentos.append(
-                {
-                    "id": doc.pk,
-                    "tipo": cfg["tipo"],
-                    "label": cfg["label"],
-                    "folio": _folio(doc, cfg["folio_field"]),
-                    "fecha": _fecha(doc, cfg["fecha_field"]),
-                    "estatus": _estatus_label(
-                        doc, cfg["estatus_field"], cfg["estatus_label_field"]
-                    ),
-                }
-            )
-    return documentos
+            if _visible(doc, cfg, alcance, pedido):
+                yield cfg, doc
+
+
+def listar_documentos_pedido(pedido, user=None, tipos=None):
+    """Documentos del pedido (``documentos_visibles``) con la forma de
+    ``pedido.documentos``. ``tipos``: solo esos (un pedido recién creado solo
+    puede tener su cotización)."""
+    return [
+        {
+            "id": doc.pk,
+            "tipo": cfg["tipo"],
+            "label": cfg["label"],
+            "folio": _folio(doc, cfg["folio_field"]),
+            "fecha": _fecha(doc, cfg["fecha_field"]),
+            "estatus": _estatus_label(doc, cfg["estatus_field"], cfg["estatus_label_field"]),
+        }
+        for cfg, doc in documentos_visibles(pedido, user, tipos)
+    ]

@@ -557,7 +557,37 @@ def _lista(qs, *campos, **alias):
     return [dict(f) for f in qs.values(*campos, **alias)]
 
 
-def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
+#: Bloques de ``documentos/`` que ya lista ``pedido.documentos`` (EC-920):
+#: ``(llave de la respuesta, tipo de DOCUMENTOS_CONFIG)``.
+BLOQUES_DE_PEDIDO_DOCUMENTOS = (
+    ("cotizaciones", "cotizacion"),
+    ("ordenes_compra", "orden_compra"),
+    ("ordenes_produccion", "orden_produccion"),
+    ("ordenes_bordado", "orden_bordado"),
+    ("ordenes_reflejante", "orden_reflejante"),
+    ("ordenes_corte_manga", "orden_corte_manga"),
+    ("packings", "packing"),
+)
+
+
+def _bloques_de_pedido_documentos(pedido, alcance):
+    """Cotización, OC, OP/OB/OR/OCM y packings con la MISMA relación y reglas de
+    visibilidad que ``pedido.documentos`` (``documentos_visibles``): qué cuenta
+    como del pedido no se redefine aquí. Una consulta por tipo, solo con las
+    columnas que se leen. Sin importes: la pestaña no los necesita y así no se
+    abre otra puerta a montos (EC-784)."""
+    from ventas.services.pedido_documentos_service import documentos_visibles, fila_de_documento
+
+    bloque_de = {tipo: bloque for bloque, tipo in BLOQUES_DE_PEDIDO_DOCUMENTOS}
+    bloques = {bloque: [] for bloque, _ in BLOQUES_DE_PEDIDO_DOCUMENTOS}
+    for cfg, doc in documentos_visibles(pedido, tipos=bloque_de, alcance=alcance, solo_campos=True):
+        bloques[bloque_de[cfg["tipo"]]].append(fila_de_documento(cfg, doc))
+    for filas in bloques.values():
+        filas.sort(key=lambda fila: fila["id"])
+    return bloques
+
+
+def documentos_pedido(pedido, *, user, con_finanzas=True, con_costos=True):
     """Vista 360: cada documento que nació del pedido, una consulta por tipo
     (constante, sin importar cuántos haya). Endpoint aparte de la trazabilidad
     para no hacerla más lenta: el frontend lo pide al abrir la pestaña.
@@ -565,12 +595,22 @@ def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
     ``con_finanzas=False``: ``facturas`` y ``cobros`` en null. ``con_costos=False``
     (sin ``R-PRODUCCION-COSTOS``, como el endpoint de SM, #1226): el ``total`` de
     cada salida a maquila en null. Ese total es el del documento SM, no la parte
-    del pedido."""
+    del pedido.
+
+    ``user`` (obligatorio): la regla por sucursal de ``pedido.documentos`` (#536)
+    acota los bloques que vienen de ahí, ``pickings`` y ``despachos`` (visible si
+    su packing lo es). Sin usuario no hay alcance que aplicar: falla cerrado."""
     from logistica.models import Envio
     from produccion.models import PreOrdenProduccion, SalidaMaquila
     from inventarios.models import MovimientoInventario
+    from ventas.services.pedido_documentos_service import alcance_documentos
     from wms.models import Despacho, Picking
 
+    if user is None:
+        raise ValueError("documentos_pedido necesita el usuario para acotar por sucursal.")
+    alcance = alcance_documentos(user)
+    # ``None``: superusuario o admin, todas las sucursales de la empresa.
+    sucursales = alcance[1]
     # Cada bloque, además, de la empresa del pedido (EC-916): las escrituras ya lo
     # validan, esto evita que un dato legado de otra empresa se cuele en la lectura.
     pk, empresa_id = pedido.pk, pedido.empresa_id
@@ -589,9 +629,13 @@ def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
     if not con_costos:
         for fila in salidas_maquila:
             fila["total"] = None
+    pickings_qs = Picking.objects.filter(pedido_id=pk, empresa_id=empresa_id)
+    despachos_qs = Despacho.objects.filter(packing__pedido_id=pk, packing__empresa_id=empresa_id)
+    if sucursales is not None:
+        pickings_qs = pickings_qs.filter(sucursal_id__in=sucursales)
+        despachos_qs = despachos_qs.filter(packing__sucursal_id__in=sucursales)
     pickings = list(
-        Picking.objects.filter(pedido_id=pk, empresa_id=empresa_id).select_related("almacen", "almacen_destino", "transferencia")
-        .order_by("id")
+        pickings_qs.select_related("almacen", "almacen_destino", "transferencia").order_by("id")
     )
     filas_picking = [
         {"id": p.pk, "folio": p.folio, "estado": p.estado, "almacen_actual": p.almacen_actual.nombre}
@@ -615,8 +659,8 @@ def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
         destino=F("transferencia__almacen_destino__nombre"),
     )
     despachos = _lista(
-        Despacho.objects.filter(packing__pedido_id=pk, packing__empresa_id=empresa_id).order_by("id"),
-        "id", "guia", "envio_id", packing_folio=F("packing__folio"),
+        despachos_qs.order_by("id"),
+        "id", "guia", "envio_id", "packing_id", packing_folio=F("packing__folio"),
     )
     envios = _lista(Envio.objects.filter(pedido_id=pk, empresa_id=empresa_id).order_by("id"), "id", "transportista_id")
     facturas = cobros = None  # sin permiso de contabilidad: null
@@ -631,6 +675,7 @@ def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
         "envios": envios,
         "facturas": facturas,
         "cobros": cobros,
+        **_bloques_de_pedido_documentos(pedido, alcance),
     }
 
 
