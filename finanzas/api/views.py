@@ -2233,7 +2233,9 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             # ``cuenta_por_pagar`` devolvía siempre ``None``. Se compara contra la
             # empresa del documento padre y sin excluir al superusuario, igual que
             # en ``CobroViewSet``. ``PagoService`` repite el guard, pero sólo con
-            # ``estatus="Aplicado"``; en ``Borrador`` nadie lo cubría.
+            # ``estatus="Aplicado"``; en ``Borrador`` nadie lo cubría. Va antes de
+            # resolver la sucursal: una CxP ajena responde por la CxP, no por su
+            # sucursal (el queryset del serializer ya la descarta, EC-874).
             cxp = d.get("cxp")
             if cxp is not None and cxp.empresa_id != empresa.pk:
                 raise ValidationError(

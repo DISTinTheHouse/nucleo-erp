@@ -1318,6 +1318,10 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
         )
         fields["proveedor"].queryset = Proveedor.objects.filter(empresa_id=empresa_id)
         fields["cuenta_bancaria"].queryset = CuentaBancaria.objects.filter(empresa_id=empresa_id).select_related("moneda")
+        # EC-874: una CxP de otra empresa responde igual que un id inexistente (#570).
+        detalles = fields.get("pago_detalles")
+        if detalles is not None and not detalles.read_only:
+            detalles.child.fields["cxp"].queryset = CuentaPorPagar.objects.filter(empresa_id=empresa_id)
         return fields
 
     def validate(self, attrs):
