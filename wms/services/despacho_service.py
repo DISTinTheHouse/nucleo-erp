@@ -9,6 +9,9 @@ from logistica.models import Envio
 from ventas.models import Pedido, PedidoDetalleTalla
 from ventas.services.sku_produccion_service import TALLAS_DE_LINEA_NO_MUESTRA_Q, linea_no_muestra_q
 from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle, PickingDetalle
+from inventarios.models import MovimientoInventario, MovimientoInventarioDetalle, TipoMovimiento
+from inventarios.services import costeo
+from wms.services.existencia_service import SaldoExistenciaAlmacen
 
 # Línea de packing cuya línea de pedido no es muestra (mismo criterio que
 # ``TALLAS_DE_LINEA_NO_MUESTRA_Q``).
@@ -433,7 +436,8 @@ class DespachoService:
         Pedido.objects.select_for_update(of=("self",)).filter(pk=packing_input.pedido_id).first()
         packing = (
             Packing.objects.select_for_update(of=("self",))
-            .select_related("empresa", "sucursal", "pedido", "picking", "picking__almacen")
+            .select_related("empresa", "sucursal", "pedido", "picking", "picking__almacen",
+                            "picking__almacen_destino", "picking__transferencia")
             .get(pk=packing_input.pk)
         )
         envio = None
@@ -462,4 +466,47 @@ class DespachoService:
                 for row in resolved_rows
             ]
         )
+        DespachoService._registrar_salida(despacho, packing, resolved_rows, user)
         return despacho
+
+    @staticmethod
+    def _registrar_salida(despacho, packing, rows, user):
+        """Las prendas despachadas salen del inventario (del almacén donde están
+        hoy, normalmente APARTADOS): una SALIDA ligada al pedido, al costo promedio.
+        Sin esto seguían contando como existencia después de irse."""
+        almacen = packing.picking.almacen_actual
+        saldo = SaldoExistenciaAlmacen(almacen, lock=True)
+        detalles = []
+        picking_dets = {
+            d.pk: d for d in PickingDetalle.objects.filter(pk__in=[r.picking_detalle_id for r in rows])
+            .select_related("producto")
+        }
+        for row in rows:
+            pd = picking_dets[row.picking_detalle_id]
+            cantidad = Decimal(str(row.cantidad_empacada or 0))
+            if cantidad <= 0:
+                continue
+            _, faltante = saldo.consumir(pd.producto_id, pd.producto_variante_id, cantidad, pd.variante_produccion_id)
+            if faltante:
+                nombre = pd.producto.nombre if pd.producto_id else f"renglón {pd.pk}"
+                raise ValidationError({"despacho_detalle": (
+                    f"No hay existencia en {almacen.nombre} para despachar {nombre}: faltan {_piezas(faltante)}.")})
+            detalles.append(MovimientoInventarioDetalle(
+                producto_id=pd.producto_id, producto_variante_id=pd.producto_variante_id,
+                variante_produccion_id=pd.variante_produccion_id, almacen=almacen,
+                cantidad=cantidad, costo_unitario=Decimal("0"),
+            ))
+        if not detalles:
+            return
+        for existencia, saldo_final in saldo.filas_consumidas():
+            existencia.cantidad = saldo_final
+            existencia.save(update_fields=["cantidad"])
+        mov = MovimientoInventario.objects.create(
+            empresa_id=packing.empresa_id, sucursal_id=packing.sucursal_id, pedido_id=packing.pedido_id,
+            tipo_movimiento=TipoMovimiento.SALIDA, usuario=user,
+            observaciones=f"Despacho {despacho.pk} del pedido {packing.pedido.folio or packing.pedido_id}"[:150],
+        )
+        for d in detalles:
+            d.movimiento_inventario = mov
+        MovimientoInventarioDetalle.objects.bulk_create(detalles)
+        costeo.costear(packing.empresa_id, [(d, -d.cantidad, None) for d in detalles], costeo.Origen.PEDIDO)
