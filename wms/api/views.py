@@ -128,7 +128,11 @@ class TransferenciaViewSet(
         return Response(TransferenciaSerializer(res).data, status=status.HTTP_201_CREATED)
 
 @extend_schema_view(
-    list=extend_schema(parameters=[pickings_listado.PARAMETRO_RESUMEN_OPENAPI, *pickings_listado.PARAMETROS_FILTRO_OPENAPI]),
+    list=extend_schema(parameters=[
+        pickings_listado.PARAMETRO_RESUMEN_OPENAPI,
+        *pickings_listado.PARAMETROS_FILTRO_OPENAPI,
+        pickings_listado.PARAMETRO_ORDERING_OPENAPI,
+    ]),
 )
 class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericViewSet):
     """#1149: ``?limit=&offset=`` pagina (sin ``limit``, la lista completa como
@@ -154,10 +158,7 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
     search_fields = ["folio", "pedido__folio", "operador__first_name", "operador__last_name", "operador__email"]
     # Columnas de la tabla con el nombre que usa el front (``pedido_folio``,
     # ``operador_nombre``) y ``prioridad`` por urgencia (``OrdenamientoPickingsFilter``).
-    ordering_fields = [
-        "id", "folio", pickings_listado.CAMPO_PEDIDO_FOLIO, pickings_listado.CAMPO_OPERADOR_NOMBRE,
-        "estado", pickings_listado.CAMPO_PRIORIDAD, "created_at", "fecha_limite", "total_lineas",
-    ]
+    ordering_fields = list(pickings_listado.CAMPOS_ORDEN)
 
     def _resumen(self):
         return self.action == "list" and str(self.request.query_params.get("resumen", "")).lower() in {"1", "true", "si"}

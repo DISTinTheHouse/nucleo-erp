@@ -90,6 +90,18 @@ class BusquedaPickingsFilter(SearchFilter):
 CAMPO_PEDIDO_FOLIO = "pedido_folio"
 CAMPO_OPERADOR_NOMBRE = "operador_nombre"
 CAMPO_PRIORIDAD = "prioridad"
+# ``ordering_fields`` de ``PickingViewSet``: las columnas de la tabla del front y las
+# fechas y totales del picking.
+CAMPOS_ORDEN = (
+    "id", "folio", CAMPO_PEDIDO_FOLIO, CAMPO_OPERADOR_NOMBRE, "estado", CAMPO_PRIORIDAD,
+    "created_at", "fecha_limite", "total_lineas",
+)
+PARAMETRO_ORDERING_OPENAPI = OpenApiParameter("ordering", OpenApiTypes.STR, description=(
+    "Campo de orden, `-` para descendente; varios separados por coma: " + ", ".join(CAMPOS_ORDEN) + ". "
+    "`prioridad` va por urgencia (BAJA → MEDIA → ALTA; `-prioridad`, ALTA primero); "
+    "`pedido_folio` deja los pedidos sin folio al final. Desempate por `id`. "
+    "Sin él (o con un campo fuera de la lista), más reciente primero."
+))
 
 # Peso de urgencia, el de ``PICKING_PRIORIDAD_RANK`` del front: ascendente es
 # BAJA → MEDIA → ALTA; un valor fuera del catálogo pesa 0, como su ``?? 0``.
