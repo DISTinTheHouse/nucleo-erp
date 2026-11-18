@@ -556,14 +556,12 @@ def documentos_pedido(pedido, con_finanzas=True):
     """Vista 360: cada documento que nació del pedido, una consulta por tipo
     (constante, sin importar cuántos haya). Endpoint aparte de la trazabilidad
     para no hacerla más lenta: el frontend lo pide al abrir la pestaña."""
-    import re
-
     from logistica.models import Envio
     from produccion.models import PreOrdenProduccion, SalidaMaquila
     from inventarios.models import MovimientoInventario
     from wms.models import Despacho, Picking
 
-    pk = pedido.pk
+    pk, empresa_id = pedido.pk, pedido.empresa_id
     pre_ordenes = _lista(
         PreOrdenProduccion.objects.filter(Q(pedido_id=pk) | Q(pedidos=pk)).distinct().order_by("id"),
         "id", "origen", "estatus", "op_id", "created_at", op_folio=F("op__folio_op"),
@@ -585,13 +583,18 @@ def documentos_pedido(pedido, con_finanzas=True):
         for p in pickings
     ]
     # Movimientos del pedido: los ligados por FK (salida del despacho, etc.) y las
-    # TR de sus pickings (alta y cada traslado, que la TR nombra por folio).
-    filtro = Q(pedido_id=pk)
-    folios = [p.folio for p in pickings if p.folio]
-    if folios:
-        filtro |= Q(transferencia__observaciones__iregex=r"del picking (%s)$" % "|".join(map(re.escape, folios)))
+    # TR de sus pickings (alta y cada traslado) por ``Transferencia.picking``
+    # (EC-916; antes un regex sobre ``observaciones``, texto libre en la API). La
+    # TR, además, de la empresa y sucursal de su picking; y todo, de la empresa
+    # del pedido y vigente.
+    filtro = Q(pedido_id=pk) | Q(
+        transferencia__picking__pedido_id=pk,
+        transferencia__picking__empresa_id=empresa_id,
+        transferencia__empresa_id=empresa_id,
+        transferencia__sucursal_id=F("transferencia__picking__sucursal_id"),
+    )
     movimientos = _lista(
-        MovimientoInventario.objects.filter(filtro).order_by("id"),
+        MovimientoInventario.objects.filter(filtro, empresa_id=empresa_id, activo=True).order_by("id"),
         "id", "tipo_movimiento", "fecha_movimiento", "observaciones",
         transferencia_folio=F("transferencia__folio"), origen=F("transferencia__almacen_origen__nombre"),
         destino=F("transferencia__almacen_destino__nombre"),

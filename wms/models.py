@@ -380,6 +380,16 @@ class Transferencia(models.Model):
     )
 
     folio = models.CharField(max_length=50)
+    # Picking que originó la TR: su alta y cada traslado (EC-916). ``Picking.transferencia``
+    # solo guarda la última; esta FK conserva todas. La fija el servidor (no la API);
+    # null en las TR manuales y en las históricas sin evidencia clara (backfill 0021).
+    picking = models.ForeignKey(
+        Picking,
+        on_delete=models.SET_NULL,
+        related_name="transferencias",
+        blank=True,
+        null=True,
+    )
 
     usuario = models.ForeignKey(
         "usuarios.Usuario", on_delete=models.CASCADE, related_name="transferencias"

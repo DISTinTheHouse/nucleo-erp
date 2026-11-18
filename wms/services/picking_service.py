@@ -374,6 +374,9 @@ class PickingService:
             total_lineas_completas=0,
             **data,
         )
+        # La TR nació antes que el picking (paso 4): se liga ahora (EC-916).
+        transferencia.picking = picking
+        transferencia.save(update_fields=["picking"])
 
         # 6. bulk_create PickingDetalle + contar líneas completas. Crear la orden
         #    de surtido es surtir: lo asignado queda como surtido en ese momento.
@@ -484,6 +487,7 @@ class PickingService:
                     "almacen_origen": actual,
                     "almacen_destino": almacen,
                     "observaciones": f"Traslado del picking {picking.folio}",
+                    "picking": picking,  # EC-916: la TR recuerda su picking
                     "transferencia_detalle": lineas,
                 },
                 user,
