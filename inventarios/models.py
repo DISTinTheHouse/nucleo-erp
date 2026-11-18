@@ -100,15 +100,25 @@ class Ubicacion(models.Model):
 
 class Lote(models.Model):
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="lotes", null=True, blank=True)
+    # Número de lote del proveedor (#1122); único por producto.
+    codigo = models.CharField(max_length=60, null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["producto", "codigo"], name="uq_lote_producto_codigo")]
 
     def __str__(self):
-        return str(self.id)
+        return self.codigo or str(self.id)
 
 class Serie(models.Model):
     producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="series", null=True, blank=True)
+    # Número de serie de la pieza (#1122); único por producto.
+    codigo = models.CharField(max_length=60, null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["producto", "codigo"], name="uq_serie_producto_codigo")]
 
     def __str__(self):
-        return str(self.id)
+        return self.codigo or str(self.id)
 
 class AjusteInventario(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="ajustes_inventario")

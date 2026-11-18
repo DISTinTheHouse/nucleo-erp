@@ -319,6 +319,11 @@ class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
         source="producto_variante.talla.nombre", read_only=True, default=None
     )
     ubicacion_nombre = serializers.SerializerMethodField()
+    # #1122: código legible junto al id (``lote``/``serie`` van en el select_related).
+    # ``numero_serie`` y no ``serie_codigo``: ese nombre ya es la serie de folios
+    # en el encabezado de la recepción.
+    lote_codigo = serializers.CharField(source="lote.codigo", read_only=True, default=None)
+    numero_serie = serializers.CharField(source="serie.codigo", read_only=True, default=None)
 
     class Meta:
         model = RecepcionDetalle
@@ -335,7 +340,9 @@ class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
             "ubicacion",
             "ubicacion_nombre",
             "lote",
+            "lote_codigo",
             "serie",
+            "numero_serie",
             "cantidad_recibida",
         ]
 
