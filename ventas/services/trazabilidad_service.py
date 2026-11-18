@@ -548,3 +548,86 @@ def trazabilidad_pedido(pedido):
     return trazabilidad_pedidos([pedido], incluir_ordenes=True)[pedido.pk]
 
 
+def _lista(qs, *campos, **alias):
+    return [dict(f) for f in qs.values(*campos, **alias)]
+
+
+def documentos_pedido(pedido, con_finanzas=True):
+    """Vista 360: cada documento que nació del pedido, una consulta por tipo
+    (constante, sin importar cuántos haya). Endpoint aparte de la trazabilidad
+    para no hacerla más lenta: el frontend lo pide al abrir la pestaña."""
+    import re
+
+    from logistica.models import Envio
+    from produccion.models import PreOrdenProduccion, SalidaMaquila
+    from inventarios.models import MovimientoInventario
+    from wms.models import Despacho, Picking
+
+    pk = pedido.pk
+    pre_ordenes = _lista(
+        PreOrdenProduccion.objects.filter(Q(pedido_id=pk) | Q(pedidos=pk)).distinct().order_by("id"),
+        "id", "origen", "estatus", "op_id", "created_at", op_folio=F("op__folio_op"),
+    )
+    salidas_maquila = _lista(
+        SalidaMaquila.objects.filter(activo=True).filter(
+            Q(op__op_pedidos__pedido_id=pk) | Q(ob__pedido_id=pk) | Q(orden_r__pedido_id=pk)
+        ).distinct().order_by("id"),
+        "id", "folio", "estatus", "fecha_envio", "fecha_recepcion", "total_piezas", "total",
+        centro_confeccion_nombre=F("centro_confeccion__nombre"), op_folio=F("op__folio_op"),
+        ob_folio=F("ob__folio_bordado"), or_folio=F("orden_r__folio_reflejante"),
+    )
+    pickings = list(
+        Picking.objects.filter(pedido_id=pk).select_related("almacen", "almacen_destino", "transferencia")
+        .order_by("id")
+    )
+    filas_picking = [
+        {"id": p.pk, "folio": p.folio, "estado": p.estado, "almacen_actual": p.almacen_actual.nombre}
+        for p in pickings
+    ]
+    # Movimientos del pedido: los ligados por FK (salida del despacho, etc.) y las
+    # TR de sus pickings (alta y cada traslado, que la TR nombra por folio).
+    filtro = Q(pedido_id=pk)
+    folios = [p.folio for p in pickings if p.folio]
+    if folios:
+        filtro |= Q(transferencia__observaciones__iregex=r"del picking (%s)$" % "|".join(map(re.escape, folios)))
+    movimientos = _lista(
+        MovimientoInventario.objects.filter(filtro).order_by("id"),
+        "id", "tipo_movimiento", "fecha_movimiento", "observaciones",
+        transferencia_folio=F("transferencia__folio"), origen=F("transferencia__almacen_origen__nombre"),
+        destino=F("transferencia__almacen_destino__nombre"),
+    )
+    despachos = _lista(
+        Despacho.objects.filter(packing__pedido_id=pk).order_by("id"),
+        "id", "guia", "envio_id", packing_folio=F("packing__folio"),
+    )
+    envios = _lista(Envio.objects.filter(pedido_id=pk).order_by("id"), "id", "transportista_id")
+    facturas = cobros = None  # sin permiso de contabilidad: null
+    if con_finanzas:
+        facturas, cobros = _facturas_y_cobros(pk)
+    return {
+        "pre_ordenes": pre_ordenes,
+        "salidas_maquila": salidas_maquila,
+        "pickings": filas_picking,
+        "movimientos_inventario": movimientos,
+        "despachos": despachos,
+        "envios": envios,
+        "facturas": facturas,
+        "cobros": cobros,
+    }
+
+
+def _facturas_y_cobros(pk):
+    from finanzas.models import CobroDetalle
+
+    facturas = _lista(
+        Factura.objects.filter(pedido_id=pk, activo=True).order_by("id"),
+        "id", "folio", "estatus", "fecha_emision", "total",
+    )
+    cobros = _lista(
+        CobroDetalle.objects.filter(cxc__factura__pedido_id=pk).order_by("cobro_id"),
+        "cobro_id", "importe_aplicado", folio=F("cobro__folio"), estatus=F("cobro__estatus"),
+        fecha=F("cobro__fecha_cobro"), factura_folio=F("cxc__factura__folio"),
+    )
+    return facturas, cobros
+
+

@@ -4263,6 +4263,18 @@ class PedidoViewSet(viewsets.ModelViewSet):
             data["resumen"]["cobrado_pct"] = None
         return Response(data)
 
+    @action(detail=True, methods=["get"], url_path="documentos")
+    def documentos(self, request, pk=None):
+        """Vista 360 del pedido: pre-órdenes, salidas a maquila, pickings (y dónde
+        están), movimientos de inventario, despachos, envíos, facturas y cobros.
+        Mismo scope que ``trazabilidad`` (404 fuera de alcance); facturas y cobros
+        solo con permiso de contabilidad."""
+        from ventas.services.trazabilidad_service import documentos_pedido
+
+        pedido = get_object_or_404(pedidos_visibles(pedidos_base(), request.user), pk=pk)
+        data = documentos_pedido(pedido, con_finanzas=puede_ver_contabilidad(request.user))
+        return Response(data)
+
     @action(detail=True, methods=["get"], url_path="stock-detalle")
     def stock_detalle(self, request, pk=None):
         """
