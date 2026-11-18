@@ -26,9 +26,9 @@ from rest_framework.viewsets import GenericViewSet
 
 from nucleo.models import SerieFolio
 from produccion.models import (
-    OrdenBordadoDetalle, OrdenesBordado, OrdenProduccion, OrdenProduccionDetalle, SalidaMaquila, SalidaMaquilaDetalle,
+    OrdenBordadoDetalle, OrdenesBordado, OrdenesReflejante, OrdenReflejanteDetalle, OrdenProduccion, OrdenProduccionDetalle, SalidaMaquila, SalidaMaquilaDetalle,
 )
-from produccion.scope import ordenes_bordado_visibles, ordenes_produccion_visibles
+from produccion.scope import ordenes_bordado_visibles, ordenes_produccion_visibles, ordenes_reflejante_visibles
 from terceros.models import Proveedor
 
 
@@ -43,31 +43,39 @@ class SalidaMaquilaDetalleSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = SalidaMaquilaDetalle
-        fields = ["id", "op_detalle", "ob_detalle", "descripcion", "cantidad", "precio_unitario", "importe"]
+        fields = ["id", "op_detalle", "ob_detalle", "or_detalle", "descripcion", "cantidad", "precio_unitario", "importe"]
         read_only_fields = ["id", "importe"]
         extra_kwargs = {"op_detalle": {"required": False, "allow_null": True,
                                        "queryset": OrdenProduccionDetalle.objects.none()},
                         "ob_detalle": {"required": False, "allow_null": True,
-                                       "queryset": OrdenBordadoDetalle.objects.none()}}
+                                       "queryset": OrdenBordadoDetalle.objects.none()},
+                        "or_detalle": {"required": False, "allow_null": True,
+                                       "queryset": OrdenReflejanteDetalle.objects.none()}}
 
 
 class SalidaMaquilaSerializer(serializers.ModelSerializer):
     detalles = SalidaMaquilaDetalleSerializer(many=True, required=False)
     op_folio = serializers.CharField(source="op.folio_op", read_only=True, allow_null=True, default=None)
     ob_folio = serializers.CharField(source="ob.folio_bordado", read_only=True, allow_null=True, default=None)
+    orden_r_folio = serializers.CharField(source="orden_r.folio_reflejante", read_only=True, allow_null=True,
+                                          default=None)
     # Documento de origen, para mostrar de dónde viene cada SM.
     origen = serializers.SerializerMethodField()
     origen_id = serializers.SerializerMethodField()
     origen_folio = serializers.SerializerMethodField()
 
     def get_origen(self, obj):
-        return "OB" if obj.ob_id else "OP"
+        return "OB" if obj.ob_id else "OR" if obj.orden_r_id else "OP"
 
     def get_origen_id(self, obj):
-        return obj.ob_id or obj.op_id
+        return obj.ob_id or obj.orden_r_id or obj.op_id
 
     def get_origen_folio(self, obj):
-        return obj.ob.folio_bordado if obj.ob_id else obj.op.folio_op
+        if obj.ob_id:
+            return obj.ob.folio_bordado
+        if obj.orden_r_id:
+            return obj.orden_r.folio_reflejante
+        return obj.op.folio_op
     centro_confeccion_nombre = serializers.CharField(source="centro_confeccion.nombre", read_only=True)
     estatus_display = serializers.CharField(source="get_estatus_display", read_only=True)
     fecha_envio = serializers.DateField(required=False)
@@ -76,7 +84,7 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
         model = SalidaMaquila
         fields = [
             "id", "folio", "estatus", "estatus_display", "origen", "origen_id", "origen_folio",
-            "op", "op_folio", "ob", "ob_folio",
+            "op", "op_folio", "ob", "ob_folio", "orden_r", "orden_r_folio",
             "centro_confeccion", "centro_confeccion_nombre", "sucursal",
             "fecha_envio", "fecha_compromiso", "fecha_recepcion",
             "total_piezas", "total", "observaciones", "usuario", "created_at", "detalles",
@@ -84,7 +92,7 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
         read_only_fields = ["folio", "estatus", "sucursal", "fecha_recepcion", "total_piezas", "total",
                             "usuario", "created_at"]
         extra_kwargs = {"centro_confeccion": {"required": False}, "op": {"required": False},
-                        "ob": {"required": False}}
+                        "ob": {"required": False}, "orden_r": {"required": False}}
 
     def get_fields(self):
         fields = super().get_fields()
@@ -93,24 +101,30 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
         # EC-871: solo OP de las sucursales del usuario (mismo alcance que el listado de OP).
         fields["op"].queryset = ordenes_produccion_visibles(OrdenProduccion.objects.filter(activo=True), user)
         fields["ob"].queryset = ordenes_bordado_visibles(OrdenesBordado.objects.filter(activo=True), user)
+        fields["orden_r"].queryset = ordenes_reflejante_visibles(OrdenesReflejante.objects.filter(activo=True), user)
         fields["centro_confeccion"].queryset = Proveedor.objects.filter(empresa_id=empresa_id)
         if "detalles" in fields:
             hijos = fields["detalles"].child.fields
             hijos["op_detalle"].queryset = OrdenProduccionDetalle.objects.filter(op__empresa_id=empresa_id)
             hijos["ob_detalle"].queryset = OrdenBordadoDetalle.objects.filter(ob__empresa_id=empresa_id)
+            hijos["or_detalle"].queryset = OrdenReflejanteDetalle.objects.filter(orden_r__empresa_id=empresa_id)
         return fields
 
     def validate(self, attrs):
-        op, ob = attrs.get("op"), attrs.get("ob")
-        if (op is None) == (ob is None):
-            raise ValidationError({"op": "Indica la OP o la OB de origen (solo una)."})
+        op, ob, orr = attrs.get("op"), attrs.get("ob"), attrs.get("orden_r")
+        if sum(x is not None for x in (op, ob, orr)) != 1:
+            raise ValidationError({"op": "Indica el documento de origen: OP, OB u OR (solo uno)."})
         if op is not None and op.estatus_op == OrdenProduccion.EstatusOrdenProduccion.CANCELADO:
             raise ValidationError({"op": "La OP está cancelada."})
         if ob is not None and ob.estatus_bordado == OrdenesBordado.EstatusBordado.CANCELADO_LEGACY:
             raise ValidationError({"ob": "La OB está cancelada."})
-        maquilero = attrs.get("centro_confeccion") or (op.centro_confeccion if op else ob.proveedor)
+        if orr is not None and orr.estatus_reflejante == OrdenesReflejante.EstatusReflejante.CANCELADO:
+            raise ValidationError({"orden_r": "La OR está cancelada."})
+        # La OR no tiene maquilero propio: se indica en la salida.
+        maquilero = attrs.get("centro_confeccion") or (
+            op.centro_confeccion if op else ob.proveedor if ob else None)
         if maquilero is None:
-            sigla = "OP" if op else "OB"
+            sigla = "OP" if op else "OB" if ob else "OR"
             raise ValidationError({"centro_confeccion": f"Indica el centro de confección (la {sigla} no tiene)."})
         if not (maquilero.activo and maquilero.es_maquilero):
             raise ValidationError({"centro_confeccion": "El proveedor no está activo como maquilero."})
@@ -124,6 +138,8 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
                 raise ValidationError({"detalles": "Un renglón no pertenece a la OP."})
             if d.get("ob_detalle") is not None and (ob is None or d["ob_detalle"].ob_id != ob.pk):
                 raise ValidationError({"detalles": "Un renglón no pertenece a la OB."})
+            if d.get("or_detalle") is not None and (orr is None or d["or_detalle"].orden_r_id != orr.pk):
+                raise ValidationError({"detalles": "Un renglón no pertenece a la OR."})
         return attrs
 
 
@@ -172,7 +188,7 @@ def _descripcion(det):
 def _descripcion_ob(det):
     partes = [getattr(det.producto, "nombre", None), getattr(det.talla, "nombre", None),
               getattr(det.color, "nombre", None)]
-    return " ".join(p for p in partes if p) or f"Renglón OB {det.pk}"
+    return " ".join(p for p in partes if p) or f"Renglón {det.pk}"
 
 
 def _exigir_produccion(user):
@@ -194,13 +210,14 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
         # de su OP), el mismo alcance que la OP: lo que no ve en OP da 404 aquí.
         qs = (
             ordenes_produccion_visibles(SalidaMaquila.objects.filter(activo=True), self.request.user)
-            .select_related("op", "ob", "centro_confeccion")
+            .select_related("op", "ob", "orden_r", "centro_confeccion")
             .order_by("-id")
         )
         if self.action == "retrieve":
             qs = qs.prefetch_related("detalles")
         p = self.request.query_params
-        for param, campo in (("op", "op_id"), ("ob", "ob_id"), ("centro_confeccion", "centro_confeccion_id")):
+        for param, campo in (("op", "op_id"), ("ob", "ob_id"), ("orden_r", "orden_r_id"),
+                             ("centro_confeccion", "centro_confeccion_id")):
             valor = p.get(param)
             if valor:
                 if not str(valor).isdigit():
@@ -208,9 +225,10 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
                 qs = qs.filter(**{campo: int(valor)})
         origen = (p.get("origen") or "").upper()
         if origen:
-            if origen not in ("OP", "OB"):
-                raise ValidationError({"origen": "Opciones: OP, OB."})
-            qs = qs.filter(**{f"{origen.lower()}__isnull": False})
+            if origen not in ("OP", "OB", "OR"):
+                raise ValidationError({"origen": "Opciones: OP, OB, OR."})
+            campo = {"OP": "op", "OB": "ob", "OR": "orden_r"}[origen]
+            qs = qs.filter(**{f"{campo}__isnull": False})
         if p.get("estatus"):
             if p["estatus"] not in SalidaMaquila.Estatus.values:
                 raise ValidationError({"estatus": f"Opciones: {', '.join(SalidaMaquila.Estatus.values)}."})
@@ -242,14 +260,19 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
             programado = base.aggregate(t=Sum("cantidad"))["t"] or Decimal("0")
             enviadas = SalidaMaquilaDetalle.objects.filter(salida__op=doc)
         else:
-            # OB: sus renglones; la OB no tiene costo de maquila (precio por renglón).
-            doc = OrdenesBordado.objects.select_for_update().get(pk=datos["ob"].pk)
-            sigla, precio_op = "OB", Decimal("0")
+            # OB / OR: sus renglones; no tienen costo de maquila (precio por renglón).
+            if datos.get("ob") is not None:
+                doc, sigla, campo_det = OrdenesBordado.objects.select_for_update().get(pk=datos["ob"].pk), "OB", "ob_detalle"
+                enviadas = SalidaMaquilaDetalle.objects.filter(salida__ob=doc)
+            else:
+                doc, sigla, campo_det = (OrdenesReflejante.objects.select_for_update().get(pk=datos["orden_r"].pk),
+                                         "OR", "or_detalle")
+                enviadas = SalidaMaquilaDetalle.objects.filter(salida__orden_r=doc)
+            precio_op = Decimal("0")
             base = list(doc.detalles.select_related("producto", "talla", "color"))
             if not renglones:
-                renglones = [{"ob_detalle": d, "cantidad": Decimal(str(d.cantidad))} for d in base]
+                renglones = [{campo_det: d, "cantidad": Decimal(str(d.cantidad))} for d in base]
             programado = sum((Decimal(str(d.cantidad)) for d in base), Decimal("0"))
-            enviadas = SalidaMaquilaDetalle.objects.filter(salida__ob=doc)
         if not renglones:
             raise ValidationError({"detalles": f"La {sigla} no tiene renglones; captura los de la salida."})
         if any((precio_op if r.get("precio_unitario") is None else r["precio_unitario"]) <= 0 for r in renglones):
@@ -285,12 +308,13 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
             precio = r.get("precio_unitario")
             precio = precio_op if precio is None else precio
             importe = (r["cantidad"] * precio).quantize(Decimal("0.01"))
-            det, det_ob = r.get("op_detalle"), r.get("ob_detalle")
+            det, det_ob, det_or = r.get("op_detalle"), r.get("ob_detalle"), r.get("or_detalle")
+            det_servicio = det_ob or det_or
             filas.append(SalidaMaquilaDetalle(
-                salida=sm, op_detalle=det, ob_detalle=det_ob, cantidad=r["cantidad"], precio_unitario=precio,
-                importe=importe,
+                salida=sm, op_detalle=det, ob_detalle=det_ob, or_detalle=det_or, cantidad=r["cantidad"],
+                precio_unitario=precio, importe=importe,
                 descripcion=(r.get("descripcion") or (_descripcion(det) if det else "")
-                             or (_descripcion_ob(det_ob) if det_ob else "") or "Prenda")[:255],
+                             or (_descripcion_ob(det_servicio) if det_servicio else "") or "Prenda")[:255],
             ))
             piezas += r["cantidad"]
             total += importe
@@ -303,7 +327,7 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        sm = SalidaMaquila.objects.prefetch_related("detalles").select_related("op", "ob", "centro_confeccion").get(
+        sm = SalidaMaquila.objects.prefetch_related("detalles").select_related("op", "ob", "orden_r", "centro_confeccion").get(
             pk=serializer.instance.pk
         )
         return Response(SalidaMaquilaSerializer(sm, context=self.get_serializer_context()).data,
