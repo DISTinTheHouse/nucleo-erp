@@ -627,14 +627,20 @@ def _facturas_y_cobros(pedido):
     facturas_qs = FacturaService.facturas_del_pedido(pedido).filter(activo=True)
     facturas = _lista(
         facturas_qs.order_by("id"),
-        "id", "folio", "estatus", "fecha_emision", "total",
+        "id", "folio", "estatus", "fecha_emision", "total", moneda_codigo=F("moneda__codigo_iso"),
     )
+    # ``moneda_codigo`` como en el detalle del pedido. ``Cobro.moneda`` es nullable
+    # (cobros previos a EC-537): entonces la de su cuenta bancaria, que es la que
+    # el servidor le fija. JOINs en la misma consulta, sin viajes por fila.
     cobros = _lista(
         CobroDetalle.objects.filter(
             cxc__factura__in=facturas_qs, cobro__empresa_id=pedido.empresa_id, cobro__activo=True,
         ).exclude(cobro__estatus=Cobro.Estatus.CANCELADO).order_by("cobro_id"),
         "cobro_id", "importe_aplicado", folio=F("cobro__folio"), estatus=F("cobro__estatus"),
         fecha=F("cobro__fecha_cobro"), factura_folio=F("cxc__factura__folio"),
+        moneda_codigo=Coalesce(
+            F("cobro__moneda__codigo_iso"), F("cobro__cuenta_bancaria__moneda__codigo_iso"),
+        ),
     )
     return facturas, cobros
 
