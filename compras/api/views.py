@@ -94,6 +94,10 @@ from nucleo.middleware import ip_auditoria
 from nucleo.models import Moneda, SerieFolio, Sucursal
 from ventas.models import Pedido
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle, SalidaMaquila
+from compras.services.maquila import (
+    ESTATUS_OP_RECIBIBLES, apartado_en_maquila, facturar_maquila, marcar_recibida, origen_sm,
+    pendiente_de_sm, recibido_sm_subquery,
+)
 from terceros.models import Proveedor, Transportista
 
 logger = logging.getLogger(__name__)
@@ -1598,11 +1602,15 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         "almacen",
         "transportista",
         "usuario",
+        # SM y su origen (folio OB/OR/OP) en la misma consulta (#1237).
+        "salida_maquila__ob",
+        "salida_maquila__orden_r",
+        "salida_maquila__op",
     )
     serializer_class = RecepcionSerializer
     http_method_names = ["get", "post"]
     # ``?search=`` se publicaba en el schema y se ignoraba sin esto (#839).
-    search_fields = ["folio", "orden_compra__folio", "op__folio_op", "proveedor__nombre"]
+    search_fields = ["folio", "orden_compra__folio", "op__folio_op", "proveedor__nombre", "salida_maquila__folio"]
     pagination_class = PaginacionOpcionalLimitOffset  # sin ?limit= regresa la lista completa
     filter_backends = [
         *[b for b in viewsets.ReadOnlyModelViewSet.filter_backends if b is not OrderingFilter],
@@ -1658,7 +1666,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 raise ValidationError(
                     {"tipo_origen": "Valor inválido. Usa OC (orden de compra), OP (orden de producción) o SM (salida a maquila)."}
                 )
-            qs = qs.filter(tipo_origen=tipo_origen)
+            if tipo_origen == Recepcion.TipoOrigen.SALIDA_MAQUILA:
+                # Toda recepción de una SM (#1238): las de OB/OR (``tipo_origen=SM``)
+                # y las de OP, que se guardan como ``OP`` con ``salida_maquila``.
+                qs = qs.filter(Q(tipo_origen=tipo_origen) | Q(salida_maquila__isnull=False))
+            else:
+                qs = qs.filter(tipo_origen=tipo_origen)
 
         # Siempre la empresa del usuario, superusuario incluido: mismo alcance
         # que el listado de OC, para que la pantalla de Compras cuadre (#834).
@@ -1734,18 +1747,23 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             raise _error_detalle({"salida_maquila": f"La SM {sm.folio} está {sm.get_estatus_display().lower()}."})
         return sm
 
-    def _recibir_sm_servicio(self, request, sm, header, serie_codigo):
+    def _recibir_sm_servicio(self, request, sm, header, serie_codigo, detalle_raw):
         """SM de OB/OR: las prendas ya son del pedido y no entran al inventario.
         Se registra la recepción (sin renglones), se cierra la SM y nace la
-        factura de maquila en Borrador para CxP."""
+        factura de maquila en Borrador para CxP, por la SM completa."""
+        if detalle_raw:  # antes se ignoraba en silencio (#1240)
+            raise _error_detalle({"detalle": "Una SM de OB/OR se recibe completa, sin renglones."})
         almacen = Almacen.objects.filter(pk=header["almacen"], empresa_id=sm.empresa_id,
                                          sucursal_id=sm.sucursal_id).first()
         if almacen is None:
             raise _error_detalle({"almacen": "El almacén no pertenece a la sucursal de la SM."})
+        transportista_id = header.get("transportista")
+        if transportista_id and not Transportista.objects.filter(pk=transportista_id, empresa_id=sm.empresa_id).exists():
+            raise _error_detalle({"transportista": "Transportista no encontrado."})
         recepcion = Recepcion(
             tipo_origen=Recepcion.TipoOrigen.SALIDA_MAQUILA, salida_maquila=sm,
             empresa_id=sm.empresa_id, sucursal_id=sm.sucursal_id, proveedor_id=sm.centro_confeccion_id,
-            almacen=almacen, transportista_id=header.get("transportista"), usuario=request.user,
+            almacen=almacen, transportista_id=transportista_id, usuario=request.user,
             fecha_recepcion=header.get("fecha_recepcion") or timezone.now(),
             remision=(header.get("remision") or None),
             factura_referencia=(header.get("factura_referencia") or None),
@@ -1754,7 +1772,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         self._asignar_folio_recepcion(recepcion, serie_codigo)
         recepcion.save()
-        _cerrar_sm(sm, recepcion)
+        facturar_maquila(sm, recepcion)
+        marcar_recibida(sm)
         return Response({"recepcion": RecepcionSerializer(recepcion).data, "detalle": []}, status=status.HTTP_200_OK)
 
     def _asignar_folio_recepcion(self, recepcion, serie_codigo):
@@ -2068,16 +2087,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 }
             )
 
+        # Mismo alcance que las SM del onboarding y que el módulo de OP (#1236):
+        # empresa activa + sucursales del usuario.
+        from produccion.scope import ordenes_produccion_visibles
         op_qs = (
-            OrdenProduccion.objects.filter(
-                activo=True,
-                empresa=empresa,
-                estatus_op__in=[
-                    OrdenProduccion.EstatusOrdenProduccion.PENDIENTE,
-                    OrdenProduccion.EstatusOrdenProduccion.PREPARACION,
-                    OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
-                    OrdenProduccion.EstatusOrdenProduccion.REVISION,
-                ],
+            ordenes_produccion_visibles(
+                OrdenProduccion.objects.filter(activo=True, estatus_op__in=ESTATUS_OP_RECIBIBLES), user
             )
             .select_related("pedido", "sucursal")
             .order_by("-fecha_inicio", "-op_id")
@@ -2121,13 +2136,16 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     "recepcion_detalle__orden_produccion_detalle_id", op_detalle_ids
                 ).items():
                     recibido_op_map[clave] = recibido_op_map.get(clave, Decimal("0")) - total
+            # Piezas en SM Enviadas: se reciben con la SM, no con la OP directa (#1234).
+            en_maquila = apartado_en_maquila(op_detalle_ids)
 
             for op_detalle in op_detalles_list:
                 producto_variante = op_detalle.producto_variante
                 producto = getattr(producto_variante, "producto", None)
                 cantidad = Decimal(str(op_detalle.cantidad or 0))
                 recibido = recibido_op_map.get(op_detalle.pk, Decimal("0"))
-                pendiente = cantidad - recibido
+                apartado = en_maquila.get(op_detalle.pk, (Decimal("0"), []))[0]
+                pendiente = cantidad - recibido - apartado
                 item = {
                     "id": op_detalle.pk,
                     "producto_id": getattr(producto, "pk", None),
@@ -2139,6 +2157,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     "cantidad_ordenada": str(cantidad),
                     "cantidad_recibida": str(recibido),
                     "cantidad_pendiente": str(max(pendiente, Decimal("0"))),
+                    "cantidad_en_maquila": str(apartado),
                     "descripcion": op_detalle.observaciones,
                 }
                 op_detalles_map.setdefault(op_detalle.op_id, []).append(item)
@@ -2211,7 +2230,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             "busqueda": {
                 "ordenes_compra": ordenes,
                 "ordenes_produccion": ordenes_produccion,
-                "salidas_maquila": _sm_pendientes(user),
+                "salidas_maquila": _sm_pendientes(request),
             },
         }
 
@@ -2244,7 +2263,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 if header.get("salida_maquila"):
                     sm = self._sm_recibible(header["salida_maquila"], empresa, orden_compra_id)
                     if sm.op_id is None:  # OB/OR: sin inventario, solo se cierra
-                        return self._recibir_sm_servicio(request, sm, header, serie_codigo)
+                        return self._recibir_sm_servicio(request, sm, header, serie_codigo, detalle_raw)
                     if orden_produccion_id and int(orden_produccion_id) != sm.op_id:
                         raise _error_detalle({"salida_maquila": "La SM no es de esa orden de producción."})
                     orden_produccion_id = sm.op_id
@@ -2287,12 +2306,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         raise _error_detalle({"orden_produccion": "Orden de producción no encontrada."})
                     if op.empresa_id != empresa.pk:
                         raise _error_detalle({"orden_produccion": "No tienes acceso a esta orden de producción."})
-                    if op.estatus_op not in {
-                        OrdenProduccion.EstatusOrdenProduccion.PENDIENTE,
-                        OrdenProduccion.EstatusOrdenProduccion.PREPARACION,
-                        OrdenProduccion.EstatusOrdenProduccion.BORDANDO,
-                        OrdenProduccion.EstatusOrdenProduccion.REVISION,
-                    }:
+                    if op.estatus_op not in ESTATUS_OP_RECIBIBLES:
                         raise _error_detalle({"estatus": "La orden de producción no está disponible para recepción."})
 
                 almacen = (
@@ -2397,6 +2411,11 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     }
                     if not detalles_op:
                         raise _error_detalle({"detalle": "La orden de producción no tiene productos para recibir."})
+                    # Piezas en maquila de OTRAS SM Enviadas: no se reciben por la OP
+                    # directa ni con otra SM (#1234). Con SM, el tope es lo pendiente
+                    # de la SM, no de la OP (#1232).
+                    en_maquila = apartado_en_maquila(detalles_op.keys(), excluir_sm_id=getattr(sm, "pk", None))
+                    pendiente_sm = pendiente_de_sm(sm) if sm is not None else None
 
                     acumulado = {}  # cantidad ya aceptada en esta petición por renglón de origen
                     for idx, item in enumerate(detalle_raw):
@@ -2434,7 +2453,27 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
 
                         recibido = self._cantidad_recibida_op(op_detalle.pk)
                         ordered = Decimal(str(op_detalle.cantidad or 0))
-                        pendiente = ordered - recibido
+                        apartado, folios_sm = en_maquila.get(op_detalle.pk, (Decimal("0"), []))
+                        pendiente = ordered - recibido - apartado
+                        if pendiente_sm is not None:
+                            if op_detalle.pk not in pendiente_sm:
+                                raise _error_detalle(
+                                    {"detalle": f"El renglón {ref} no va en la SM {sm.folio}."}
+                                )
+                            if pendiente_sm[op_detalle.pk] <= 0:
+                                raise _error_detalle(
+                                    {"detalle": f"El renglón {ref} ya se recibió completo en la SM {sm.folio}."}
+                                )
+                            pendiente = min(pendiente, pendiente_sm[op_detalle.pk])
+                        if pendiente <= 0 and apartado > 0:
+                            raise _error_detalle(
+                                {
+                                    "detalle": (
+                                        f"El renglón {ref} tiene {apartado.normalize():f} pzas en maquila "
+                                        f"({', '.join(folios_sm)}): recíbelas con su SM."
+                                    )
+                                }
+                            )
                         if pendiente <= 0:
                             raise _error_detalle(
                                 {
@@ -2492,9 +2531,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 self._asignar_folio_recepcion(recepcion, serie_codigo)
                 recepcion.save()
 
-                self._crear_renglones_recepcion(recepcion, detalle_payload)
+                renglones = self._crear_renglones_recepcion(recepcion, detalle_payload)
                 if sm is not None:
-                    _cerrar_sm(sm, recepcion)
+                    # Factura por lo que llegó; la SM queda Recibida solo al completarse (#1232).
+                    facturar_maquila(sm, recepcion, renglones)
+                    if all(v <= 0 for v in pendiente_de_sm(sm).values()):
+                        marcar_recibida(sm)
 
                 # ``_actualizar_estatus_oc``/cierre de OP siguen basados en
                 # conteo físico (lo que ya se registró arriba), sin esperar a
@@ -3449,49 +3491,37 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
 
 
 
-def _origen_sm(sm):
-    if sm.ob_id:
-        return "OB", sm.ob.folio_bordado
-    if sm.orden_r_id:
-        return "OR", sm.orden_r.folio_reflejante
-    return "OP", sm.op.folio_op
+def _sm_pendientes(request):
+    """SM Enviadas (por recibir) del alcance del usuario. Una consulta.
 
-
-def _cerrar_sm(sm, recepcion):
-    """La SM regresó: queda Recibida y nace la factura de maquila en Borrador
-    (total de la SM, sin OC). CxP la registra con la factura real del maquilero
-    y ahí se genera la cuenta por pagar."""
-    sm.estatus = SalidaMaquila.Estatus.RECIBIDA
-    sm.fecha_recepcion = timezone.now()
-    sm.save(update_fields=["estatus", "fecha_recepcion", "updated_at"])
-    moneda = Moneda.objects.filter(codigo_iso="MXN").order_by("pk").first()
-    if moneda is None:
-        raise _error_detalle({"moneda": "No existe la moneda MXN para la factura de maquila."})
-    origen, folio_origen = _origen_sm(sm)
-    FacturaProveedor.objects.create(
-        empresa_id=sm.empresa_id, sucursal_id=sm.sucursal_id, proveedor_id=sm.centro_confeccion_id,
-        oc=None, recepcion=recepcion, salida_maquila=sm, moneda=moneda,
-        subtotal=sm.total, total=sm.total, estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
-        observaciones=f"Maquila {sm.folio} ({origen} {folio_origen}), {sm.total_piezas:g} pzas.",
-    )
-
-
-def _sm_pendientes(user):
-    """SM Enviadas (por recibir) del alcance del usuario, una consulta."""
+    - Las de OP solo si la OP sigue en estatus recibible (#1236).
+    - ``piezas_pendientes``: piezas de la SM menos lo ya recibido con ella (parciales, #1232).
+    - ``total`` solo con ``R-PRODUCCION-COSTOS``, como en las SM (#1235)."""
+    from nucleo.permisos import permisos_de_la_peticion
+    from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
     from produccion.scope import ordenes_produccion_visibles
-    qs = (
-        ordenes_produccion_visibles(SalidaMaquila.objects.filter(activo=True, estatus=SalidaMaquila.Estatus.ENVIADA), user)
+
+    sms = list(
+        ordenes_produccion_visibles(SalidaMaquila.objects.filter(activo=True, estatus=SalidaMaquila.Estatus.ENVIADA),
+                                    request.user)
+        .filter(Q(op__isnull=True) | Q(op__estatus_op__in=ESTATUS_OP_RECIBIBLES, op__activo=True))
         .select_related("op", "ob", "orden_r", "centro_confeccion")
+        .annotate(piezas_recibidas=recibido_sm_subquery(OuterRef("pk")))
         .order_by("-id")[:200]
     )
+    # Sin SM no se consultan permisos (una consulta menos para quien no es admin).
+    ve_costos = bool(sms) and PERMISO_COSTOS_PRODUCCION in permisos_de_la_peticion(request)
     filas = []
-    for sm in qs:
-        origen, folio_origen = _origen_sm(sm)
-        filas.append({
+    for sm in sms:
+        origen, folio_origen = origen_sm(sm)
+        fila = {
             "id": sm.pk, "folio": sm.folio, "folio_display": f"{sm.folio} · {folio_origen}",
             "origen": origen, "origen_folio": folio_origen, "op_id": sm.op_id,
             "centro_confeccion": sm.centro_confeccion_id, "centro_confeccion_nombre": sm.centro_confeccion.nombre,
             "sucursal_id": sm.sucursal_id, "fecha_envio": sm.fecha_envio, "total_piezas": sm.total_piezas,
-            "total": sm.total,
-        })
+            "piezas_pendientes": (sm.total_piezas - sm.piezas_recibidas).quantize(Decimal("0.01")),
+        }
+        if ve_costos:
+            fila["total"] = sm.total
+        filas.append(fila)
     return filas

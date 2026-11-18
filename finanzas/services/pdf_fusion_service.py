@@ -1,4 +1,4 @@
-"""Fusión de OC + Recepción + factura de proveedor en un solo PDF (EC-397).
+"""Fusión de OC (o SM) + Recepción + factura de proveedor en un solo PDF (EC-397).
 
 A propósito muy simple: reportlab arma una página de resumen para la OC y
 otra para la recepción (puro texto/tablas, nada de plantillas ni imágenes),
@@ -92,13 +92,49 @@ def _render_recepcion_pdf(recepcion):
     return buffer.getvalue()
 
 
-def fusionar_pdf_factura_proveedor(factura):
-    """Devuelve los bytes de OC + Recepción (generadas aquí) + el PDF adjunto, en ese orden."""
-    partes = [
-        _render_oc_pdf(factura.oc),
-        _render_recepcion_pdf(factura.recepcion),
-        bytes(factura.pdf_adjunto),
+def _render_sm_pdf(factura):
+    """Portada de la factura de maquila (#1233): la SM en lugar de la OC. Los
+    renglones son las líneas de la factura (lo que se factura de la SM)."""
+    sm = factura.salida_maquila
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
+    styles = getSampleStyleSheet()
+    origen = (
+        f"OB {sm.ob.folio_bordado}" if sm.ob_id
+        else f"OR {sm.orden_r.folio_reflejante}" if sm.orden_r_id
+        else f"OP {sm.op.folio_op}"
+    )
+    elementos = [
+        Paragraph(f"Salida a maquila {sm.folio}", styles["Title"]),
+        Spacer(1, 0.3 * cm),
+        Paragraph(f"Origen: {origen}", styles["Normal"]),
+        Paragraph(f"Maquilero: {getattr(sm.centro_confeccion, 'nombre', '') or '-'}", styles["Normal"]),
+        Paragraph(f"Fecha de envío: {sm.fecha_envio}", styles["Normal"]),
+        Paragraph(f"Piezas enviadas: {sm.total_piezas:g}", styles["Normal"]),
+        Spacer(1, 0.5 * cm),
     ]
+    data = [["Descripción", "Cantidad", "Precio", "Importe"]]
+    for d in factura.factura_proveedor_detalles.select_related("producto").order_by("id"):
+        nombre = d.descripcion or getattr(d.producto, "nombre", None) or "-"
+        data.append([nombre, f"{d.cantidad:g}", f"${d.precio_unitario:.2f}", f"${d.subtotal:.2f}"])
+    tabla = Table(data, colWidths=[8 * cm, 2.5 * cm, 3 * cm, 3 * cm])
+    tabla.setStyle(_TABLE_STYLE)
+    elementos.append(tabla)
+    elementos.append(Spacer(1, 0.5 * cm))
+    elementos.append(Paragraph(f"Total: ${factura.total:.2f}", styles["Normal"]))
+    doc.build(elementos)
+    return buffer.getvalue()
+
+
+def fusionar_pdf_factura_proveedor(factura):
+    """Devuelve los bytes de OC (o SM, factura de maquila) + Recepción (generadas
+    aquí) + el PDF adjunto, en ese orden. Sin OC ni SM se omite la portada."""
+    partes = []
+    if factura.oc_id:
+        partes.append(_render_oc_pdf(factura.oc))
+    elif factura.salida_maquila_id:
+        partes.append(_render_sm_pdf(factura))
+    partes += [_render_recepcion_pdf(factura.recepcion), bytes(factura.pdf_adjunto)]
 
     writer = PdfWriter()
     for parte in partes:

@@ -11,7 +11,10 @@
 - Errores 400 siempre ``{campo: ["mensaje"]}`` (#1222).
 - Lectura: ``R-PRODUCCION-OP``; ``total``, ``precio_unitario`` e ``importe`` solo
   con ``R-PRODUCCION-COSTOS`` (#1211).
-- ``POST {id}/cerrar/``: WMS recibió y pasó calidad → ``RECIBIDA``.
+- Detalle: ``recepciones`` (RC de WMS) y ``facturas_proveedor`` (maquila en CxP);
+  listado: ``recepcion_folio`` (#1239).
+- ``POST {id}/cerrar/``: 400; la SM queda ``RECIBIDA`` al recibir todas sus piezas
+  en WMS (``compras/recepciones/onboarding/`` con ``salida_maquila``).
 - ``POST {id}/cancelar/``.
 
 No mueve inventario (la OP ya consumió la materia prima). Siempre la empresa
@@ -21,7 +24,7 @@ producción, superusuario o admin de empresa.
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import OuterRef, Prefetch, Subquery, Sum
 from django.utils import timezone
 from rest_framework import mixins, serializers, status
 from rest_framework.permissions import IsAuthenticated
@@ -30,6 +33,8 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
+from compras.models import Recepcion
+from finanzas.models import FacturaProveedor
 from nucleo.models import SerieFolio
 from nucleo.permisos import CODIGOS_PRODUCCION_OP, LecturaPorCodigo, permisos_de_la_peticion
 from produccion.models import (
@@ -98,6 +103,29 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
             return None
         return u.get_full_name().strip() or u.email
 
+    recepciones = serializers.SerializerMethodField()
+    facturas_proveedor = serializers.SerializerMethodField()
+
+    def get_recepciones(self, obj):
+        """Recepciones (RC) con que WMS recibió la SM (#1239); ``prefetch`` en el detalle."""
+        return [
+            {"id": r.pk, "folio": r.folio, "estatus": r.estatus, "fecha_recepcion": r.fecha_recepcion}
+            for r in obj.recepciones.all() if r.activo
+        ]
+
+    def get_facturas_proveedor(self, obj):
+        """Facturas de maquila en CxP (#1239). ``total`` solo con ``R-PRODUCCION-COSTOS``."""
+        ve = self._ve_costos()
+        filas = []
+        for f in obj.facturas_proveedores.all():
+            if not f.activo:
+                continue
+            fila = {"id": f.pk, "folio": f.folio, "estatus": f.estatus, "recepcion": f.recepcion_id}
+            if ve:
+                fila["total"] = f.total
+            filas.append(fila)
+        return filas
+
     def _ve_costos(self):
         """``R-PRODUCCION-COSTOS`` (#1211, como el costo de maquila de la OP, #1135)."""
         request = self.context.get("request")
@@ -125,6 +153,7 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
             "centro_confeccion", "centro_confeccion_nombre", "sucursal", "sucursal_nombre",
             "fecha_envio", "fecha_compromiso", "fecha_recepcion",
             "total_piezas", "total", "observaciones", "usuario", "usuario_nombre", "created_at", "detalles",
+            "recepciones", "facturas_proveedor",
         ]
         read_only_fields = ["folio", "estatus", "sucursal", "fecha_recepcion", "total_piezas", "total",
                             "usuario", "created_at"]
@@ -194,15 +223,28 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
 
 
 class SalidaMaquilaListSerializer(SalidaMaquilaSerializer):
-    """Mismo renglón sin ``detalles``: serializarlos y descartarlos costaba una
-    consulta por salida."""
+    """Mismo renglón sin ``detalles``, ``recepciones`` ni ``facturas_proveedor``:
+    serializarlos costaba consultas por salida. En su lugar ``recepcion_folio``,
+    el folio de la última recepción, anotado en la consulta del listado (#1239)."""
+
+    recepcion_folio = serializers.CharField(read_only=True, default=None)
 
     class Meta(SalidaMaquilaSerializer.Meta):
-        fields = [f for f in SalidaMaquilaSerializer.Meta.fields if f != "detalles"]
+        fields = [
+            f for f in SalidaMaquilaSerializer.Meta.fields
+            if f not in ("detalles", "recepciones", "facturas_proveedor")
+        ] + ["recepcion_folio"]
 
 
 TIPOS_SERIE_SM = ["Salida a Maquila", "SALIDA_MAQUILA", "SM"]
 _RELACIONES = ("op", "ob", "orden_r", "centro_confeccion", "sucursal", "usuario")
+# Recepción y factura de maquila del detalle (#1239), sin el PDF binario de la factura.
+_PREFETCH_DOCUMENTOS = (
+    Prefetch("recepciones", queryset=Recepcion.objects.only(
+        "id", "folio", "estatus", "fecha_recepcion", "activo", "salida_maquila_id").order_by("id")),
+    Prefetch("facturas_proveedores", queryset=FacturaProveedor.objects.only(
+        "id", "folio", "estatus", "total", "activo", "recepcion_id", "salida_maquila_id").order_by("id")),
+)
 
 
 def _n(valor):
@@ -272,7 +314,7 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
             .order_by("-id")
         )
         if self.action == "retrieve":
-            qs = qs.prefetch_related("detalles")
+            qs = qs.prefetch_related("detalles", *_PREFETCH_DOCUMENTOS)
         p = self.request.query_params
         for param, campo in (("op", "op_id"), ("ob", "ob_id"), ("orden_r", "orden_r_id"),
                              ("centro_confeccion", "centro_confeccion_id")):
@@ -294,9 +336,16 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
         return qs
 
     def list(self, request, *args, **kwargs):
-        # El listado no lleva renglones (sin consultas por fila).
+        # El listado no lleva renglones (sin consultas por fila); el folio de la
+        # última recepción va en la misma consulta (#1239).
+        ultima = (
+            Recepcion.objects.filter(salida_maquila=OuterRef("pk"), activo=True)
+            .exclude(estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            .order_by("-id").values("folio")[:1]
+        )
+        qs = self.get_queryset().annotate(recepcion_folio=Subquery(ultima))
         return Response(
-            SalidaMaquilaListSerializer(self.get_queryset(), many=True, context=self.get_serializer_context()).data
+            SalidaMaquilaListSerializer(qs, many=True, context=self.get_serializer_context()).data
         )
 
     @transaction.atomic
