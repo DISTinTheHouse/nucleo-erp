@@ -354,8 +354,12 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
 
     @action(detail=True, methods=["post"], url_path="cerrar")
     def cerrar(self, request, pk=None):
-        """WMS recibió la producción y pasó calidad."""
-        return self._cambiar(request, SalidaMaquila.Estatus.RECIBIDA, {SalidaMaquila.Estatus.ENVIADA})
+        """Ya no se cierra a mano: la SM queda Recibida al recepcionarla en WMS
+        (``compras/recepciones/onboarding/`` con ``salida_maquila``), que además
+        registra la recepción y crea la factura de maquila para CxP.
+        Antes: ``self._cambiar(request, SalidaMaquila.Estatus.RECIBIDA, {SalidaMaquila.Estatus.ENVIADA})``."""
+        self.get_object()  # 404 fuera de alcance, como antes
+        raise ValidationError({"estatus": "La SM se recibe en WMS (Recepciones → Orden de Producción)."})
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):

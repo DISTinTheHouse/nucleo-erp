@@ -281,6 +281,8 @@ class Recepcion(models.Model):
     class TipoOrigen(models.TextChoices):
         ORDEN_COMPRA = "OC", "Orden de compra"
         ORDEN_PRODUCCION = "OP", "Orden de produccion"
+        # Regreso de una salida a maquila de OB/OR: sin movimiento de inventario.
+        SALIDA_MAQUILA = "SM", "Salida a maquila"
 
     class EstatusRecepcion(models.IntegerChoices):
         BORRADOR = 1, 'Borrador'
@@ -297,6 +299,10 @@ class Recepcion(models.Model):
     )
     orden_compra = models.ForeignKey(OrdenCompra, on_delete=models.CASCADE, null=True, blank=True)
     op = models.ForeignKey(OrdenProduccion, on_delete=models.CASCADE, null=True, blank=True)
+    # SM que regresa del maquilero (con la OP, o sola si viene de OB/OR).
+    salida_maquila = models.ForeignKey(
+        "produccion.SalidaMaquila", on_delete=models.PROTECT, null=True, blank=True, related_name="recepciones"
+    )
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name='recepciones')
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE, related_name='recepciones')
     proveedor = models.ForeignKey(Proveedor, on_delete=models.CASCADE, related_name='recepciones', null=True, blank=True)
