@@ -903,8 +903,14 @@ class FacturaProveedorDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = FacturaProveedorDetalle
         fields = "__all__"
+        # OC, recepción y producto se siguen exigiendo por la API; solo la factura de
+        # maquila de una SM (la crea el backend) los deja nulos (#1242).
         extra_kwargs = {
             "factura_proveedor": {"read_only": True},
+            "oc_detalle": {"required": True, "allow_null": False},
+            "recepcion_detalle": {"required": True, "allow_null": False},
+            "producto": {"required": True, "allow_null": False},
+            "salida_maquila_detalle": {"read_only": True},
         }
 
     def validate(self, attrs):
@@ -929,8 +935,10 @@ class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnSe
     factura_proveedor_detalles = FacturaProveedorDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     moneda_codigo = serializers.CharField(source="moneda.codigo_iso", read_only=True)
-    oc_folio = serializers.CharField(source="oc.folio", read_only=True)
+    # ``default=None``: la factura de maquila no tiene OC y la llave debe venir (#1233).
+    oc_folio = serializers.CharField(source="oc.folio", read_only=True, default=None)
     recepcion_folio = serializers.CharField(source="recepcion.folio", read_only=True)
+    salida_maquila_folio = serializers.CharField(source="salida_maquila.folio", read_only=True, default=None)
     tiene_pdf_adjunto = serializers.SerializerMethodField()
 
     class Meta:
@@ -1463,8 +1471,20 @@ class PolizaLecturaSerializer(PolizaSerializer):
 
 class FacturaProveedorDetalleLecturaSerializer(FacturaProveedorDetalleSerializer):
     # Convención de los renglones de compras.
-    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    # Línea de maquila sin producto (SM de OB/OR): ``null`` y el texto en ``descripcion``.
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True, default=None)
     producto_codigo = serializers.CharField(source="producto.codigo", read_only=True, default=None)
+
+
+class AjusteLineaMaquilaSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    precio_unitario = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=Decimal("0"), required=False)
+    descuento = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=Decimal("0"), required=False)
+    impuesto = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=Decimal("0"), required=False)
+
+
+class AjusteMaquilaSerializer(serializers.Serializer):
+    lineas = AjusteLineaMaquilaSerializer(many=True, allow_empty=False)
 
 
 class FacturaProveedorLecturaSerializer(FacturaProveedorSerializer):

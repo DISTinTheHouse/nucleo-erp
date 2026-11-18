@@ -492,7 +492,33 @@ class RecepcionSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
-class RecepcionListSerializer(RecepcionSerializer):
+class _OrigenSalidaMaquilaMixin(serializers.Serializer):
+    """SM de la recepción y su documento de origen (#1237): ``SM-00005 · OB-00012``.
+    ``salida_maquila`` y sus ``ob``/``orden_r``/``op`` van en el ``select_related``
+    del viewset: sin consultas extra. Todo ``null`` si no es recepción de SM."""
+
+    salida_maquila_folio = serializers.CharField(source="salida_maquila.folio", read_only=True, default=None)
+    salida_maquila_origen = serializers.SerializerMethodField()
+    salida_maquila_origen_folio = serializers.SerializerMethodField()
+
+    def _origen(self, obj):
+        sm = obj.salida_maquila if obj.salida_maquila_id else None
+        if sm is None:
+            return None, None
+        if sm.ob_id:
+            return "OB", sm.ob.folio_bordado
+        if sm.orden_r_id:
+            return "OR", sm.orden_r.folio_reflejante
+        return "OP", sm.op.folio_op
+
+    def get_salida_maquila_origen(self, obj):
+        return self._origen(obj)[0]
+
+    def get_salida_maquila_origen_folio(self, obj):
+        return self._origen(obj)[1]
+
+
+class RecepcionListSerializer(_OrigenSalidaMaquilaMixin, RecepcionSerializer):
     """Listado de recepciones para el módulo de Compras.
 
     Conserva intacta la forma plana de ``RecepcionSerializer`` (``fields='__all__'``,
@@ -535,7 +561,7 @@ class RecepcionDetalleRetrieveSerializer(RecepcionDetalleResumenSerializer):
     """
 
 
-class RecepcionRetrieveSerializer(serializers.ModelSerializer):
+class RecepcionRetrieveSerializer(_OrigenSalidaMaquilaMixin, serializers.ModelSerializer):
     """Detalle individual de una recepción (acción ``retrieve``).
 
     Forma dedicada, independiente de ``RecepcionListSerializer`` (que conserva la
@@ -576,6 +602,10 @@ class RecepcionRetrieveSerializer(serializers.ModelSerializer):
             "tipo_origen",
             "orden_compra_folio",
             "op_folio",
+            "salida_maquila",
+            "salida_maquila_folio",
+            "salida_maquila_origen",
+            "salida_maquila_origen_folio",
             "folio",
             "remision",
             "factura_referencia",

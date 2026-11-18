@@ -3627,3 +3627,265 @@ class RecepcionRetrieveOrigenTallaTests(TestCase):
         self.assertEqual(consultas_una, consultas_varias)
         tallas = sorted((d["producto_variante_talla"] or "") for r in data["recepciones"] for d in r["detalles"])
         self.assertEqual(tallas, ["", "2XG", "CH", "G", "M", "XG"])
+
+
+class RecepcionSalidaMaquilaTests(TestCase):
+    """Recepción de SM en WMS y factura de maquila (#1217, #1232-#1242).
+
+    Reglas que se documentan aquí (``compras/services/maquila.py``):
+
+    - SM de OP: se recibe a lo más lo pendiente de la SM por ``op_detalle``; puede
+      ser parcial y la SM queda Enviada hasta completar sus piezas (#1232).
+    - Las piezas de una SM Enviada quedan apartadas: la OP directa no las recibe
+      (#1234) y el onboarding las informa en ``cantidad_en_maquila``.
+    - Cada recepción de SM crea su factura de maquila en Borrador con líneas
+      (#1242); la de OB/OR, por la SM completa y sin renglones de recepción.
+    - SM de OB/OR: ``detalle`` no vacío o transportista ajeno → 400 (#1240).
+    - ``busqueda.salidas_maquila`` sin ``total`` si no hay R-PRODUCCION-COSTOS
+      (#1235) y sin SM de OP no recibible (#1236).
+    - ``?tipo_origen=SM`` incluye las recepciones de SM de OP (#1238); listado y
+      detalle exponen la SM y su origen (#1237).
+    """
+
+    setUpTestData = RecepcionOnboardingRenglonesTests.__dict__["setUpTestData"]
+
+    def setUp(self):
+        from produccion.models import SalidaMaquila, SalidaMaquilaDetalle
+
+        self.maquilero = Proveedor.objects.filter(empresa=self.empresa).first()
+        Proveedor.objects.filter(pk=self.maquilero.pk).update(es_maquilero=True, activo=True)
+        self.sm = SalidaMaquila.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, op=self.op, centro_confeccion=self.maquilero,
+            folio="SM-T1", fecha_envio=timezone.localdate(), total_piezas=4, total=20,
+        )
+        self.smd = SalidaMaquilaDetalle.objects.create(
+            salida=self.sm, op_detalle=self.op_detalle, descripcion="Costura", cantidad=4,
+            precio_unitario=5, importe=20,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.usuario)
+        Usuario.objects.filter(pk=self.usuario.pk).update(is_admin_empresa=True)
+        self.usuario.refresh_from_db()
+
+    def _post(self, recepcion, detalle):
+        cuerpo = {"recepcion": {"almacen": self.almacen.pk, "serie_codigo": "RC", **recepcion}, "detalle": detalle}
+        return self.client.post(RECEPCION_ONBOARDING_URL, cuerpo, format="json")
+
+    def _recibir_sm(self, cantidad, op_detalle=None):
+        return self._post({"salida_maquila": self.sm.pk},
+                          [{"orden_produccion_detalle": (op_detalle or self.op_detalle).pk, "cantidad_recibida": cantidad}])
+
+    def test_parcial_deja_la_sm_enviada_y_factura_lo_recibido(self):
+        r = self._recibir_sm(1)
+        self.assertEqual(r.status_code, 200, r.data)
+        self.sm.refresh_from_db()
+        self.assertEqual(self.sm.estatus, "ENVIADA")
+        factura = FacturaProveedor.objects.get(salida_maquila=self.sm)
+        self.assertIsNone(factura.oc_id)
+        self.assertEqual(factura.estatus, FacturaProveedor.FacturaProveedorStatus.BORRADOR)
+        self.assertEqual(factura.total, Decimal("5.00"))
+        linea = factura.factura_proveedor_detalles.get()
+        self.assertEqual((linea.cantidad, linea.salida_maquila_detalle_id), (Decimal("1.00"), self.smd.pk))
+
+    def test_completar_la_sm_la_marca_recibida_con_una_factura_por_recepcion(self):
+        self.assertEqual(self._recibir_sm(1).status_code, 200)
+        self.assertEqual(self._recibir_sm(3).status_code, 200)
+        self.sm.refresh_from_db()
+        self.assertEqual(self.sm.estatus, "RECIBIDA")
+        self.assertIsNotNone(self.sm.fecha_recepcion)
+        totales = list(FacturaProveedor.objects.filter(salida_maquila=self.sm).order_by("id").values_list("total", flat=True))
+        self.assertEqual(totales, [Decimal("5.00"), Decimal("15.00")])
+
+    def test_no_recibe_mas_que_las_piezas_de_la_sm(self):
+        r = self._recibir_sm(5)  # la OP tiene 10, la SM solo 4
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(Recepcion.objects.filter(salida_maquila=self.sm).exists())
+
+    def test_renglon_que_no_va_en_la_sm(self):
+        r = self._recibir_sm(1, op_detalle=self.op_detalle_2)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("no va en la SM", str(r.data["detalle"]))
+
+    def test_la_op_directa_no_recibe_piezas_en_maquila(self):
+        # 10 de la OP, 4 en maquila: la OP directa recibe a lo más 6.
+        r = self._post({"orden_produccion": self.op.pk},
+                       [{"orden_produccion_detalle": self.op_detalle.pk, "cantidad_recibida": 7}])
+        self.assertEqual(r.status_code, 400)
+        r = self._post({"orden_produccion": self.op.pk},
+                       [{"orden_produccion_detalle": self.op_detalle.pk, "cantidad_recibida": 6}])
+        self.assertEqual(r.status_code, 200, r.data)
+        r = self._post({"orden_produccion": self.op.pk},
+                       [{"orden_produccion_detalle": self.op_detalle.pk, "cantidad_recibida": 1}])
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("SM-T1", str(r.data["detalle"]))
+        # La SM sigue recibible por sus 4 piezas.
+        self.assertEqual(self._recibir_sm(4).status_code, 200)
+
+    def test_onboarding_get_informa_piezas_en_maquila_y_pendientes(self):
+        self._recibir_sm(1)
+        r = self.client.get(RECEPCION_ONBOARDING_URL)
+        sm = next(s for s in r.data["busqueda"]["salidas_maquila"] if s["id"] == self.sm.pk)
+        self.assertEqual(sm["piezas_pendientes"], Decimal("3.00"))
+        op = next(o for o in r.data["busqueda"]["ordenes_produccion"] if o["id"] == self.op.pk)
+        renglon = next(d for d in op["detalle"] if d["id"] == self.op_detalle.pk)
+        self.assertEqual(Decimal(renglon["cantidad_en_maquila"]), Decimal("3"))
+        self.assertEqual(Decimal(renglon["cantidad_pendiente"]), Decimal("6"))
+
+    def test_onboarding_get_sin_permiso_de_costos_no_trae_total(self):
+        Usuario.objects.filter(pk=self.usuario.pk).update(is_admin_empresa=False)
+        self.usuario.refresh_from_db()
+        self.usuario.sucursales.add(self.sucursal)
+        r = self.client.get(RECEPCION_ONBOARDING_URL)
+        filas = r.data["busqueda"]["salidas_maquila"]
+        self.assertTrue(filas)
+        self.assertTrue(all("total" not in f for f in filas))
+
+    def test_onboarding_get_excluye_sm_de_op_no_recibible(self):
+        from produccion.models import OrdenProduccion
+
+        OrdenProduccion.objects.filter(pk=self.op.pk).update(estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO)
+        r = self.client.get(RECEPCION_ONBOARDING_URL)
+        self.assertNotIn(self.sm.pk, [s["id"] for s in r.data["busqueda"]["salidas_maquila"]])
+
+    def test_tipo_origen_sm_incluye_las_de_op_y_expone_la_sm(self):
+        self._recibir_sm(4)
+        rc = Recepcion.objects.get(salida_maquila=self.sm)
+        self.assertEqual(rc.tipo_origen, Recepcion.TipoOrigen.ORDEN_PRODUCCION)
+        r = self.client.get(RECEPCIONES_URL, {"tipo_origen": "SM"})
+        filas = r.data["results"] if isinstance(r.data, dict) else r.data
+        fila = next(f for f in filas if f["id"] == rc.pk)
+        self.assertEqual((fila["salida_maquila_folio"], fila["salida_maquila_origen"]), ("SM-T1", "OP"))
+        r = self.client.get(f"{RECEPCIONES_URL}{rc.pk}/")
+        self.assertEqual(r.data["salida_maquila"], self.sm.pk)
+        self.assertEqual(r.data["salida_maquila_origen_folio"], self.op.folio_op)
+
+    def test_misma_sm_cancelada_o_de_otra_empresa(self):
+        from produccion.models import SalidaMaquila
+
+        SalidaMaquila.objects.filter(pk=self.sm.pk).update(estatus="CANCELADA")
+        self.assertEqual(self._recibir_sm(1).status_code, 400)
+        otra = Empresa.objects.create(codigo="otra-sm", razon_social="Otra SA")
+        Usuario.objects.filter(pk=self.usuario.pk).update(empresa=otra)
+        self.usuario.refresh_from_db()
+        r = self._recibir_sm(1)
+        self.assertEqual(r.status_code, 400)
+
+    def test_salida_maquila_con_orden_compra(self):
+        r = self._post({"salida_maquila": self.sm.pk, "orden_compra": self.oc.pk},
+                       [{"orden_produccion_detalle": self.op_detalle.pk, "cantidad_recibida": 1}])
+        self.assertEqual(r.status_code, 400)
+
+    def test_factura_de_maquila_se_ajusta_en_borrador_y_se_registra(self):
+        self._recibir_sm(4)
+        factura = FacturaProveedor.objects.get(salida_maquila=self.sm)
+        linea = factura.factura_proveedor_detalles.get()
+        url = f"/api/v1/finanzas/facturas-proveedor/{factura.pk}/"
+        r = self.client.post(f"{url}ajustar-maquila/", {"lineas": [{"id": linea.pk, "impuesto": "3.20"}]}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(Decimal(r.data["total"]), Decimal("23.20"))
+        r = self.client.get(url)
+        self.assertIsNone(r.data["oc_folio"])
+        self.assertEqual(r.data["salida_maquila_folio"], "SM-T1")
+
+
+class RecepcionSalidaMaquilaServicioTests(TestCase):
+    """SM de OB: sin renglones ni inventario, factura por la SM completa (#1240)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from produccion.models import OrdenesBordado, SalidaMaquila, SalidaMaquilaDetalle
+        from terceros.models import Cliente, Transportista
+        from ventas.models import Pedido
+
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
+        cls.empresa = Empresa.objects.create(codigo="smob", razon_social="SMOB SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="SOB", nombre="SMOB 1")
+        SerieFolio.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="RECEPCION", serie="RC")
+        cls.almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="AOB", nombre="AOB")
+        cls.usuario = Usuario.objects.create(username="u@smob.test", email="u@smob.test", empresa=cls.empresa,
+                                             is_admin_empresa=True)
+        maquilero = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="Maquilero", moneda=moneda, sat_regimen_fiscal=regimen,
+            sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="MAQ-OB", razon_social="Maquilero SA",
+            telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000", email="m@smob.test",
+            es_maquilero=True,
+        )
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente OB")
+        pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=moneda,
+            persona_pagos="Pagos", correo_facturas="p@smob.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        ob = OrdenesBordado.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, pedido=pedido, folio_bordado="OB-T1")
+        cls.sm = SalidaMaquila.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, ob=ob, centro_confeccion=maquilero,
+            folio="SM-OB1", fecha_envio=timezone.localdate(), total_piezas=2, total=30,
+        )
+        SalidaMaquilaDetalle.objects.create(salida=cls.sm, descripcion="Bata", cantidad=2, precio_unitario=15, importe=30)
+        otra = Empresa.objects.create(codigo="smob-2", razon_social="Otra SA")
+        cls.transportista_ajeno = Transportista.objects.create(empresa=otra)
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.usuario)
+
+    def _post(self, detalle=(), **extra):
+        cuerpo = {"recepcion": {"almacen": self.almacen.pk, "serie_codigo": "RC", "salida_maquila": self.sm.pk, **extra},
+                  "detalle": list(detalle)}
+        return self.client.post(RECEPCION_ONBOARDING_URL, cuerpo, format="json")
+
+    def test_recibe_completa_sin_inventario_y_factura_con_lineas(self):
+        movimientos = MovimientoInventario.objects.count()
+        r = self._post()
+        self.assertEqual(r.status_code, 200, r.data)
+        self.sm.refresh_from_db()
+        self.assertEqual(self.sm.estatus, "RECIBIDA")
+        rc = Recepcion.objects.get(salida_maquila=self.sm)
+        self.assertEqual(rc.tipo_origen, Recepcion.TipoOrigen.SALIDA_MAQUILA)
+        self.assertFalse(rc.recepciondetalle_set.exists())
+        self.assertEqual(MovimientoInventario.objects.count(), movimientos)
+        factura = FacturaProveedor.objects.get(salida_maquila=self.sm)
+        self.assertEqual((factura.total, factura.recepcion_id, factura.oc_id), (Decimal("30.00"), rc.pk, None))
+        linea = factura.factura_proveedor_detalles.get()
+        self.assertIsNone(linea.producto_id)
+        self.assertEqual(linea.descripcion, "Bata")
+
+    def test_detalle_no_vacio_es_400(self):
+        r = self._post(detalle=[{"orden_produccion_detalle": 1, "cantidad_recibida": 5}])
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(Recepcion.objects.filter(salida_maquila=self.sm).exists())
+
+    def test_transportista_de_otra_empresa_es_400(self):
+        r = self._post(transportista=self.transportista_ajeno.pk)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("transportista", r.data)
+
+    def test_dos_veces_es_400(self):
+        self.assertEqual(self._post().status_code, 200)
+        self.assertEqual(self._post().status_code, 400)
+
+    def test_pdf_fusionado_sin_oc(self):
+        import io
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from reportlab.pdfgen import canvas
+
+        self._post()
+        factura = FacturaProveedor.objects.get(salida_maquila=self.sm)
+        buffer = io.BytesIO()
+        hoja = canvas.Canvas(buffer)
+        hoja.drawString(50, 50, "factura")
+        hoja.save()
+        url = f"/api/v1/finanzas/facturas-proveedor/{factura.pk}/"
+        self.client.post(f"{url}adjuntar-pdf/", {"archivo": SimpleUploadedFile("f.pdf", buffer.getvalue(), "application/pdf")},
+                         format="multipart")
+        r = self.client.get(f"{url}pdf-fusionado/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("SM-RC-Factura", r["Content-Disposition"])
+
+    def test_cerrar_sigue_en_400(self):
+        r = self.client.post(f"/api/v1/produccion/salidas-maquila/{self.sm.pk}/cerrar/")
+        self.assertIn(r.status_code, (400, 403))

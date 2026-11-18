@@ -452,9 +452,17 @@ class FacturaProveedor(models.Model):
 
 class FacturaProveedorDetalle(models.Model):
     factura_proveedor = models.ForeignKey(FacturaProveedor, on_delete=models.CASCADE, related_name="factura_proveedor_detalles")
-    oc_detalle = models.ForeignKey('compras.OrdenCompraDetalle', on_delete=models.PROTECT, related_name="factura_proveedor_detalles")
-    recepcion_detalle = models.ForeignKey('compras.RecepcionDetalle', on_delete=models.PROTECT, related_name="factura_proveedor_detalles")
-    producto = models.ForeignKey('catalogo.Producto', on_delete=models.PROTECT, related_name="factura_proveedor_detalles")
+    # Nulos solo en la factura de maquila de una SM (#1242): no hay OC, la SM de
+    # OB/OR no tiene renglones de recepción ni producto. La API los sigue exigiendo.
+    oc_detalle = models.ForeignKey('compras.OrdenCompraDetalle', on_delete=models.PROTECT, related_name="factura_proveedor_detalles",
+                                   null=True, blank=True)
+    recepcion_detalle = models.ForeignKey('compras.RecepcionDetalle', on_delete=models.PROTECT, related_name="factura_proveedor_detalles",
+                                          null=True, blank=True)
+    producto = models.ForeignKey('catalogo.Producto', on_delete=models.PROTECT, related_name="factura_proveedor_detalles",
+                                 null=True, blank=True)
+    salida_maquila_detalle = models.ForeignKey('produccion.SalidaMaquilaDetalle', on_delete=models.PROTECT,
+                                               related_name="factura_proveedor_detalles", null=True, blank=True)
+    descripcion = models.CharField(max_length=255, blank=True, default="")
     cantidad = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     precio_unitario = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     descuento = models.DecimalField(max_digits=18, decimal_places=2, default=0)

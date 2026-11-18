@@ -20,6 +20,8 @@ from finanzas.services.facturama.acceso import empresa_usa_facturama, puede_cons
 from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
 from finanzas.services.pdf_fusion_service import fusionar_pdf_factura_proveedor
+from finanzas.services.factura_proveedor_montos import completar_linea, recalcular_encabezado
+from drf_spectacular.utils import extend_schema
 from finanzas.services.syncfy.client import SyncfyClient
 from finanzas.services.syncfy.exceptions import SyncfyAPIException
 from finanzas.exceptions import (
@@ -58,6 +60,7 @@ from finanzas.models import (
 )
 
 from finanzas.api.serializers import (
+    AjusteMaquilaSerializer,
     AlertaMoraSerializer,
     BancoSerializer,
     CentroCostoSerializer,
@@ -1458,7 +1461,7 @@ class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         # la consulta; ``tiene_pdf_adjunto`` sale de un CASE en SQL.
         qs = (
             super().get_queryset()
-            .select_related("proveedor", "moneda", "oc", "recepcion")
+            .select_related("proveedor", "moneda", "oc", "recepcion", "salida_maquila")
             # EC-904: al leer, el producto de cada línea en la misma consulta de las líneas.
             .prefetch_related(
                 Prefetch(
@@ -1487,6 +1490,11 @@ class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         moneda = qp.get("moneda") or qp.get("moneda_id")
         oc = qp.get("oc") or qp.get("orden_compra") or qp.get("orden_compra_id")
         recepcion = qp.get("recepcion") or qp.get("recepcion_id")
+        salida_maquila = qp.get("salida_maquila")
+        if salida_maquila:
+            if not str(salida_maquila).isdecimal():
+                raise ValidationError({"salida_maquila": ["Debe ser un número entero."]})
+            qs = qs.filter(salida_maquila_id=int(salida_maquila))
         if proveedor:
             qs = qs.filter(proveedor_id=proveedor)
         if estatus:
@@ -1643,6 +1651,47 @@ class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             status=status.HTTP_200_OK,
         )
 
+    @extend_schema(request=AjusteMaquilaSerializer, responses=FacturaProveedorLecturaSerializer)
+    @action(detail=True, methods=["post"], url_path="ajustar-maquila")
+    @transaction.atomic
+    def ajustar_maquila(self, request, pk=None):
+        """Factura de maquila de una SM en Borrador (#1242): nace con las líneas de la
+        SM al precio de maquila y sin impuestos; aquí se ajustan ``precio_unitario``,
+        ``descuento`` e ``impuesto`` de sus líneas a la factura real del maquilero.
+        No agrega ni quita líneas. El encabezado se recalcula de las líneas."""
+        factura = self.get_object()
+        _exigir_de_la_empresa_del_usuario(request.user, factura.empresa_id)
+        factura = FacturaProveedor.objects.select_for_update().get(pk=factura.pk)
+        if factura.salida_maquila_id is None:
+            raise ValidationError({"salida_maquila": ["Solo aplica a facturas de maquila de una SM."]})
+        if factura.estatus != FacturaProveedor.FacturaProveedorStatus.BORRADOR:
+            raise ValidationError({"estatus": ["Solo se ajusta una factura en Borrador."]})
+        entrada = AjusteMaquilaSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        lineas = {l.pk: l for l in factura.factura_proveedor_detalles.all()}
+        cambiadas = []
+        for i, dato in enumerate(entrada.validated_data["lineas"]):
+            linea = lineas.get(dato["id"])
+            if linea is None:
+                raise ValidationError({"lineas": [f"La línea {dato['id']} no es de esta factura."]})
+            for campo in ("precio_unitario", "descuento", "impuesto"):
+                if campo in dato:
+                    setattr(linea, campo, dato[campo])
+            linea.subtotal, linea.total = completar_linea(linea.cantidad, linea.precio_unitario,
+                                                          linea.descuento, linea.impuesto)
+            if linea.total < 0:
+                raise ValidationError({"lineas": [f"La línea {linea.pk} queda con total negativo."]})
+            cambiadas.append(linea)
+        FacturaProveedorDetalle.objects.bulk_update(
+            cambiadas, ["precio_unitario", "descuento", "impuesto", "subtotal", "total"])
+        recalcular_encabezado(factura)
+        factura = FacturaProveedor.objects.select_related(
+            "proveedor", "moneda", "oc", "recepcion", "salida_maquila",
+        ).prefetch_related(
+            Prefetch("factura_proveedor_detalles", queryset=FacturaProveedorDetalle.objects.select_related("producto"))
+        ).get(pk=factura.pk)
+        return Response(FacturaProveedorLecturaSerializer(factura, context=self.get_serializer_context()).data)
+
     @action(detail=True, methods=["get"], url_path="pdf-fusionado")
     def pdf_fusionado(self, request, pk=None):
         """OC + Recepción + factura del proveedor en un solo PDF (EC-397)."""
@@ -1652,7 +1701,9 @@ class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
                 {"pdf_adjunto": "Primero adjunta el PDF de la factura del proveedor (ver adjuntar-pdf/)."}
             )
         pdf_bytes = fusionar_pdf_factura_proveedor(factura)
-        nombre = f"OC-RC-Factura-{factura.folio or factura.pk}.pdf"
+        # Factura de maquila: SM en lugar de OC (#1233).
+        prefijo = "OC" if factura.oc_id else "SM" if factura.salida_maquila_id else None
+        nombre = f"{prefijo + '-' if prefijo else ''}RC-Factura-{factura.folio or factura.pk}.pdf"
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'inline; filename="{nombre}"'
         return response
