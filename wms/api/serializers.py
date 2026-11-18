@@ -452,6 +452,14 @@ class PickingSerializer(serializers.ModelSerializer):
         return str(obj.lote) if obj.lote_id else None
 
 
+
+class PickingListSerializer(PickingSerializer):
+    """Listado ligero (``?resumen=1``, #1149): el encabezado sin ``picking_detalle``
+    ni ``ordenes_trabajo``. Mismos nombres resueltos que el detalle."""
+
+    picking_detalle = None
+    ordenes_trabajo = None
+
 class PickingTrasladoSerializer(serializers.Serializer):
     """Entrada de ``POST /pickings/{id}/trasladar/``: almacén al que se mueve."""
 

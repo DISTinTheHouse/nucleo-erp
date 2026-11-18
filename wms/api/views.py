@@ -17,6 +17,7 @@ from wms.api.serializers import (
     PickingCreateSerializer,
     PickingTrasladoSerializer,
     PickingSerializer,
+    PickingListSerializer,
     PackingSerializer,
 )
 from wms.models import (
@@ -33,6 +34,7 @@ from wms.models import (
     Transferencia,
     TransferenciaDetalle,
 )
+from nucleo.listados import PaginacionOpcionalLimitOffset
 from wms.scope import documentos_wms_visibles
 from wms.services.despacho_service import DespachoService
 from wms.services.rfid_scan_service import (
@@ -123,8 +125,15 @@ class TransferenciaViewSet(
         return Response(TransferenciaSerializer(res).data, status=status.HTTP_201_CREATED)
 
 class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericViewSet):
+    """#1149: ``?limit=&offset=`` pagina (sin ``limit``, la lista completa como
+    antes) y ``?resumen=1`` regresa el listado sin renglones anidados."""
+
     queryset = Picking.objects.all()
     serializer_class = PickingSerializer
+    pagination_class = PaginacionOpcionalLimitOffset
+
+    def _resumen(self):
+        return self.action == "list" and str(self.request.query_params.get("resumen", "")).lower() in {"1", "true", "si"}
 
     def get_queryset(self):
         user = self.request.user
@@ -180,6 +189,8 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
             )
             .order_by("-created_at", "-id")
         )
+        if self._resumen():
+            qs = qs.prefetch_related(None)
 
         # Aislamiento multi-tenant (``wms/scope.py``): empresa activa, superusuario
         # incluido (EC-882). Los no admin ven las sucursales de
@@ -191,6 +202,8 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
             return PickingCreateSerializer
+        if self._resumen():
+            return PickingListSerializer
         return PickingSerializer
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
