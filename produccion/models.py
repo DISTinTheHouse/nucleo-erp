@@ -828,6 +828,8 @@ class SalidaMaquila(models.Model):
                            null=True, blank=True)
     ob = models.ForeignKey("produccion.OrdenesBordado", on_delete=models.PROTECT, related_name="salidas_maquila",
                            null=True, blank=True)
+    orden_r = models.ForeignKey("produccion.OrdenesReflejante", on_delete=models.PROTECT,
+                                related_name="salidas_maquila", null=True, blank=True)
     centro_confeccion = models.ForeignKey(
         "terceros.Proveedor", on_delete=models.PROTECT, related_name="salidas_maquila"
     )
@@ -850,9 +852,14 @@ class SalidaMaquila(models.Model):
         verbose_name_plural = "Salidas a maquila"
         constraints = [
             models.UniqueConstraint(fields=["empresa", "folio"], name="uq_sm_empresa_folio"),
+            # Exactamente un origen: OP, OB u OR.
             models.CheckConstraint(
-                condition=models.Q(op__isnull=False, ob__isnull=True) | models.Q(op__isnull=True, ob__isnull=False),
-                name="ck_sm_origen_op_u_ob",
+                condition=(
+                    models.Q(op__isnull=False, ob__isnull=True, orden_r__isnull=True)
+                    | models.Q(op__isnull=True, ob__isnull=False, orden_r__isnull=True)
+                    | models.Q(op__isnull=True, ob__isnull=True, orden_r__isnull=False)
+                ),
+                name="ck_sm_un_origen",
             ),
         ]
         indexes = [models.Index(fields=["empresa", "-id"], name="sm_empresa_id")]
@@ -868,6 +875,9 @@ class SalidaMaquilaDetalle(models.Model):
     )
     ob_detalle = models.ForeignKey(
         "produccion.OrdenBordadoDetalle", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    or_detalle = models.ForeignKey(
+        "produccion.OrdenReflejanteDetalle", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     descripcion = models.CharField(max_length=255)
     cantidad = models.DecimalField(max_digits=14, decimal_places=2)
