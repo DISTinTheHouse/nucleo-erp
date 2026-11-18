@@ -218,6 +218,9 @@ class Departamento(StatusLifecycleModel):
     def perform_destroy(self, instance):
         instance.soft_delete()
 
+ANIO = "{anio}"  # marcador de año en prefijo/sufijo de SerieFolio (#1142)
+
+
 class SerieFolio(StatusLifecycleModel):
     id_serie_folio = models.BigAutoField(primary_key=True)
 
@@ -231,8 +234,8 @@ class SerieFolio(StatusLifecycleModel):
     folio_inicial = models.PositiveIntegerField(blank=True, null=True)
     folio_final = models.PositiveIntegerField(blank=True, null=True)
 
-    prefijo = models.CharField(max_length=20, blank=True, null=True)
-    sufijo = models.CharField(max_length=20, blank=True, null=True)
+    prefijo = models.CharField(max_length=20, blank=True, null=True)  # acepta {anio} (#1142)
+    sufijo = models.CharField(max_length=20, blank=True, null=True)  # acepta {anio} (#1142)
     
     # Configuración de formato
     relleno_ceros = models.PositiveSmallIntegerField(default=6, help_text="Ceros a la izquierda. 0 para desactivar.")
@@ -282,15 +285,18 @@ class SerieFolio(StatusLifecycleModel):
             numero_str = str(nuevo_consecutivo).zfill(self.relleno_ceros)
         else:
             numero_str = str(nuevo_consecutivo)
+        # ``{anio}`` en prefijo o sufijo = año en curso a 4 dígitos (#1142): antes
+        # se capturaba "2026" literal y en 2027 seguiría diciendo 2026.
+        anio_completo = datetime.datetime.now().strftime('%Y')
         partes = []
         if self.prefijo:
-            partes.append(self.prefijo)
+            partes.append(self.prefijo.replace(ANIO, anio_completo))
         partes.append(self.serie)
         partes.append(numero_str)
         if self.incluir_anio:
             partes.append(str(anio_actual))
         if self.sufijo:
-            partes.append(self.sufijo)
+            partes.append(self.sufijo.replace(ANIO, anio_completo))
         folio_formateado = self.separador.join(partes)
         return folio_formateado, nuevo_consecutivo, anio_actual
 
