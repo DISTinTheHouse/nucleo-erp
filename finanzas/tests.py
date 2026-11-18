@@ -11689,7 +11689,7 @@ class SucursalCobrosPagosTests(FinanzasBase):
         resp = self._cobro(self.ambas, [self._cxc(self.mty)], sucursal=self.slt.pk)
 
         self.assertEqual(resp.status_code, 400, resp.data)
-        self.assertIn("No coincide", str(resp.data["sucursal"]))
+        self.assertIn("no coincide", str(resp.data["sucursal"]))
         self.assertEqual(Cobro.objects.count(), 0)
 
     def test_sucursal_enviada_igual_a_la_de_las_facturas(self):
@@ -11848,7 +11848,7 @@ class SucursalCobrosPagosTests(FinanzasBase):
         resp = self._pago(self.solo_mty, [self._cxp(self.slt)], sucursal=self.mty.pk)
 
         self.assertEqual(resp.status_code, 400, resp.data)
-        self.assertIn("No coincide", str(resp.data["sucursal"]))
+        self.assertIn("no coincide", str(resp.data["sucursal"]))
         self.assertEqual(Pago.objects.count(), 0)
 
     def test_pago_sin_lineas_queda_sin_sucursal(self):
@@ -11891,6 +11891,25 @@ class SucursalCobrosPagosTests(FinanzasBase):
             self.assertEqual(self._pago(self.su, [self._cxp(sucursal)]).status_code, 201)
 
         self.assertEqual(consultas(), una)
+
+    def test_resolver_la_sucursal_cuesta_una_consulta(self):
+        """EC-874: las sucursales de las líneas y su empresa salen de una sola consulta
+        (antes, una para los ids y otra para cargar la sucursal)."""
+        from finanzas.scope import sucursales_de_cxcs, sucursales_de_cxps
+
+        cxcs = [self._cxc(self.mty), self._cxc(self.mty), self._cxc(self.slt)]
+        cxps = [self._cxp(self.mty)[1], self._cxp(self.slt)[1]]
+
+        with self.assertNumQueries(1):
+            de_cxcs = sucursales_de_cxcs([c.pk for c in cxcs])
+        with self.assertNumQueries(1):
+            de_cxps = sucursales_de_cxps([c.pk for c in cxps])
+        with self.assertNumQueries(0):
+            vacio = sucursales_de_cxcs([])
+
+        self.assertEqual(sorted((s.pk, s.empresa_id) for s in de_cxcs), sorted([(self.mty.pk, self.a["empresa"].pk), (self.slt.pk, self.a["empresa"].pk)]))
+        self.assertEqual(sorted(s.pk for s in de_cxps), sorted([self.mty.pk, self.slt.pk]))
+        self.assertEqual(vacio, [])
 
     def test_listado_de_cobros_con_sucursal_sin_consultas_por_fila(self):
         def consultas():
@@ -11943,15 +11962,112 @@ class SucursalCobrosPagosTests(FinanzasBase):
         self.assertNotIn(de_b.pk, ids)
         self.assertEqual(self._client(self.su).get(f"{COBROS_URL}{de_b.pk}/").status_code, 404)
 
-    def test_sucursal_enviada_inactiva_400(self):
+    def test_sucursal_enviada_inactiva_se_compara_como_cualquier_otra(self):
+        """La enviada nunca se asigna, solo se compara: inactiva y de las facturas → 201;
+        inactiva y distinta → 400 por no coincidir."""
         inactiva = Sucursal.objects.create(empresa=self.a["empresa"], codigo="OFF", nombre="Cerrada", activo=False)
+        SerieFolio.objects.create(empresa=self.a["empresa"], sucursal=inactiva, tipo_documento="COBROS", serie="OF", folio_actual=0)
 
         cobro = self._cobro(self.su, [self._cxc(inactiva)], sucursal=inactiva.pk)
         pago = self._pago(self.su, [self._cxp(inactiva)], sucursal=inactiva.pk)
+        cobro_otra = self._cobro(self.su, [self._cxc(self.mty)], sucursal=inactiva.pk)
+        pago_otra = self._pago(self.su, [self._cxp(self.mty)], sucursal=inactiva.pk)
 
-        self.assertEqual((cobro.status_code, pago.status_code), (400, 400))
-        self.assertIn("sucursal", cobro.data)
-        self.assertIn("sucursal", pago.data)
+        self.assertEqual((cobro.status_code, pago.status_code), (201, 201), (cobro.data, pago.data))
+        self.assertEqual((cobro.data["sucursal"], pago.data["sucursal"]), (inactiva.pk, inactiva.pk))
+        self.assertEqual((cobro_otra.status_code, pago_otra.status_code), (400, 400))
+        self.assertIn("no coincide", str(cobro_otra.data["sucursal"]))
+        self.assertIn("no coincide", str(pago_otra.data["sucursal"]))
+
+    def test_editar_reenviando_la_sucursal_inactiva_actual(self):
+        """PATCH y PUT que reenvían la sucursal (inactiva) que el documento ya tiene."""
+        inactiva = Sucursal.objects.create(empresa=self.a["empresa"], codigo="OFF", nombre="Cerrada", activo=False)
+        client = self._client(self.su)
+        cobro = self._cobro(self.su, [self._cxc(inactiva)], estatus="Borrador").data
+        pago = self._pago(self.su, [self._cxp(inactiva)], estatus="Borrador").data
+        url_c, url_p = f"{COBROS_URL}{cobro['id']}/", f"{PAGOS_URL}{pago['id']}/"
+        cxc_nueva = self._cxc(inactiva)
+
+        respuestas = {
+            "cobro PATCH": client.patch(url_c, {"sucursal": inactiva.pk, "observaciones": "x"}, format="json"),
+            "cobro PATCH con líneas": client.patch(url_c, {
+                "sucursal": inactiva.pk, "cobro_detalles": [{"cxc": cxc_nueva.pk, "importe_aplicado": "10.00"}],
+            }, format="json"),
+            "cobro PUT": client.put(url_c, {
+                "cliente": cobro["cliente"], "cuenta_bancaria": cobro["cuenta_bancaria"], "sucursal": inactiva.pk,
+                "estatus": "Borrador", "total_cobrado": "10.00", "observaciones": "y",
+            }, format="json"),
+            "pago PATCH": client.patch(url_p, {"sucursal": inactiva.pk, "observaciones": "x"}, format="json"),
+            "pago PUT": client.put(url_p, {
+                "proveedor": pago["proveedor"], "cuenta_bancaria": pago["cuenta_bancaria"], "sucursal": inactiva.pk,
+                "estatus": "Borrador", "total_pagado": "50.00", "observaciones": "y",
+            }, format="json"),
+        }
+
+        for nombre, resp in respuestas.items():
+            with self.subTest(nombre):
+                self.assertEqual((resp.status_code, resp.data["sucursal"]), (200, inactiva.pk), resp.data)
+        self.assertEqual(Cobro.objects.get(pk=cobro["id"]).observaciones, "y")
+        self.assertEqual(Pago.objects.get(pk=pago["id"]).observaciones, "y")
+
+    def test_aplicar_pago_exige_su_sucursal(self):
+        """Pagos armados por ORM (la vista ya no deja crearlos así): varias sucursales, sin
+        sucursal y con otra. No se aplican ni mueven saldos ni banco."""
+        from finanzas.exceptions import ErrorDeNegocio
+        from finanzas.services.pago_service import PagoService
+
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        casos = {
+            "varias sucursales": (self.mty, [self.mty, self.slt]),
+            "sin sucursal": (None, [self.mty]),
+            "otra sucursal": (self.mty, [self.slt]),
+        }
+        for nombre, (sucursal, de_lineas) in casos.items():
+            with self.subTest(nombre):
+                cxps = [self._cxp(s) for s in de_lineas]
+                pago = Pago.objects.create(
+                    empresa=self.a["empresa"], proveedor=cxps[0][0], cuenta_bancaria=cuenta, sucursal=sucursal,
+                    total_pagado=Decimal("50.00") * len(cxps), estatus=Pago.Estatus.BORRADOR,
+                )
+                for _, cxp in cxps:
+                    PagoDetalle.objects.create(pago=pago, cxp=cxp, importe_aplicado=Decimal("50.00"))
+
+                with self.assertRaises(ErrorDeNegocio) as ctx:
+                    PagoService.aplicar_pago(pago)
+
+                self.assertIn("sucursal", ctx.exception.message_dict)
+                pago.refresh_from_db()
+                self.assertEqual(pago.estatus, Pago.Estatus.BORRADOR)
+                self.assertEqual(
+                    [str(CuentaPorPagar.objects.get(pk=cxp.pk).saldo) for _, cxp in cxps], ["50.00"] * len(cxps),
+                )
+                self.assertFalse(MovimientoBancario.objects.filter(pago=pago).exists())
+
+    def test_migracion_0048_deja_sin_sucursal_solo_los_borradores_vacios(self):
+        """Borrador vacío con sucursal → null; Borrador con líneas y Cancelado vacío, igual.
+        Dos veces seguidas: la segunda no cambia nada."""
+        migracion = importlib.import_module("finanzas.migrations.0048_borrador_sin_lineas_sin_sucursal")
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+
+        def cobro(estatus, lineas):
+            c = Cobro.objects.create(
+                empresa=self.a["empresa"], cliente=self.a["cliente"], cuenta_bancaria=cuenta, sucursal=self.mty,
+                estatus=estatus, total_cobrado=Decimal("10.00") if lineas else Decimal("0.00"),
+            )
+            if lineas:
+                CobroDetalle.objects.create(cobro=c, cxc=self._cxc(self.mty), importe_aplicado=Decimal("10.00"))
+            return c
+
+        vacio, con_lineas = cobro(Cobro.Estatus.BORRADOR, False), cobro(Cobro.Estatus.BORRADOR, True)
+        cancelado, aplicado = cobro(Cobro.Estatus.CANCELADO, False), cobro(Cobro.Estatus.APLICADO, True)
+
+        for corrida in (1, 2):
+            with self.subTest(corrida=corrida):
+                migracion.quitar_sucursal(django_apps, None)
+                self.assertEqual(
+                    {c.pk: Cobro.objects.get(pk=c.pk).sucursal_id for c in (vacio, con_lineas, cancelado, aplicado)},
+                    {vacio.pk: None, con_lineas.pk: self.mty.pk, cancelado.pk: self.mty.pk, aplicado.pk: self.mty.pk},
+                )
 
     def test_sucursal_inactiva_de_las_facturas_se_acepta(self):
         """Un cobro o pago salda una deuda que ya existe: la sucursal de las facturas
