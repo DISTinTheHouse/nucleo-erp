@@ -33,15 +33,19 @@ class EnvioViewSet(
     def create(self, request, *args, **kwargs):
         user = request.user
         empresa = getattr(user, "empresa", None)
-        if not empresa and not getattr(user, "is_superuser", False):
+        # Superusuario incluido (EC-798): sin empresa activa no escribe en ninguna.
+        if not empresa:
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         pedido = serializer.validated_data["pedido"]
+        transportista = serializer.validated_data["transportista"]
 
-        if empresa and pedido.empresa_id != empresa.pk:
+        if pedido.empresa_id != empresa.pk:
             raise ValidationError({"pedido": "No pertenece a tu empresa."})
+        if transportista.empresa_id != empresa.pk:
+            raise ValidationError({"transportista": "No pertenece a tu empresa."})
 
         es_staff = getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)
         if not es_staff and pedido.sucursal_id not in user.sucursales_permitidas():

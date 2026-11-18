@@ -70,3 +70,20 @@ class EnvioAlcanceTests(TestCase):
     def test_usuario_normal_solo_ve_sus_sucursales(self):
         self.assertEqual(self._ids(self.usuario), {self.propio.pk})
         self.assertEqual(self._client(self.usuario).get(f"{URL}{self.otra_sucursal.pk}/").status_code, 404)
+
+    def test_alta_exige_empresa_activa_y_datos_de_ella(self):
+        pedido = self.propio.pedido
+        propio = Transportista.objects.create(empresa=self.empresa)
+        ajeno = Transportista.objects.create(empresa=self.otra)
+        cases = [
+            (self.sin_empresa, pedido.pk, propio.pk, "empresa"),
+            (self.superusuario, self.ajeno.pedido_id, propio.pk, "pedido"),
+            (self.superusuario, pedido.pk, ajeno.pk, "transportista"),
+        ]
+        for user, pedido_id, transportista_id, campo in cases:
+            resp = self._client(user).post(URL, {"pedido": pedido_id, "transportista": transportista_id}, format="json")
+            self.assertEqual(resp.status_code, 400, resp.content)
+            self.assertIn(campo, resp.json())
+        resp = self._client(self.superusuario).post(URL, {"pedido": pedido.pk, "transportista": propio.pk}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(Envio.objects.get(pk=resp.json()["id"]).empresa_id, self.empresa.pk)
