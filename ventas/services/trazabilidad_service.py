@@ -573,13 +573,14 @@ BLOQUES_DE_PEDIDO_DOCUMENTOS = (
 def _bloques_de_pedido_documentos(pedido, alcance):
     """Cotización, OC, OP/OB/OR/OCM y packings con la MISMA relación y reglas de
     visibilidad que ``pedido.documentos`` (``documentos_visibles``): qué cuenta
-    como del pedido no se redefine aquí. Una consulta por tipo. Sin importes: la
-    pestaña no los necesita y así no se abre otra puerta a montos (EC-784)."""
+    como del pedido no se redefine aquí. Una consulta por tipo, solo con las
+    columnas que se leen. Sin importes: la pestaña no los necesita y así no se
+    abre otra puerta a montos (EC-784)."""
     from ventas.services.pedido_documentos_service import documentos_visibles, fila_de_documento
 
     bloque_de = {tipo: bloque for bloque, tipo in BLOQUES_DE_PEDIDO_DOCUMENTOS}
     bloques = {bloque: [] for bloque, _ in BLOQUES_DE_PEDIDO_DOCUMENTOS}
-    for cfg, doc in documentos_visibles(pedido, tipos=bloque_de, alcance=alcance):
+    for cfg, doc in documentos_visibles(pedido, tipos=bloque_de, alcance=alcance, solo_campos=True):
         bloques[bloque_de[cfg["tipo"]]].append(fila_de_documento(cfg, doc))
     for filas in bloques.values():
         filas.sort(key=lambda fila: fila["id"])

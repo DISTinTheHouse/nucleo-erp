@@ -4276,11 +4276,16 @@ class PedidoViewSet(viewsets.ModelViewSet):
         no, null)."""
         from nucleo.permisos import permisos_de_la_peticion
         from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
+        from ventas.services.pedido_documentos_service import campos_diferidos_de_la_cotizacion
         from ventas.services.trazabilidad_service import documentos_pedido
 
-        # ``select_related("cotizacion")``: el bloque ``cotizaciones`` la lee sin otro viaje.
+        # ``select_related("cotizacion")``: el bloque ``cotizaciones`` la lee sin otro
+        # viaje, y sin las columnas que no usa (snapshots JSON).
         pedido = get_object_or_404(
-            pedidos_visibles(pedidos_base(), request.user).select_related("cotizacion"), pk=pk,
+            pedidos_visibles(pedidos_base(), request.user)
+            .select_related("cotizacion")
+            .defer(*campos_diferidos_de_la_cotizacion()),
+            pk=pk,
         )
         data = documentos_pedido(
             pedido,
