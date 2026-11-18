@@ -1,9 +1,12 @@
 import secrets
 
+from django.contrib.postgres.indexes import OpClass
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models.functions import Upper
 from simple_history.models import HistoricalRecords
 
+from nucleo.indices import GinIndexSoloPostgres
 from nucleo.scope import visibles_en_empresa_activa
 
 class Estado(models.TextChoices):
@@ -147,6 +150,16 @@ class Picking(models.Model):
         db_table = "picking"
         verbose_name = "Picking"
         verbose_name_plural = "Pickings"
+        indexes = [
+            # ``?search=`` del listado (EC-921) busca el folio por subcadena
+            # (``folio__icontains`` → ``UPPER("folio"::text) LIKE UPPER('%...%')``):
+            # un GIN trigram sobre ``UPPER(folio)`` sí sirve a eso. Mismo patrón que
+            # los folios de producción; sólo existe en PostgreSQL (``nucleo.indices``).
+            GinIndexSoloPostgres(
+                OpClass(Upper("folio"), name="gin_trgm_ops"),
+                name="picking_folio_upper_trgm",
+            ),
+        ]
 
     def __str__(self):
         return self.folio

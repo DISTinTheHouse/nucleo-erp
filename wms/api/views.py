@@ -1,7 +1,11 @@
 from django.db.models import Prefetch
+from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import mixins, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
@@ -35,6 +39,7 @@ from wms.models import (
     TransferenciaDetalle,
 )
 from nucleo.listados import PaginacionOpcionalLimitOffset
+from wms.api import pickings_listado
 from wms.scope import documentos_wms_visibles
 from wms.services.despacho_service import DespachoService
 from wms.services.rfid_scan_service import (
@@ -124,13 +129,38 @@ class TransferenciaViewSet(
         res = TransferenciaService.handle_store(serializer.validated_data, request.user, request=request)
         return Response(TransferenciaSerializer(res).data, status=status.HTTP_201_CREATED)
 
+@extend_schema_view(
+    list=extend_schema(parameters=[
+        pickings_listado.PARAMETRO_RESUMEN_OPENAPI,
+        *pickings_listado.PARAMETROS_FILTRO_OPENAPI,
+        pickings_listado.PARAMETRO_ORDERING_OPENAPI,
+    ]),
+)
 class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin, GenericViewSet):
     """#1149: ``?limit=&offset=`` pagina (sin ``limit``, la lista completa como
-    antes) y ``?resumen=1`` regresa el listado sin renglones anidados."""
+    antes) y ``?resumen=1`` regresa el listado sin renglones anidados.
+
+    EC-921 (modo servidor del listado): ``?estado=``, ``?prioridad=``, ``?search=`` y
+    ``?ordering=`` (``wms/api/pickings_listado.py``), y ``kpis/`` con los mismos
+    filtros. Sin parámetros, la misma respuesta de siempre."""
 
     queryset = Picking.objects.all()
     serializer_class = PickingSerializer
     pagination_class = PaginacionOpcionalLimitOffset
+    # Sin ``OrderingFilter`` de DRF: sin lista blanca aceptaba cualquier campo del
+    # serializer, sin desempate, y ``prioridad`` salía alfabética (ALTA, BAJA, MEDIA).
+    # ``SearchFilter`` sólo en el listado (``BusquedaPickingsFilter``).
+    filter_backends = [
+        *[b for b in GenericViewSet.filter_backends if not issubclass(b, (OrderingFilter, SearchFilter))],
+        pickings_listado.BusquedaPickingsFilter,
+        pickings_listado.OrdenamientoPickingsFilter,
+    ]
+    # Lo que busca la caja del front ("folio, pedido u operador"); el operador por el
+    # nombre que pinta la fila (el correo sólo si no tiene nombre).
+    search_fields = ["folio", "pedido__folio", pickings_listado.CAMPO_BUSQUEDA_OPERADOR]
+    # Columnas de la tabla con el nombre que usa el front (``pedido_folio``,
+    # ``operador_nombre``) y ``prioridad`` por urgencia (``OrdenamientoPickingsFilter``).
+    ordering_fields = list(pickings_listado.CAMPOS_ORDEN)
 
     def _resumen(self):
         return self.action == "list" and str(self.request.query_params.get("resumen", "")).lower() in {"1", "true", "si"}
@@ -197,7 +227,12 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
         # ``sucursales_permitidas()``, el mismo conjunto que une el onboarding
         # (``PickingService.onboarding_payload``): quien crea un picking lo vuelve a
         # ver en list/retrieve. ``trasladar`` pasa por aquí vía ``get_object``.
-        return documentos_wms_visibles(qs, user)
+        qs = documentos_wms_visibles(qs, user)
+        # Filtros del listado (EC-921) encima del alcance y sólo donde se listan
+        # filas: en el detalle un parámetro suelto daría 404 sobre un picking visible.
+        if self.action in pickings_listado.ACCIONES_FILTRADAS:
+            qs = pickings_listado.filtrar(self.request, qs)
+        return qs
 
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
@@ -205,6 +240,27 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
         if self._resumen():
             return PickingListSerializer
         return PickingSerializer
+
+    @extend_schema(
+        summary="KPIs del listado de pickings con sus filtros",
+        description=(
+            "Mismos `estado`, `prioridad` y `search` que el listado, sin paginar ni ordenar "
+            "(`limit`, `offset` y `ordering` se ignoran). Respuesta: `generado_en`, `total` "
+            "(= `count` del listado con los mismos filtros), `lineas_por_surtir` (suma de "
+            "`total_lineas - total_lineas_completas`, cada picking acotado a >= 0) y "
+            "`por_prioridad` (`[{prioridad, prioridad_label, total}]`, ALTA, MEDIA, BAJA)."
+        ),
+        parameters=list(pickings_listado.PARAMETROS_FILTRO_OPENAPI),
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path=pickings_listado.ACCION_KPIS)
+    def kpis(self, request):
+        """Tarjetas de ``PickingView`` sobre el conjunto filtrado, en una consulta
+        (``pickings_listado.kpis``). Mismo ``get_queryset`` (alcance y filtros) y los
+        mismos filter backends que el listado, como ``PedidoViewSet.kpis_mesa``; el
+        orden lo descarta ``pickings_listado.kpis`` antes de agregar."""
+        qs = self.filter_queryset(self.get_queryset())
+        return Response({"generado_en": timezone.now(), **pickings_listado.kpis(qs)})
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
     def onboarding(self, request):

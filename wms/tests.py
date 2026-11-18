@@ -2854,3 +2854,373 @@ class TransferenciaPickingBackfillTests(TestCase):
         from wms.api.serializers import TransferenciaSerializer
 
         self.assertTrue(TransferenciaSerializer().fields["picking"].read_only)
+
+
+class PickingListadoServidorTests(TestCase):
+    """EC-921: ``?estado=``, ``?prioridad=``, ``?search=``, ``?ordering=`` y ``kpis/`` del
+    listado de pickings (modo servidor de ``PickingView``, EC-915).
+
+    Empresa A (superusuario, su empresa activa) con siete pickings de prioridad,
+    estado, operador, pedido y líneas distintas; empresa B con uno solo, que no debe
+    aparecer nunca.
+    """
+
+    URL = "/api/v1/wms/pickings/"
+    KPIS = "/api/v1/wms/pickings/kpis/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from ventas.models import Pedido
+        from wms.models import Picking
+
+        cls.a = _documentos_wms("LA", superusuario=True)
+        cls.b = _documentos_wms("LB")
+        cls.user = cls.a["usuario"]
+        # El picking del fixture: MEDIA, Pendiente, 0 líneas, operador sin nombre.
+        cls.base = cls.a["picking"]
+
+        def operador(codigo, nombre="", apellido=""):
+            return Usuario.objects.create(
+                username=f"op-{codigo}@example.com", email=f"op-{codigo}@example.com",
+                first_name=nombre, last_name=apellido, empresa=cls.a["empresa"],
+            )
+
+        cls.zoe = operador("zoe", "Zoe", "Alvarez")
+        cls.ana = operador("ana", "Ana", "Zamora")
+        cls.sin_nombre = operador("anonimo")
+
+        def pedido(folio):
+            p = cls.a["pedido"]
+            return Pedido.objects.create(
+                empresa=p.empresa, sucursal=p.sucursal, cliente=p.cliente, moneda=p.moneda, folio=folio,
+                estatus=3, persona_pagos="Pagos", correo_facturas="p@example.com", telefono_pagos="8100000000",
+                forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            )
+
+        cls.pedido_z = pedido("P-ZZZ")
+        cls.pedido_sin_folio = pedido(None)
+
+        def picking(folio, prioridad, estado, total, completas, op, ped=None):
+            return Picking.objects.create(
+                folio=folio, empresa=cls.a["empresa"], sucursal=cls.a["sucursal"], pedido=ped or cls.a["pedido"],
+                operador=op, almacen=cls.base.almacen, usuario=cls.user, prioridad=prioridad, estado=estado,
+                total_lineas=total, total_lineas_completas=completas,
+            )
+
+        A, M, B = Picking.Prioridad.ALTA, Picking.Prioridad.MEDIA, Picking.Prioridad.BAJA
+        E = Picking.Estado
+        cls.alta1 = picking("SUR-001", A, E.COMPLETADO, 4, 4, cls.zoe, cls.pedido_z)
+        cls.baja1 = picking("SUR-002", B, E.PARCIAL, 5, 2, cls.ana)
+        cls.alta2 = picking("SUR-003", A, E.PARCIAL, 3, 1, cls.ana, cls.pedido_sin_folio)
+        cls.media1 = picking("SUR-004", M, E.PENDIENTE, 6, 0, cls.zoe)
+        cls.baja2 = picking("SUR-005", B, E.COMPLETADO, 2, 2, cls.sin_nombre)
+        # Dato inconsistente: más líneas completas que totales; no debe restar.
+        cls.raro = picking("SUR-006", M, E.CANCELADO, 1, 3, cls.sin_nombre)
+
+    def setUp(self):
+        self.api = _api_de(self.user)
+
+    def _get(self, url, **params):
+        resp = self.api.get(url, params)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def _ids(self, **params):
+        return [fila["id"] for fila in self._get(self.URL, **params)]
+
+    @staticmethod
+    def _pks(*pickings):
+        return [p.pk for p in pickings]
+
+    def _por_defecto(self):
+        from wms.models import Picking
+
+        return list(
+            Picking.objects.filter(empresa=self.a["empresa"]).order_by("-created_at", "-id").values_list("id", flat=True)
+        )
+
+    # --- Sin parámetros ----------------------------------------------------------
+
+    def test_sin_parametros_responde_la_lista_completa_con_renglones(self):
+        datos = self._get(self.URL)
+        self.assertIsInstance(datos, list)
+        self.assertEqual([f["id"] for f in datos], self._por_defecto())
+        self.assertIn("picking_detalle", datos[0])
+        self.assertIn("ordenes_trabajo", datos[0])
+
+    def test_el_detalle_ignora_los_parametros_del_listado(self):
+        url = f"{self.URL}{self.alta1.pk}/"
+        limpio = self._get(url)
+        con_params = self._get(url, search="no-coincide", estado="Pendiente", prioridad="BAJA", ordering="prioridad")
+        self.assertEqual(con_params, limpio)
+        self.assertEqual(self.api.get(url, {"estado": "Inexistente"}).status_code, 200)
+
+    # --- Filtros -----------------------------------------------------------------
+
+    def test_filtra_por_estado_uno_o_varios(self):
+        self.assertCountEqual(self._ids(estado="Completado"), self._pks(self.alta1, self.baja2))
+        self.assertCountEqual(
+            self._ids(estado="Completado,Parcial"), self._pks(self.alta1, self.baja2, self.baja1, self.alta2)
+        )
+        self.assertEqual(self._ids(estado="En proceso"), [])
+
+    def test_filtra_por_prioridad_uno_o_varios(self):
+        self.assertCountEqual(self._ids(prioridad="ALTA"), self._pks(self.alta1, self.alta2))
+        self.assertCountEqual(
+            self._ids(prioridad="BAJA,MEDIA"), self._pks(self.baja1, self.baja2, self.media1, self.raro, self.base)
+        )
+
+    def test_estado_o_prioridad_inexistente_es_400(self):
+        for params, campo in [
+            ({"estado": "Terminado"}, "estado"),
+            ({"estado": "Completado,completado"}, "estado"),
+            ({"prioridad": "alta"}, "prioridad"),
+            ({"prioridad": "URGENTE"}, "prioridad"),
+            ({"prioridad": ","}, "prioridad"),
+        ]:
+            for url in (self.URL, self.KPIS):
+                with self.subTest(url=url, **params):
+                    resp = self.api.get(url, params)
+                    self.assertEqual(resp.status_code, 400, resp.content)
+                    self.assertIn(campo, resp.json())
+
+    # --- Búsqueda ----------------------------------------------------------------
+
+    def test_busca_por_folio_pedido_y_operador(self):
+        casos = {
+            "sur-003": [self.alta2],
+            "P-ZZZ": [self.alta1],
+            "zoe": [self.alta1, self.media1],
+            "Ana Zamora": [self.baja1, self.alta2],
+            # Sin nombre, la fila pinta el correo: se busca por él.
+            "op-anonimo": [self.baja2, self.raro],
+            # Con nombre, el correo no se pinta ni se busca.
+            "op-zoe": [],
+            "example.com": [self.base, self.baja2, self.raro],
+        }
+        for termino, esperados in casos.items():
+            with self.subTest(search=termino):
+                self.assertCountEqual(self._ids(search=termino), self._pks(*esperados))
+
+    def test_la_busqueda_no_alcanza_otra_empresa(self):
+        self.assertEqual(self._ids(search="PICK-LB"), [])
+        self.assertEqual(self._ids(search="P-LB"), [])
+
+    def test_busqueda_y_filtros_se_combinan(self):
+        self.assertEqual(self._ids(search="ana", prioridad="ALTA"), self._pks(self.alta2))
+
+    # --- Ordenamiento ------------------------------------------------------------
+
+    def test_prioridad_ordena_por_urgencia_con_desempate_por_id(self):
+        baja = sorted(self._pks(self.baja1, self.baja2))
+        media = sorted(self._pks(self.base, self.media1, self.raro))
+        alta = sorted(self._pks(self.alta1, self.alta2))
+        self.assertEqual(self._ids(ordering="prioridad"), baja + media + alta)
+        self.assertEqual(self._ids(ordering="-prioridad"), alta[::-1] + media[::-1] + baja[::-1])
+
+    def test_operador_nombre_ordena_por_el_nombre_que_se_muestra(self):
+        """El mismo texto que ``operador_nombre`` (nombre completo o, sin él, el correo),
+        con el desempate por ``id``. El orden entre textos es el de la collation de la
+        base, igual que cualquier otra columna de texto."""
+        filas = self._get(self.URL, ordering="operador_nombre", resumen=1)
+        claves = [(f["operador_nombre"], f["id"]) for f in filas]
+        self.assertEqual(len({nombre for nombre, _ in claves}), 4)
+        # Agrupados por nombre y, dentro de cada nombre, por id ascendente.
+        for nombre in {n for n, _ in claves}:
+            ids = [pk for n, pk in claves if n == nombre]
+            self.assertEqual(ids, sorted(ids))
+            posiciones = [i for i, (n, _) in enumerate(claves) if n == nombre]
+            self.assertEqual(posiciones, list(range(posiciones[0], posiciones[0] + len(posiciones))))
+        desc = self._get(self.URL, ordering="-operador_nombre", resumen=1)
+        self.assertEqual([f["operador_nombre"] for f in desc], [n for n, _ in claves][::-1])
+        self.assertEqual([f["id"] for f in desc], [pk for _, pk in claves][::-1])
+
+    def test_pedido_folio_ordena_con_los_sin_folio_al_final(self):
+        asc = self._ids(ordering="pedido_folio")
+        desc = self._ids(ordering="-pedido_folio")
+        self.assertEqual(asc[-1], self.alta2.pk)
+        self.assertEqual(desc[-1], self.alta2.pk)
+        self.assertEqual(desc[0], self.alta1.pk)  # P-ZZZ
+
+    def test_columnas_simples_y_campo_fuera_de_la_lista(self):
+        self.assertEqual(
+            self._ids(ordering="folio"),
+            self._pks(self.base, self.alta1, self.baja1, self.alta2, self.media1, self.baja2, self.raro),
+        )
+        self.assertEqual(self._ids(ordering="-total_lineas")[0], self.media1.pk)
+        self.assertEqual(self._ids(ordering="estado,folio")[:2], self._pks(self.raro, self.alta1))
+        for invalido in ("observaciones", "almacen_nombre", "operador__password"):
+            with self.subTest(ordering=invalido):
+                self.assertEqual(self._ids(ordering=invalido), self._por_defecto())
+
+    # --- Paginación y resumen ----------------------------------------------------
+
+    def test_filtros_busqueda_y_orden_con_resumen_y_pagina(self):
+        params = {"prioridad": "ALTA,BAJA", "ordering": "-prioridad", "resumen": 1, "limit": 2, "offset": 1}
+        datos = self._get(self.URL, **params)
+        completos = self._ids(prioridad="ALTA,BAJA", ordering="-prioridad")
+        self.assertEqual(datos["count"], 4)
+        self.assertEqual([f["id"] for f in datos["results"]], completos[1:3])
+        self.assertNotIn("picking_detalle", datos["results"][0])
+        self.assertNotIn("ordenes_trabajo", datos["results"][0])
+        self.assertEqual(self._get(self.URL, search="zoe", resumen=1, limit=1)["count"], 2)
+
+    # --- KPIs --------------------------------------------------------------------
+
+    @staticmethod
+    def _kpis_del_front(filas):
+        """``computePickingKpis`` del front sobre las filas del listado."""
+        por_prioridad = {"ALTA": 0, "MEDIA": 0, "BAJA": 0}
+        lineas = 0
+        for f in filas:
+            lineas += max(0, f["total_lineas"] - f["total_lineas_completas"])
+            if f["prioridad"] in por_prioridad:
+                por_prioridad[f["prioridad"]] += 1
+        return {"total": len(filas), "lineas_por_surtir": lineas, "por_prioridad": por_prioridad}
+
+    @staticmethod
+    def _plano(kpis):
+        return {
+            "total": kpis["total"],
+            "lineas_por_surtir": kpis["lineas_por_surtir"],
+            "por_prioridad": {b["prioridad"]: b["total"] for b in kpis["por_prioridad"]},
+        }
+
+    def test_kpis_igual_que_el_front_sobre_el_listado_filtrado(self):
+        for params in ({}, {"estado": "Parcial,Completado"}, {"prioridad": "MEDIA"}, {"search": "ana"},
+                       {"search": "sin-coincidencias"}, {"search": "zoe", "estado": "Pendiente"}):
+            with self.subTest(**params):
+                kpis = self._get(self.KPIS, **params)
+                self.assertEqual(self._plano(kpis), self._kpis_del_front(self._get(self.URL, **params)))
+                self.assertEqual(kpis["total"], self._get(self.URL, limit=1, **params)["count"])
+
+    def test_kpis_sin_filtros(self):
+        kpis = self._get(self.KPIS)
+        self.assertIn("generado_en", kpis)
+        self.assertEqual(kpis["total"], 7)
+        # 0 (fixture) + 0 + 3 + 2 + 6 + 0 + 0: el inconsistente (1 de 3) no resta.
+        self.assertEqual(kpis["lineas_por_surtir"], 11)
+        self.assertEqual(kpis["por_prioridad"], [
+            {"prioridad": "ALTA", "prioridad_label": "Alta", "total": 2},
+            {"prioridad": "MEDIA", "prioridad_label": "Media", "total": 3},
+            {"prioridad": "BAJA", "prioridad_label": "Baja", "total": 2},
+        ])
+
+    def test_kpis_prioridad_fuera_del_catalogo_cuenta_solo_en_total(self):
+        from wms.models import Picking
+
+        Picking.objects.filter(pk=self.raro.pk).update(prioridad="URGENTE")
+        kpis = self._plano(self._get(self.KPIS))
+        self.assertEqual(kpis, self._kpis_del_front(self._get(self.URL)))
+        self.assertEqual(kpis["total"], 7)
+        self.assertEqual(sum(kpis["por_prioridad"].values()), 6)
+
+    def test_kpis_ignoran_pagina_y_orden(self):
+        self.assertEqual(
+            self._plano(self._get(self.KPIS, prioridad="ALTA,BAJA", limit=1, offset=1, ordering="-operador_nombre")),
+            self._plano(self._get(self.KPIS, prioridad="ALTA,BAJA")),
+        )
+
+    def test_kpis_en_una_consulta(self):
+        with self.assertNumQueries(1):
+            resp = self.api.get(self.KPIS, {"search": "zoe", "estado": "Completado,Pendiente", "ordering": "-prioridad"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_kpis_y_listado_acotados_a_la_empresa_activa(self):
+        self.assertEqual(self._get(self.KPIS, search="LB")["total"], 0)
+        admin_b = _api_de(self.b["usuario"])
+        self.assertEqual(admin_b.get(self.KPIS).json()["total"], 1)
+        self.assertEqual(admin_b.get(self.KPIS, {"search": "SUR"}).json()["total"], 0)
+        self.assertEqual(admin_b.get(self.URL, {"search": "SUR"}).json(), [])
+
+    def test_superusuario_sigue_a_su_empresa_activa(self):
+        Usuario.objects.filter(pk=self.user.pk).update(empresa=self.b["empresa"])
+        api = _api_de(Usuario.objects.get(pk=self.user.pk))
+        self.assertEqual(api.get(self.KPIS).json()["total"], 1)
+        self.assertEqual([f["id"] for f in api.get(self.URL, {"prioridad": "MEDIA"}).json()], [self.b["picking"].pk])
+
+    def test_sin_empresa_kpis_en_cero_y_listado_vacio(self):
+        Usuario.objects.filter(pk=self.user.pk).update(empresa=None)
+        api = _api_de(Usuario.objects.get(pk=self.user.pk))
+        self.assertEqual(api.get(self.URL, {"prioridad": "ALTA"}).json(), [])
+        kpis = api.get(self.KPIS).json()
+        self.assertEqual((kpis["total"], kpis["lineas_por_surtir"]), (0, 0))
+        self.assertEqual([b["total"] for b in kpis["por_prioridad"]], [0, 0, 0])
+
+    def test_kpis_requieren_sesion(self):
+        self.assertIn(APIClient().get(self.KPIS).status_code, (401, 403))
+
+    # --- Usuario sin admin: sólo sus sucursales -----------------------------------
+
+    def _otra_sucursal_con_picking(self):
+        """Una segunda sucursal de la empresa A con un picking ALTA que, por folio,
+        pedido y operador, coincidiría con los filtros y la búsqueda de las pruebas."""
+        from wms.models import Picking
+
+        otra = Sucursal.objects.create(empresa=self.a["empresa"], codigo="SLA2", nombre="Sucursal LA2")
+        return Picking.objects.create(
+            folio="SUR-900", empresa=self.a["empresa"], sucursal=otra, pedido=self.pedido_z, operador=self.zoe,
+            almacen=self.base.almacen, usuario=self.user, prioridad=Picking.Prioridad.ALTA,
+            estado=Picking.Estado.PARCIAL, total_lineas=50, total_lineas_completas=0,
+        )
+
+    def _usuario_de_sucursal(self):
+        return Usuario.objects.create(
+            username="wms-sucursal-la@example.com", email="wms-sucursal-la@example.com",
+            empresa=self.a["empresa"], sucursal_default=self.a["sucursal"],
+        )
+
+    def test_usuario_de_sucursal_no_ve_otras_sucursales_ni_empresas(self):
+        ajeno = self._otra_sucursal_con_picking()
+        api = _api_de(self._usuario_de_sucursal())
+        propios = [self.base, self.alta1, self.baja1, self.alta2, self.media1, self.baja2, self.raro]
+        for params, esperados in [
+            ({}, propios),
+            ({"prioridad": "ALTA"}, [self.alta1, self.alta2]),
+            ({"estado": "Parcial"}, [self.baja1, self.alta2]),
+            ({"search": "zoe"}, [self.alta1, self.media1]),
+            ({"search": "SUR-900"}, []),
+            ({"search": "PICK-LB"}, []),
+            ({"search": "P-ZZZ", "prioridad": "ALTA", "estado": "Parcial,Completado"}, [self.alta1]),
+        ]:
+            with self.subTest(**params):
+                filas = api.get(self.URL, params).json()
+                ids = [f["id"] for f in filas]
+                self.assertCountEqual(ids, self._pks(*esperados))
+                self.assertNotIn(ajeno.pk, ids)
+                pagina = api.get(self.URL, {**params, "limit": 2, "resumen": 1}).json()
+                self.assertEqual(pagina["count"], len(esperados))
+                kpis = api.get(self.KPIS, params).json()
+                self.assertEqual(self._plano(kpis), self._kpis_del_front(filas))
+
+    def test_kpis_de_usuario_de_sucursal_sin_totales_de_otra_sucursal(self):
+        self._otra_sucursal_con_picking()
+        kpis = _api_de(self._usuario_de_sucursal()).get(self.KPIS, {"prioridad": "ALTA"}).json()
+        # Sólo SUR-001 (0 pendientes) y SUR-003 (2): el ALTA de la otra sucursal (50) no cuenta.
+        self.assertEqual((kpis["total"], kpis["lineas_por_surtir"]), (2, 2))
+        # El superusuario sí lo ve: es de su empresa activa.
+        self.assertEqual(self._get(self.KPIS, prioridad="ALTA")["total"], 3)
+
+    def test_usuario_de_sucursal_kpis_en_una_consulta(self):
+        api = _api_de(self._usuario_de_sucursal())
+        with self.assertNumQueries(1):
+            resp = api.get(self.KPIS, {"search": "zoe", "estado": "Completado,Pendiente"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    # --- trasladar ignora los parámetros del listado ------------------------------
+
+    def test_trasladar_ignora_busqueda_y_filtros_del_listado(self):
+        """``trasladar`` resuelve el picking con ``get_object()`` (filter backends
+        incluidos): un ``?search=`` o un filtro que no coincide no lo vuelven 404. El
+        mismo almacén responde el 400 de negocio sin mover nada."""
+        url = f"{self.URL}{self.alta1.pk}/trasladar/"
+        cuerpo = {"almacen": self.alta1.almacen_id}
+        limpio = self.api.post(url, cuerpo, format="json")
+        self.assertEqual(limpio.status_code, 400, limpio.content)
+        self.assertIn("almacen", limpio.json())
+        for params in ("search=no-coincide", "estado=Pendiente&prioridad=BAJA", "estado=Inexistente",
+                       "search=x&ordering=-prioridad"):
+            with self.subTest(params=params):
+                resp = self.api.post(f"{url}?{params}", cuerpo, format="json")
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), limpio.json())
