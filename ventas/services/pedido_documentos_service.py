@@ -218,8 +218,24 @@ def _alcance(user):
     return puede_ver_contabilidad(user), None if todas else user.sucursales_permitidas()
 
 
-def _visible(doc, cfg, alcance):
+def _de_la_empresa_del_pedido(doc, cfg, pedido):
+    """El documento es de la empresa del pedido (EC-916): un dato legado de otra
+    empresa que apunta al pedido no se lista. Facturas, con la regla de
+    ``pedido_de_la_factura`` (#1203); el resto, por su ``empresa_id`` (entregas y
+    devoluciones no lo tienen: solo cuelgan del pedido). En memoria: la lista se
+    arma con lo que ``retrieve()`` ya precargó, sin consultas extra."""
+    if cfg["tipo"] == "factura":
+        from finanzas.services.facturama.cfdi_payload import pedido_de_la_factura
+
+        return pedido_de_la_factura(doc) is not None
+    empresa_id = getattr(doc, "empresa_id", None)
+    return empresa_id is None or empresa_id == pedido.empresa_id
+
+
+def _visible(doc, cfg, alcance, pedido):
     if getattr(doc, "activo", True) is False:
+        return False
+    if not _de_la_empresa_del_pedido(doc, cfg, pedido):
         return False
     ve_facturas, sucursales = alcance
     if cfg["tipo"] == "factura" and not ve_facturas:
@@ -240,7 +256,7 @@ def listar_documentos_pedido(pedido, user=None, tipos=None):
             continue
         if cfg["is_single"]:
             doc = getattr(pedido, cfg["related_name"], None)
-            if doc is None or not _visible(doc, cfg, alcance):
+            if doc is None or not _visible(doc, cfg, alcance, pedido):
                 continue
             documentos.append(
                 {
@@ -264,7 +280,7 @@ def listar_documentos_pedido(pedido, user=None, tipos=None):
         # y ``.iterator()`` nunca lee ``_result_cache`` — re-ejecutaba una
         # consulta por tipo de documento y desperdiciaba todo ese prefetch.
         for doc in qs:
-            if not _visible(doc, cfg, alcance):
+            if not _visible(doc, cfg, alcance, pedido):
                 continue
             documentos.append(
                 {

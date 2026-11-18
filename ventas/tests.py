@@ -5502,6 +5502,36 @@ class PedidoDocumentosTests(TestCase):
             self.assertEqual(len(data[bloque]), 1, bloque)
         self.assertEqual(data["despachos"][0]["guia"], "GUIA-1")
 
+    def test_detalle_del_pedido_no_lista_documentos_de_otra_empresa(self):
+        """``documentos[]`` de ``GET /pedidos/{id}/`` (la lista que hoy pinta el
+        front) sigue la misma regla: la factura, el envío y el movimiento de B que
+        apuntan al pedido de A no salen; los de A sí."""
+        from logistica.models import Envio
+        from terceros.models import Transportista
+
+        pedido = self._pedido()
+        propia = self._factura(pedido)
+        ajena = self._factura(pedido, empresa=self.empresa_b)
+        envio_b = Envio.objects.create(
+            empresa=self.empresa_b, sucursal=self.sucursal_b, pedido=pedido,
+            transportista=Transportista.objects.create(empresa=self.empresa_b),
+        )
+        mov_a = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, usuario=self.usuario, pedido=pedido,
+        )
+        mov_b = MovimientoInventario.objects.create(
+            empresa=self.empresa_b, sucursal=self.sucursal_b, usuario=self.usuario, pedido=pedido,
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resp = client.get(f"/api/v1/ventas/pedidos/{pedido.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        docs = {(d["tipo"], d["id"]) for d in resp.json()["documentos"]}
+        self.assertIn(("factura", propia.pk), docs)
+        self.assertIn(("movimiento_inventario", mov_a.pk), docs)
+        for ajeno in (("factura", ajena.pk), ("envio", envio_b.pk), ("movimiento_inventario", mov_b.pk)):
+            self.assertNotIn(ajeno, docs)
+
     def test_trazabilidad_ignora_factura_de_otra_empresa(self):
         """#1203 también en ``trazabilidad/``: la factura de B no suma a lo
         facturado ni a lo cobrado del pedido de A."""
