@@ -5,6 +5,9 @@ import binascii
 import json
 import logging
 
+from datetime import timedelta
+
+from django.core.cache import cache
 from django.db.models import F, Q
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -443,6 +446,30 @@ def lector_desde_request(request):
     return LectorRFID.objects.filter(token=token, activo=True).first()
 
 
+# Retención de lecturas huérfanas (#1155): tags ajenos leídos por un FX sin
+# token que no ligan con ninguna etiqueta del ERP. Una que sí se liga después
+# toma empresa y etiqueta y deja de ser huérfana, así que el corte no la toca.
+DIAS_RETENCION_HUERFANAS = 30
+
+
+def huerfanas_viejas(dias=DIAS_RETENCION_HUERFANAS):
+    return RfidScan.objects.filter(
+        empresa__isnull=True, lector__isnull=True, etiqueta__isnull=True,
+        created_at__lt=timezone.now() - timedelta(days=dias),
+    )
+
+
+def purgar_huerfanas(dias=DIAS_RETENCION_HUERFANAS):
+    """Borra las lecturas huérfanas de más de ``dias``. A lo más una vez por hora
+    por proceso (``cache.add``), así que no pesa en cada lectura. Regresa cuántas."""
+    if not cache.add("wms:rfid:purga_huerfanas", 1, 3600):
+        return 0
+    borradas, _ = huerfanas_viejas(dias).delete()
+    if borradas:
+        logger.info("RFID: %s lecturas huérfanas de más de %s días borradas", borradas, dias)
+    return borradas
+
+
 def recibir_lecturas(request, lector):
     """Parsea el payload del FX (JSON, form o texto) y guarda un ``RfidScan`` por EPC.
 
@@ -753,6 +780,8 @@ def recibir_lecturas(request, lector):
                     scan.empresa_id = detalle.empresa_id_
             RfidScan.objects.bulk_create(tags_to_create, batch_size=200)
             marcar_leidas({d.pk for d in match.values()})
+            if lector is None and len(match) < len(tags_to_create):
+                purgar_huerfanas()  # sólo cuando entran huérfanas nuevas (#1155)
             if lector is not None:
                 LectorRFID.objects.filter(pk=lector.pk).update(ultima_lectura=timezone.now())
             debug_payload["etiquetas_ligadas"] = len(match)
