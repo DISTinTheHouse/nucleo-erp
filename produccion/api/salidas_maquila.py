@@ -63,6 +63,11 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
     origen = serializers.SerializerMethodField()
     origen_id = serializers.SerializerMethodField()
     origen_folio = serializers.SerializerMethodField()
+    # Para pantalla: "SM-00012 · OR-00006" (el folio no cambia).
+    folio_display = serializers.SerializerMethodField()
+
+    def get_folio_display(self, obj):
+        return f"{obj.folio} · {self.get_origen_folio(obj)}"
 
     def get_origen(self, obj):
         return "OB" if obj.ob_id else "OR" if obj.orden_r_id else "OP"
@@ -83,7 +88,7 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
     class Meta:
         model = SalidaMaquila
         fields = [
-            "id", "folio", "estatus", "estatus_display", "origen", "origen_id", "origen_folio",
+            "id", "folio", "folio_display", "estatus", "estatus_display", "origen", "origen_id", "origen_folio",
             "op", "op_folio", "ob", "ob_folio", "orden_r", "orden_r_folio",
             "centro_confeccion", "centro_confeccion_nombre", "sucursal",
             "fecha_envio", "fecha_compromiso", "fecha_recepcion",
