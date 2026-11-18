@@ -557,7 +557,43 @@ def _lista(qs, *campos, **alias):
     return [dict(f) for f in qs.values(*campos, **alias)]
 
 
-def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
+#: Bloques de ``documentos/`` que ya lista ``pedido.documentos`` (EC-920):
+#: ``(llave de la respuesta, tipo de DOCUMENTOS_CONFIG)``.
+_BLOQUES_DE_PEDIDO_DOCUMENTOS = (
+    ("cotizaciones", "cotizacion"),
+    ("ordenes_compra", "orden_compra"),
+    ("ordenes_produccion", "orden_produccion"),
+    ("ordenes_bordado", "orden_bordado"),
+    ("ordenes_reflejante", "orden_reflejante"),
+    ("ordenes_corte_manga", "orden_corte_manga"),
+    ("packings", "packing"),
+)
+
+
+def _bloques_de_pedido_documentos(pedido, user):
+    """Cotización, OC, OP/OB/OR/OCM y packings con la MISMA relación y reglas de
+    visibilidad que ``pedido.documentos`` (``documentos_visibles``): qué cuenta
+    como del pedido no se redefine aquí. Una consulta por tipo. Sin importes: la
+    pestaña no los necesita y así no se abre otra puerta a montos (EC-784)."""
+    from ventas.services.pedido_documentos_service import _estatus_label, documentos_visibles
+
+    bloque_de = {tipo: bloque for bloque, tipo in _BLOQUES_DE_PEDIDO_DOCUMENTOS}
+    bloques = {bloque: [] for bloque, _ in _BLOQUES_DE_PEDIDO_DOCUMENTOS}
+    for cfg, doc in documentos_visibles(pedido, user, tipos=bloque_de):
+        bloques[bloque_de[cfg["tipo"]]].append({
+            "id": doc.pk,
+            # ``Cotizacion`` no tiene folio: null, no el ``str(pk)`` de ``pedido.documentos``.
+            "folio": getattr(doc, cfg["folio_field"], None),
+            "estatus": getattr(doc, cfg["estatus_field"]),
+            "estatus_label": _estatus_label(doc, cfg["estatus_field"], cfg["estatus_label_field"]),
+            "fecha": getattr(doc, cfg["fecha_field"]),
+        })
+    for filas in bloques.values():
+        filas.sort(key=lambda fila: fila["id"])
+    return bloques
+
+
+def documentos_pedido(pedido, con_finanzas=True, con_costos=True, user=None):
     """Vista 360: cada documento que nació del pedido, una consulta por tipo
     (constante, sin importar cuántos haya). Endpoint aparte de la trazabilidad
     para no hacerla más lenta: el frontend lo pide al abrir la pestaña.
@@ -565,7 +601,8 @@ def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
     ``con_finanzas=False``: ``facturas`` y ``cobros`` en null. ``con_costos=False``
     (sin ``R-PRODUCCION-COSTOS``, como el endpoint de SM, #1226): el ``total`` de
     cada salida a maquila en null. Ese total es el del documento SM, no la parte
-    del pedido."""
+    del pedido. ``user``: el alcance de ``pedido.documentos`` en los bloques que
+    vienen de ahí (``_bloques_de_pedido_documentos``)."""
     from logistica.models import Envio
     from produccion.models import PreOrdenProduccion, SalidaMaquila
     from inventarios.models import MovimientoInventario
@@ -631,6 +668,7 @@ def documentos_pedido(pedido, con_finanzas=True, con_costos=True):
         "envios": envios,
         "facturas": facturas,
         "cobros": cobros,
+        **_bloques_de_pedido_documentos(pedido, user),
     }
 
 

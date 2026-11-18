@@ -4266,7 +4266,9 @@ class PedidoViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"], url_path="documentos")
     def documentos(self, request, pk=None):
         """Vista 360 del pedido: pre-órdenes, salidas a maquila, pickings (y dónde
-        están), movimientos de inventario, despachos, envíos, facturas y cobros.
+        están), movimientos de inventario, despachos, envíos, facturas, cobros y,
+        con las reglas de ``pedido.documentos`` (EC-920), cotización, OC,
+        OP/OB/OR/OCM y packings.
         Mismo scope que ``trazabilidad`` (404 fuera de alcance); facturas y cobros
         solo con permiso de contabilidad; el ``total`` de las salidas a maquila,
         solo con ``R-PRODUCCION-COSTOS`` (si no, null)."""
@@ -4274,11 +4276,15 @@ class PedidoViewSet(viewsets.ModelViewSet):
         from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
         from ventas.services.trazabilidad_service import documentos_pedido
 
-        pedido = get_object_or_404(pedidos_visibles(pedidos_base(), request.user), pk=pk)
+        # ``select_related("cotizacion")``: el bloque ``cotizaciones`` la lee sin otro viaje.
+        pedido = get_object_or_404(
+            pedidos_visibles(pedidos_base(), request.user).select_related("cotizacion"), pk=pk,
+        )
         data = documentos_pedido(
             pedido,
             con_finanzas=puede_ver_contabilidad(request.user),
             con_costos=PERMISO_COSTOS_PRODUCCION in permisos_de_la_peticion(request),
+            user=request.user,
         )
         return Response(data)
 
