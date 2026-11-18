@@ -257,11 +257,9 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
     def kpis(self, request):
         """Tarjetas de ``PickingView`` sobre el conjunto filtrado, en una consulta
         (``pickings_listado.kpis``). Mismo ``get_queryset`` (alcance y filtros) y los
-        mismos filter backends que el listado, salvo el de orden."""
-        qs = self.get_queryset()
-        for backend in self.filter_backends:
-            if not issubclass(backend, OrderingFilter):
-                qs = backend().filter_queryset(request, qs, self)
+        mismos filter backends que el listado, como ``PedidoViewSet.kpis_mesa``; el
+        orden lo descarta ``pickings_listado.kpis`` antes de agregar."""
+        qs = self.filter_queryset(self.get_queryset())
         return Response({"generado_en": timezone.now(), **pickings_listado.kpis(qs)})
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
