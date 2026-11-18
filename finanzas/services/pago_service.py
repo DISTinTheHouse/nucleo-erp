@@ -41,6 +41,16 @@ class PagoService:
             raise ErrorDeNegocio(
                 {"pago_detalles": "El pago debe tener al menos un detalle."}
             )
+        # EC-874: un pago aplicado es de una sola sucursal, la de sus facturas de
+        # proveedor. La vista ya la fijó; aquí se garantiza que no se aplique sin ella
+        # ni con otra.
+        sucursales = {factura.sucursal_id for factura in facturas.values()}
+        if len(sucursales) > 1:
+            raise ErrorDeNegocio({"sucursal": "Las facturas son de varias sucursales: haz un pago por sucursal."})
+        if pago.sucursal_id is None:
+            raise ErrorDeNegocio({"sucursal": "El pago no tiene sucursal: vuelve a capturarlo con sus líneas."})
+        if sucursales and sucursales != {pago.sucursal_id}:
+            raise ErrorDeNegocio({"sucursal": "La sucursal del pago no coincide con la de sus facturas."})
 
         cxp_ids = [d.cxp_id for d in detalles]
         cxps = {

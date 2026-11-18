@@ -1,6 +1,6 @@
 """Asiento de un pago: cargo a Proveedores, abono al banco."""
 
-from finanzas.models import ConceptoContable, PagoDetalle, Poliza
+from finanzas.models import ConceptoContable, Poliza
 from finanzas.services.plan_contable_service import PlanContableService
 from finanzas.services.poliza_motor_service import PolizaMotorService
 
@@ -13,14 +13,11 @@ class PagoPolizaService:
         """Póliza del pago, o ``None`` si la empresa no contabiliza."""
         if not PlanContableService.contabilizacion_activa(pago.empresa_id, fecha=pago.fecha_pago):
             return None
-        sucursal_factura = (
-            PagoDetalle.objects.filter(pago=pago)
-            .values_list("cxp__factura_proveedor__sucursal_id", flat=True).first()
-        )
         referencia = pago.referencia_operacion or str(pago.pk)
         return PolizaMotorService.generar(
             empresa_id=pago.empresa_id,
-            sucursal_id=PolizaMotorService.sucursal_id(pago.empresa_id, sucursal_factura, usuario),
+            # EC-874: la sucursal del pago (la de sus facturas de proveedor).
+            sucursal_id=PolizaMotorService.sucursal_id(pago.empresa_id, pago.sucursal_id, usuario),
             origen_tipo=ORIGEN,
             origen_id=pago.pk,
             fecha=pago.fecha_pago,
