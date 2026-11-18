@@ -559,7 +559,7 @@ def _lista(qs, *campos, **alias):
 
 #: Bloques de ``documentos/`` que ya lista ``pedido.documentos`` (EC-920):
 #: ``(llave de la respuesta, tipo de DOCUMENTOS_CONFIG)``.
-_BLOQUES_DE_PEDIDO_DOCUMENTOS = (
+BLOQUES_DE_PEDIDO_DOCUMENTOS = (
     ("cotizaciones", "cotizacion"),
     ("ordenes_compra", "orden_compra"),
     ("ordenes_produccion", "orden_produccion"),
@@ -575,19 +575,12 @@ def _bloques_de_pedido_documentos(pedido, alcance):
     visibilidad que ``pedido.documentos`` (``documentos_visibles``): qué cuenta
     como del pedido no se redefine aquí. Una consulta por tipo. Sin importes: la
     pestaña no los necesita y así no se abre otra puerta a montos (EC-784)."""
-    from ventas.services.pedido_documentos_service import _estatus_label, documentos_visibles
+    from ventas.services.pedido_documentos_service import documentos_visibles, fila_de_documento
 
-    bloque_de = {tipo: bloque for bloque, tipo in _BLOQUES_DE_PEDIDO_DOCUMENTOS}
-    bloques = {bloque: [] for bloque, _ in _BLOQUES_DE_PEDIDO_DOCUMENTOS}
+    bloque_de = {tipo: bloque for bloque, tipo in BLOQUES_DE_PEDIDO_DOCUMENTOS}
+    bloques = {bloque: [] for bloque, _ in BLOQUES_DE_PEDIDO_DOCUMENTOS}
     for cfg, doc in documentos_visibles(pedido, tipos=bloque_de, alcance=alcance):
-        bloques[bloque_de[cfg["tipo"]]].append({
-            "id": doc.pk,
-            # ``Cotizacion`` no tiene folio: null, no el ``str(pk)`` de ``pedido.documentos``.
-            "folio": getattr(doc, cfg["folio_field"], None),
-            "estatus": getattr(doc, cfg["estatus_field"]),
-            "estatus_label": _estatus_label(doc, cfg["estatus_field"], cfg["estatus_label_field"]),
-            "fecha": getattr(doc, cfg["fecha_field"]),
-        })
+        bloques[bloque_de[cfg["tipo"]]].append(fila_de_documento(cfg, doc))
     for filas in bloques.values():
         filas.sort(key=lambda fila: fila["id"])
     return bloques

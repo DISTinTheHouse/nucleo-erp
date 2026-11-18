@@ -246,6 +246,19 @@ def _visible(doc, cfg, alcance, pedido):
     return True
 
 
+def fila_de_documento(cfg, doc):
+    """Fila de un documento en ``documentos/`` (EC-920): valor guardado del
+    estatus y su etiqueta. ``Cotizacion`` no tiene folio: null, no el ``str(pk)``
+    de ``pedido.documentos``."""
+    return {
+        "id": doc.pk,
+        "folio": getattr(doc, cfg["folio_field"], None),
+        "estatus": getattr(doc, cfg["estatus_field"]),
+        "estatus_label": _estatus_label(doc, cfg["estatus_field"], cfg["estatus_label_field"]),
+        "fecha": getattr(doc, cfg["fecha_field"]),
+    }
+
+
 def documentos_visibles(pedido, user=None, tipos=None, alcance=None):
     """``(cfg, doc)`` de cada documento del pedido, en el orden de
     ``DOCUMENTOS_CONFIG``: la relación y las reglas de visibilidad de

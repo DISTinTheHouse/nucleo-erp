@@ -62,6 +62,7 @@ from ventas.models import (
     PedidoDetalleTalla,
     PedidoServicioExtra,
 )
+from ventas.services.trazabilidad_service import BLOQUES_DE_PEDIDO_DOCUMENTOS
 from ventas.servicios_bordado import TipoServicioBordado, validar_tipos_servicio_array
 from ventas.utils.helpers import _save_cotizacion_detalle
 
@@ -5630,15 +5631,8 @@ class PedidoDocumentosTests(TestCase):
 
     # --- bloques que ya lista ``pedido.documentos`` (EC-920) -----------------
 
-    _BLOQUES_EC920 = {
-        "cotizaciones": "cotizacion",
-        "ordenes_compra": "orden_compra",
-        "ordenes_produccion": "orden_produccion",
-        "ordenes_bordado": "orden_bordado",
-        "ordenes_reflejante": "orden_reflejante",
-        "ordenes_corte_manga": "orden_corte_manga",
-        "packings": "packing",
-    }
+    #: ``{bloque: tipo}``, el mismo mapa del servicio.
+    _BLOQUES_EC920 = dict(BLOQUES_DE_PEDIDO_DOCUMENTOS)
 
     def _documentos_de_produccion_y_compras(self, pedido, empresa=None, sucursal=None, **extra):
         """Cotización, OC, OP (principal y ligada por ``pedidos_ids``), OB, OR,
