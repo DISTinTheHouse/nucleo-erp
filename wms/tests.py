@@ -3149,3 +3149,78 @@ class PickingListadoServidorTests(TestCase):
 
     def test_kpis_requieren_sesion(self):
         self.assertIn(APIClient().get(self.KPIS).status_code, (401, 403))
+
+    # --- Usuario sin admin: sólo sus sucursales -----------------------------------
+
+    def _otra_sucursal_con_picking(self):
+        """Una segunda sucursal de la empresa A con un picking ALTA que, por folio,
+        pedido y operador, coincidiría con los filtros y la búsqueda de las pruebas."""
+        from wms.models import Picking
+
+        otra = Sucursal.objects.create(empresa=self.a["empresa"], codigo="SLA2", nombre="Sucursal LA2")
+        return Picking.objects.create(
+            folio="SUR-900", empresa=self.a["empresa"], sucursal=otra, pedido=self.pedido_z, operador=self.zoe,
+            almacen=self.base.almacen, usuario=self.user, prioridad=Picking.Prioridad.ALTA,
+            estado=Picking.Estado.PARCIAL, total_lineas=50, total_lineas_completas=0,
+        )
+
+    def _usuario_de_sucursal(self):
+        return Usuario.objects.create(
+            username="wms-sucursal-la@example.com", email="wms-sucursal-la@example.com",
+            empresa=self.a["empresa"], sucursal_default=self.a["sucursal"],
+        )
+
+    def test_usuario_de_sucursal_no_ve_otras_sucursales_ni_empresas(self):
+        ajeno = self._otra_sucursal_con_picking()
+        api = _api_de(self._usuario_de_sucursal())
+        propios = [self.base, self.alta1, self.baja1, self.alta2, self.media1, self.baja2, self.raro]
+        for params, esperados in [
+            ({}, propios),
+            ({"prioridad": "ALTA"}, [self.alta1, self.alta2]),
+            ({"estado": "Parcial"}, [self.baja1, self.alta2]),
+            ({"search": "zoe"}, [self.alta1, self.media1]),
+            ({"search": "SUR-900"}, []),
+            ({"search": "PICK-LB"}, []),
+            ({"search": "P-ZZZ", "prioridad": "ALTA", "estado": "Parcial,Completado"}, [self.alta1]),
+        ]:
+            with self.subTest(**params):
+                filas = api.get(self.URL, params).json()
+                ids = [f["id"] for f in filas]
+                self.assertCountEqual(ids, self._pks(*esperados))
+                self.assertNotIn(ajeno.pk, ids)
+                pagina = api.get(self.URL, {**params, "limit": 2, "resumen": 1}).json()
+                self.assertEqual(pagina["count"], len(esperados))
+                kpis = api.get(self.KPIS, params).json()
+                self.assertEqual(self._plano(kpis), self._kpis_del_front(filas))
+
+    def test_kpis_de_usuario_de_sucursal_sin_totales_de_otra_sucursal(self):
+        self._otra_sucursal_con_picking()
+        kpis = _api_de(self._usuario_de_sucursal()).get(self.KPIS, {"prioridad": "ALTA"}).json()
+        # Sólo SUR-001 (0 pendientes) y SUR-003 (2): el ALTA de la otra sucursal (50) no cuenta.
+        self.assertEqual((kpis["total"], kpis["lineas_por_surtir"]), (2, 2))
+        # El superusuario sí lo ve: es de su empresa activa.
+        self.assertEqual(self._get(self.KPIS, prioridad="ALTA")["total"], 3)
+
+    def test_usuario_de_sucursal_kpis_en_una_consulta(self):
+        api = _api_de(self._usuario_de_sucursal())
+        with self.assertNumQueries(1):
+            resp = api.get(self.KPIS, {"search": "zoe", "estado": "Completado,Pendiente"})
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    # --- trasladar ignora los parámetros del listado ------------------------------
+
+    def test_trasladar_ignora_busqueda_y_filtros_del_listado(self):
+        """``trasladar`` resuelve el picking con ``get_object()`` (filter backends
+        incluidos): un ``?search=`` o un filtro que no coincide no lo vuelven 404. El
+        mismo almacén responde el 400 de negocio sin mover nada."""
+        url = f"{self.URL}{self.alta1.pk}/trasladar/"
+        cuerpo = {"almacen": self.alta1.almacen_id}
+        limpio = self.api.post(url, cuerpo, format="json")
+        self.assertEqual(limpio.status_code, 400, limpio.content)
+        self.assertIn("almacen", limpio.json())
+        for params in ("search=no-coincide", "estado=Pendiente&prioridad=BAJA", "estado=Inexistente",
+                       "search=x&ordering=-prioridad"):
+            with self.subTest(params=params):
+                resp = self.api.post(f"{url}?{params}", cuerpo, format="json")
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), limpio.json())
