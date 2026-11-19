@@ -457,6 +457,7 @@ class DespachoService:
             cantidad = Decimal(str(row.cantidad_empacada or 0))
             if cantidad <= 0:
                 continue
+            antes = saldo.disponible(pd.producto_id, pd.producto_variante_id, pd.variante_produccion_id)
             _, faltante = saldo.consumir(pd.producto_id, pd.producto_variante_id, cantidad, pd.variante_produccion_id)
             if faltante:
                 nombre = pd.producto.nombre if pd.producto_id else f"renglón {pd.pk}"
@@ -466,6 +467,7 @@ class DespachoService:
                 producto_id=pd.producto_id, producto_variante_id=pd.producto_variante_id,
                 variante_produccion_id=pd.variante_produccion_id, almacen=almacen,
                 cantidad=cantidad, costo_unitario=Decimal("0"),
+                cantidad_antes=antes, cantidad_despues=antes - cantidad,  # existencia del almacén
             ))
         if not detalles:
             return

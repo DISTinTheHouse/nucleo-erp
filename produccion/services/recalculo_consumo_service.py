@@ -165,6 +165,7 @@ class RecalculoConsumoTelaService:
                     # El almacén de la existencia movida, como en ventas (EC-821).
                     almacen_id=i["almacen_id"],
                     cantidad=abs(i["cantidad_consumida"]), costo_unitario=Decimal("0"),
+                    cantidad_antes=i["cantidad_before"], cantidad_despues=i["cantidad_after"],
                 )
                 for i in items
             ])

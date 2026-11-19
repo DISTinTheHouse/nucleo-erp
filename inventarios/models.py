@@ -230,6 +230,11 @@ class MovimientoInventarioDetalle(models.Model):
     
     cantidad = models.DecimalField(max_digits=18, decimal_places=8, default=0)
     costo_unitario = models.DecimalField(max_digits=18, decimal_places=8, default=0)
+    # Existencia de la fila afectada (ubicación, o el almacén si el renglón no la
+    # trae) justo antes y después del movimiento, guardada al moverla. Nulo en
+    # movimientos anteriores a este campo y en transferencias (afectan dos lados).
+    cantidad_antes = models.DecimalField(max_digits=18, decimal_places=4, null=True, blank=True)
+    cantidad_despues = models.DecimalField(max_digits=18, decimal_places=4, null=True, blank=True)
 
     class Meta:
         db_table = "movimiento_inventario_detalle"

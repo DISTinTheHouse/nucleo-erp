@@ -1006,6 +1006,8 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 serie_id=item["serie_id"],
                 cantidad=item["cantidad"],
                 costo_unitario=Decimal("0"),
+                cantidad_antes=item.get("cantidad_antes"),
+                cantidad_despues=item.get("cantidad_despues"),
             )
             # En un ajuste ``cantidad`` es la final: el delta viaja aparte.
             renglones.append((detalle, item["delta"], None))
@@ -1146,6 +1148,8 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                         "serie_id": it["serie_id"],
                         "cantidad": qty if tipo != "AJUSTE" else new_qty,
                         "delta": new_qty - current,
+                        "cantidad_antes": current,
+                        "cantidad_despues": new_qty,
                     }
                 )
                 results.append(
@@ -1557,6 +1561,9 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
                     "almacen_destino_id": almacen_destino_id,
                     "cantidad": str(d.cantidad),
                     "costo_unitario": str(d.costo_unitario),
+                    # Existencia antes/después guardada al mover (null en movimientos viejos).
+                    "cantidad_before": None if d.cantidad_antes is None else str(d.cantidad_antes),
+                    "cantidad_after": None if d.cantidad_despues is None else str(d.cantidad_despues),
                 }
             )
 

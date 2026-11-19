@@ -1229,6 +1229,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     serie_id=None,
                     cantidad=item["cantidad_movimiento"],
                     costo_unitario=Decimal("0"),
+                    cantidad_antes=item["cantidad_before"],
+                    cantidad_despues=item["cantidad_after"],
                 )
                 for item in items
             ]
