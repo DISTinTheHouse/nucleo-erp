@@ -2975,6 +2975,8 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
                 serie_id=item.get("serie_id"),
                 cantidad=Decimal(str(item["delta"] or 0)),
                 costo_unitario=Decimal("0"),
+                cantidad_antes=Decimal(item["cantidad_before"]),
+                cantidad_despues=Decimal(item["cantidad_after"]),
             )
             renglones.append((detalle, detalle.cantidad, costos.get(item["recepcion_detalle_id"])))
         # Entrada valorada: recalcula el costo promedio y deja historial (#809).

@@ -108,6 +108,8 @@ class FacturaInventarioService:
                     almacen_id=e.get("almacen_id"),
                     cantidad=abs(Decimal(e["delta"])),
                     costo_unitario=Decimal("0"),
+                    cantidad_antes=Decimal(e["cantidad_before"]),
+                    cantidad_despues=Decimal(e["cantidad_after"]),
                 )
                 for e in items
             )
