@@ -127,6 +127,31 @@ def apartado_en_maquila(op_detalle_ids, excluir_sm_id=None):
     return apartado
 
 
+def recibido_por_renglon_sm(sm, detalles):
+    """``{salida_maquila_detalle_id: piezas recibidas}`` de una SM. Renglón de
+    OB/OR: lo recibido con él. Renglón de OP: lo recibido con la SM en su
+    ``op_detalle``, repartido en orden entre los renglones de la SM de ese
+    ``op_detalle`` (mismo reparto que la factura). Una consulta."""
+    directo = dict(
+        RecepcionDetalle.objects.filter(recepcion__salida_maquila_id=sm.pk, recepcion__activo=True,
+                                        salida_maquila_detalle__isnull=False)
+        .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        .values("salida_maquila_detalle_id").annotate(t=Sum("cantidad_recibida"))
+        .values_list("salida_maquila_detalle_id", "t")
+    ) if sm.op_id is None else {}
+    por_op = dict(_recibido_por_sm([sm.pk])) if sm.op_id is not None else {}
+    resto = {opd: total for (_, opd), total in por_op.items()}
+    out = {}
+    for d in sorted(detalles, key=lambda x: x.pk):
+        if d.op_detalle_id is not None and sm.op_id is not None:
+            toma = min(resto.get(d.op_detalle_id, CERO), d.cantidad)
+            resto[d.op_detalle_id] = resto.get(d.op_detalle_id, CERO) - toma
+            out[d.pk] = toma
+        else:
+            out[d.pk] = directo.get(d.pk) or CERO
+    return out
+
+
 def renglones_sm_servicio(sm_ids):
     """``{sm_id: [renglón]}`` de SM de OB/OR con SKU, talla, color y lo pendiente
     (enviado − recibido con la SM). Una consulta, sin importar SM ni renglones."""

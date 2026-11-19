@@ -16,6 +16,8 @@
 - ``POST {id}/cerrar/``: 400; la SM queda ``RECIBIDA`` al recibir todas sus piezas
   en WMS (``compras/recepciones/onboarding/`` con ``salida_maquila``) o al recibir
   con ``cerrar_salida_maquila``.
+- Detalle: cada renglón de ``detalles`` trae ``cantidad_recibida`` y
+  ``cantidad_pendiente`` (lo recibido con la SM; en SM de OP, por ``op_detalle``).
 - ``piezas_recibidas`` (lo que regresó en sus recepciones) y ``piezas_faltantes``
   (enviadas − recibidas): en una SM Recibida, lo que no regresó del maquilero.
   Anotadas en la misma consulta.
@@ -153,6 +155,15 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
             for d in data.get("detalles") or []:
                 d.pop("precio_unitario", None)
                 d.pop("importe", None)
+        if "detalles" in data and instance.pk:
+            # Detalle: lo recibido y pendiente por renglón (una consulta).
+            from compras.services.maquila import recibido_por_renglon_sm
+
+            recibido = recibido_por_renglon_sm(instance, instance.detalles.all())
+            for d in data["detalles"]:
+                r = recibido.get(d["id"], Decimal("0"))
+                d["cantidad_recibida"] = _n(r)
+                d["cantidad_pendiente"] = _n(max(Decimal(str(d["cantidad"])) - r, Decimal("0")))
         return data
     estatus_display = serializers.CharField(source="get_estatus_display", read_only=True)
     fecha_envio = serializers.DateField(required=False)
