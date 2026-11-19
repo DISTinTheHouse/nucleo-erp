@@ -193,9 +193,8 @@ class DespachoService:
         already_dispatched = cls._despachado_map(
             packing, packing_detalle_ids=[row.id for row in rows]
         )
-        # Sin embarque parcial y con el pedido sin empacar completo, la regla O1
-        # rechazaría cualquier despacho: las líneas no se ofrecen y ``embarque``
-        # dice por qué (EC-574).
+        # Lo empacado siempre se puede despachar; ``embarque`` solo avisa si el
+        # pedido no admite embarque parcial y aún falta por empacar.
         embarque = cls._resumen_embarque(packing.pedido)
         payload["embarque"] = embarque
         payload["despacho_detalle"] = [
@@ -257,8 +256,7 @@ class DespachoService:
                 "cantidad_empacada": str(row.cantidad_empacada),
                 "estado": row.estado,
                 "ya_despachado": bool(already_dispatched[row.id]),
-                "disponible_para_despacho": not bool(already_dispatched[row.id])
-                and embarque["despachable"],
+                "disponible_para_despacho": not bool(already_dispatched[row.id]),
             }
             for row in rows
         ]
@@ -299,7 +297,11 @@ class DespachoService:
         """Piezas del pedido contra lo empacado vivo, con el criterio de la regla
         O1 (EC-574 / WM-02): cuentan packings y líneas vivos de líneas de picking
         no canceladas, y las muestras (con su propio flujo) quedan fuera de ambos
-        lados. ``despachable`` dice si O1 deja despachar."""
+        lados.
+
+        Es informativo: lo ya empacado siempre se despacha. Sin
+        ``embarque_parcial`` y con piezas por empacar, ``motivo`` lleva el aviso;
+        ``despachable`` queda en ``True`` por compatibilidad con el front."""
         total = Decimal(
             PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=pedido.pk)
             .filter(TALLAS_DE_LINEA_NO_MUESTRA_Q)
@@ -316,49 +318,20 @@ class DespachoService:
             or Decimal("0")
         )
         faltan = max(total - empacado, Decimal("0"))
-        despachable = bool(pedido.embarque_parcial) or faltan == 0
+        aviso = not pedido.embarque_parcial and faltan > 0
         return {
             "embarque_parcial": bool(pedido.embarque_parcial),
             "total_piezas_pedido": _piezas(total),
             "piezas_empacadas": _piezas(empacado),
             "piezas_por_empacar": _piezas(faltan),
-            "despachable": despachable,
-            "motivo": None
-            if despachable
-            else (
-                "El pedido no permite embarque parcial: faltan "
+            "despachable": True,
+            "motivo": (
+                "Aviso: el pedido no admite embarque parcial y faltan "
                 f"{_piezas(faltan)} piezas por empacar de las {_piezas(total)} del pedido."
-            ),
-        }
-
-    @classmethod
-    def _validar_embarque_parcial(cls, packing, rows):
-        """Con ``pedido.embarque_parcial`` apagado solo se despacha cuando todo lo
-        pedido ya está empacado, y cada despacho lleva todas las líneas vivas
-        pendientes de su packing: un despacho por packing (EC-574 / WM-02,
-        regla O1)."""
-        pedido = packing.pedido
-        if pedido.embarque_parcial:
-            return
-        embarque = cls._resumen_embarque(pedido)
-        if not embarque["despachable"]:
-            raise ValidationError({"despacho_detalle": embarque["motivo"]})
-
-        vivas = set(
-            packing.packing_detalle.exclude(estado="CANCELADO")
-            .exclude(despacho_detalle__isnull=False)
-            .values_list("id", flat=True)
-        )
-        faltantes = vivas - {row.pk for row in rows}
-        if faltantes:
-            raise ValidationError(
-                {
-                    "despacho_detalle": (
-                        "El pedido no permite embarque parcial: el despacho debe llevar "
-                        f"todas las líneas del packing (faltan: {sorted(faltantes)})."
-                    )
-                }
             )
+            if aviso
+            else None,
+        }
 
     @classmethod
     def _resolve_requested_rows(cls, packing, requested_rows):
@@ -430,8 +403,7 @@ class DespachoService:
         # Tenencia antes de bloquear nada; después, el orden de bloqueo común a
         # packing y despacho (EC-574): Pedido -> Picking -> líneas de picking ->
         # Packing -> Envio (el despacho no toca el picking), siempre
-        # ``of=("self",)`` para no bloquear de paso empresa ni sucursal. El
-        # pedido serializa los despachos de sus packings mientras se valida O1.
+        # ``of=("self",)`` para no bloquear de paso empresa ni sucursal.
         DespachoService._validate_context(packing_input, envio_input, user)
         Pedido.objects.select_for_update(of=("self",)).filter(pk=packing_input.pedido_id).first()
         packing = (
@@ -450,7 +422,6 @@ class DespachoService:
 
         DespachoService._validate_context(packing, envio, user)
         resolved_rows = DespachoService._resolve_requested_rows(packing, despacho_detalle)
-        DespachoService._validar_embarque_parcial(packing, resolved_rows)
 
         despacho = Despacho.objects.create(
             packing=packing,
