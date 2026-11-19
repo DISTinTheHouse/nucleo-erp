@@ -1597,8 +1597,8 @@ class PickingTrasladoTests(TestCase):
 
 class PackingDespachoEC574Tests(TestCase):
     """Crear el picking ya surte lo asignado; empacar solo registra lo empacado
-    con lo surtido como tope y, sin embarque parcial, despachar exige todo el
-    pedido empacado (WM-02, regla O1).
+    con lo surtido como tope. Lo empacado siempre se despacha; sin embarque
+    parcial el onboarding solo avisa lo que falta por empacar (WM-02).
 
     Todo por la API sobre un picking creado con ``PickingService``: ninguna
     prueba fija ``cantidad_surtida`` a mano.
@@ -1837,19 +1837,19 @@ class PackingDespachoEC574Tests(TestCase):
         self.assertNotIn(self.picking.pk, [p["id"] for p in onboarding()["pickings"]])  # completo: fuera
 
     # --- WM-02 -------------------------------------------------------------
-    def test_sin_embarque_parcial_despacha_solo_con_todo_empacado(self):
+    def _aviso(self, packing):
+        resp = self.api.get("/api/v1/wms/despachos/onboarding/", {"packing": packing["id"]})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()["embarque"]["motivo"]
+
+    def test_sin_embarque_parcial_despacha_lo_empacado(self):
+        """embarque_parcial=False no bloquea: lo empacado sale aunque falte empacar."""
         primero = self._empacar_ok((self.linea_m, 4))
-        resp = self._despachar(primero)
-        self.assertEqual(resp.status_code, 400)
-        mensaje = self._mensaje(resp, "despacho_detalle")
-        self.assertEqual(
-            mensaje, "El pedido no permite embarque parcial: faltan 2 piezas por empacar de las 6 del pedido."
-        )
-        self.assertIsNone(self.STALE_DESPACHO_RE.search(mensaje))
-        self.assertIsNone(self.STALE_PACKING_RE.search(mensaje))
+        self.assertEqual(self._aviso(primero), "Aviso: el pedido no admite embarque parcial y faltan 2 piezas por empacar de las 6 del pedido.")
+        self.assertEqual(self._despachar(primero).status_code, 201)
 
         segundo = self._empacar_ok((self.linea_g, 2))
-        self.assertEqual(self._despachar(primero).status_code, 201)
+        self.assertIsNone(self._aviso(segundo))
         self.assertEqual(self._despachar(segundo).status_code, 201)
 
     def test_con_embarque_parcial_despacha_parcial(self):
@@ -1863,14 +1863,13 @@ class PackingDespachoEC574Tests(TestCase):
 
         primero = self._empacar_ok((self.linea_m, 4))
         segundo = self._empacar_ok((self.linea_g, 2))
+        self.assertIsNone(self._aviso(primero))
         Packing.objects.filter(pk=segundo["id"]).update(estado="CANCELADO")
-        self.assertEqual(self._despachar(primero).status_code, 400)
+        self.assertIn("faltan 2 piezas", self._aviso(primero))
 
         Packing.objects.filter(pk=segundo["id"]).update(estado="PENDIENTE")
         PackingDetalle.objects.filter(packing_id=segundo["id"]).update(estado="CANCELADO")
-        resp = self._despachar(primero)
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("faltan 2 piezas", self._mensaje(resp, "despacho_detalle"))
+        self.assertIn("faltan 2 piezas", self._aviso(primero))
 
     def test_linea_cancelada_se_rechaza_y_no_se_ofrece(self):
         from ventas.models import Pedido
@@ -1903,24 +1902,12 @@ class PackingDespachoEC574Tests(TestCase):
         PackingDetalle.objects.create(
             packing_id=primero["id"], picking_detalle=linea_muestra, cantidad_empacada=2
         )
-        resp = self._despachar(primero)
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("faltan 2 piezas por empacar de las 6", self._mensaje(resp, "despacho_detalle"))
+        self.assertIn("faltan 2 piezas por empacar de las 6", self._aviso(primero))
 
     # --- revisión de código ------------------------------------------------
     def test_despacho_de_parte_de_un_packing(self):
-        from ventas.models import Pedido
-
         packing = self._empacar_ok((self.linea_m, 4), (self.linea_g, 2))
         solo_m = {**packing, "packing_detalle": packing["packing_detalle"][:1]}
-        resp = self._despachar(solo_m)
-        self.assertEqual(resp.status_code, 400)
-        mensaje = self._mensaje(resp, "despacho_detalle")
-        self.assertIn("todas las líneas del packing", mensaje)
-        self.assertIsNone(self.STALE_DESPACHO_RE.search(mensaje))
-        self.assertIsNone(self.STALE_PACKING_RE.search(mensaje))
-
-        Pedido.objects.filter(pk=self.pedido.pk).update(embarque_parcial=True)
         self.assertEqual(self._despachar(solo_m).status_code, 201)
 
     def test_reempacar_tras_cancelar_no_infla_el_surtido(self):
@@ -1938,9 +1925,7 @@ class PackingDespachoEC574Tests(TestCase):
 
         packing = self._empacar_ok((self.linea_m, 4), (self.linea_g, 2))
         PickingDetalle.objects.filter(pk=self.linea_g.pk).update(estado=PickingDetalle.EstadoLinea.CANCELADA)
-        resp = self._despachar(packing)
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("faltan 2 piezas", self._mensaje(resp, "despacho_detalle"))
+        self.assertIn("faltan 2 piezas", self._aviso(packing))
 
     def test_otra_empresa_rechazada_antes_de_bloquear(self):
         from ventas.models import Pedido
@@ -1967,7 +1952,7 @@ class PackingDespachoEC574Tests(TestCase):
         self.assertIn(resp_packing.status_code, (400, 404))
         lock.assert_not_called()
 
-    def test_onboarding_de_despacho_explica_o1(self):
+    def test_onboarding_de_despacho_solo_avisa(self):
         def onboarding(packing):
             resp = self.api.get("/api/v1/wms/despachos/onboarding/", {"packing": packing["id"]})
             self.assertEqual(resp.status_code, 200, resp.content)
@@ -1982,11 +1967,11 @@ class PackingDespachoEC574Tests(TestCase):
                 "total_piezas_pedido": "6",
                 "piezas_empacadas": "4",
                 "piezas_por_empacar": "2",
-                "despachable": False,
-                "motivo": "El pedido no permite embarque parcial: faltan 2 piezas por empacar de las 6 del pedido.",
+                "despachable": True,
+                "motivo": "Aviso: el pedido no admite embarque parcial y faltan 2 piezas por empacar de las 6 del pedido.",
             },
         )
-        self.assertFalse(any(d["disponible_para_despacho"] for d in datos["despacho_detalle"]))
+        self.assertTrue(all(d["disponible_para_despacho"] for d in datos["despacho_detalle"]))
         self.assertTrue(all(not d["ya_despachado"] for d in datos["despacho_detalle"]))
 
         self._empacar_ok((self.linea_g, 2))
