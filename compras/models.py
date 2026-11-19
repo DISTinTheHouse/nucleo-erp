@@ -2,7 +2,7 @@ from django.db import models
 from django.conf import settings
 from nucleo.models import Empresa, Sucursal, Departamento, Moneda, StatusLifecycleModel
 from terceros.models import Proveedor, Transportista
-from catalogo.models import Producto, ProductoVariante
+from catalogo.models import Producto, ProductoVariante, VarianteProductoProduccion
 from ventas.models import Pedido
 
 from inventarios.models import Almacen, Ubicacion, Lote, Serie
@@ -338,8 +338,15 @@ class RecepcionDetalle(models.Model):
     recepcion = models.ForeignKey(Recepcion, on_delete=models.CASCADE)
     orden_compra_detalle = models.ForeignKey(OrdenCompraDetalle, on_delete=models.CASCADE, null=True, blank=True)
     orden_produccion_detalle = models.ForeignKey(OrdenProduccionDetalle, on_delete=models.CASCADE, null=True, blank=True)
-    producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+    # Catálogo: ``producto`` (+ ``producto_variante``). Muestra de fabricación
+    # especial (renglón de OP con ``variante_produccion``): solo
+    # ``variante_produccion``, como su ``Existencia``.
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, null=True, blank=True)
     producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.CASCADE, null=True, blank=True)
+    variante_produccion = models.ForeignKey(
+        VarianteProductoProduccion, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="recepcion_detalles",
+    )
     ubicacion = models.ForeignKey(Ubicacion, on_delete=models.CASCADE, null=True, blank=True)
     lote = models.ForeignKey(Lote, on_delete=models.CASCADE, null=True, blank=True)
     serie = models.ForeignKey(Serie, on_delete=models.CASCADE, null=True, blank=True)
@@ -359,10 +366,33 @@ class RecepcionDetalle(models.Model):
                 name="ck_recepcion_detalle_cantidad_recibida_positiva",
                 violation_error_message="La cantidad recibida debe ser mayor a 0.",
             ),
+            models.CheckConstraint(
+                condition=models.Q(producto__isnull=False) | models.Q(variante_produccion__isnull=False),
+                name="ck_recepcion_detalle_producto_o_muestra",
+                violation_error_message="El renglón requiere producto o variante de producción.",
+            ),
         ]
 
     def __str__(self):
         return str(self.id)
+
+    # Nombre/SKU/talla del artículo, sea de catálogo o muestra. Quien los use
+    # trae ``producto``, ``producto_variante__talla`` y
+    # ``variante_produccion__talla`` en su ``select_related``.
+    @property
+    def articulo_nombre(self):
+        if self.producto_id:
+            return self.producto.nombre
+        return getattr(self.variante_produccion, "nombre", None) or getattr(self.variante_produccion, "sku", None)
+
+    @property
+    def articulo_sku(self):
+        return getattr(self.producto_variante, "sku", None) or getattr(self.variante_produccion, "sku", None)
+
+    @property
+    def articulo_talla(self):
+        variante = self.producto_variante or self.variante_produccion
+        return getattr(getattr(variante, "talla", None), "nombre", None)
 
 
 class RecepcionRFIDEncuadre(models.Model):

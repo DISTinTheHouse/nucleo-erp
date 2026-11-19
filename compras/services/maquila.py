@@ -93,7 +93,9 @@ def pendiente_de_sm(sm):
 
 def apartado_en_maquila(op_detalle_ids, excluir_sm_id=None):
     """Piezas en maquila (SM de OP Enviadas, aún no recibidas) por renglón de OP:
-    ``{op_detalle_id: (piezas, [folios])}``. Una consulta, sin importar filas."""
+    ``{op_detalle_id: (piezas, [folios], [{id, folio, cantidad_pendiente}])}``; la
+    lista es lo pendiente de cada SM (el tope al recibir con ella). Una consulta,
+    sin importar filas."""
     op_detalle_ids = list(op_detalle_ids)
     if not op_detalle_ids:
         return {}
@@ -107,14 +109,16 @@ def apartado_en_maquila(op_detalle_ids, excluir_sm_id=None):
         smd.values("salida_id", "salida__folio", "op_detalle_id")
         .annotate(total=Sum("cantidad"))
         .annotate(recibido=recibido_sm_subquery(OuterRef("salida_id"), OuterRef("op_detalle_id")))
+        .order_by("salida_id")
     )
     apartado = {}
     for f in filas:
         pend = (f["total"] or CERO) - f["recibido"]
         if pend <= 0:
             continue
-        piezas, folios = apartado.get(f["op_detalle_id"], (CERO, []))
-        apartado[f["op_detalle_id"]] = (piezas + pend, folios + [f["salida__folio"]])
+        piezas, folios, por_sm = apartado.get(f["op_detalle_id"], (CERO, [], []))
+        sm = {"id": f["salida_id"], "folio": f["salida__folio"], "cantidad_pendiente": str(pend.quantize(CENTAVO))}
+        apartado[f["op_detalle_id"]] = (piezas + pend, folios + [f["salida__folio"]], por_sm + [sm])
     return apartado
 
 
@@ -165,7 +169,7 @@ def facturar_maquila(sm, recepcion, renglones_recepcion=None):
                 toma = min(resto, libre[d.pk])
                 libre[d.pk] -= toma
                 resto -= toma
-                lineas.append(_linea(d, toma, rd, rd.producto))
+                lineas.append(_linea(d, toma, rd, rd.producto))  # muestra: sin producto
     if not lineas:
         return None
     origen, folio_origen = origen_sm(sm)

@@ -296,28 +296,25 @@ class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
     de ambos viewsets: sin consultas por fila. Mantén los dos ``Prefetch`` al
     día si agregas un campo que cruce otra FK.
 
-    Sirve tanto a renglones de OC como de OP: ``producto`` es NOT NULL en el
-    modelo (el onboarding lo puebla en ambos orígenes), así que
-    ``producto_nombre`` siempre resuelve. En un renglón de OC ``producto_variante``
+    Sirve tanto a renglones de OC como de OP. Un renglón de muestra (OP de
+    fabricación especial) no trae ``producto``: ``producto_nombre``, el SKU y la
+    talla salen de ``variante_produccion`` (también en el ``select_related``).
+    En un renglón de OC ``producto_variante``
     y ``orden_compra_detalle`` conviven con ``orden_produccion_detalle`` nulo; en
     uno de OP es al revés (``producto_variante`` poblado, ``orden_compra_detalle``
     nulo). La forma expone ``orden_compra_detalle`` pero no
     ``orden_produccion_detalle``.
     """
 
-    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    producto_nombre = serializers.CharField(source="articulo_nombre", read_only=True, default=None)
     # Identifica la materia prima, que no tiene variante (``producto`` va en el select_related).
     producto_codigo = serializers.CharField(source="producto.codigo", read_only=True, default=None)
     producto_cod_proscai = serializers.CharField(source="producto.cod_proscai", read_only=True, default=None)
     # ``producto_variante`` viene en el ``select_related`` de ambos retrieves.
-    producto_variante_sku = serializers.CharField(
-        source="producto_variante.sku", read_only=True, default=None
-    )
+    producto_variante_sku = serializers.CharField(source="articulo_sku", read_only=True, default=None)
     # Mismo nombre que en los renglones de la OC; ``None`` sin variante o sin
     # talla. ``producto_variante__talla`` va en el mismo ``select_related``.
-    producto_variante_talla = serializers.CharField(
-        source="producto_variante.talla.nombre", read_only=True, default=None
-    )
+    producto_variante_talla = serializers.CharField(source="articulo_talla", read_only=True, default=None)
     ubicacion_nombre = serializers.SerializerMethodField()
     # #1122: código legible junto al id (``lote``/``serie`` van en el select_related).
     # ``numero_serie`` y no ``serie_codigo``: ese nombre ya es la serie de folios
@@ -337,6 +334,7 @@ class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
             "producto_variante",
             "producto_variante_sku",
             "producto_variante_talla",
+            "variante_produccion",
             "ubicacion",
             "ubicacion_nombre",
             "lote",
@@ -676,7 +674,7 @@ class RecepcionOnboardingSerializer(serializers.Serializer):
 
 
 class CalidadInspeccionDetalleSerializer(serializers.ModelSerializer):
-    producto_nombre = serializers.CharField(source="recepcion_detalle.producto.nombre", read_only=True)
+    producto_nombre = serializers.CharField(source="recepcion_detalle.articulo_nombre", read_only=True, default=None)
 
     class Meta:
         model = CalidadInspeccionDetalle
