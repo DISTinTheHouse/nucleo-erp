@@ -347,6 +347,12 @@ class RecepcionDetalle(models.Model):
         VarianteProductoProduccion, on_delete=models.PROTECT, null=True, blank=True,
         related_name="recepcion_detalles",
     )
+    # Regreso de una SM de OB/OR: lo que volvió de cada renglón de la SM. Solo
+    # cuenta piezas; no entra al inventario (las prendas ya son del pedido).
+    salida_maquila_detalle = models.ForeignKey(
+        "produccion.SalidaMaquilaDetalle", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="recepcion_detalles",
+    )
     ubicacion = models.ForeignKey(Ubicacion, on_delete=models.CASCADE, null=True, blank=True)
     lote = models.ForeignKey(Lote, on_delete=models.CASCADE, null=True, blank=True)
     serie = models.ForeignKey(Serie, on_delete=models.CASCADE, null=True, blank=True)
@@ -367,9 +373,13 @@ class RecepcionDetalle(models.Model):
                 violation_error_message="La cantidad recibida debe ser mayor a 0.",
             ),
             models.CheckConstraint(
-                condition=models.Q(producto__isnull=False) | models.Q(variante_produccion__isnull=False),
-                name="ck_recepcion_detalle_producto_o_muestra",
-                violation_error_message="El renglón requiere producto o variante de producción.",
+                condition=(
+                    models.Q(producto__isnull=False)
+                    | models.Q(variante_produccion__isnull=False)
+                    | models.Q(salida_maquila_detalle__isnull=False)
+                ),
+                name="ck_recepcion_detalle_articulo",
+                violation_error_message="El renglón requiere producto, variante de producción o renglón de SM.",
             ),
         ]
 
@@ -383,7 +393,11 @@ class RecepcionDetalle(models.Model):
     def articulo_nombre(self):
         if self.producto_id:
             return self.producto.nombre
-        return getattr(self.variante_produccion, "nombre", None) or getattr(self.variante_produccion, "sku", None)
+        return (
+            getattr(self.variante_produccion, "nombre", None)
+            or getattr(self.variante_produccion, "sku", None)
+            or getattr(self.salida_maquila_detalle, "descripcion", None)
+        )
 
     @property
     def articulo_sku(self):

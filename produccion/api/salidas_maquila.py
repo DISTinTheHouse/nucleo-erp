@@ -14,7 +14,11 @@
 - Detalle: ``recepciones`` (RC de WMS) y ``facturas_proveedor`` (maquila en CxP);
   listado: ``recepcion_folio`` (#1239).
 - ``POST {id}/cerrar/``: 400; la SM queda ``RECIBIDA`` al recibir todas sus piezas
-  en WMS (``compras/recepciones/onboarding/`` con ``salida_maquila``).
+  en WMS (``compras/recepciones/onboarding/`` con ``salida_maquila``) o al recibir
+  con ``cerrar_salida_maquila``.
+- ``piezas_recibidas`` (lo que regresó en sus recepciones) y ``piezas_faltantes``
+  (enviadas − recibidas): en una SM Recibida, lo que no regresó del maquilero.
+  Anotadas en la misma consulta.
 - ``POST {id}/cancelar/``.
 
 No mueve inventario (la OP ya consumió la materia prima). Siempre la empresa
@@ -105,6 +109,14 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
 
     recepciones = serializers.SerializerMethodField()
     facturas_proveedor = serializers.SerializerMethodField()
+    piezas_recibidas = serializers.SerializerMethodField()
+    piezas_faltantes = serializers.SerializerMethodField()
+
+    def get_piezas_recibidas(self, obj):
+        return _n(getattr(obj, "piezas_recibidas", 0) or 0)
+
+    def get_piezas_faltantes(self, obj):
+        return _n(max(obj.total_piezas - (getattr(obj, "piezas_recibidas", 0) or 0), 0))
 
     def get_recepciones(self, obj):
         """Recepciones (RC) con que WMS recibió la SM (#1239); ``prefetch`` en el detalle."""
@@ -152,7 +164,8 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
             "op", "op_folio", "ob", "ob_folio", "orden_r", "orden_r_folio",
             "centro_confeccion", "centro_confeccion_nombre", "sucursal", "sucursal_nombre",
             "fecha_envio", "fecha_compromiso", "fecha_recepcion",
-            "total_piezas", "total", "observaciones", "usuario", "usuario_nombre", "created_at", "detalles",
+            "total_piezas", "piezas_recibidas", "piezas_faltantes",
+            "total", "observaciones", "usuario", "usuario_nombre", "created_at", "detalles",
             "recepciones", "facturas_proveedor",
         ]
         read_only_fields = ["folio", "estatus", "sucursal", "fecha_recepcion", "total_piezas", "total",
@@ -308,9 +321,12 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
     def get_queryset(self):
         # EC-871: empresa activa + sucursales del usuario (la SM lleva la sucursal
         # de su OP), el mismo alcance que la OP: lo que no ve en OP da 404 aquí.
+        from compras.services.maquila import recibido_sm_subquery
+
         qs = (
             ordenes_produccion_visibles(SalidaMaquila.objects.filter(activo=True), self.request.user)
             .select_related(*_RELACIONES)
+            .annotate(piezas_recibidas=recibido_sm_subquery(OuterRef("pk")))
             .order_by("-id")
         )
         if self.action == "retrieve":
