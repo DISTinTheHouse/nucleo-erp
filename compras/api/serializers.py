@@ -700,6 +700,26 @@ class CalidadInspeccionSerializer(serializers.ModelSerializer):
     inspector_nombre = serializers.SerializerMethodField()
     recepcion_folio = serializers.CharField(source="recepcion.folio", read_only=True)
     detalles = CalidadInspeccionDetalleSerializer(many=True, read_only=True)
+    pedido_id = serializers.SerializerMethodField()
+    pedido_folio = serializers.SerializerMethodField()
+    pedidos = serializers.SerializerMethodField()
+
+    def get_pedidos(self, obj):
+        """Pedido(s) maestro(s) de la recepción; el listado los calcula en bloque."""
+        from compras.services.recepcion_pedidos import pedidos_de_recepciones
+
+        mapa = self.context.get("pedidos_por_recepcion")
+        if mapa is None:
+            mapa = pedidos_de_recepciones([obj.recepcion])
+        return mapa.get(obj.recepcion_id, [])
+
+    def get_pedido_id(self, obj):
+        lista = self.get_pedidos(obj)
+        return lista[0]["id"] if lista else None
+
+    def get_pedido_folio(self, obj):
+        lista = self.get_pedidos(obj)
+        return lista[0]["folio"] if lista else None
 
     class Meta:
         model = CalidadInspeccion
@@ -707,6 +727,9 @@ class CalidadInspeccionSerializer(serializers.ModelSerializer):
             "id",
             "recepcion",
             "recepcion_folio",
+            "pedido_id",
+            "pedido_folio",
+            "pedidos",
             "inspector",
             "inspector_nombre",
             "fecha",

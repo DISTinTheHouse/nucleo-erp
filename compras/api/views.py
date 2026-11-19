@@ -96,9 +96,9 @@ from ventas.models import Pedido
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle, SalidaMaquila
 from compras.services.maquila import (
     ESTATUS_OP_RECIBIBLES, apartado_en_maquila, facturar_maquila, marcar_recibida, origen_sm,
-    renglones_sm_servicio,
-    pendiente_de_sm, recibido_sm_subquery,
+    renglones_sm_servicio, pendiente_de_sm, recibido_sm_subquery,
 )
+from compras.services.recepcion_pedidos import RELACIONES_PEDIDO, origen_folio, pedidos_de_recepciones
 from terceros.models import Proveedor, Transportista
 
 logger = logging.getLogger(__name__)
@@ -2877,9 +2877,22 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
     está definido todavía (ver DOCS/arquitectura/flujo-recepcion-calidad-compras.md).
     """
 
-    queryset = CalidadInspeccion.objects.all().select_related("recepcion", "inspector")
+    queryset = CalidadInspeccion.objects.all().select_related(
+        "recepcion", "inspector",
+        *(f"recepcion__{r}" for r in RELACIONES_PEDIDO),  # pedido(s) de cada recepción
+    )
     serializer_class = CalidadInspeccionSerializer
     http_method_names = ["get", "post"]
+
+    def list(self, request, *args, **kwargs):
+        # ``pedidos`` de todas las recepciones de la página en bloque (2 consultas).
+        qs = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(qs)
+        objs = list(page if page is not None else qs)
+        contexto = {**self.get_serializer_context(),
+                    "pedidos_por_recepcion": pedidos_de_recepciones([o.recepcion for o in objs])}
+        data = self.get_serializer_class()(objs, many=True, context=contexto).data
+        return self.get_paginated_response(data) if page is not None else Response(data)
 
     def get_queryset(self):
         user = self.request.user
@@ -3030,7 +3043,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             Recepcion.objects.filter(
                 activo=True, estatus=Recepcion.EstatusRecepcion.EN_CALIDAD, empresa=empresa,
             )
-            .select_related("proveedor")
+            .select_related("proveedor", "almacen", *RELACIONES_PEDIDO)
             .prefetch_related(
                 Prefetch(
                     "recepciondetalle_set",
@@ -3041,15 +3054,24 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
         recepciones = []
-        for r in recepciones_qs[:50]:
+        pendientes = list(recepciones_qs[:50])
+        pedidos = pedidos_de_recepciones(pendientes)
+        for r in pendientes:
             detalles = r.recepciondetalle_set.all()
+            lista = pedidos.get(r.pk, [])
             recepciones.append(
                 {
                     "id": r.pk,
                     "folio": r.folio,
                     "tipo_origen": r.tipo_origen,
+                    "origen_folio": origen_folio(r),
+                    # Pedido maestro (el principal) y todos si la OC/OP surte varios.
+                    "pedido_id": lista[0]["id"] if lista else None,
+                    "pedido_folio": lista[0]["folio"] if lista else None,
+                    "pedidos": lista,
                     "proveedor_nombre": getattr(r.proveedor, "nombre", None),
                     "almacen_id": r.almacen_id,
+                    "almacen_nombre": r.almacen.nombre,
                     "fecha_recepcion": r.fecha_recepcion,
                     "detalle": [
                         {
