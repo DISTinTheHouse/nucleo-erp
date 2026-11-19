@@ -335,6 +335,7 @@ class RecepcionDetalleResumenSerializer(serializers.ModelSerializer):
             "producto_variante_sku",
             "producto_variante_talla",
             "variante_produccion",
+            "salida_maquila_detalle",
             "ubicacion",
             "ubicacion_nombre",
             "lote",
@@ -628,8 +629,11 @@ class RecepcionRetrieveSerializer(_OrigenSalidaMaquilaMixin, serializers.ModelSe
 class RecepcionOnboardingHeaderSerializer(serializers.Serializer):
     orden_compra = serializers.IntegerField(required=False, allow_null=True)
     orden_produccion = serializers.IntegerField(required=False, allow_null=True)
-    # Regreso de maquila: con OP se recibe la OP; de OB/OR solo se cierra la SM.
+    # Regreso de maquila: con OP se recibe la OP; de OB/OR se cuentan las piezas
+    # por renglón de la SM (sin inventario).
     salida_maquila = serializers.IntegerField(required=False, allow_null=True)
+    # Cierra la SM aunque falten piezas: lo que no regresó queda como faltante.
+    cerrar_salida_maquila = serializers.BooleanField(required=False, default=False)
     almacen = serializers.IntegerField()
     serie_codigo = serializers.CharField(required=False, allow_blank=True)
     fecha_recepcion = serializers.DateTimeField(required=False, allow_null=True)
@@ -642,6 +646,7 @@ class RecepcionOnboardingHeaderSerializer(serializers.Serializer):
 class RecepcionOnboardingDetalleInputSerializer(serializers.Serializer):
     orden_compra_detalle = serializers.IntegerField(required=False, allow_null=True)
     orden_produccion_detalle = serializers.IntegerField(required=False, allow_null=True)
+    salida_maquila_detalle = serializers.IntegerField(required=False, allow_null=True)  # SM de OB/OR
     cantidad_recibida = serializers.DecimalField(max_digits=18, decimal_places=4)
     ubicacion = serializers.IntegerField(required=False, allow_null=True)
     lote = serializers.IntegerField(required=False, allow_null=True)
@@ -657,7 +662,7 @@ class RecepcionOnboardingSerializer(serializers.Serializer):
         # Se valida aquí, antes de consumir folio, crear la recepción o cambiar
         # el estatus de la OC/OP. El error va plano (``{"detalle": ["..."]}``)
         # y numera el renglón desde 1, igual que los demás de la vista.
-        # Excepción: el regreso de una SM de OB/OR no lleva renglones (sin inventario);
+        # Excepción: una SM de OB/OR sin renglones recibe todo lo pendiente;
         # la vista lo distingue y la de OP sigue exigiéndolos.
         if not detalle and not (self.initial_data.get("recepcion") or {}).get("salida_maquila"):
             raise serializers.ValidationError(

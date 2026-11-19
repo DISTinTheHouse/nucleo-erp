@@ -96,6 +96,7 @@ from ventas.models import Pedido
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle, SalidaMaquila
 from compras.services.maquila import (
     ESTATUS_OP_RECIBIBLES, apartado_en_maquila, facturar_maquila, marcar_recibida, origen_sm,
+    renglones_sm_servicio,
     pendiente_de_sm, recibido_sm_subquery,
 )
 from terceros.models import Proveedor, Transportista
@@ -1751,10 +1752,28 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
 
     def _recibir_sm_servicio(self, request, sm, header, serie_codigo, detalle_raw):
         """SM de OB/OR: las prendas ya son del pedido y no entran al inventario.
-        Se registra la recepción (sin renglones), se cierra la SM y nace la
-        factura de maquila en Borrador para CxP, por la SM completa."""
-        if detalle_raw:  # antes se ignoraba en silencio (#1240)
-            raise _error_detalle({"detalle": "Una SM de OB/OR se recibe completa, sin renglones."})
+        Se cuentan las piezas que regresan por renglón de la SM (``detalle`` con
+        ``salida_maquila_detalle``; vacío = todo lo pendiente) contra lo pendiente
+        de cada renglón. La factura de maquila es por lo que regresó; la SM queda
+        Recibida al completarse o con ``cerrar_salida_maquila`` (el resto, faltante)."""
+        pendientes = {f["id"]: Decimal(f["cantidad_pendiente"]) for f in renglones_sm_servicio([sm.pk]).get(sm.pk, [])}
+        if not detalle_raw:
+            detalle_raw = [{"salida_maquila_detalle": k, "cantidad_recibida": v} for k, v in pendientes.items() if v > 0]
+            if not detalle_raw:
+                raise _error_detalle({"detalle": f"La SM {sm.folio} no tiene piezas pendientes."})
+        acumulado = {}
+        for idx, item in enumerate(detalle_raw):
+            smd_id = item.get("salida_maquila_detalle")
+            ref = f"#{idx + 1}" + (f" (salida_maquila_detalle {smd_id})" if smd_id else "")
+            if item.get("orden_compra_detalle") or item.get("orden_produccion_detalle") or not smd_id:
+                raise _error_detalle({"detalle": f"El renglón {ref} de una SM de OB/OR va con salida_maquila_detalle."})
+            if smd_id not in pendientes:
+                raise _error_detalle({"detalle": f"El renglón {ref} no va en la SM {sm.folio}."})
+            acumulado[smd_id] = acumulado.get(smd_id, Decimal("0")) + Decimal(str(item["cantidad_recibida"]))
+            if acumulado[smd_id] > pendientes[smd_id]:
+                raise _error_detalle({"detalle": (
+                    f"El renglón {ref} excede lo pendiente de la SM {sm.folio} "
+                    f"({pendientes[smd_id].normalize():f} pzas).")})
         almacen = Almacen.objects.filter(pk=header["almacen"], empresa_id=sm.empresa_id,
                                          sucursal_id=sm.sucursal_id).first()
         if almacen is None:
@@ -1774,9 +1793,22 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         self._asignar_folio_recepcion(recepcion, serie_codigo)
         recepcion.save()
-        facturar_maquila(sm, recepcion)
-        marcar_recibida(sm)
-        return Response({"recepcion": RecepcionSerializer(recepcion).data, "detalle": []}, status=status.HTTP_200_OK)
+        detalles = {d.pk: d for d in sm.detalles.select_related("ob_detalle", "or_detalle")}
+        renglones = RecepcionDetalle.objects.bulk_create([
+            RecepcionDetalle(
+                recepcion=recepcion, salida_maquila_detalle=detalles[smd_id],
+                producto_id=getattr(detalles[smd_id].ob_detalle or detalles[smd_id].or_detalle, "producto_id", None),
+                cantidad_recibida=cantidad,
+            )
+            for smd_id, cantidad in acumulado.items()
+        ])
+        facturar_maquila(sm, recepcion, renglones)
+        if header.get("cerrar_salida_maquila") or all(pendientes[k] - acumulado.get(k, 0) <= 0 for k in pendientes):
+            marcar_recibida(sm)
+        return Response(
+            {"recepcion": RecepcionSerializer(recepcion).data, "detalle": RecepcionDetalleSerializer(renglones, many=True).data},
+            status=status.HTTP_200_OK,
+        )
 
     def _asignar_folio_recepcion(self, recepcion, serie_codigo):
         serie_folio = self._serie_folio_recepcion(
@@ -2555,7 +2587,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 if sm is not None:
                     # Factura por lo que llegó; la SM queda Recibida solo al completarse (#1232).
                     facturar_maquila(sm, recepcion, renglones)
-                    if all(v <= 0 for v in pendiente_de_sm(sm).values()):
+                    if header.get("cerrar_salida_maquila") or all(v <= 0 for v in pendiente_de_sm(sm).values()):
                         marcar_recibida(sm)
 
                 # ``_actualizar_estatus_oc``/cierre de OP siguen basados en
@@ -3525,6 +3557,8 @@ def _sm_pendientes(request):
 
     - Las de OP solo si la OP sigue en estatus recibible (#1236).
     - ``piezas_pendientes``: piezas de la SM menos lo ya recibido con ella (parciales, #1232).
+    - SM de OB/OR: ``detalle`` con sus renglones (SKU, talla, color y
+      ``cantidad_pendiente``, el tope al recibir). Una consulta más, solo si hay.
     - ``total`` solo con ``R-PRODUCCION-COSTOS``, como en las SM (#1235)."""
     from nucleo.permisos import permisos_de_la_peticion
     from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
@@ -3540,6 +3574,7 @@ def _sm_pendientes(request):
     )
     # Sin SM no se consultan permisos (una consulta menos para quien no es admin).
     ve_costos = bool(sms) and PERMISO_COSTOS_PRODUCCION in permisos_de_la_peticion(request)
+    renglones = renglones_sm_servicio([sm.pk for sm in sms if sm.op_id is None])
     filas = []
     for sm in sms:
         origen, folio_origen = origen_sm(sm)
@@ -3550,6 +3585,8 @@ def _sm_pendientes(request):
             "sucursal_id": sm.sucursal_id, "fecha_envio": sm.fecha_envio, "total_piezas": sm.total_piezas,
             "piezas_pendientes": (sm.total_piezas - sm.piezas_recibidas).quantize(Decimal("0.01")),
         }
+        if sm.op_id is None:
+            fila["detalle"] = renglones.get(sm.pk, [])
         if ve_costos:
             fila["total"] = sm.total
         filas.append(fila)

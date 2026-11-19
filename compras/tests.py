@@ -3811,7 +3811,9 @@ class RecepcionSalidaMaquilaTests(TestCase):
 
 
 class RecepcionSalidaMaquilaServicioTests(TestCase):
-    """SM de OB: sin renglones ni inventario, factura por la SM completa (#1240)."""
+    """SM de OB: se cuentan las piezas por renglón de la SM, sin inventario; la
+    factura es por lo que regresó. Parcial: la SM sigue Enviada salvo
+    ``cerrar_salida_maquila``, y lo que no regresó queda en ``piezas_faltantes``."""
 
     @classmethod
     def setUpTestData(cls):
@@ -3846,7 +3848,7 @@ class RecepcionSalidaMaquilaServicioTests(TestCase):
             empresa=cls.empresa, sucursal=cls.sucursal, ob=ob, centro_confeccion=maquilero,
             folio="SM-OB1", fecha_envio=timezone.localdate(), total_piezas=2, total=30,
         )
-        SalidaMaquilaDetalle.objects.create(salida=cls.sm, descripcion="Bata", cantidad=2, precio_unitario=15, importe=30)
+        cls.smd = SalidaMaquilaDetalle.objects.create(salida=cls.sm, descripcion="Bata", cantidad=2, precio_unitario=15, importe=30)
         otra = Empresa.objects.create(codigo="smob-2", razon_social="Otra SA")
         cls.transportista_ajeno = Transportista.objects.create(empresa=otra)
 
@@ -3867,7 +3869,9 @@ class RecepcionSalidaMaquilaServicioTests(TestCase):
         self.assertEqual(self.sm.estatus, "RECIBIDA")
         rc = Recepcion.objects.get(salida_maquila=self.sm)
         self.assertEqual(rc.tipo_origen, Recepcion.TipoOrigen.SALIDA_MAQUILA)
-        self.assertFalse(rc.recepciondetalle_set.exists())
+        # Sin renglones en el POST se recibe todo lo pendiente.
+        renglon = rc.recepciondetalle_set.get()
+        self.assertEqual((renglon.salida_maquila_detalle_id, renglon.cantidad_recibida), (self.smd.pk, Decimal("2")))
         self.assertEqual(MovimientoInventario.objects.count(), movimientos)
         factura = FacturaProveedor.objects.get(salida_maquila=self.sm)
         self.assertEqual((factura.total, factura.recepcion_id, factura.oc_id), (Decimal("30.00"), rc.pk, None))
@@ -3875,10 +3879,33 @@ class RecepcionSalidaMaquilaServicioTests(TestCase):
         self.assertIsNone(linea.producto_id)
         self.assertEqual(linea.descripcion, "Bata")
 
-    def test_detalle_no_vacio_es_400(self):
-        r = self._post(detalle=[{"orden_produccion_detalle": 1, "cantidad_recibida": 5}])
-        self.assertEqual(r.status_code, 400)
+    def test_renglon_de_op_o_excedido_es_400(self):
+        for renglon in ({"orden_produccion_detalle": 1, "cantidad_recibida": 1},
+                        {"salida_maquila_detalle": self.smd.pk, "cantidad_recibida": 3}):
+            self.assertEqual(self._post(detalle=[renglon]).status_code, 400)
         self.assertFalse(Recepcion.objects.filter(salida_maquila=self.sm).exists())
+
+    def test_onboarding_get_trae_los_renglones_de_la_sm(self):
+        r = self.client.get(RECEPCION_ONBOARDING_URL)
+        fila = next(s for s in r.data["busqueda"]["salidas_maquila"] if s["id"] == self.sm.pk)
+        self.assertEqual([(d["id"], d["cantidad_pendiente"]) for d in fila["detalle"]], [(self.smd.pk, "2.00")])
+
+    def test_parcial_sigue_enviada_y_cerrar_deja_el_faltante(self):
+        uno = [{"salida_maquila_detalle": self.smd.pk, "cantidad_recibida": 1}]
+        self.assertEqual(self._post(detalle=uno).status_code, 200)
+        self.sm.refresh_from_db()
+        self.assertEqual(self.sm.estatus, "ENVIADA")
+        self.assertEqual(FacturaProveedor.objects.get(salida_maquila=self.sm).total, Decimal("15.00"))
+
+        # Con 3 enviadas, la segunda recepción cierra la SM con 1 faltante.
+        self.sm.detalles.update(cantidad=3)
+        type(self.sm).objects.filter(pk=self.sm.pk).update(total_piezas=3)
+        self.assertEqual(self._post(detalle=uno, cerrar_salida_maquila=True).status_code, 200)
+        self.sm.refresh_from_db()
+        self.assertEqual(self.sm.estatus, "RECIBIDA")
+        r = self.client.get(f"/api/v1/produccion/salidas-maquila/{self.sm.pk}/")
+        if r.status_code == 200:  # lectura con R-PRODUCCION-OP
+            self.assertEqual((r.data["piezas_recibidas"], r.data["piezas_faltantes"]), ("2", "1"))
 
     def test_transportista_de_otra_empresa_es_400(self):
         r = self._post(transportista=self.transportista_ajeno.pk)

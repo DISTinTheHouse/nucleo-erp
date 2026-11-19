@@ -9,10 +9,15 @@ Reglas (#1232, #1234, #1242):
 - Contra una SM de OP se recibe a lo más lo pendiente de **la SM** (piezas de
   sus renglones menos lo ya recibido con ella), por ``op_detalle``. Puede ser
   parcial: la SM sigue Enviada hasta completar sus piezas.
+- SM de OB/OR: se cuentan las piezas que regresan por renglón de la SM
+  (``salida_maquila_detalle``), sin inventario: las prendas ya son del pedido.
+  Sin renglones en el POST se recibe todo lo pendiente.
+- Cualquier SM queda Recibida al completar sus piezas, o antes si el POST trae
+  ``cerrar_salida_maquila``: lo que no regresó queda como faltante
+  (``piezas_enviadas − piezas_recibidas``) y no se factura.
 - Cada recepción de SM crea su factura de maquila en Borrador **con líneas**:
   una por renglón de la SM, por lo que llegó en esa recepción, al precio de la
-  SM (#385: el encabezado se deriva de las líneas). La SM de OB/OR se recibe
-  completa (no lleva renglones de recepción) y se factura completa.
+  SM (#385: el encabezado se deriva de las líneas).
 
 "Recibido con una SM" = renglones de recepciones activas, no canceladas, ligadas
 a la SM; sin restar el rechazo de calidad (lo enviado y devuelto por el
@@ -67,13 +72,13 @@ def _recibido_por_sm(sm_ids):
 
 
 def recibido_sm_subquery(sm_ref, op_detalle_ref=None):
-    """Piezas recibidas con una SM (y renglón de OP) como subconsulta anotable:
-    lo mismo que ``_recibido_por_sm`` sin una consulta aparte."""
+    """Piezas recibidas con una SM (y renglón de OP) como subconsulta anotable.
+    Sin ``op_detalle_ref``, todas las de la SM: renglones de OP o de la SM (OB/OR)."""
     filtro = {"recepcion__salida_maquila_id": sm_ref}
     if op_detalle_ref is not None:
         filtro["orden_produccion_detalle_id"] = op_detalle_ref
     sub = (
-        RecepcionDetalle.objects.filter(recepcion__activo=True, orden_produccion_detalle_id__isnull=False, **filtro)
+        RecepcionDetalle.objects.filter(recepcion__activo=True, **filtro)
         .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
         .order_by().values("recepcion__salida_maquila_id")
         .annotate(t=Sum("cantidad_recibida")).values("t")
@@ -122,6 +127,54 @@ def apartado_en_maquila(op_detalle_ids, excluir_sm_id=None):
     return apartado
 
 
+def renglones_sm_servicio(sm_ids):
+    """``{sm_id: [renglón]}`` de SM de OB/OR con SKU, talla, color y lo pendiente
+    (enviado − recibido con la SM). Una consulta, sin importar SM ni renglones."""
+    from catalogo.models import ProductoVariante
+
+    sm_ids = list(sm_ids)
+    if not sm_ids:
+        return {}
+    recibido = (
+        RecepcionDetalle.objects.filter(salida_maquila_detalle_id=OuterRef("pk"), recepcion__activo=True)
+        .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        .order_by().values("salida_maquila_detalle_id").annotate(t=Sum("cantidad_recibida")).values("t")
+    )
+    sku = ProductoVariante.objects.filter(
+        producto_id=OuterRef("_producto"), talla_id=OuterRef("_talla"), color_id=OuterRef("_color"),
+    ).order_by("id").values("sku")[:1]
+    filas = (
+        SalidaMaquilaDetalle.objects.filter(salida_id__in=sm_ids)
+        .annotate(
+            _producto=Coalesce("ob_detalle__producto_id", "or_detalle__producto_id"),
+            _talla=Coalesce("ob_detalle__talla_id", "or_detalle__talla_id"),
+            _color=Coalesce("ob_detalle__color_id", "or_detalle__color_id"),
+        )
+        .annotate(
+            producto_nombre=Coalesce("ob_detalle__producto__nombre", "or_detalle__producto__nombre"),
+            talla=Coalesce("ob_detalle__talla__nombre", "or_detalle__talla__nombre"),
+            color=Coalesce("ob_detalle__color__nombre", "or_detalle__color__nombre"),
+            sku=Subquery(sku),
+            recibido=Coalesce(Subquery(recibido, output_field=DecimalField(max_digits=18, decimal_places=4)),
+                              Value(CERO), output_field=DecimalField(max_digits=18, decimal_places=4)),
+        )
+        .order_by("salida_id", "id")
+        .values("id", "salida_id", "ob_detalle_id", "or_detalle_id", "descripcion", "producto_nombre",
+                "sku", "talla", "color", "cantidad", "recibido", "_producto")
+    )
+    out = {}
+    for f in filas:
+        out.setdefault(f["salida_id"], []).append({
+            "id": f["id"], "ob_detalle": f["ob_detalle_id"], "or_detalle": f["or_detalle_id"],
+            "producto_id": f["_producto"], "producto_nombre": f["producto_nombre"], "descripcion": f["descripcion"],
+            "sku": f["sku"], "talla": f["talla"], "color": f["color"],
+            "cantidad": str(f["cantidad"].quantize(CENTAVO)),
+            "cantidad_recibida": str(f["recibido"].quantize(CENTAVO)),
+            "cantidad_pendiente": str(max(f["cantidad"] - f["recibido"], CERO).quantize(CENTAVO)),
+        })
+    return out
+
+
 def _moneda_mxn():
     moneda = Moneda.objects.filter(codigo_iso="MXN").order_by("pk").first()
     if moneda is None:
@@ -142,9 +195,9 @@ def _linea(smd, cantidad, recepcion_detalle=None, producto=None):
 def facturar_maquila(sm, recepcion, renglones_recepcion=None):
     """Factura de maquila en Borrador para lo que llegó en ``recepcion``.
 
-    ``renglones_recepcion``: los ``RecepcionDetalle`` creados (SM de OP); se
-    reparten entre los renglones de la SM de su ``op_detalle`` en orden. Sin
-    ellos (SM de OB/OR) se factura la SM completa."""
+    ``renglones_recepcion``: los ``RecepcionDetalle`` creados. Uno de SM de OB/OR
+    va a su ``salida_maquila_detalle``; uno de OP se reparte entre los renglones
+    de la SM de su ``op_detalle`` en orden. Sin ellos se factura la SM completa."""
     detalles_sm = list(sm.detalles.order_by("id"))
     lineas = []
     if renglones_recepcion is None:
@@ -164,7 +217,12 @@ def facturar_maquila(sm, recepcion, renglones_recepcion=None):
             for d in detalles_sm:
                 if resto <= 0:
                     break
-                if d.op_detalle_id != rd.orden_produccion_detalle_id or libre[d.pk] <= 0:
+                if rd.salida_maquila_detalle_id:
+                    if d.pk != rd.salida_maquila_detalle_id:
+                        continue
+                elif d.op_detalle_id != rd.orden_produccion_detalle_id:
+                    continue
+                if libre[d.pk] <= 0:
                     continue
                 toma = min(resto, libre[d.pk])
                 libre[d.pk] -= toma
