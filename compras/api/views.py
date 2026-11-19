@@ -326,6 +326,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                         "producto",
                         # La talla de ``producto_variante_talla`` va en el mismo JOIN.
                         "producto_variante__talla",
+                        "variante_produccion__talla",  # renglón de muestra
                         "ubicacion",
                         "ubicacion__almacen",
                         "lote",  # lote_codigo / numero_serie (#1122)
@@ -1644,6 +1645,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     queryset=RecepcionDetalle.objects.select_related(
                         "producto",
                         "producto_variante__talla",
+                        "variante_produccion__talla",  # renglón de muestra
                         "ubicacion",
                         "ubicacion__almacen",
                         "lote",  # lote_codigo / numero_serie (#1122)
@@ -1900,9 +1902,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     )
 
             for campo, modelo in (("lote", Lote), ("serie", Serie)):
-                if item.get(campo) and not modelo.objects.filter(
+                # Lote/serie son del producto de catálogo; una muestra no tiene.
+                if item.get(campo) and (item["producto"] is None or not modelo.objects.filter(
                     pk=item[campo], producto_id=item["producto"].pk
-                ).exists():
+                ).exists()):
                     raise ValidationError(
                         {campo: f"El {campo} no existe o no pertenece al producto del renglón."}
                     )
@@ -1913,6 +1916,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 orden_produccion_detalle=item.get("orden_produccion_detalle"),
                 producto=item["producto"],
                 producto_variante=item.get("producto_variante"),
+                variante_produccion=item.get("variante_produccion"),
                 ubicacion=ubicacion,
                 lote_id=item.get("lote"),
                 serie_id=item.get("serie"),
@@ -2103,6 +2107,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 | Q(pedido__folio__icontains=oc_q)
                 | Q(orden_produccion_detalle__producto_variante__sku__icontains=oc_q)
                 | Q(orden_produccion_detalle__producto_variante__producto__nombre__icontains=oc_q)
+                | Q(orden_produccion_detalle__variante_produccion__sku__icontains=oc_q)
+                | Q(orden_produccion_detalle__variante_produccion__nombre__icontains=oc_q)
             ).distinct()
 
         ordenes_produccion = []
@@ -2113,7 +2119,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             op_detalles_qs = (
                 OrdenProduccionDetalle.objects
                 .filter(op_id__in=op_ids, activo=True)
-                .select_related("producto_variante__producto")
+                .select_related("producto_variante__producto", "variante_produccion")
                 .order_by("op_id", "op_detalle_id")
             )
             op_detalles_list = list(op_detalles_qs)
@@ -2142,22 +2148,30 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             for op_detalle in op_detalles_list:
                 producto_variante = op_detalle.producto_variante
                 producto = getattr(producto_variante, "producto", None)
+                muestra = op_detalle.variante_produccion  # fabricación especial
                 cantidad = Decimal(str(op_detalle.cantidad or 0))
                 recibido = recibido_op_map.get(op_detalle.pk, Decimal("0"))
-                apartado = en_maquila.get(op_detalle.pk, (Decimal("0"), []))[0]
+                apartado, _, por_sm = en_maquila.get(op_detalle.pk, (Decimal("0"), [], []))
                 pendiente = cantidad - recibido - apartado
                 item = {
                     "id": op_detalle.pk,
                     "producto_id": getattr(producto, "pk", None),
                     "producto_variante_id": getattr(producto_variante, "pk", None),
+                    "variante_produccion_id": getattr(muestra, "pk", None),
                     "producto_nombre": (
                         getattr(producto_variante, "nombre", None)
                         or getattr(producto, "nombre", None)
+                        or getattr(muestra, "nombre", None)
+                        or getattr(muestra, "sku", None)
                     ),
+                    "sku": getattr(producto_variante, "sku", None) or getattr(muestra, "sku", None),
                     "cantidad_ordenada": str(cantidad),
                     "cantidad_recibida": str(recibido),
+                    # Por la OP directa (sin SM): lo que no está en maquila.
                     "cantidad_pendiente": str(max(pendiente, Decimal("0"))),
                     "cantidad_en_maquila": str(apartado),
+                    # Tope al recibir con cada SM: su ``cantidad_pendiente``.
+                    "salidas_maquila": por_sm,
                     "descripcion": op_detalle.observaciones,
                 }
                 op_detalles_map.setdefault(op_detalle.op_id, []).append(item)
@@ -2166,7 +2180,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             detalle = []
             for item in op_detalles_map.get(op.pk, []):
                 detalle.append(item)
-            if not any(Decimal(item["cantidad_pendiente"]) > 0 for item in detalle):
+            # Sigue si hay algo por recibir, directo o con una SM.
+            if not any(Decimal(item["cantidad_pendiente"]) > 0 or item["salidas_maquila"] for item in detalle):
                 continue
 
             ordenes_produccion.append(
@@ -2405,7 +2420,9 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 else:
                     detalles_op = {
                         d.pk: d
-                        for d in OrdenProduccionDetalle.objects.select_related("producto_variante__producto")
+                        for d in OrdenProduccionDetalle.objects.select_related(
+                            "producto_variante__producto", "variante_produccion"
+                        )
                         .filter(op=op, activo=True)
                         .order_by("op_detalle_id")
                     }
@@ -2437,7 +2454,9 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
 
                         producto_variante = op_detalle.producto_variante
                         producto = getattr(producto_variante, "producto", None)
-                        if not producto_variante or not producto:
+                        # Muestra de fabricación especial: entra como su variante de producción.
+                        muestra = None if producto_variante else op_detalle.variante_produccion
+                        if not muestra and (not producto_variante or not producto):
                             raise _error_detalle(
                                 {"detalle": f"El renglón #{idx + 1} (orden_produccion_detalle {detalle_id}) no tiene producto terminado configurado."}
                             )
@@ -2453,7 +2472,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
 
                         recibido = self._cantidad_recibida_op(op_detalle.pk)
                         ordered = Decimal(str(op_detalle.cantidad or 0))
-                        apartado, folios_sm = en_maquila.get(op_detalle.pk, (Decimal("0"), []))
+                        apartado, folios_sm, _ = en_maquila.get(op_detalle.pk, (Decimal("0"), [], []))
                         pendiente = ordered - recibido - apartado
                         if pendiente_sm is not None:
                             if op_detalle.pk not in pendiente_sm:
@@ -2499,6 +2518,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                                 "orden_produccion_detalle": op_detalle,
                                 "producto": producto,
                                 "producto_variante": producto_variante,
+                                "variante_produccion": muestra,
                                 "cantidad_recibida": cantidad,
                                 "ubicacion": item.get("ubicacion"),
                                 "lote": item.get("lote"),
@@ -2781,8 +2801,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             .order_by("-cantidad_rechazada", "-id")
             .values(
                 "id", "recepcion_detalle__recepcion_id", "recepcion_detalle__recepcion__folio",
-                "recepcion_detalle__producto__nombre", unidad, moneda, "cantidad_rechazada",
-                "valor_linea", "motivo_rechazo",
+                unidad, moneda, "cantidad_rechazada", "valor_linea", "motivo_rechazo",
+                articulo=Coalesce("recepcion_detalle__producto__nombre", "recepcion_detalle__variante_produccion__nombre"),
             )[:TOPE_DRILL_DOWN]
         )
         drill_down = [
@@ -2790,7 +2810,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 "id": fila["id"],
                 "recepcion_id": fila["recepcion_detalle__recepcion_id"],
                 "recepcion_folio": fila["recepcion_detalle__recepcion__folio"],
-                "producto": fila["recepcion_detalle__producto__nombre"],
+                "producto": fila["articulo"],
                 "unidad": fila[unidad],
                 "moneda": fila[moneda],
                 "cantidad_rechazada": fila["cantidad_rechazada"],
@@ -2836,7 +2856,9 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
         qs = self.queryset.prefetch_related(
             Prefetch(
                 "detalles",
-                queryset=CalidadInspeccionDetalle.objects.select_related("recepcion_detalle__producto"),
+                queryset=CalidadInspeccionDetalle.objects.select_related(
+                    "recepcion_detalle__producto", "recepcion_detalle__variante_produccion"
+                ),
             )
         )
         empresa = getattr(user, "empresa", None)
@@ -2850,6 +2872,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             .filter(
                 producto_id=renglon.producto_id,
                 producto_variante_id=renglon.producto_variante_id,
+                variante_produccion_id=renglon.variante_produccion_id,
                 almacen_id=recepcion.almacen_id,
                 ubicacion_id=renglon.ubicacion_id,
             )
@@ -2860,6 +2883,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             existencia = Existencia.objects.create(
                 producto_id=renglon.producto_id,
                 producto_variante_id=renglon.producto_variante_id,
+                variante_produccion_id=renglon.variante_produccion_id,
                 almacen=recepcion.almacen,
                 ubicacion_id=renglon.ubicacion_id,
                 stock=0,
@@ -2881,6 +2905,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             "orden_produccion_detalle_id": renglon.orden_produccion_detalle_id,
             "producto_id": renglon.producto_id,
             "producto_variante_id": renglon.producto_variante_id,
+            "variante_produccion_id": renglon.variante_produccion_id,
             "ubicacion_id": renglon.ubicacion_id,
             "lote_id": renglon.lote_id,
             "serie_id": renglon.serie_id,
@@ -2911,6 +2936,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
                 movimiento_inventario=movimiento,
                 producto_id=item["producto_id"],
                 producto_variante_id=item["producto_variante_id"],
+                variante_produccion_id=item.get("variante_produccion_id"),
                 ubicacion_origen_id=None,
                 ubicacion_destino_id=item["ubicacion_id"],
                 lote_id=item.get("lote_id"),
@@ -2974,7 +3000,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             .prefetch_related(
                 Prefetch(
                     "recepciondetalle_set",
-                    queryset=RecepcionDetalle.objects.select_related("producto").order_by("id"),
+                    queryset=RecepcionDetalle.objects.select_related("producto", "variante_produccion").order_by("id"),
                 )
             )
             .order_by("-fecha_recepcion", "-id")
@@ -2995,7 +3021,8 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
                         {
                             "id": d.pk,
                             "producto_id": d.producto_id,
-                            "producto_nombre": d.producto.nombre,
+                            "variante_produccion_id": d.variante_produccion_id,
+                            "producto_nombre": d.articulo_nombre,
                             "cantidad_recibida": str(d.cantidad_recibida),
                         }
                         for d in detalles
@@ -3157,7 +3184,9 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
                     user_agent=request.META.get("HTTP_USER_AGENT"),
                 )
 
-        detalles_out = inspeccion.detalles.select_related("recepcion_detalle__producto").order_by("id")
+        detalles_out = inspeccion.detalles.select_related(
+            "recepcion_detalle__producto", "recepcion_detalle__variante_produccion"
+        ).order_by("id")
         return Response(
             {
                 "calidad_inspeccion": CalidadInspeccionSerializer(inspeccion).data,

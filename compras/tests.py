@@ -3730,6 +3730,28 @@ class RecepcionSalidaMaquilaTests(TestCase):
         renglon = next(d for d in op["detalle"] if d["id"] == self.op_detalle.pk)
         self.assertEqual(Decimal(renglon["cantidad_en_maquila"]), Decimal("3"))
         self.assertEqual(Decimal(renglon["cantidad_pendiente"]), Decimal("6"))
+        # Tope al recibir con la SM: lo pendiente de esa SM en el renglón.
+        self.assertEqual(renglon["salidas_maquila"], [{"id": self.sm.pk, "folio": "SM-T1", "cantidad_pendiente": "3.00"}])
+
+    def test_muestra_de_fabricacion_especial_se_recibe_con_su_sm(self):
+        """Renglón de OP con ``variante_produccion`` (sin catálogo): el onboarding
+        trae su nombre/SKU y la recepción guarda la variante de producción, no un
+        producto."""
+        from catalogo.models import VarianteProductoProduccion
+        from produccion.models import OrdenProduccionDetalle
+
+        muestra = VarianteProductoProduccion.objects.create(empresa=self.empresa, nombre="Bata muestra", sku="MP-T1-M")
+        OrdenProduccionDetalle.objects.filter(pk=self.op_detalle.pk).update(producto_variante=None, variante_produccion=muestra)
+        r = self.client.get(RECEPCION_ONBOARDING_URL, {"q": "MP-T1"})
+        op = next(o for o in r.data["busqueda"]["ordenes_produccion"] if o["id"] == self.op.pk)
+        renglon = next(d for d in op["detalle"] if d["id"] == self.op_detalle.pk)
+        self.assertEqual((renglon["producto_nombre"], renglon["sku"], renglon["variante_produccion_id"]),
+                         ("Bata muestra", "MP-T1-M", muestra.pk))
+
+        self.assertEqual(self._recibir_sm(2).status_code, 200)
+        rd = RecepcionDetalle.objects.get(recepcion__salida_maquila=self.sm)
+        self.assertEqual((rd.producto_id, rd.variante_produccion_id), (None, muestra.pk))
+        self.assertEqual(FacturaProveedor.objects.get(salida_maquila=self.sm).total, Decimal("10.00"))
 
     def test_onboarding_get_sin_permiso_de_costos_no_trae_total(self):
         Usuario.objects.filter(pk=self.usuario.pk).update(is_admin_empresa=False)

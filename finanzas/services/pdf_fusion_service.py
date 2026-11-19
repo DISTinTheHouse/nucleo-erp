@@ -80,9 +80,9 @@ def _render_recepcion_pdf(recepcion):
     ]
 
     data = [["Producto", "Cantidad recibida"]]
-    detalles = RecepcionDetalle.objects.filter(recepcion=recepcion).select_related("producto", "producto_variante").order_by("id")
+    detalles = RecepcionDetalle.objects.filter(recepcion=recepcion).select_related("producto", "producto_variante", "variante_produccion").order_by("id")
     for d in detalles:
-        data.append([_con_sku(d, getattr(d.producto, "nombre", None) or "-"), str(d.cantidad_recibida)])
+        data.append([_con_sku(d, d.articulo_nombre or "-"), str(d.cantidad_recibida)])
 
     tabla = Table(data, colWidths=[10 * cm, 4 * cm])
     tabla.setStyle(_TABLE_STYLE)
