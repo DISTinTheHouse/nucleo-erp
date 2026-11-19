@@ -10,6 +10,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
 
+from nucleo.listados import BusquedaSoloListadoFilter
 from nucleo.permisos import permisos_efectivos
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -56,7 +57,7 @@ from hr.api.serializers import (
 )
 
 
-FILTER_BACKENDS = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+FILTER_BACKENDS = [DjangoFilterBackend, BusquedaSoloListadoFilter, filters.OrderingFilter]
 
 
 class RegistroConDependenciasError(APIException):

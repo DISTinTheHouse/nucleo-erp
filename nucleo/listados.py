@@ -5,10 +5,23 @@ from django.core.exceptions import FieldDoesNotExist
 from django.db.models import F
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
-from rest_framework.filters import OrderingFilter
+from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.pagination import LimitOffsetPagination
 
 from nucleo.kpis import entero_param, rango_fechas
+
+
+class BusquedaSoloListadoFilter(SearchFilter):
+    """``SearchFilter`` que sólo busca en acciones sin ``{id}`` (``list``, ``kpis``,
+    ``exportar``...). ``get_object()`` también pasa por los filter backends: con el
+    ``SearchFilter`` de DRF, un ``?search=`` suelto en el detalle (``retrieve``,
+    ``update``, ``destroy`` o ``@action(detail=True)``) sacaba el registro del
+    queryset y respondía 404 sobre un registro visible (#1261)."""
+
+    def get_search_fields(self, view, request):
+        if getattr(view, "detail", False):
+            return None
+        return super().get_search_fields(view, request)
 
 
 class PaginacionOpcionalLimitOffset(LimitOffsetPagination):
