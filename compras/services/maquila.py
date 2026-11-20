@@ -177,6 +177,8 @@ def renglones_sm_servicio(sm_ids):
         )
         .annotate(
             producto_nombre=Coalesce("ob_detalle__producto__nombre", "or_detalle__producto__nombre"),
+            producto_codigo=Coalesce("ob_detalle__producto__codigo", "or_detalle__producto__codigo"),
+            producto_cod_proscai=Coalesce("ob_detalle__producto__cod_proscai", "or_detalle__producto__cod_proscai"),
             talla=Coalesce("ob_detalle__talla__nombre", "or_detalle__talla__nombre"),
             color=Coalesce("ob_detalle__color__nombre", "or_detalle__color__nombre"),
             sku=Subquery(sku),
@@ -185,7 +187,7 @@ def renglones_sm_servicio(sm_ids):
         )
         .order_by("salida_id", "id")
         .values("id", "salida_id", "ob_detalle_id", "or_detalle_id", "descripcion", "producto_nombre",
-                "sku", "talla", "color", "cantidad", "recibido", "_producto")
+                "sku", "talla", "color", "cantidad", "recibido", "_producto", "producto_codigo", "producto_cod_proscai")
     )
     out = {}
     for f in filas:
@@ -193,6 +195,7 @@ def renglones_sm_servicio(sm_ids):
             "id": f["id"], "ob_detalle": f["ob_detalle_id"], "or_detalle": f["or_detalle_id"],
             "producto_id": f["_producto"], "producto_nombre": f["producto_nombre"], "descripcion": f["descripcion"],
             "sku": f["sku"], "talla": f["talla"], "color": f["color"],
+            "producto_codigo": f["producto_codigo"], "producto_cod_proscai": f["producto_cod_proscai"],
             "cantidad": str(f["cantidad"].quantize(CENTAVO)),
             "cantidad_recibida": str(f["recibido"].quantize(CENTAVO)),
             "cantidad_pendiente": str(max(f["cantidad"] - f["recibido"], CERO).quantize(CENTAVO)),
