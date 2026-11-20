@@ -18,6 +18,7 @@ from wms.services.picking_pipeline.catalogs import (
     armar_payload_vacio,
     cargar_catalogos,
     programaciones_de,
+    surtido_por_destino,
     serializar_almacen,
     sugerir_apartados_por_defecto,
     sugerir_origen,
@@ -283,7 +284,7 @@ class PickingService:
             "cliente_nombre": getattr(pedido.cliente, "nombre", None),
             "sucursal": pedido.sucursal_id,
             "sucursal_nombre": getattr(pedido.sucursal, "nombre", None),
-            "programaciones": programaciones_de(pedido, almacenes_destino),
+            "programaciones": programaciones_de(pedido, almacenes_destino, surtido_por_destino(pedido)),
         }
         payload["picking_detalle"] = detalle_payload
         return payload

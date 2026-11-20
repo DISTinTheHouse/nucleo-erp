@@ -527,6 +527,7 @@ class PickingCreateSerializer(serializers.ModelSerializer):
             "operador",
             "almacen",
             "almacen_destino",
+            "programacion_destino",
             "oleada",
             "zona_almacen",
             "lote",

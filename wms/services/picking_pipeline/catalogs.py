@@ -1,3 +1,4 @@
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -55,9 +56,29 @@ ALMACEN_POR_DESTINO = {"APARTADO": "APARTADOS", "BORDADO": "BORDADOS"}
 ALMACEN_ACTIVO = "ACTIVO"
 
 
-def programaciones_de(pedido, almacenes=None):
+def surtido_por_destino(pedido):
+    """{programacion_destino: Σ cantidad_asignada} de los pickings no cancelados del
+    pedido (renglones no cancelados). Una consulta."""
+    from wms.models import Picking, PickingDetalle
+
+    filas = (
+        PickingDetalle.objects.filter(picking__pedido=pedido, picking__programacion_destino__isnull=False)
+        .exclude(picking__estado=Picking.Estado.CANCELADO)
+        .exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
+        .values("picking__programacion_destino")
+        .annotate(total=Sum("cantidad_asignada"))
+    )
+    return {f["picking__programacion_destino"]: f["total"] or 0 for f in filas}
+
+
+def programaciones_de(pedido, almacenes=None, surtido=None):
     """Parcialidades programadas del pedido. Con ``almacenes`` ({nombre en mayúsculas:
-    Almacen}) agrega el almacén sugerido de cada destino."""
+    Almacen}) agrega el almacén sugerido de cada destino.
+
+    Con ``surtido`` ({destino: piezas}, ver ``surtido_por_destino``) agrega
+    ``surtido``/``pendiente``: lo surtido a un destino se reparte en orden entre sus
+    parcialidades y el excedente queda en la última (no se bloquea: el front avisa).
+    """
     filas = []
     for p in (pedido.programacion_conf or {}).get("programaciones") or []:
         fila = {"destino": p.get("destino"), "cantidad": p.get("cantidad"), "comentarios": p.get("comentarios") or ""}
@@ -65,6 +86,16 @@ def programaciones_de(pedido, almacenes=None):
             almacen = almacenes.get(ALMACEN_POR_DESTINO.get(fila["destino"]))
             fila["almacen_sugerido"] = {"id": almacen.pk, "nombre": almacen.nombre} if almacen else None
         filas.append(fila)
+    if surtido is not None:
+        resto = {d: float(v) for d, v in surtido.items()}
+        ultima = {fila["destino"]: i for i, fila in enumerate(filas)}
+        for i, fila in enumerate(filas):
+            cantidad = float(fila["cantidad"] or 0)
+            disponible = resto.get(fila["destino"], 0.0)
+            tomado = disponible if ultima[fila["destino"]] == i else min(cantidad, disponible)
+            resto[fila["destino"]] = disponible - tomado
+            fila["surtido"] = tomado
+            fila["pendiente"] = max(0.0, cantidad - tomado)
     return filas
 
 
