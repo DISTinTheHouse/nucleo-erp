@@ -56,19 +56,27 @@ ALMACEN_POR_DESTINO = {"APARTADO": "APARTADOS", "BORDADO": "BORDADOS"}
 ALMACEN_ACTIVO = "ACTIVO"
 
 
-def surtido_por_destino(pedido):
-    """{programacion_destino: Σ cantidad_asignada} de los pickings no cancelados del
-    pedido (renglones no cancelados). Una consulta."""
+def surtido_por_destino_de_pedidos(pedido_ids):
+    """{pedido_id: {programacion_destino: Σ cantidad_asignada}} de los pickings no
+    cancelados (renglones no cancelados) de esos pedidos. Una consulta."""
     from wms.models import Picking, PickingDetalle
 
     filas = (
-        PickingDetalle.objects.filter(picking__pedido=pedido, picking__programacion_destino__isnull=False)
+        PickingDetalle.objects.filter(picking__pedido_id__in=pedido_ids, picking__programacion_destino__isnull=False)
         .exclude(picking__estado=Picking.Estado.CANCELADO)
         .exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
-        .values("picking__programacion_destino")
+        .values("picking__pedido_id", "picking__programacion_destino")
         .annotate(total=Sum("cantidad_asignada"))
     )
-    return {f["picking__programacion_destino"]: f["total"] or 0 for f in filas}
+    out = {pid: {} for pid in pedido_ids}
+    for f in filas:
+        out[f["picking__pedido_id"]][f["picking__programacion_destino"]] = f["total"] or 0
+    return out
+
+
+def surtido_por_destino(pedido):
+    """``surtido_por_destino_de_pedidos`` de un solo pedido."""
+    return surtido_por_destino_de_pedidos([pedido.pk])[pedido.pk]
 
 
 def programaciones_de(pedido, almacenes=None, surtido=None):
@@ -241,6 +249,8 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids, limite_pedidos=LIMIT
     almacenes_por_sucursal = almacenes_por_destino_de_sucursales(
         empresa.pk, {pedido.sucursal_id for pedido in pedidos}
     )
+    # Surtido por programación de los 50 pedidos: una consulta agrupada.
+    surtido = surtido_por_destino_de_pedidos([pedido.pk for pedido in pedidos])
     pedidos_payload = [
         {
             "id": pedido.id,
@@ -249,7 +259,9 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids, limite_pedidos=LIMIT
             "cliente_nombre": getattr(pedido.cliente, "nombre", None),
             "sucursal": pedido.sucursal_id,
             "sucursal_nombre": getattr(pedido.sucursal, "nombre", None),
-            "programaciones": programaciones_de(pedido, almacenes_por_sucursal[pedido.sucursal_id]),
+            "programaciones": programaciones_de(
+                pedido, almacenes_por_sucursal[pedido.sucursal_id], surtido[pedido.pk]
+            ),
         }
         for pedido in pedidos
     ]
