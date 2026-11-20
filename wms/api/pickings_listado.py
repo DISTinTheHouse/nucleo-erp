@@ -13,9 +13,11 @@ por pk sin ellos, como ``cotizaciones_listado``.
 from datetime import timedelta
 
 from django.db.models import (
-    Case, CharField, Count, DateField, Exists, ExpressionWrapper, F, IntegerField, OuterRef, Q, Sum,
+    Case, CharField, Count, DateField, DecimalField, Exists, ExpressionWrapper, F, IntegerField, OuterRef, Q, Sum,
     Value, When,
 )
+from django.db.models import Subquery
+from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.db.models.functions import Coalesce, Concat, Greatest, NullIf, Trim
 from drf_spectacular.types import OpenApiTypes
@@ -26,10 +28,11 @@ from rest_framework.filters import SearchFilter
 from nucleo.listados import OrdenamientoEstableFilter
 
 from ventas.services.clasificacion_service import _RANGOS_DIAS, rango_fecha_entrega
-from wms.models import Despacho, Packing, Picking, Transferencia
+from wms.models import Despacho, Packing, Picking, PickingDetalle, Transferencia
 
 ACCION_KPIS = "kpis"
-ACCIONES_FILTRADAS = ("list", ACCION_KPIS)
+ACCION_RESUMEN = "resumen"
+ACCIONES_FILTRADAS = ("list", ACCION_KPIS, ACCION_RESUMEN)
 
 ESTADOS_VALIDOS = frozenset(Picking.Estado.values)
 PRIORIDADES_VALIDAS = frozenset(Picking.Prioridad.values)
@@ -55,6 +58,13 @@ PARAMETROS_FILTRO_OPENAPI = (
     OpenApiParameter("almacen_actual", OpenApiTypes.INT, description=(
         "Id del almacén donde están hoy las prendas (`almacen_actual`)."
     )),
+    OpenApiParameter("estado_empaque", OpenApiTypes.STR, description=(
+        "Uno o varios separados por coma: POR_EMPACAR, EMPACADO, ENVIADO."
+    )),
+    OpenApiParameter("cliente", OpenApiTypes.INT, description="Id del cliente del pedido."),
+    OpenApiParameter("operador", OpenApiTypes.INT, description="Id del operador del picking."),
+    OpenApiParameter("pedido_fecha_entrega_desde", OpenApiTypes.DATE, description="Entrega del pedido desde."),
+    OpenApiParameter("pedido_fecha_entrega_hasta", OpenApiTypes.DATE, description="Entrega del pedido hasta, inclusive."),
     OpenApiParameter("fecha_desde", OpenApiTypes.DATE, description="Alta del picking desde (AAAA-MM-DD)."),
     OpenApiParameter("fecha_hasta", OpenApiTypes.DATE, description="Alta del picking hasta (AAAA-MM-DD), inclusive."),
 )
@@ -82,7 +92,34 @@ def _valores_param(request, nombre, validos, mensaje):
 
 def filtrar(request, qs):
     """``?estado=`` y ``?prioridad=`` (uno o varios, separados por coma). Inválidos → 400.
-    ``?search=`` lo aplica ``BusquedaPickingsFilter`` con los ``search_fields`` de la vista."""
+    ``?search=`` lo aplica ``BusquedaPickingsFilter`` con los ``search_fields`` de la vista.
+
+    Anota antes ``piezas``/``productos``/``tallas``/``estado_empaque`` (``anotar``): los
+    usan filtros, orden, la vista de lista y el ``resumen``."""
+    qs = anotar(qs)
+    estados_empaque = _valores_param(
+        request, "estado_empaque", frozenset(ESTADOS_EMPAQUE), "Estado de empaque inexistente."
+    )
+    if estados_empaque is not None:
+        qs = qs.filter(estado_empaque__in=estados_empaque)
+    for nombre, campo in (("cliente", "pedido__cliente_id"), ("operador", "operador_id")):
+        valor = (request.query_params.get(nombre) or "").strip()
+        if valor:
+            if not valor.isdigit():
+                raise ValidationError({nombre: "Debe ser un id."})
+            qs = qs.filter(**{campo: int(valor)})
+    entrega = {
+        nombre: (request.query_params.get(nombre) or "").strip()
+        for nombre in ("pedido_fecha_entrega_desde", "pedido_fecha_entrega_hasta")
+    }
+    if any(entrega.values()):
+        qs = qs.annotate(orden_fecha_entrega=FECHA_ENTREGA)
+        for nombre, lookup in (("pedido_fecha_entrega_desde", "gte"), ("pedido_fecha_entrega_hasta", "lte")):
+            if entrega[nombre]:
+                fecha = parse_date(entrega[nombre])
+                if fecha is None:
+                    raise ValidationError({nombre: "Fecha inválida (AAAA-MM-DD)."})
+                qs = qs.filter(**{f"orden_fecha_entrega__{lookup}": fecha})
     estados = _valores_param(request, "estado", ESTADOS_VALIDOS, "Estado inexistente.")
     if estados is not None:
         qs = qs.filter(estado__in=estados)
@@ -145,11 +182,12 @@ CAMPO_PEDIDO_FOLIO = "pedido_folio"
 CAMPO_OPERADOR_NOMBRE = "operador_nombre"
 CAMPO_PRIORIDAD = "prioridad"
 CAMPO_FECHA_ENTREGA = "pedido_fecha_entrega"
+CAMPO_ESTADO_EMPAQUE = "estado_empaque"
 # ``ordering_fields`` de ``PickingViewSet``: las columnas de la tabla del front y las
 # fechas y totales del picking.
 CAMPOS_ORDEN = (
     "id", "folio", CAMPO_PEDIDO_FOLIO, CAMPO_OPERADOR_NOMBRE, "estado", CAMPO_PRIORIDAD,
-    "created_at", "fecha_limite", "total_lineas", CAMPO_FECHA_ENTREGA,
+    "created_at", "fecha_limite", "total_lineas", CAMPO_FECHA_ENTREGA, "piezas", CAMPO_ESTADO_EMPAQUE,
 )
 PARAMETRO_ORDERING_OPENAPI = OpenApiParameter("ordering", OpenApiTypes.STR, description=(
     "Campo de orden, `-` para descendente; varios separados por coma: " + ", ".join(CAMPOS_ORDEN) + ". "
@@ -199,6 +237,8 @@ FECHA_ENTREGA = Case(
 
 _ANOTACIONES_ORDEN = {
     CAMPO_FECHA_ENTREGA: ("orden_fecha_entrega", FECHA_ENTREGA),
+    # Del más atrasado al más avanzado (``anotar`` deja ``estado_empaque``).
+    CAMPO_ESTADO_EMPAQUE: ("orden_estado_empaque", None),
     CAMPO_PRIORIDAD: ("orden_prioridad", PRIORIDAD_RANGO),
     CAMPO_OPERADOR_NOMBRE: ("orden_operador_nombre", OPERADOR_NOMBRE),
 }
@@ -233,7 +273,10 @@ class OrdenamientoPickingsFilter(OrdenamientoEstableFilter):
         if not ordering:
             return queryset
         pedidos = {campo.lstrip("-") for campo in ordering}
-        anotaciones = {alias: expr for nombre, (alias, expr) in _ANOTACIONES_ORDEN.items() if nombre in pedidos}
+        anotaciones = {
+            alias: (RANGO_EMPAQUE if nombre == CAMPO_ESTADO_EMPAQUE else expr)
+            for nombre, (alias, expr) in _ANOTACIONES_ORDEN.items() if nombre in pedidos
+        }
         if anotaciones:
             queryset = queryset.annotate(**anotaciones)
         return queryset.order_by(*[_termino(campo) for campo in ordering])
@@ -244,6 +287,116 @@ class OrdenamientoPickingsFilter(OrdenamientoEstableFilter):
 ESTADO_POR_EMPACAR = "POR_EMPACAR"
 ESTADO_EMPACADO = "EMPACADO"
 ESTADO_ENVIADO = "ENVIADO"
+ESTADOS_EMPAQUE = (ESTADO_POR_EMPACAR, ESTADO_EMPACADO, ESTADO_ENVIADO)
+
+
+def _detalle_vivo():
+    return PickingDetalle.objects.filter(picking=OuterRef("pk")).exclude(
+        estado=PickingDetalle.EstadoLinea.CANCELADA
+    )
+
+
+def _agregado(expr, output_field):
+    """Subconsulta escalar sobre los renglones vivos del picking (por FK indexada)."""
+    return Coalesce(
+        Subquery(_detalle_vivo().order_by().values("picking").annotate(v=expr).values("v")[:1]),
+        Value(0),
+        output_field=output_field,
+    )
+
+
+# Misma regla que ``estado_empaque()`` (fila) en SQL, para filtrar, ordenar y resumir.
+_PACKINGS_VIVOS = Packing.objects.filter(picking=OuterRef("pk")).exclude(estado="CANCELADO")
+ESTADO_EMPAQUE_SQL = Case(
+    When(Exists(Despacho.objects.filter(packing__picking=OuterRef("pk")).exclude(packing__estado="CANCELADO")),
+         then=Value(ESTADO_ENVIADO)),
+    When(Exists(_PACKINGS_VIVOS), then=Value(ESTADO_EMPACADO)),
+    default=Value(ESTADO_POR_EMPACAR),
+    output_field=CharField(),
+)
+RANGO_EMPAQUE = Case(
+    When(estado_empaque=ESTADO_POR_EMPACAR, then=Value(1)),
+    When(estado_empaque=ESTADO_EMPACADO, then=Value(2)),
+    default=Value(3),
+    output_field=IntegerField(),
+)
+
+
+def anotar(qs):
+    """``piezas`` (Σ ``cantidad_asignada``), ``productos`` (renglones de pedido
+    distintos = producto + color), ``tallas`` (líneas) y ``estado_empaque``, sin
+    contar renglones cancelados. Subconsultas por FK indexada: no crece con las filas."""
+    return qs.annotate(
+        piezas=_agregado(Sum("cantidad_asignada"), DecimalField(max_digits=18, decimal_places=4)),
+        productos=_agregado(Count("pedido_detalle", distinct=True), IntegerField()),
+        tallas=_agregado(Count("id"), IntegerField()),
+        estado_empaque=ESTADO_EMPAQUE_SQL,
+    )
+
+
+def resumen(qs):
+    """Indicadores sobre TODO el conjunto filtrado (no la página): 2 consultas.
+
+    - ``por_empacar``: surtidos no cancelados sin packing y sus piezas.
+    - ``surtidos_hoy``: surtidos dados de alta hoy (hora de México), piezas y pedidos.
+    - ``piezas_por_destino``: piezas por ``programacion_destino`` (``null`` = sin destino).
+    """
+    vivos = qs.exclude(estado=Picking.Estado.CANCELADO).order_by()
+    hoy = timezone.localdate()
+    datos = vivos.aggregate(
+        por_empacar_surtidos=Count("id", filter=Q(estado_empaque=ESTADO_POR_EMPACAR)),
+        por_empacar_piezas=Coalesce(Sum("piezas", filter=Q(estado_empaque=ESTADO_POR_EMPACAR)), Value(0), output_field=DecimalField()),
+        hoy_surtidos=Count("id", filter=Q(created_at__date=hoy)),
+        hoy_piezas=Coalesce(Sum("piezas", filter=Q(created_at__date=hoy)), Value(0), output_field=DecimalField()),
+        hoy_pedidos=Count("pedido", filter=Q(created_at__date=hoy), distinct=True),
+    )
+    por_destino = (
+        PickingDetalle.objects.filter(picking__in=vivos.values("pk"))
+        .exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
+        .values("picking__programacion_destino")
+        .annotate(piezas=Sum("cantidad_asignada"))
+        .order_by("picking__programacion_destino")
+    )
+    return {
+        "por_empacar": {"surtidos": datos["por_empacar_surtidos"], "piezas": float(datos["por_empacar_piezas"])},
+        "surtidos_hoy": {
+            "fecha": hoy,
+            "surtidos": datos["hoy_surtidos"],
+            "piezas": float(datos["hoy_piezas"]),
+            "pedidos": datos["hoy_pedidos"],
+        },
+        "piezas_por_destino": [
+            {"destino": f["picking__programacion_destino"], "piezas": float(f["piezas"] or 0)} for f in por_destino
+        ],
+    }
+
+
+def catalogos_filtros(qs):
+    """Clientes y operadores con al menos un surtido visible (sin filtros): 2 consultas."""
+    clientes = (
+        qs.order_by().filter(pedido__cliente__isnull=False)
+        .values("pedido__cliente_id", "pedido__cliente__nombre").distinct()
+    )
+    operadores = qs.order_by().values(
+        "operador_id", "operador__first_name", "operador__last_name", "operador__email"
+    ).distinct()
+    return {
+        "clientes": sorted(
+            ({"id": c["pedido__cliente_id"], "nombre": c["pedido__cliente__nombre"]} for c in clientes),
+            key=lambda c: (c["nombre"] or "").upper(),
+        ),
+        "operadores": sorted(
+            (
+                {
+                    "id": o["operador_id"],
+                    "nombre": f"{o['operador__first_name'] or ''} {o['operador__last_name'] or ''}".strip()
+                    or o["operador__email"],
+                }
+                for o in operadores
+            ),
+            key=lambda o: (o["nombre"] or "").upper(),
+        ),
+    }
 
 
 def contexto_filas(pickings):
