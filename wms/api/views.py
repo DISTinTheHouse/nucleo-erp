@@ -157,13 +157,20 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
     ]
     # Lo que busca la caja del front ("folio, pedido u operador"); el operador por el
     # nombre que pinta la fila (el correo sólo si no tiene nombre).
-    search_fields = ["folio", "pedido__folio", pickings_listado.CAMPO_BUSQUEDA_OPERADOR]
+    search_fields = [
+        "folio", "pedido__folio", pickings_listado.CAMPO_BUSQUEDA_OPERADOR,
+        "pedido__cliente__nombre", "pedido__cliente_nombre",
+    ]
     # Columnas de la tabla con el nombre que usa el front (``pedido_folio``,
     # ``operador_nombre``) y ``prioridad`` por urgencia (``OrdenamientoPickingsFilter``).
     ordering_fields = list(pickings_listado.CAMPOS_ORDEN)
 
     def _resumen(self):
-        return self.action == "list" and str(self.request.query_params.get("resumen", "")).lower() in {"1", "true", "si"}
+        # ``?vista=lista`` (nombre del front) = ``?resumen=1`` (#1149).
+        params = self.request.query_params
+        return self.action == "list" and (
+            str(params.get("resumen", "")).lower() in {"1", "true", "si"} or params.get("vista") == "lista"
+        )
 
     def get_queryset(self):
         user = self.request.user
@@ -273,6 +280,31 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
         orden lo descarta ``pickings_listado.kpis`` antes de agregar."""
         qs = self.filter_queryset(self.get_queryset())
         return Response({"generado_en": timezone.now(), **pickings_listado.kpis(qs)})
+
+    @extend_schema(
+        summary="Indicadores del listado de surtidos con sus filtros",
+        description=(
+            "Mismos filtros y `search` que el listado, sobre todo el conjunto (sin paginar). "
+            "`por_empacar` {surtidos, piezas}, `surtidos_hoy` {fecha, surtidos, piezas, pedidos} "
+            "(hora de México) y `piezas_por_destino` [{destino, piezas}]. Cancelados no cuentan."
+        ),
+        parameters=[*pickings_listado.PARAMETROS_FILTRO_OPENAPI],
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path=pickings_listado.ACCION_RESUMEN)
+    def resumen(self, request):
+        qs = self.filter_queryset(self.get_queryset()).prefetch_related(None)
+        return Response({"generado_en": timezone.now(), **pickings_listado.resumen(qs)})
+
+    @extend_schema(
+        summary="Catálogos de los filtros del listado de surtidos",
+        description="Clientes y operadores con al menos un surtido visible: `{clientes: [{id, nombre}], operadores: [{id, nombre}]}`.",
+        responses=OpenApiTypes.OBJECT,
+    )
+    @action(detail=False, methods=["get"], url_path="filtros")
+    def filtros(self, request):
+        return Response(pickings_listado.catalogos_filtros(self.get_queryset().prefetch_related(None)))
+
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
     def onboarding(self, request):

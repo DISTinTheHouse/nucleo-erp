@@ -423,6 +423,13 @@ class PickingSerializer(serializers.ModelSerializer):
     estado_empaque = serializers.SerializerMethodField()
     programacion_avance = serializers.SerializerMethodField()
     pedido_fecha_entrega = serializers.SerializerMethodField()
+    cliente_nombre = serializers.SerializerMethodField()
+
+    def get_cliente_nombre(self, obj):
+        pedido = obj.pedido
+        if not pedido:
+            return None
+        return getattr(pedido.cliente, "nombre", None) or pedido.cliente_nombre
 
     def _ctx_fila(self, obj):
         from wms.api.pickings_listado import contexto_filas
@@ -503,6 +510,10 @@ class PickingListSerializer(PickingSerializer):
 
     picking_detalle = None
     ordenes_trabajo = None
+    # Totales que ``pickings_listado.anotar`` calcula en la misma consulta del listado.
+    piezas = serializers.DecimalField(max_digits=18, decimal_places=4, read_only=True, coerce_to_string=False)
+    productos = serializers.IntegerField(read_only=True)
+    tallas = serializers.IntegerField(read_only=True)
 
 class PickingTrasladoSerializer(serializers.Serializer):
     """Entrada de ``POST /pickings/{id}/trasladar/``: almacén al que se mueve."""
