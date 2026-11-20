@@ -445,6 +445,7 @@ class DespachoService:
             tipo_envio=tipo_envio,
             paqueteria=paqueteria,
             chofer=chofer,
+            usuario=user,
         )
         DespachoDetalle.objects.bulk_create(
             [
