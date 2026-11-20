@@ -248,6 +248,10 @@ class PickingService:
                     "producto_variante_nombre": (
                         str(talla.variante) if talla.variante_id else None
                     ),
+                    # Mismos nombres que packing y despacho (#1275, #1277).
+                    "producto_variante_sku": getattr(talla.variante, "sku", None),
+                    "producto_codigo": getattr(producto, "codigo", None),
+                    "producto_cod_proscai": getattr(producto, "cod_proscai", None),
                     # Muestra: se surte por su SKU de muestra (``null`` si aún no tiene).
                     "es_muestra": es_muestra(talla.pedido_detalle),
                     "variante_produccion": getattr(muestra, "pk", None),
