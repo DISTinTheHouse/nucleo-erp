@@ -234,6 +234,18 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
             qs = pickings_listado.filtrar(self.request, qs)
         return qs
 
+    def list(self, request, *args, **kwargs):
+        # Empaque y surtido por programación de toda la página en bloque
+        # (``pickings_listado.contexto_filas``), no por fila en el serializer.
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        filas = [*(page if page is not None else queryset)]
+        serializer = self.get_serializer(filas, many=True)
+        serializer.context["contexto_filas"] = pickings_listado.contexto_filas(filas)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
     def get_serializer_class(self):
         if self.action in {"create", "onboarding"} and self.request.method == "POST":
             return PickingCreateSerializer
@@ -250,7 +262,7 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
             "`total_lineas - total_lineas_completas`, cada picking acotado a >= 0) y "
             "`por_prioridad` (`[{prioridad, prioridad_label, total}]`, ALTA, MEDIA, BAJA)."
         ),
-        parameters=list(pickings_listado.PARAMETROS_FILTRO_OPENAPI),
+        parameters=[*pickings_listado.PARAMETROS_FILTRO_OPENAPI],
         responses=OpenApiTypes.OBJECT,
     )
     @action(detail=False, methods=["get"], url_path=pickings_listado.ACCION_KPIS)

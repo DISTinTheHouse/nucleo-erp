@@ -389,6 +389,7 @@ class PickingService:
         #    de surtido es surtir: lo asignado queda como surtido en ese momento.
         ahora = timezone.now()
         picking_rows = []
+        # Las que cubren todo lo pendiente de su talla (deciden COMPLETADO/PARCIAL).
         lineas_completas = 0
         for item in requested_items:
             talla = item["talla"]
@@ -417,7 +418,8 @@ class PickingService:
 
         PickingDetalle.objects.bulk_create(picking_rows)
         # Completado si cada línea cubre todo lo pendiente de su talla; si no, parcial.
-        picking.total_lineas_completas = lineas_completas
+        # Toda línea nace SURTIDA (crear el picking es surtir): completas = todas.
+        picking.total_lineas_completas = len(picking_rows)
         update_fields = ["total_lineas_completas", "estado", "updated_at"]
         if lineas_completas == len(picking_rows):
             picking.estado = Picking.Estado.COMPLETADO

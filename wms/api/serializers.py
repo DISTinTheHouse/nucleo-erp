@@ -415,6 +415,48 @@ class PickingSerializer(serializers.ModelSerializer):
     # Dónde están hoy las prendas (``Picking.almacen_actual``, misma regla que el traslado).
     almacen_actual = serializers.PrimaryKeyRelatedField(read_only=True)
     almacen_actual_nombre = serializers.CharField(source="almacen_actual.nombre", read_only=True)
+    # Empaque, avance de la programación y entrega del pedido. El listado los calcula
+    # para toda la página (``contexto_filas`` en el contexto, ver ``PickingViewSet.list``);
+    # sin él (retrieve, alta) se calculan para el picking.
+    packings = serializers.SerializerMethodField()
+    packing_folio = serializers.SerializerMethodField()
+    estado_empaque = serializers.SerializerMethodField()
+    programacion_avance = serializers.SerializerMethodField()
+    pedido_fecha_entrega = serializers.SerializerMethodField()
+
+    def _ctx_fila(self, obj):
+        from wms.api.pickings_listado import contexto_filas
+
+        ctx = self.context.get("contexto_filas")
+        if ctx is None or obj.pk not in ctx["empaque"]:
+            nuevo = contexto_filas([obj])
+            if ctx is None:
+                ctx = self.context["contexto_filas"] = nuevo
+            else:
+                ctx["empaque"].update(nuevo["empaque"])
+                ctx["surtido"].update(nuevo["surtido"])
+        return ctx
+
+    def get_packings(self, obj):
+        return self._ctx_fila(obj)["empaque"][obj.pk]
+
+    def get_packing_folio(self, obj):
+        packings = self._ctx_fila(obj)["empaque"][obj.pk]
+        return packings[-1]["folio"] if packings else None
+
+    def get_estado_empaque(self, obj):
+        from wms.api.pickings_listado import estado_empaque
+        return estado_empaque(self._ctx_fila(obj)["empaque"][obj.pk])
+
+    def get_programacion_avance(self, obj):
+        from wms.api.pickings_listado import avance_programacion
+        if not obj.programacion_destino:
+            return None
+        return avance_programacion(obj, self._ctx_fila(obj)["surtido"].get(obj.pedido_id, {}))
+
+    def get_pedido_fecha_entrega(self, obj):
+        from wms.api.pickings_listado import fecha_entrega
+        return fecha_entrega(obj)
 
     class Meta:
         model = Picking
