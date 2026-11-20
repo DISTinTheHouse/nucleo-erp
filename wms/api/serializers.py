@@ -779,6 +779,12 @@ class DespachoSerializer(serializers.ModelSerializer):
     tipo_envio_display = serializers.CharField(source="get_tipo_envio_display", read_only=True, default=None)
     paqueteria_display = serializers.CharField(source="get_paqueteria_display", read_only=True, default=None)
     chofer_nombre = serializers.SerializerMethodField()
+    fecha_creacion = serializers.DateTimeField(source="created_at", read_only=True, allow_null=True)
+    usuario_nombre = serializers.SerializerMethodField()
+
+    def get_usuario_nombre(self, obj):
+        u = obj.usuario if obj.usuario_id else None
+        return (u.get_full_name().strip() or u.email) if u else None
 
     def get_chofer_nombre(self, obj):
         return nombre_chofer(obj.chofer) if obj.chofer_id else None

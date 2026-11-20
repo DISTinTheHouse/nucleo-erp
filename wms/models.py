@@ -1,3 +1,4 @@
+from django.conf import settings
 import secrets
 
 from django.contrib.postgres.indexes import OpClass
@@ -307,6 +308,12 @@ class Despacho(models.Model):
     paqueteria = models.CharField(max_length=15, choices=Paqueteria.choices, blank=True, default="")
     chofer = models.ForeignKey(
         "hr.Empleado", on_delete=models.PROTECT, related_name="despachos", null=True, blank=True
+    )
+    # Alta del despacho; en los anteriores se tomó de su movimiento de salida (si lo tiene).
+    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="despachos_registrados",
+        null=True, blank=True,
     )
 
     class Meta:
