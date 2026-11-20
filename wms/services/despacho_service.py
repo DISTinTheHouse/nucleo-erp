@@ -196,7 +196,8 @@ class DespachoService:
         }
 
         # Las líneas canceladas no se ofrecen para despachar (EC-574).
-        rows = list(packing.packing_detalle.exclude(estado="CANCELADO").order_by("id"))
+        # En memoria: ``exclude``/``order_by`` sobre el prefetch lo descartaban (N+1).
+        rows = sorted((r for r in packing.packing_detalle.all() if r.estado != "CANCELADO"), key=lambda r: r.id)
         already_dispatched = cls._despachado_map(
             packing, packing_detalle_ids=[row.id for row in rows]
         )
@@ -218,6 +219,10 @@ class DespachoService:
                     "nombre",
                     None,
                 ),
+                # Mismos nombres que el onboarding de packing (#1275).
+                "producto_variante_sku": getattr(getattr(row.picking_detalle, "producto_variante", None), "sku", None),
+                "producto_codigo": getattr(getattr(row.picking_detalle, "producto", None), "codigo", None),
+                "producto_cod_proscai": getattr(getattr(row.picking_detalle, "producto", None), "cod_proscai", None),
                 "talla": getattr(
                     getattr(getattr(row.picking_detalle, "pedido_detalle_talla", None), "variante", None),
                     "talla_id",
