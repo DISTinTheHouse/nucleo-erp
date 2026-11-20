@@ -50,12 +50,13 @@ def folio_preview(empresa, sucursal, tipo_documento="Picking"):
 
 # Destino de la programación -> almacén por nombre (mismo criterio que APARTADOS).
 # EMBARQUE/REFLEJANTE/CORTE_MANGA no tienen almacén propio: van sin sugerencia.
-# Almacén sugerido por destino de programación. REFLEJANTE aún no tiene almacén.
+# Almacén sugerido por destino de programación.
 ALMACEN_POR_DESTINO = {
     "APARTADO": "APARTADOS",
     "EMBARQUE": "APARTADOS",
     "BORDADO": "BORDADOS",
     "CORTE_MANGA": "CORTE DE MANGA",
+    "REFLEJANTE": "REFLEJANTES",
 }
 
 # ``Almacen.estatus`` declara sus choices en línea (sin enum): único lugar del valor en wms.
