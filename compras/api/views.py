@@ -2093,6 +2093,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     "id": detalle.pk,
                     "producto_id": detalle.producto_id,
                     "producto_nombre": detalle.producto.nombre,
+                    "producto_codigo": detalle.producto.codigo,
+                    "producto_cod_proscai": detalle.producto.cod_proscai,
                     # Mismos nombres que ``OrdenCompraDetalleReadSerializer``.
                     "producto_variante_id": detalle.producto_variante_id,
                     "producto_variante_sku": getattr(variante, "sku", None),
@@ -2197,6 +2199,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                         or getattr(muestra, "sku", None)
                     ),
                     "sku": getattr(producto_variante, "sku", None) or getattr(muestra, "sku", None),
+                    "producto_codigo": getattr(producto, "codigo", None),
+                    "producto_cod_proscai": getattr(producto, "cod_proscai", None),
                     "cantidad_ordenada": str(cantidad),
                     "cantidad_recibida": str(recibido),
                     # Por la OP directa (sin SM): lo que no está en maquila.
