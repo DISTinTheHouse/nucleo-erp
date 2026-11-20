@@ -6,6 +6,7 @@ from django.db.models import Sum
 from rest_framework.exceptions import ValidationError
 
 from logistica.models import Envio
+from hr.models import Empleado
 from ventas.models import Pedido, PedidoDetalleTalla
 from ventas.services.sku_produccion_service import TALLAS_DE_LINEA_NO_MUESTRA_Q, linea_no_muestra_q
 from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle, PickingDetalle
@@ -127,6 +128,12 @@ class DespachoService:
             "despacho_detalle": [],
             "embarque": None,
         }
+        # Choferes locales (``Empleado.es_chofer``) para envíos ``LOCAL``.
+        payload["choferes"] = [
+            {"id": e.id, "nombre": " ".join(x for x in (e.nombre, e.apellido_paterno, e.apellido_materno) if x)}
+            for e in Empleado.objects.filter(empresa=empresa, es_chofer=True, activo=True)
+            .only("id", "nombre", "apellido_paterno", "apellido_materno").order_by("nombre", "apellido_paterno")
+        ]
 
         if not packing_id:
             return payload
@@ -398,7 +405,10 @@ class DespachoService:
         packing_input = data.pop("packing")
         envio_input = data.pop("envio", None)
         despacho_detalle = data.pop("despacho_detalle")
-        guia = data.pop("guia", "") or ""
+        guia = (data.pop("guia", "") or "").strip()
+        tipo_envio = data.pop("tipo_envio", None)
+        paqueteria = data.pop("paqueteria", "") or ""
+        chofer = data.pop("chofer", None)
 
         # Tenencia antes de bloquear nada; después, el orden de bloqueo común a
         # packing y despacho (EC-574): Pedido -> Picking -> líneas de picking ->
@@ -427,6 +437,9 @@ class DespachoService:
             packing=packing,
             envio=envio,
             guia=guia,
+            tipo_envio=tipo_envio,
+            paqueteria=paqueteria,
+            chofer=chofer,
         )
         DespachoDetalle.objects.bulk_create(
             [

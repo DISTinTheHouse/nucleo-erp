@@ -289,6 +289,26 @@ class Despacho(models.Model):
     envio = models.ForeignKey("logistica.Envio", on_delete=models.CASCADE, related_name="despachos", null=True, blank=True)
     guia = models.CharField(max_length=100, blank=True, default="")
 
+    class TipoEnvio(models.TextChoices):
+        PAQUETERIA = "PAQUETERIA", "Paquetería"
+        LOCAL = "LOCAL", "Local"
+
+    class Paqueteria(models.TextChoices):
+        ESTAFETA = "ESTAFETA", "Estafeta"
+        FEDEX = "FEDEX", "FedEx"
+        DHL = "DHL", "DHL"
+        PAQUETEXPRESS = "PAQUETEXPRESS", "Paquetexpress"
+        UPS = "UPS", "UPS"
+        NOVENTA_Y_NUEVE_MINUTOS = "99MINUTOS", "99 Minutos"
+        OTRA = "OTRA", "Otra"
+
+    # Obligatorio en el alta (serializer); nulo en despachos anteriores.
+    tipo_envio = models.CharField(max_length=12, choices=TipoEnvio.choices, null=True, blank=True)
+    paqueteria = models.CharField(max_length=15, choices=Paqueteria.choices, blank=True, default="")
+    chofer = models.ForeignKey(
+        "hr.Empleado", on_delete=models.PROTECT, related_name="despachos", null=True, blank=True
+    )
+
     class Meta:
         db_table = "despachos"
         verbose_name = "Despacho"

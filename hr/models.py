@@ -72,6 +72,8 @@ class Empleado(StatusLifecycleModel):
     turno = models.ForeignKey('hr.Turno', on_delete=models.PROTECT, related_name='empleados_turno', blank=True, null=True)
 
     numero_empleado = models.CharField(max_length=20)
+    # Chofer local: aparece en ``choferes`` del onboarding de despacho (envío LOCAL).
+    es_chofer = models.BooleanField(default=False, db_index=True)
     nombre = models.CharField(max_length=150)
     apellido_paterno = models.CharField(max_length=150)
     apellido_materno = models.CharField(max_length=150, blank=True)

@@ -391,6 +391,7 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
                 "packing__sucursal",
                 "envio",
                 "envio__transportista",
+                "chofer",
             )
             .prefetch_related(
                 Prefetch(
