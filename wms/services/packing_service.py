@@ -170,7 +170,9 @@ class PackingService:
 
         detalle_rows = [
             row
-            for row in picking.picking_detalle.all().order_by("id")
+            # Orden en memoria: ``.order_by()`` sobre el prefetch lo descartaba y
+            # cada renglón volvía a consultar producto, variante, talla y color.
+            for row in sorted(picking.picking_detalle.all(), key=lambda r: r.id)
             if row.estado != PickingDetalle.EstadoLinea.CANCELADA
         ]
         packed_map = cls._historical_packed_map(
@@ -215,6 +217,10 @@ class PackingService:
                     row.producto_variante, "nombre", None
                 ),
                 "sku_muestra": getattr(row.variante_produccion, "sku", None),
+                # Mismos nombres que los renglones de OC/recepción (ya prefetcheados).
+                "producto_variante_sku": getattr(row.producto_variante, "sku", None),
+                "producto_codigo": getattr(row.producto, "codigo", None),
+                "producto_cod_proscai": getattr(row.producto, "cod_proscai", None),
                 "talla": getattr(_variante(row), "talla_id", None),
                 "talla_nombre": getattr(getattr(_variante(row), "talla", None), "nombre", None),
                 "color": getattr(_variante(row), "color_id", None),
