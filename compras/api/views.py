@@ -1593,6 +1593,29 @@ def _ids_orden_log(data):
     return {k: cab.get(k) for k in ("orden_compra", "orden_produccion")}
 
 
+def _anotar_listado_recepciones(qs):
+    """Totales e inspección por recepción en la misma consulta (subconsultas por FK
+    indexada): ``piezas_recibidas``/``renglones`` y, de su última inspección,
+    ``inspeccion_estado`` y ``piezas_aprobadas``/``piezas_rechazadas`` (nulos sin
+    inspección)."""
+    dec = DecimalField(max_digits=18, decimal_places=4)
+    renglones = RecepcionDetalle.objects.filter(recepcion=OuterRef("pk")).order_by().values("recepcion")
+    ultima = CalidadInspeccion.objects.filter(recepcion=OuterRef("pk")).order_by("-id")
+    det = (
+        CalidadInspeccionDetalle.objects.filter(calidad_inspeccion=OuterRef("inspeccion_id"))
+        .order_by().values("calidad_inspeccion")
+    )
+    return qs.annotate(
+        piezas_recibidas=Coalesce(Subquery(renglones.annotate(t=Sum("cantidad_recibida")).values("t")[:1], output_field=dec), Value(0), output_field=dec),
+        renglones=Coalesce(Subquery(renglones.annotate(t=Count("id")).values("t")[:1]), Value(0)),
+        inspeccion_id=Subquery(ultima.values("pk")[:1]),
+        inspeccion_estado=Subquery(ultima.values("estado")[:1]),
+    ).annotate(
+        piezas_aprobadas=Subquery(det.annotate(t=Sum("cantidad_aprobada")).values("t")[:1], output_field=dec),
+        piezas_rechazadas=Subquery(det.annotate(t=Sum("cantidad_rechazada")).values("t")[:1], output_field=dec),
+    )
+
+
 @extend_schema_view(list=extend_schema(parameters=PARAMETROS_LISTADO_RECEPCIONES))
 class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Recepcion.objects.all().select_related(
@@ -1699,7 +1722,19 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             qs = filtrar_listado_compras(
                 self.request, qs, Recepcion.EstatusRecepcion.values, "fecha_recepcion__date",
             )
+            qs = _anotar_listado_recepciones(qs).select_related(*RELACIONES_PEDIDO)
         return qs
+
+    def list(self, request, *args, **kwargs):
+        # ``pedidos`` de toda la página en bloque (``pedidos_de_recepciones``: 2 consultas).
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        filas = [*(page if page is not None else queryset)]
+        serializer = self.get_serializer(filas, many=True)
+        serializer.context["pedidos_por_recepcion"] = pedidos_de_recepciones(filas)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     def get_serializer_class(self):
         # retrieve → forma anidada dedicada (con ``detalles[]``); list conserva la
@@ -1803,7 +1838,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             for smd_id, cantidad in acumulado.items()
         ])
         facturar_maquila(sm, recepcion, renglones)
-        if header.get("cerrar_salida_maquila") or all(pendientes[k] - acumulado.get(k, 0) <= 0 for k in pendientes):
+        sm_completa = all(pendientes[k] - acumulado.get(k, 0) <= 0 for k in pendientes)
+        recepcion.alcance_recepcion = (
+            Recepcion.AlcanceRecepcion.COMPLETA if sm_completa else Recepcion.AlcanceRecepcion.PARCIAL
+        )
+        recepcion.save(update_fields=["alcance_recepcion", "updated_at"])
+        if header.get("cerrar_salida_maquila") or sm_completa:
             marcar_recibida(sm)
         return Response(
             {"recepcion": RecepcionSerializer(recepcion).data, "detalle": RecepcionDetalleSerializer(renglones, many=True).data},
@@ -2588,10 +2628,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 recepcion.save()
 
                 renglones = self._crear_renglones_recepcion(recepcion, detalle_payload)
+                sm_completa = None
                 if sm is not None:
                     # Factura por lo que llegó; la SM queda Recibida solo al completarse (#1232).
                     facturar_maquila(sm, recepcion, renglones)
-                    if header.get("cerrar_salida_maquila") or all(v <= 0 for v in pendiente_de_sm(sm).values()):
+                    sm_completa = all(v <= 0 for v in pendiente_de_sm(sm).values())
+                    if header.get("cerrar_salida_maquila") or sm_completa:
                         marcar_recibida(sm)
 
                 # ``_actualizar_estatus_oc``/cierre de OP siguen basados en
@@ -2615,7 +2657,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 # Existencia aquí. Solo CalidadInspeccionViewSet abona
                 # inventario, y únicamente por lo aprobado.
                 recepcion.estatus = Recepcion.EstatusRecepcion.EN_CALIDAD
-                recepcion.save(update_fields=["estatus", "updated_at"])
+                # Alcance contra la orden de la que se recibió: la SM si vino con una.
+                completa = sm_completa if sm_completa is not None else orden_completa
+                recepcion.alcance_recepcion = (
+                    Recepcion.AlcanceRecepcion.COMPLETA if completa else Recepcion.AlcanceRecepcion.PARCIAL
+                )
+                recepcion.save(update_fields=["estatus", "alcance_recepcion", "updated_at"])
                 if oc:
                     self._actualizar_estatus_oc(oc)
                 elif orden_completa and op and op.cerrar_orden:

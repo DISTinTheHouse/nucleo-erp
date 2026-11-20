@@ -317,6 +317,15 @@ class Recepcion(models.Model):
     fecha_recepcion = models.DateTimeField()
 
     estatus = models.IntegerField(choices=EstatusRecepcion.choices, default=EstatusRecepcion.BORRADOR)
+
+    class AlcanceRecepcion(models.TextChoices):
+        PARCIAL = "PARCIAL", "Parcial"
+        COMPLETA = "COMPLETA", "Completa"
+
+    # Al registrarla: ¿con ella ya no le quedó pendiente a la orden (OC, OP o SM)?
+    # Se guarda tal cual aunque otra recepción complete la orden después. Nulo en
+    # recepciones anteriores a este campo.
+    alcance_recepcion = models.CharField(max_length=10, choices=AlcanceRecepcion.choices, null=True, blank=True)
     activo = models.BooleanField(default=True)
 
     observaciones = models.TextField(blank=True, null=True)
