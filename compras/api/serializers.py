@@ -545,6 +545,25 @@ class RecepcionListSerializer(_OrigenSalidaMaquilaMixin, RecepcionSerializer):
     orden_compra_tipo_compra = serializers.CharField(
         source="orden_compra.tipo_compra", read_only=True, default=None
     )
+    # Anotados por ``_anotar_listado_recepciones`` (misma consulta del listado).
+    piezas_recibidas = serializers.DecimalField(max_digits=18, decimal_places=4, read_only=True, coerce_to_string=False)
+    renglones = serializers.IntegerField(read_only=True)
+    inspeccion_estado = serializers.CharField(read_only=True, allow_null=True)
+    piezas_aprobadas = serializers.DecimalField(max_digits=18, decimal_places=4, read_only=True, allow_null=True, coerce_to_string=False)
+    piezas_rechazadas = serializers.DecimalField(max_digits=18, decimal_places=4, read_only=True, allow_null=True, coerce_to_string=False)
+    usuario_nombre = serializers.SerializerMethodField()
+    pedidos = serializers.SerializerMethodField()
+
+    def get_usuario_nombre(self, obj):
+        u = obj.usuario
+        return (u.get_full_name().strip() or u.email) if u else None
+
+    def get_pedidos(self, obj):
+        mapa = self.context.get("pedidos_por_recepcion")
+        if mapa is None or obj.pk not in mapa:
+            from compras.services.recepcion_pedidos import pedidos_de_recepciones
+            mapa = pedidos_de_recepciones([obj])
+        return mapa[obj.pk]
 
     class Meta(RecepcionSerializer.Meta):
         pass
