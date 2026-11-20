@@ -118,6 +118,19 @@ class Picking(models.Model):
     almacen = models.ForeignKey("inventarios.Almacen", on_delete=models.CASCADE, related_name="pickings")
     almacen_destino = models.ForeignKey("inventarios.Almacen", on_delete=models.CASCADE, related_name="pickings_destino", blank=True, null=True,)
 
+    class ProgramacionDestino(models.TextChoices):
+        BORDADO = "BORDADO", "Bordado"
+        REFLEJANTE = "REFLEJANTE", "Reflejante"
+        CORTE_MANGA = "CORTE_MANGA", "Corte de manga"
+        EMBARQUE = "EMBARQUE", "Embarque"
+        APARTADO = "APARTADO", "Apartado"
+
+    # A qué programación del pedido (``programacion_conf.programaciones[].destino``)
+    # abona este surtido. Nulo en pickings anteriores sin destino inferible.
+    programacion_destino = models.CharField(
+        max_length=15, choices=ProgramacionDestino.choices, null=True, blank=True
+    )
+
     transferencia = models.ForeignKey(
         "wms.Transferencia",
         on_delete=models.SET_NULL,
