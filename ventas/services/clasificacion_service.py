@@ -27,12 +27,14 @@ def fecha_base_compromiso(pedido):
 
 def rango_fecha_entrega(pedido):
     """``(fecha_min, fecha_max)`` estimadas a partir de ``pedido.clasificacion``,
-    contando desde ``fecha_base_compromiso(pedido)``.
+    contando desde ``pedido.fecha_clasificacion`` (el día en que se clasificó):
+    capturar o cambiar ``fecha_confirmacion`` no las mueve, solo reclasificar.
+    Sin ese sello (instancia sin guardar) cae en ``fecha_base_compromiso``.
 
     ``(None, None)`` si el pedido no tiene clasificación asignada o es ``X``.
     """
     rango = _RANGOS_DIAS.get(pedido.clasificacion)
-    base = fecha_base_compromiso(pedido)
+    base = getattr(pedido, "fecha_clasificacion", None) or fecha_base_compromiso(pedido)
     if not rango or base is None:
         return None, None
     dias_min, dias_max = rango

@@ -1,6 +1,7 @@
 from django.contrib.postgres.indexes import OpClass
 from django.core.validators import MinValueValidator
 from django.db import models
+from django.utils import timezone
 from django.db.models.functions import Upper
 from nucleo.indices import GinIndexSoloPostgres, IndexSoloPostgres
 from django.conf import settings
@@ -498,6 +499,10 @@ class Pedido(StatusLifecycleModel):
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
     fecha_confirmacion = models.DateTimeField(null=True, blank=True)
+    # Día (hora local) en que se asignó la ``clasificacion`` vigente: desde aquí
+    # corre la entrega estimada (``rango_fecha_entrega``). Lo sella ``save()`` al
+    # asignar o cambiar la clasificación; cambiar ``fecha_confirmacion`` no lo toca.
+    fecha_clasificacion = models.DateField(null=True, blank=True)
 
     history = HistoricalRecords()
 
@@ -539,9 +544,33 @@ class Pedido(StatusLifecycleModel):
     def __str__(self):
         return str(self.id)
 
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        obj = super().from_db(db, field_names, values)
+        if "clasificacion" in field_names:
+            obj._clasificacion_original = obj.clasificacion
+        return obj
+
     def save(self, *args, **kwargs):
         self._exigir_cliente_de_la_empresa(kwargs.get("update_fields"))
+        self._sellar_fecha_clasificacion(kwargs)
         super().save(*args, **kwargs)
+
+    def _sellar_fecha_clasificacion(self, kwargs):
+        """La entrega estimada se fija al clasificar: solo un cambio de
+        ``clasificacion`` (o su alta) vuelve a sellar ``fecha_clasificacion``."""
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "clasificacion" not in update_fields:
+            return
+        original = getattr(self, "_clasificacion_original", None)
+        if not self._state.adding and not hasattr(self, "_clasificacion_original"):
+            return  # cargado sin ``clasificacion`` (``only``/``defer``): no se sabe si cambió
+        if self.clasificacion == original and (self.fecha_clasificacion or not self.clasificacion):
+            return
+        self.fecha_clasificacion = timezone.localdate() if self.clasificacion else None
+        self._clasificacion_original = self.clasificacion
+        if update_fields is not None:
+            kwargs["update_fields"] = {*update_fields, "fecha_clasificacion"}
 
     def _exigir_cliente_de_la_empresa(self, update_fields):
         """Última barrera (#1024): el cliente del pedido es de su misma empresa.
