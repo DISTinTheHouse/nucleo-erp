@@ -5,6 +5,7 @@ from rest_framework import serializers
 from catalogo.models import Producto, ProductoVariante
 from inventarios.models import Almacen
 from logistica.models import Envio
+from hr.models import Empleado
 from wms.models import (
     Despacho,
     DespachoDetalle,
@@ -775,6 +776,12 @@ class DespachoSerializer(serializers.ModelSerializer):
     envio_transportista_nombre = serializers.CharField(
         source="envio.transportista.nombre", read_only=True, default=None
     )
+    tipo_envio_display = serializers.CharField(source="get_tipo_envio_display", read_only=True, default=None)
+    paqueteria_display = serializers.CharField(source="get_paqueteria_display", read_only=True, default=None)
+    chofer_nombre = serializers.SerializerMethodField()
+
+    def get_chofer_nombre(self, obj):
+        return nombre_chofer(obj.chofer) if obj.chofer_id else None
 
     class Meta:
         model = Despacho
@@ -791,6 +798,36 @@ class DespachoCreateSerializer(serializers.ModelSerializer):
         allow_null=True,
     )
     despacho_detalle = DespachoCreateDetalleInputSerializer(many=True)
+    tipo_envio = serializers.ChoiceField(choices=Despacho.TipoEnvio.choices)
+    paqueteria = serializers.ChoiceField(
+        choices=Despacho.Paqueteria.choices, required=False, allow_blank=True
+    )
+    chofer = serializers.PrimaryKeyRelatedField(
+        queryset=Empleado.objects.filter(es_chofer=True, activo=True),
+        required=False,
+        allow_null=True,
+    )
+
+    def validate(self, attrs):
+        tipo = attrs["tipo_envio"]
+        errores = {}
+        if tipo == Despacho.TipoEnvio.PAQUETERIA:
+            if not attrs.get("paqueteria"):
+                errores["paqueteria"] = "Obligatoria si el envío es por paquetería."
+            if not (attrs.get("guia") or "").strip():
+                errores["guia"] = "Obligatoria si el envío es por paquetería."
+            attrs["chofer"] = None
+        else:
+            chofer = attrs.get("chofer")
+            user = getattr(self.context.get("request"), "user", None)
+            if chofer is None:
+                errores["chofer"] = "Obligatorio si el envío es local."
+            elif user is not None and chofer.empresa_id != getattr(user, "empresa_id", None):
+                errores["chofer"] = "El chofer no pertenece a tu empresa."
+            attrs["paqueteria"] = ""
+        if errores:
+            raise serializers.ValidationError(errores)
+        return attrs
 
     class Meta:
         model = Despacho
@@ -798,8 +835,15 @@ class DespachoCreateSerializer(serializers.ModelSerializer):
             "packing",
             "envio",
             "guia",
+            "tipo_envio",
+            "paqueteria",
+            "chofer",
             "despacho_detalle",
         ]
+
+
+def nombre_chofer(empleado):
+    return " ".join(x for x in (empleado.nombre, empleado.apellido_paterno, empleado.apellido_materno) if x)
 
 
 class EtiquetaRFIDDetalleReadSerializer(serializers.ModelSerializer):
