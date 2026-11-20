@@ -50,7 +50,13 @@ def folio_preview(empresa, sucursal, tipo_documento="Picking"):
 
 # Destino de la programación -> almacén por nombre (mismo criterio que APARTADOS).
 # EMBARQUE/REFLEJANTE/CORTE_MANGA no tienen almacén propio: van sin sugerencia.
-ALMACEN_POR_DESTINO = {"APARTADO": "APARTADOS", "BORDADO": "BORDADOS"}
+# Almacén sugerido por destino de programación. REFLEJANTE aún no tiene almacén.
+ALMACEN_POR_DESTINO = {
+    "APARTADO": "APARTADOS",
+    "EMBARQUE": "APARTADOS",
+    "BORDADO": "BORDADOS",
+    "CORTE_MANGA": "CORTE DE MANGA",
+}
 
 # ``Almacen.estatus`` declara sus choices en línea (sin enum): único lugar del valor en wms.
 ALMACEN_ACTIVO = "ACTIVO"
@@ -123,7 +129,7 @@ def almacenes_por_destino_de_sucursales(empresa_id, sucursal_ids):
         sucursal_id__in=sucursal_ids,
         estatus=ALMACEN_ACTIVO,
         permite_entrada=True,
-        nombre__iregex=r"^(" + "|".join(ALMACEN_POR_DESTINO.values()) + r")$",
+        nombre__iregex=r"^(" + "|".join(sorted(set(ALMACEN_POR_DESTINO.values()))) + r")$",
     ).order_by("pk")
     for almacen in almacenes:
         por_sucursal[almacen.sucursal_id].setdefault(almacen.nombre.upper(), almacen)
