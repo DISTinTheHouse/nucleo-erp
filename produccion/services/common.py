@@ -70,6 +70,38 @@ def cantidades_asignadas(detalle_model, fk_orden, pedido_ids, campo_estatus=None
     return por_linea, sin_talla
 
 
+def programado_a_destino(pedido, destino):
+    """Piezas que mesa de control programó para ``pedido`` hacia ``destino``
+    (Σ ``programacion_conf.programaciones[].cantidad``), o ``None`` si no hay
+    ninguna programación a ese destino."""
+    filas = [
+        f for f in ((pedido.programacion_conf or {}).get("programaciones") or [])
+        if isinstance(f, dict) and f.get("destino") == destino
+    ]
+    if not filas:
+        return None
+    return sum(float(f.get("cantidad") or 0) for f in filas)
+
+
+def exigir_tope_programado(pedido, destino, asignado_por_linea, asignado_sin_talla, solicitado, etiqueta):
+    """400 si la orden nueva rebasa lo programado al destino que aún no está en
+    órdenes activas: ``ya_asignado + solicitado > programado``. Sin programación a
+    ese destino no aplica (el onboarding ya no ofrece esos pedidos)."""
+    programado = programado_a_destino(pedido, destino)
+    if programado is None:
+        return
+    ya = sum(asignado_por_linea.values()) + sum(asignado_sin_talla.values())
+    disponible = max(0.0, programado - ya)
+    if solicitado > disponible + EPS_CANTIDAD:
+        raise ValidationError({
+            "err": (
+                f"No se puede generar la orden de {etiqueta}: excede lo programado por "
+                f"mesa de control ({programado:g} piezas; ya en órdenes {ya:g}, "
+                f"disponible {disponible:g}, solicitado {solicitado:g})."
+            ),
+        })
+
+
 def pendientes_por_linea(lineas, por_linea, sin_talla):
     """Calcula ``(asignada, pendiente)`` por línea aplicando el pool sin talla.
 

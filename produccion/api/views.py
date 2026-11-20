@@ -241,6 +241,17 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
         programado = _programado_para_destino(p, destino_programacion) if destino_programacion else None
         if destino_programacion and programado is None:
             continue
+        if programado is not None:
+            # Lo programado a este destino que aún no está en órdenes activas (todo
+            # el pedido, piezas sin talla incluidas). Cubierto -> el pedido sale.
+            det_ids = {det.id for det in p.detalles.all()}
+            claves = {(det.id, dt.talla_id) for det in p.detalles.all() for dt in det.tallas.all()}
+            ya = sum(por_linea.get(k, 0.0) for k in claves) + sum(sin_talla.get(d, 0.0) for d in det_ids)
+            disponible = max(0.0, programado["cantidad"] - ya)
+            if disponible <= EPS_CANTIDAD:
+                continue
+            programado["asignado"] = ya
+            programado["disponible"] = disponible
 
         lineas = []
         for (det, dt), (cantidad_asignada, cantidad_pendiente) in zip(pares, pendientes):
@@ -325,6 +336,8 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
             "sucursal_nombre": getattr(p.sucursal, "nombre", None),
             "detalles": lineas,
             "programado": programado,
+            # Tope para la orden nueva: programado al destino − Σ órdenes activas.
+            "disponible_programado": programado["disponible"] if programado else None,
         })
     return pedidos_payload
 

@@ -5,7 +5,7 @@ from django.db.models import Sum, F
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesBordado, OrdenBordadoDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
-from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas
+from produccion.services.common import exigir_tope_programado, EPS_CANTIDAD, cantidades_asignadas
 from produccion.services.common import (
     config_como_dict,
     crear_orden_con_guardia_duplicado,
@@ -469,6 +469,12 @@ class OrdenBordadoService:
                 ),
                 "detalles_exceso": errores_lineas,
             })
+
+        # Tope de lo que mesa de control programó a BORDADO (todo el pedido).
+        exigir_tope_programado(
+            pedido, "BORDADO", asignado_por_linea, asignado_sin_talla,
+            sum(float(dt.cantidad or 0) for dt in detalle_tallas), "bordado",
+        )
 
         # Las muestras con SKU de producción sí generan OB: el detalle admite producto nulo.
         folio_bordado = generate_ob_folio(pedido.empresa_id, pedido.sucursal_id)

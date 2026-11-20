@@ -6,6 +6,7 @@ from catalogo.compatibilidad import Proceso, exigir_compatibilidad
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesCorteManga, OrdenCorteMangaDetalle
 from produccion.services.common import (
+    exigir_tope_programado,
     EPS_CANTIDAD,
     cantidades_asignadas,
     crear_orden_con_guardia_duplicado,
@@ -379,6 +380,12 @@ class OrdenCorteMangaService:
                 ),
                 "detalles_exceso": errores_lineas,
             })
+
+        # Tope de lo que mesa de control programó a CORTE_MANGA (todo el pedido).
+        exigir_tope_programado(
+            pedido, "CORTE_MANGA", asignado_por_linea, asignado_sin_talla,
+            sum(float(dt.cantidad or 0) for dt in detalle_tallas), "corte de manga",
+        )
 
         # El folio se consume DESPUÉS de todas las validaciones, para que un
         # rechazo no gaste consecutivo de la serie.

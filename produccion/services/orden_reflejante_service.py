@@ -6,7 +6,7 @@ from django.db.models import Sum, F
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesReflejante, OrdenReflejanteDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
-from produccion.services.common import EPS_CANTIDAD, cantidades_asignadas, crear_orden_con_guardia_duplicado, exigir_producto_en_tallas, payload_duplicada, pendientes_por_linea, revisar_empresa, tallas_orden_trabajo_qs, tallas_para_alta
+from produccion.services.common import exigir_tope_programado, EPS_CANTIDAD, cantidades_asignadas, crear_orden_con_guardia_duplicado, exigir_producto_en_tallas, payload_duplicada, pendientes_por_linea, revisar_empresa, tallas_orden_trabajo_qs, tallas_para_alta
 from produccion.utils.folios import generate_or_folio
 
 
@@ -522,6 +522,12 @@ class OrdenReflejanteService:
                 ),
                 "detalles_exceso": errores_lineas,
             })
+
+        # Tope de lo que mesa de control programó a REFLEJANTE (todo el pedido).
+        exigir_tope_programado(
+            pedido, "REFLEJANTE", asignado_por_linea, asignado_sin_talla,
+            sum(float(dt.cantidad or 0) for dt in detalle_tallas), "reflejante",
+        )
 
         # El folio se consume DESPUÉS de todas las validaciones, para que un
         # rechazo no gaste consecutivo de la serie.
