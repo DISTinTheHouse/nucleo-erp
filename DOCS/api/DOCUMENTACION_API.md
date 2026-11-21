@@ -712,6 +712,7 @@ Permite consultar el inventario actual.
   - `existencia_final = existencia_inicial + entradas - salidas`
   - `costo_total_existencia_final = sum(existencia_final * costo_unitario_final)`
   - En la respuesta, `salidas` se entrega como valor positivo para facilitar la lectura del reporte.
+- **Origen de los movimientos**: la bitácora de existencias (`AuditoriaEvento`) y, para lo que ella no registra, el ledger (`MovimientoInventarioDetalle`, #1019): las **transferencias** (salida del almacén de origen y entrada al de destino; el almacén de cada lado es el de su ubicación o el de la TR) y las **salidas por despacho**. Así cuentan en el periodo y, después del corte, en la existencia final; también las TR anteriores a que la TR escribiera evento. Los eventos `TRANSFERENCIA` de la bitácora se ignoran para no contarlas dos veces. Una consulta más, constante.
 - **Ejemplo**:
   - `GET /api/v1/inventarios/existencias/reporte-existencias-periodo/?fecha_inicio=2026-07-01&fecha_final=2026-07-31&almacen_id=1&page=1&page_size=200`
 - **Respuesta**:
