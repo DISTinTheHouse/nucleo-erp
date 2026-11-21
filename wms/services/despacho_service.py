@@ -13,6 +13,7 @@ from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle, Picki
 from inventarios.models import MovimientoInventario, MovimientoInventarioDetalle, TipoMovimiento
 from inventarios.services import costeo
 from wms.services.existencia_service import SaldoExistenciaAlmacen
+from wms.services.packing_service import _almacen_actual
 
 # Línea de packing cuya línea de pedido no es muestra (mismo criterio que
 # ``TALLAS_DE_LINEA_NO_MUESTRA_Q``).
@@ -98,6 +99,9 @@ class DespachoService:
                 "sucursal",
                 "picking",
                 "picking__almacen",
+                # ``almacen_actual`` sin consultas por fila (#1287).
+                "picking__almacen_destino",
+                "picking__transferencia",
                 "operador",
             )
             .order_by("-created_at", "-id")
@@ -119,6 +123,7 @@ class DespachoService:
                     "picking_folio": getattr(packing.picking, "folio", None),
                     "almacen": getattr(packing.picking, "almacen_id", None),
                     "almacen_nombre": getattr(getattr(packing.picking, "almacen", None), "nombre", None),
+                    **_almacen_actual(packing.picking),
                     "estado": packing.estado,
                 }
                 for packing in packings_qs[:50]
@@ -192,6 +197,7 @@ class DespachoService:
             "picking_folio": getattr(packing.picking, "folio", None),
             "almacen": getattr(packing.picking, "almacen_id", None),
             "almacen_nombre": getattr(getattr(packing.picking, "almacen", None), "nombre", None),
+            **_almacen_actual(packing.picking),
             "estado": packing.estado,
         }
 

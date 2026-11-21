@@ -14,6 +14,14 @@ from wms.models import Packing, PackingDetalle, Picking, PickingDetalle
 ALMACEN_APARTADOS = "APARTADOS"
 
 
+def _almacen_actual(picking):
+    """``almacen_actual``/``almacen_actual_nombre``: dónde están hoy las prendas del
+    picking (``Picking.almacen_actual``), de donde sale el packing y el despacho (#1287).
+    Sin consultas si se cargó ``almacen``, ``almacen_destino`` y ``transferencia``."""
+    actual = picking.almacen_actual if picking is not None else None
+    return {"almacen_actual": getattr(actual, "pk", None), "almacen_actual_nombre": getattr(actual, "nombre", None)}
+
+
 def en_apartados_q():
     """Pickings cuyas prendas están hoy en APARTADOS (misma regla que ``Picking.almacen_actual``)."""
     from django.db.models import Q
@@ -116,6 +124,9 @@ class PackingService:
                 "sucursal",
                 "operador",
                 "almacen",
+                # ``almacen_actual`` sin consultas por fila (#1287).
+                "almacen_destino",
+                "transferencia",
             )
             .order_by("-created_at", "-id")
         )
@@ -137,6 +148,7 @@ class PackingService:
                     or picking.operador.email,
                     "almacen": picking.almacen_id,
                     "almacen_nombre": getattr(picking.almacen, "nombre", None),
+                    **_almacen_actual(picking),
                     "estado": picking.estado,
                 }
                 for picking in pickings_qs[:50]
@@ -196,6 +208,7 @@ class PackingService:
             or picking.operador.email,
             "almacen": picking.almacen_id,
             "almacen_nombre": getattr(picking.almacen, "nombre", None),
+            **_almacen_actual(picking),
             "estado": picking.estado,
         }
         def _variante(row):

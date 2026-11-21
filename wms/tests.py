@@ -2576,6 +2576,18 @@ class SurtidoPedidosTests(TestCase):
         r = self.api.get(SURTIDO_URL, {"pendientes": "1"})
         self.assertIn(self.d["pedido"].pk, [x["id"] for x in r.data["results"]])
 
+    def test_etapa_por_talla_con_una_sobre_surtida(self):
+        """#1290: Σ surtidas (5) ≥ Σ pedidas (3), pero a la muestra le falta 1: PARCIAL."""
+        from wms.models import PickingDetalle
+
+        PickingDetalle.objects.filter(pk=self.d["pk_catalogo"].pk).update(cantidad_surtida=5)  # 2 pedidas
+        PickingDetalle.objects.filter(pk=self.d["pk_muestra"].pk).update(cantidad_surtida=0)  # 1 pedida
+        data = self._detalle()
+        self.assertEqual(data["etapa"], "PARCIAL")
+        self.assertEqual({x["etapa"] for x in data["renglones"]}, {"SURTIDO", "SIN_SURTIR"})
+        fila = next(x for x in self.api.get(SURTIDO_URL).data["results"] if x["id"] == self.d["pedido"].pk)
+        self.assertEqual(fila["etapa"], "PARCIAL")
+
     def test_muestra_trae_nombre_externo(self):
         """#1248."""
         from ventas.models import PedidoDetalle
