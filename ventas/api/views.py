@@ -4271,13 +4271,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
         están), movimientos de inventario, despachos, envíos, facturas, cobros y,
         con las reglas de ``pedido.documentos`` (EC-920), cotización, OC,
         OP/OB/OR/OCM y packings.
-        Mismo scope que ``trazabilidad`` (404 fuera de alcance); sin admin, los
-        documentos por sucursal (#536), pickings y despachos solo de sus
-        sucursales; facturas y cobros solo con permiso de contabilidad; el
-        ``total`` de las salidas a maquila, solo con ``R-PRODUCCION-COSTOS`` (si
-        no, null)."""
+        Mismo scope que ``trazabilidad`` (404 fuera de alcance). Cada sección con el
+        permiso y el alcance por sucursal de su módulo (#1243, ``documentos_pedido``):
+        null sin el permiso; sin admin, solo lo de sus sucursales."""
         from nucleo.permisos import permisos_de_la_peticion
-        from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
         from ventas.services.pedido_documentos_service import campos_diferidos_de_la_cotizacion
         from ventas.services.trazabilidad_service import documentos_pedido
 
@@ -4289,12 +4286,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             .defer(*campos_diferidos_de_la_cotizacion()),
             pk=pk,
         )
-        data = documentos_pedido(
-            pedido,
-            user=request.user,
-            con_finanzas=puede_ver_contabilidad(request.user),
-            con_costos=PERMISO_COSTOS_PRODUCCION in permisos_de_la_peticion(request),
-        )
+        data = documentos_pedido(pedido, user=request.user, permisos=permisos_de_la_peticion(request))
         return Response(data)
 
     @action(detail=True, methods=["get"], url_path="stock-detalle")

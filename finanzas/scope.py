@@ -33,7 +33,12 @@ def cobros_por_sucursal(qs, user):
     EC-874: un Borrador sin líneas no tiene sucursal (``null``): lo ve toda la empresa.
     Uno con líneas y sin sucursal (no debería existir) no.
     """
-    ids = sucursales_visibles(user)
+    return cobros_de_sucursales(qs, sucursales_visibles(user))
+
+
+def cobros_de_sucursales(qs, ids):
+    """``cobros_por_sucursal`` con los ids de sucursal ya resueltos (``None`` = sin
+    acotar), para quien ya los tiene y no quiere consultarlos otra vez."""
     if ids is None:
         return qs
     from finanzas.models import CobroDetalle

@@ -1,6 +1,18 @@
 from __future__ import annotations
 
 
+def _ordenes_compra_del_pedido(pedido):
+    """OC que surten el pedido (#1263): las del M2M ``pedidos`` (todos los que
+    surte) y las de la FK ``pedido`` (su primer pedido; alguna OC vieja solo tiene
+    la FK). Una consulta, sin duplicados (subconsulta, no JOIN al M2M)."""
+    from django.db.models import Q
+
+    from compras.models import OrdenCompra
+
+    del_m2m = OrdenCompra.pedidos.through.objects.filter(pedido_id=pedido.pk).values("ordencompra_id")
+    return OrdenCompra.objects.filter(Q(pedido_id=pedido.pk) | Q(pk__in=del_m2m)).order_by("id")
+
+
 DOCUMENTOS_CONFIG = [
     {
         "tipo": "cotizacion",
@@ -16,6 +28,9 @@ DOCUMENTOS_CONFIG = [
         "tipo": "orden_compra",
         "label": "Orden de Compra",
         "related_name": "ordenes_compra",
+        # De todos los pedidos que surte, no solo del primero (#1263): consulta
+        # propia en lugar del prefetch de la FK.
+        "consulta": _ordenes_compra_del_pedido,
         "is_single": False,
         "folio_field": "folio",
         "fecha_field": "fecha_oc",
@@ -184,7 +199,7 @@ def documentos_related_prefetch_args():
 
     args = []
     for c in DOCUMENTOS_CONFIG:
-        if c["is_single"]:
+        if c["is_single"] or c.get("consulta"):
             continue
         if c.get("via"):
             # ``to_attr``: no choca con otros prefetch de ``op_pedidos``.
@@ -195,6 +210,9 @@ def documentos_related_prefetch_args():
 
 
 def _docs_relacionados(pedido, cfg, solo_campos=False):
+    if cfg.get("consulta"):
+        qs = cfg["consulta"](pedido)
+        return _solo_campos(qs, cfg) if solo_campos else qs
     if cfg.get("via"):
         filas = getattr(pedido, cfg["prefetch_attr"], None)
         if filas is None:
@@ -211,6 +229,14 @@ def _docs_relacionados(pedido, cfg, solo_campos=False):
 TIPOS_POR_SUCURSAL = {"orden_bordado", "orden_reflejante", "orden_corte_manga", "picking", "packing"}
 
 
+def sucursales_de_documentos(user):
+    """Sucursales cuyos documentos ve ``user``; ``None`` = todas las de la
+    empresa (superusuario y admin de empresa)."""
+    if user.is_superuser or user.is_admin_empresa:
+        return None
+    return user.sucursales_permitidas()
+
+
 def alcance_documentos(user):
     """``(ve_facturas, sucursales)``; ``sucursales`` es ``None`` si ve todas.
     Sin ``user`` (``pedido.documentos`` sin petición), todo."""
@@ -218,8 +244,7 @@ def alcance_documentos(user):
 
     if user is None:
         return True, None
-    todas = user.is_superuser or user.is_admin_empresa
-    return puede_ver_contabilidad(user), None if todas else user.sucursales_permitidas()
+    return puede_ver_contabilidad(user), sucursales_de_documentos(user)
 
 
 def _de_la_empresa_del_pedido(doc, cfg, pedido):
@@ -297,7 +322,8 @@ def _solo_campos(qs, cfg, fk_al_pedido=None):
         modelo = qs.model._meta.get_field(cfg["via"]).related_model
         campos = [f"{cfg['via']}__{c}" for c in campos_de_documento(cfg, modelo)]
         return qs.only(cfg["via"], *campos)
-    return qs.only(fk_al_pedido, *campos_de_documento(cfg, qs.model))
+    fk = (fk_al_pedido,) if fk_al_pedido else ()
+    return qs.only(*fk, *campos_de_documento(cfg, qs.model))
 
 
 def documentos_visibles(pedido, user=None, tipos=None, alcance=None, solo_campos=False):

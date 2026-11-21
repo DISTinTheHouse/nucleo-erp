@@ -403,6 +403,13 @@ class BorradoProtegidoComo409Mixin:
 # HTTP cambia: ``AlertaMoraViewSet`` sigue siendo de sólo lectura y
 # ``DashboardFinancieroViewSet`` sigue sin rutas de detalle. El mapeo de choques
 # de concurrencia a 409 va en las mismas bases por la misma razón.
+def lee_seccion_finanzas(permisos, seccion):
+    """Lectura de una sección de Finanzas: ``R-CONTABILIDAD`` (todo el módulo, #636) o
+    el código de la sección (EC-746). ``permisos``: ``permisos_de_la_peticion``. La usan
+    ``PermisoFinanzas`` y las secciones de finanzas de la vista 360 del pedido (#1243)."""
+    return 'R-CONTABILIDAD' in permisos or bool(seccion and seccion in permisos)
+
+
 class PermisoFinanzas(BasePermission):
     """Lecturas: ``R-CONTABILIDAD`` (#636) o, en los viewsets que declaran
     ``codigo_lectura_seccion``, también ese código de sección (EC-746): el de módulo lee
@@ -418,7 +425,7 @@ class PermisoFinanzas(BasePermission):
             seccion = getattr(view, "codigo_lectura_seccion", None)
             if getattr(view, "action", None) in getattr(view, "acciones_solo_modulo", ()):
                 seccion = None
-            return 'R-CONTABILIDAD' in permisos or bool(seccion and seccion in permisos)
+            return lee_seccion_finanzas(permisos, seccion)
         self.message = getattr(view, "mensaje_sin_permiso_escritura", "No tienes permiso para modificar datos de finanzas.")
         return PERMISO_CANCELAR_FACTURA in permisos
 
