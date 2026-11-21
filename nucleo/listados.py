@@ -2,13 +2,34 @@
 ``?ordering=`` con desempate estable, los filtros comunes de Compras y los rangos
 ``*_min``/``*_max``."""
 from django.core.exceptions import FieldDoesNotExist
-from django.db.models import F
+from django.db.models import CharField, F, Value
+from django.db.models.functions import Coalesce, Concat, NullIf, Trim
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.pagination import LimitOffsetPagination
 
 from nucleo.kpis import entero_param, rango_fechas
+
+
+def nombre_para_mostrar_sql(relacion):
+    """Gemela SQL de ``ventas.utils.helpers.nombre_para_mostrar`` (#1262): nombre
+    completo del usuario en ``relacion`` (``"operador"``, ``"cotizacion__vendedor"``)
+    o, si queda vacío, su correo; ``None`` si no hay usuario. ``""`` = el propio
+    ``Usuario``. Única copia de la regla para anotar, ordenar y buscar en los listados."""
+    prefijo = f"{relacion}__" if relacion else ""
+    return Coalesce(
+        NullIf(
+            Trim(Concat(
+                Coalesce(F(f"{prefijo}first_name"), Value("")),
+                Value(" "),
+                Coalesce(F(f"{prefijo}last_name"), Value("")),
+            )),
+            Value(""),
+        ),
+        F(f"{prefijo}email"),
+        output_field=CharField(),
+    )
 
 
 class BusquedaSoloListadoFilter(SearchFilter):
