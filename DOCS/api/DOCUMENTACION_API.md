@@ -8117,9 +8117,10 @@ Sirve a la junta semanal de planeación: qué producto terminado se vende más, 
 - **Validación:** con `agrupar=producto`, `fabricacion=ALCANZA|NO_ALCANZA` y `ordering=fabricable_con_existencia|sku` responden `400`. `?sucursal` solo acepta sucursales activas. En `necesidades-materia-prima`, `ordering`, `page` o `page_size` responden `400`.
 - **Velocidad:** consultas fijas, sin importar cuántos artículos haya. Medido en la BD real (sin contar la autenticación):
   - Cálculo: **8** en el tablero y en el consolidado de necesidades (universo, venta agrupada, importe por moneda, serie semanal, existencias, OPs abiertas, BOM e insumos); **3** con `variante` (variante, BOM e insumos).
-  - Usuario normal con `R-PRODUCCION`: + 2 del permiso (overrides y roles) + 1 de las claves de departamento para los importes + 1 de la empresa activa + 1 de sus sucursales visibles = **13** (tablero y consolidado) y **8** (con `variante`).
+  - Usuario normal con `R-PRODUCCION`: + 1 del permiso (overrides y roles en una sola consulta) + 1 de las claves de departamento para los importes + 1 de la empresa activa + 1 de sus sucursales visibles = **12** (tablero y consolidado) y **7** (con `variante`).
   - Admin de empresa (y superusuario): no consulta permisos, claves ni sucursales, solo + 1 de la empresa = **9** y **4**.
-  - Con `?sucursal=` se suma 1 consulta que la valida (14 para el usuario normal en el tablero).
+  - Con `?sucursal=` se suma 1 consulta que la valida (13 para el usuario normal en el tablero).
+  - Medido el 2026-11-21: 9 (admin) y 12 (usuario normal) en tablero y consolidado.
 
 **Origen de los datos**
 
@@ -8173,6 +8174,7 @@ Un valor inválido responde `400` con el campo.
 - `limitante`: ese insumo (`componente_id`, `componente_nombre`).
 - `puede_fabricar_resurtido`: si `fabricable_con_existencia` ≥ `resurtido_sugerido`. Es `null` si no hay resurtido o no hay BOM.
 - `bom_con_alertas`: algún renglón del BOM pide una unidad distinta a la del inventario del insumo (p. ej. `cm` contra `m`), o tiene cantidad 0.
+- `variantes_con_bom` (solo con `agrupar=producto`): cuántas variantes del producto tienen BOM activo.
 
 Reglas del cálculo, las mismas que el consumo real de la OP:
 - Por pieza se requiere `cantidad × (1 + desperdicio/100)`.
@@ -8180,7 +8182,7 @@ Reglas del cálculo, las mismas que el consumo real de la OP:
 - No convierte unidades.
 - Cada SKU se calcula solo: dos SKUs que comparten tela no pueden fabricar los dos su máximo a la vez. Para el total usa `necesidades-materia-prima/`.
 
-Con `agrupar=producto`, estos campos llegan `null`, salvo `tiene_bom` y `variantes_con_bom`.
+Con `agrupar=producto`, `fabricable_con_existencia`, `limitante` y `puede_fabricar_resurtido` llegan `null`; `tiene_bom` y `bom_con_alertas` llegan como booleano (alguna variante con BOM / con alertas) y se agrega `variantes_con_bom`.
 
 Filtro extra: `fabricacion=SIN_BOM|ALCANZA|NO_ALCANZA`. `ALCANZA` y `NO_ALCANZA` se refieren al resurtido sugerido. Se puede ordenar por `fabricable_con_existencia`.
 
@@ -8188,29 +8190,41 @@ Filtro extra: `fabricacion=SIN_BOM|ALCANZA|NO_ALCANZA`. `ALCANZA` y `NO_ALCANZA`
 
 **Respuesta**
 
+Las cantidades (`vendido_periodo`, `vendido_periodo_anterior`, `existencia`, `en_proceso`, `disponible`, por fila y en `resumen`) son decimales y llegan como número con decimales (`652.0`); `resurtido_sugerido`, `serie_semanal`, `fabricable_con_existencia`, `pedidos` y `clientes` son enteros.
+
 ```json
 {
-  "parametros": {"semanas": 12, "semanas_objetivo": 8, "dias_sin_venta": 90, "agrupar": "variante", "desde": "2026-08-20", "hasta": "2026-11-11"},
+  "parametros": {"semanas": 12, "semanas_objetivo": 8, "dias_sin_venta": 90, "agrupar": "variante", "desde": "2026-08-30", "hasta": "2026-11-21"},
   "resumen": {
-    "articulos": 3187, "vendido_periodo": 5758, "vendido_periodo_anterior": 4535, "tendencia_pct": 27.0,
-    "existencia": 6211646, "en_proceso": 314, "resurtido_sugerido": 1, "importe_vendido": 2478663.74,
-    "por_clase": {"A": 38, "B": 63, "C": 3086},
-    "por_estado": {"RESURTIR": 1, "SOBREINVENTARIO": 266, "LENTO": 8, "SIN_VENTA": 2911, "OK": 1},
-    "candidatos_descontinuar": 2932
+    "articulos": 3187, "vendido_periodo": 4972.0, "vendido_periodo_anterior": 5787.0, "tendencia_pct": -14.1,
+    "existencia": 6211643.0, "en_proceso": 336.0, "resurtido_sugerido": 1,
+    "importe_por_moneda": {"MXN": 1466964.74, "USD": 785095.0},
+    "por_clase": {"A": 36, "B": 51, "C": 3100},
+    "por_estado": {"RESURTIR": 1, "SOBREINVENTARIO": 241, "LENTO": 6, "SIN_VENTA": 2938, "OK": 1},
+    "candidatos_descontinuar": 2960,
+    "con_bom": 3187, "resurtir_sin_bom": 0, "resurtir_sin_material": 0
   },
   "count": 3187, "page": 1, "page_size": 50,
   "results": [{
-    "producto_id": 8515, "producto_nombre": "CHAMARRA ALASKA UNISEX", "categoria_id": 146, "categoria_nombre": "Chamarra",
-    "variante_id": 1185, "sku": "30038002XC", "color": "NEGRO", "talla": "2XCH", "variantes": 1,
-    "vendido_periodo": 315, "vendido_periodo_anterior": 33, "tendencia_pct": 854.5, "venta_semanal": 26.25,
-    "serie_semanal": [15, 0, 0, 0, 0, 0, 0, 0, 300, 0, 0, 0],
-    "pedidos": 2, "clientes": 2, "ultima_venta": "2026-10-15", "dias_sin_venta": 27,
-    "existencia": 1652, "en_proceso": 0, "disponible": 1652, "cobertura_semanas": 62.9,
-    "resurtido_sugerido": 0, "importe_vendido": 81900.00,
-    "clase_abc": "A", "participacion_pct": 5.47, "estado": "SOBREINVENTARIO", "candidato_descontinuar": false
+    "producto_id": 8549, "producto_nombre": "IMPERMEABLE MODELO MOTOCICLISTA 2 PZ VERDENEGRO",
+    "categoria_id": 150, "categoria_nombre": "Impermeable",
+    "variante_id": 2140, "sku": "3037100XG", "color": "BLANCO", "talla": "XG", "variantes": 1,
+    "vendido_periodo": 652.0, "vendido_periodo_anterior": 0.0, "tendencia_pct": null, "venta_semanal": 54.33,
+    "serie_semanal": [0, 0, 0, 652, 0, 0, 0, 0, 0, 0, 0, 0],
+    "pedidos": 1, "clientes": 1, "ultima_venta": "2026-09-23", "dias_sin_venta": 59,
+    "existencia": 1348.0, "en_proceso": 0.0, "disponible": 1348.0, "cobertura_semanas": 24.8,
+    "resurtido_sugerido": 0, "importe_por_moneda": {"MXN": 253628.0}, "importe_vendido": 253628.0,
+    "tiene_bom": true, "fabricable_con_existencia": 495,
+    "limitante": {"componente_id": 14477, "componente_nombre": "SHIFON"},
+    "bom_con_alertas": false, "puede_fabricar_resurtido": null,
+    "clase_abc": "A", "participacion_pct": 13.11, "estado": "SOBREINVENTARIO", "candidato_descontinuar": false
   }]
 }
 ```
+
+Con `agrupar=producto` la fila trae además `"variantes_con_bom": 11` y `"fabricable_con_existencia": null`, `"limitante": null`.
+
+**Paginación:** `count`, `page` y `page_size`; no hay `next`/`previous`. Una página fuera de rango responde `200` con `results: []` (p. ej. `?page=999` → `{"count": 3187, "page": 999, "page_size": 50, "results": []}`).
 
 `resumen` es de todo el universo filtrado (no de la página). Con `agrupar=producto`, `variante_id`/`sku`/`color`/`talla` llegan `null`, `variantes` dice cuántas suma, y `pedidos`/`clientes` son la suma por variante (aproximada).
 
