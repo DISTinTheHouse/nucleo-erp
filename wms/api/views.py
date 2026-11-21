@@ -29,7 +29,6 @@ from wms.models import (
     DespachoDetalle,
     EtiquetaRFIDDetalle,
     EtiquetaRFIDImpresion,
-    LectorRFID,
     Packing,
     PackingDetalle,
     Picking,
@@ -811,8 +810,6 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 {"status": "error", "message": "Lector no autorizado."},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
-        # Heartbeat: cualquier POST autenticado, aunque no traiga tags.
-        LectorRFID.objects.filter(pk=lector.pk).update(ultima_conexion=timezone.now())
         return recibir_lecturas(request._request, lector)
 
     @action(

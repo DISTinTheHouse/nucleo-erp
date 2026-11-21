@@ -11,6 +11,7 @@ from django.core.cache import cache
 from django.db.models import F, Q
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
 from django.utils import timezone
 
 from wms.models import EtiquetaRFIDDetalle, LectorRFID, RfidScan
@@ -516,6 +517,9 @@ def recibir_lecturas(request, lector):
     # Declarado FUERA del try para que los logger.info/warning de abajo
     # (fuera del bloque try) no causen NameError si algo falló en medio.
     body = ""
+    if lector is not None:
+        # Heartbeat: cualquier POST autenticado, aunque no traiga tags.
+        LectorRFID.objects.filter(pk=lector.pk).update(ultima_conexion=timezone.now())
     debug_payload = {
         "content_type": request.content_type or "",
         "method": request.method,
@@ -857,20 +861,13 @@ def recibir_lecturas(request, lector):
         )
 
 
-URL_RECEIVE = "/api/v1/wms/etiquetas-rfid/scans/receive/"
-
-
 @csrf_exempt
+@require_POST
 def receive_scan_sin_token(request):
-    """``/api/receive-scan/``: retirada. Responde ``410 Gone`` sin guardar nada,
-    para que un FX que aún apunte aquí no parezca funcionar. El FX debe postear
-    a ``scans/receive/`` con el token de su ``LectorRFID``."""
-    return JsonResponse(
-        {
-            "status": "error",
-            "message": "Endpoint retirado. Configure el lector con POST " + URL_RECEIVE
-                       + " y el token de su LectorRFID.",
-            "receive_url": URL_RECEIVE,
-        },
-        status=410,
-    )
+    """``POST /api/receive-scan/``: la URL que ya tiene configurada el FX.
+
+    Misma lógica que ``scans/receive/``. Con token (``?token=`` en la URL,
+    ``X-RFID-Token`` o Basic) usa su lector y marca su heartbeat; sin token,
+    cada lectura toma la empresa de la etiqueta impresa con su EPC.
+    """
+    return recibir_lecturas(request, lector_desde_request(request))
