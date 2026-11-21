@@ -488,6 +488,49 @@ class PedidoDetalleScopeTenantTests(TestCase):
         )
         self.assertEqual(resp.status_code, 201)
 
+    def test_detalle_categoria_de_otra_empresa_es_rechazada(self):
+        """#1036: ``categoria_producto`` se valida como ``producto`` (POST y PATCH)."""
+        ajena = CategoriaProducto.objects.create(
+            empresa=self.b["pedido"].empresa, nombre="Ajena", codigo="AJE", descripcion="x",
+        )
+        client = self._client(self.a["usuario"])
+        resp = client.post(
+            PEDIDO_DETALLE_URL,
+            {"pedido": self.a["pedido"].pk, "producto": self.a["producto"].pk, "categoria_producto": ajena.pk},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("categoria_producto", resp.data)
+        resp = client.patch(
+            f"{PEDIDO_DETALLE_URL}{self.a['detalle'].pk}/", {"categoria_producto": ajena.pk}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.a["detalle"].refresh_from_db()
+        self.assertIsNone(self.a["detalle"].categoria_producto_id)
+
+    def test_alta_de_pedido_y_cotizacion_sin_empresa_es_400_explicito(self):
+        """#1036: sin empresa activa, 400 en ``empresa`` antes de validar el body; la
+        cotización se creaba con ``empresa=None``."""
+        client = self._client(self.sin_empresa)
+        for url in ("/api/v1/ventas/pedidos/", "/api/v1/ventas/cotizaciones/"):
+            resp = client.post(url, {}, format="json")
+            self.assertEqual(resp.status_code, 400, url)
+            self.assertEqual(resp.data, {"empresa": ["El usuario no tiene empresa activa."]}, url)
+
+    def test_header_de_mesa_control_rechaza_moneda_privada_de_otra_empresa(self):
+        """#1036: ``editar-mesa-control`` valida ``moneda`` como el alta del pedido."""
+        from types import SimpleNamespace
+
+        from ventas.api.serializers import PedidoMesaControlHeaderSerializer
+
+        ajena = Moneda.objects.create(codigo_iso="ZZA", nombre="Ajena", empresa=self.b["pedido"].empresa)
+        propia = Moneda.objects.create(codigo_iso="ZZP", nombre="Propia", empresa=self.a["pedido"].empresa)
+        serializer = PedidoMesaControlHeaderSerializer(context={"request": SimpleNamespace(user=self.a["usuario"])})
+        self.assertEqual(serializer.validate_moneda(self.moneda), self.moneda)  # global
+        self.assertEqual(serializer.validate_moneda(propia), propia)
+        with self.assertRaises(DRFValidationError):
+            serializer.validate_moneda(ajena)
+
     def test_detalle_sin_empresa_no_ve_nada(self):
         self.assertEqual(self._ids(self.sin_empresa, PEDIDO_DETALLE_URL), [])
         resp = self._client(self.sin_empresa).get(
