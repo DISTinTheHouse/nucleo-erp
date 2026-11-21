@@ -590,30 +590,44 @@ def _bloques_de_pedido_documentos(pedido, alcance):
     return bloques
 
 
-def documentos_pedido(pedido, *, user, con_finanzas=True, con_costos=True):
+def documentos_pedido(pedido, *, user, permisos=None):
     """Vista 360: cada documento que nació del pedido, una consulta por tipo
     (constante, sin importar cuántos haya). Endpoint aparte de la trazabilidad
     para no hacerla más lenta: el frontend lo pide al abrir la pestaña.
 
-    ``con_finanzas=False``: ``facturas`` y ``cobros`` en null. ``con_costos=False``
-    (sin ``R-PRODUCCION-COSTOS``, como el endpoint de SM, #1226): el ``total`` de
-    cada salida a maquila en null. Ese total es el del documento SM, no la parte
-    del pedido.
+    Cada sección con la regla de lectura de SU módulo (#1243), en null sin ella:
+    ``salidas_maquila`` con ``R-PRODUCCION-OP`` (``GET /produccion/salidas-maquila/``,
+    #1226) y su ``total`` además con ``R-PRODUCCION-COSTOS`` (si no, null; es el del
+    documento SM, no la parte del pedido); ``facturas`` con ``R-CONTABILIDAD`` o
+    ``R-CONTABILIDAD-FACTURACION`` y ``cobros`` con ``R-CONTABILIDAD`` o
+    ``R-CONTABILIDAD-CXC`` (``PermisoFinanzas``, EC-746). ``permisos``: los de
+    ``permisos_de_la_peticion`` (si no, se resuelven aquí): una sola resolución de
+    permisos por petición, sin claves de departamento (#1259).
 
-    ``user`` (obligatorio): la regla por sucursal de ``pedido.documentos`` (#536)
-    acota los bloques que vienen de ahí, ``pickings`` y ``despachos`` (visible si
-    su packing lo es). Sin usuario no hay alcance que aplicar: falla cerrado."""
+    ``user`` (obligatorio): para quien no es admin ni superusuario, cada bloque solo
+    de sus sucursales, como en su módulo: los de ``pedido.documentos`` (#536),
+    ``pickings``, ``despachos`` (visible si su packing lo es), ``salidas_maquila``
+    (EC-871), ``movimientos_inventario``, ``facturas`` y ``cobros`` (#753, #1078).
+    ``pre_ordenes`` y ``envios`` son de la empresa, como en su módulo. Sin usuario no
+    hay alcance que aplicar: falla cerrado."""
+    from finanzas.api.views import CobroViewSet, FacturaViewSet, lee_seccion_finanzas
     from logistica.models import Envio
+    from nucleo.permisos import CODIGOS_PRODUCCION_OP, permisos_efectivos
+    from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
     from produccion.models import PreOrdenProduccion, SalidaMaquila
     from inventarios.models import MovimientoInventario
-    from ventas.services.pedido_documentos_service import alcance_documentos
+    from ventas.services.pedido_documentos_service import sucursales_de_documentos
     from wms.models import Despacho, Picking
 
     if user is None:
         raise ValueError("documentos_pedido necesita el usuario para acotar por sucursal.")
-    alcance = alcance_documentos(user)
+    if permisos is None:
+        permisos = permisos_efectivos(user)
     # ``None``: superusuario o admin, todas las sucursales de la empresa.
-    sucursales = alcance[1]
+    sucursales = sucursales_de_documentos(user)
+    # Los bloques de ``pedido.documentos`` no incluyen facturas: no se resuelve
+    # ``puede_ver_contabilidad`` (claves de departamento, otra consulta, #1259).
+    alcance = (False, sucursales)
     # Cada bloque, además, de la empresa del pedido (EC-916): las escrituras ya lo
     # validan, esto evita que un dato legado de otra empresa se cuele en la lectura.
     pk, empresa_id = pedido.pk, pedido.empresa_id
@@ -621,22 +635,30 @@ def documentos_pedido(pedido, *, user, con_finanzas=True, con_costos=True):
         PreOrdenProduccion.objects.filter(Q(pedido_id=pk) | Q(pedidos=pk), empresa_id=empresa_id).distinct().order_by("id"),
         "id", "origen", "estatus", "op_id", "created_at", op_folio=F("op__folio_op"),
     )
-    salidas_maquila = _lista(
-        SalidaMaquila.objects.filter(activo=True, empresa_id=empresa_id).filter(
+    salidas_maquila = None  # sin ``R-PRODUCCION-OP``: null, como su endpoint (403)
+    if permisos.alguno(CODIGOS_PRODUCCION_OP):
+        sm_qs = SalidaMaquila.objects.filter(activo=True, empresa_id=empresa_id).filter(
             Q(op__op_pedidos__pedido_id=pk) | Q(ob__pedido_id=pk) | Q(orden_r__pedido_id=pk)
-        ).distinct().order_by("id"),
-        "id", "folio", "estatus", "fecha_envio", "fecha_recepcion", "total_piezas", "total",
-        centro_confeccion_nombre=F("centro_confeccion__nombre"), op_folio=F("op__folio_op"),
-        ob_folio=F("ob__folio_bordado"), or_folio=F("orden_r__folio_reflejante"),
-    )
-    if not con_costos:
-        for fila in salidas_maquila:
-            fila["total"] = None
+        )
+        if sucursales is not None:  # EC-871: la sucursal de la SM (la de su OP)
+            sm_qs = sm_qs.filter(sucursal_id__in=sucursales)
+        salidas_maquila = _lista(
+            sm_qs.distinct().order_by("id"),
+            "id", "folio", "estatus", "fecha_envio", "fecha_recepcion", "total_piezas", "total",
+            centro_confeccion_nombre=F("centro_confeccion__nombre"), op_folio=F("op__folio_op"),
+            ob_folio=F("ob__folio_bordado"), or_folio=F("orden_r__folio_reflejante"),
+        )
+        if PERMISO_COSTOS_PRODUCCION not in permisos:
+            for fila in salidas_maquila:
+                fila["total"] = None
     pickings_qs = Picking.objects.filter(pedido_id=pk, empresa_id=empresa_id)
     despachos_qs = Despacho.objects.filter(packing__pedido_id=pk, packing__empresa_id=empresa_id)
+    movimientos_qs = MovimientoInventario.objects.filter(empresa_id=empresa_id, activo=True)
     if sucursales is not None:
         pickings_qs = pickings_qs.filter(sucursal_id__in=sucursales)
         despachos_qs = despachos_qs.filter(packing__sucursal_id__in=sucursales)
+        # Como ``MovimientoInventarioViewSet``: la sucursal del movimiento.
+        movimientos_qs = movimientos_qs.filter(sucursal_id__in=sucursales)
     pickings = list(
         pickings_qs.select_related("almacen", "almacen_destino", "transferencia").order_by("id")
     )
@@ -656,7 +678,7 @@ def documentos_pedido(pedido, *, user, con_finanzas=True, con_costos=True):
         transferencia__sucursal_id=F("transferencia__picking__sucursal_id"),
     )
     movimientos = _lista(
-        MovimientoInventario.objects.filter(filtro, empresa_id=empresa_id, activo=True).order_by("id"),
+        movimientos_qs.filter(filtro).order_by("id"),
         "id", "tipo_movimiento", "fecha_movimiento", "observaciones",
         transferencia_folio=F("transferencia__folio"), origen=F("transferencia__almacen_origen__nombre"),
         destino=F("transferencia__almacen_destino__nombre"),
@@ -666,9 +688,11 @@ def documentos_pedido(pedido, *, user, con_finanzas=True, con_costos=True):
         "id", "guia", "envio_id", "packing_id", packing_folio=F("packing__folio"),
     )
     envios = _lista(Envio.objects.filter(pedido_id=pk, empresa_id=empresa_id).order_by("id"), "id", "transportista_id")
-    facturas = cobros = None  # sin permiso de contabilidad: null
-    if con_finanzas:
-        facturas, cobros = _facturas_y_cobros(pedido)
+    facturas, cobros = _facturas_y_cobros(
+        pedido, sucursales,
+        con_facturas=lee_seccion_finanzas(permisos, FacturaViewSet.codigo_lectura_seccion),
+        con_cobros=lee_seccion_finanzas(permisos, CobroViewSet.codigo_lectura_seccion),
+    )
     return {
         "pre_ordenes": pre_ordenes,
         "salidas_maquila": salidas_maquila,
@@ -682,26 +706,39 @@ def documentos_pedido(pedido, *, user, con_finanzas=True, con_costos=True):
     }
 
 
-def _facturas_y_cobros(pedido):
+def _facturas_y_cobros(pedido, sucursales, *, con_facturas, con_cobros):
     """Facturas y cobros del pedido, solo de SU empresa (EC-916, #1203): una
     factura de otra empresa que apunta al pedido no es suya
     (``FacturaService.facturas_del_pedido``). Cobros: los vigentes (activos y no
-    cancelados) aplicados a esas facturas, de la misma empresa."""
+    cancelados) aplicados a esas facturas, de la misma empresa. Sin permiso de su
+    sección, null. ``sucursales`` (``None`` = todas): solo de ellas, con la regla de
+    ``finanzas/scope.py`` (#753, #1078): un cobro con alguna línea de una factura de
+    otra sucursal no se ve."""
     from finanzas.models import Cobro, CobroDetalle
+    from finanzas.scope import cobros_de_sucursales
     from finanzas.services.factura_service import FacturaService
 
+    facturas = cobros = None
     facturas_qs = FacturaService.facturas_del_pedido(pedido).filter(activo=True)
-    facturas = _lista(
-        facturas_qs.order_by("id"),
-        "id", "folio", "estatus", "fecha_emision", "total", moneda_codigo=F("moneda__codigo_iso"),
-    )
+    if sucursales is not None:
+        facturas_qs = facturas_qs.filter(sucursal_id__in=sucursales)
+    if con_facturas:
+        facturas = _lista(
+            facturas_qs.order_by("id"),
+            "id", "folio", "estatus", "fecha_emision", "total", moneda_codigo=F("moneda__codigo_iso"),
+        )
+    if not con_cobros:
+        return facturas, cobros
     # ``moneda_codigo`` como en el detalle del pedido. ``Cobro.moneda`` es nullable
     # (cobros previos a EC-537): entonces la de su cuenta bancaria, que es la que
     # el servidor le fija. JOINs en la misma consulta, sin viajes por fila.
+    lineas = CobroDetalle.objects.filter(
+        cxc__factura__in=facturas_qs, cobro__empresa_id=pedido.empresa_id, cobro__activo=True,
+    ).exclude(cobro__estatus=Cobro.Estatus.CANCELADO)
+    if sucursales is not None:
+        lineas = lineas.filter(cobro__in=cobros_de_sucursales(Cobro.objects.all(), sucursales).values("pk"))
     cobros = _lista(
-        CobroDetalle.objects.filter(
-            cxc__factura__in=facturas_qs, cobro__empresa_id=pedido.empresa_id, cobro__activo=True,
-        ).exclude(cobro__estatus=Cobro.Estatus.CANCELADO).order_by("cobro_id"),
+        lineas.order_by("cobro_id"),
         "cobro_id", "importe_aplicado", folio=F("cobro__folio"), estatus=F("cobro__estatus"),
         fecha=F("cobro__fecha_cobro"), factura_folio=F("cxc__factura__folio"),
         moneda_codigo=Coalesce(

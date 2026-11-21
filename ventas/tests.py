@@ -5277,10 +5277,10 @@ class PedidoDocumentosTests(TestCase):
             username="costos@acme.test", email="costos@acme.test",
             empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
-        UsuarioPermiso.objects.create(
-            usuario=cls.costos, permiso=_permiso("R-PRODUCCION-COSTOS"),
-            tipo=UsuarioPermiso.TIPO_GRANT, empresa=cls.empresa,
-        )
+        for clave in ("R-PRODUCCION-COSTOS", "R-PRODUCCION-OP"):
+            UsuarioPermiso.objects.create(
+                usuario=cls.costos, permiso=_permiso(clave), tipo=UsuarioPermiso.TIPO_GRANT, empresa=cls.empresa,
+            )
         cls.maquilero = Proveedor.objects.create(
             empresa=cls.empresa, nombre="Maquila SA", es_maquilero=True, moneda=cls.moneda,
             sat_regimen_fiscal=SatRegimenFiscal.objects.get_or_create(
@@ -5416,6 +5416,110 @@ class PedidoDocumentosTests(TestCase):
         data = self._data(pedido, self.usuario)
         self.assertIsNone(data["facturas"])
         self.assertIsNone(data["cobros"])
+
+    def _con_grants(self, username, *claves):
+        user = Usuario.objects.create(
+            username=username, email=username, empresa=self.empresa, sucursal_default=self.sucursal,
+        )
+        for clave in claves:
+            UsuarioPermiso.objects.create(
+                usuario=user, permiso=_permiso(clave), tipo=UsuarioPermiso.TIPO_GRANT, empresa=self.empresa,
+            )
+        return user
+
+    def test_cada_seccion_con_el_permiso_de_su_modulo(self):
+        """#1243: facturas con ``R-CONTABILIDAD-FACTURACION``, cobros con
+        ``R-CONTABILIDAD-CXC`` (o ``R-CONTABILIDAD`` para ambas) y SM con
+        ``R-PRODUCCION-OP``; sin el permiso, null. Las claves de departamento
+        (``puede_ver_contabilidad``) ya no deciden."""
+        pedido = self._pedido(lleva_bordado=True)
+        cobro = self._cobro(self._factura(pedido))
+        sm = self._sm(pedido)
+
+        data = self._data(pedido, self._con_grants("fact@acme.test", "R-CONTABILIDAD-FACTURACION"))
+        self.assertEqual(len(data["facturas"]), 1)
+        self.assertIsNone(data["cobros"])
+        self.assertIsNone(data["salidas_maquila"])
+
+        data = self._data(pedido, self._con_grants("cxc@acme.test", "R-CONTABILIDAD-CXC"))
+        self.assertIsNone(data["facturas"])
+        self.assertEqual([c["cobro_id"] for c in data["cobros"]], [cobro.pk])
+
+        data = self._data(pedido, self._con_grants("conta@acme.test", "R-CONTABILIDAD"))
+        self.assertEqual((len(data["facturas"]), len(data["cobros"])), (1, 1))
+
+        data = self._data(pedido, self._con_grants("op@acme.test", "R-PRODUCCION-OP"))
+        self.assertEqual([s["id"] for s in data["salidas_maquila"]], [sm.pk])
+        self.assertIsNone(data["salidas_maquila"][0]["total"])
+
+        data = self._data(pedido, self.usuario)
+        self.assertIsNone(data["salidas_maquila"])
+
+    def test_no_resuelve_claves_de_departamento(self):
+        """#1259: una sola resolución de permisos por petición (``permisos_efectivos``)."""
+        pedido = self._pedido()
+        self._cobro(self._factura(pedido))
+        user = self._con_grants("solo@acme.test", "R-CONTABILIDAD")
+        with patch("nucleo.importes.claves_departamento_usuario", side_effect=AssertionError("#1259")):
+            self.assertEqual(len(self._data(pedido, user)["facturas"]), 1)
+
+    def test_sm_movimientos_facturas_y_cobros_solo_de_sus_sucursales(self):
+        """#1243: como en su módulo, quien no es admin solo ve lo de sus sucursales;
+        un cobro con una línea de una factura de otra sucursal no se ve (#1078)."""
+        from produccion.models import SalidaMaquila
+
+        otra = Sucursal.objects.create(empresa=self.empresa, codigo="MTY", nombre="MTY")
+        pedido = self._pedido(lleva_bordado=True)
+        sm = self._sm(pedido)
+        sm_ajena = self._sm(pedido)
+        SalidaMaquila.objects.filter(pk=sm_ajena.pk).update(sucursal=otra)
+        factura = self._factura(pedido)
+        ajena = self._factura(pedido)
+        Factura.objects.filter(pk=ajena.pk).update(sucursal=otra)
+        cobro = self._cobro(factura)
+        cobro_ajeno = self._cobro(ajena)
+        mov = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, usuario=self.usuario, pedido=pedido,
+        )
+        mov_ajeno = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=otra, usuario=self.usuario, pedido=pedido,
+        )
+        todo = ("R-CONTABILIDAD", "R-PRODUCCION-OP")
+
+        data = self._data(pedido, self._con_grants("suc@acme.test", *todo))
+        self.assertEqual([s["id"] for s in data["salidas_maquila"]], [sm.pk])
+        self.assertEqual([f["id"] for f in data["facturas"]], [factura.pk])
+        self.assertEqual([c["cobro_id"] for c in data["cobros"]], [cobro.pk])
+        self.assertEqual([m["id"] for m in data["movimientos_inventario"]], [mov.pk])
+
+        data = self._data(pedido, self.admin)
+        self.assertEqual([s["id"] for s in data["salidas_maquila"]], [sm.pk, sm_ajena.pk])
+        self.assertEqual([f["id"] for f in data["facturas"]], [factura.pk, ajena.pk])
+        self.assertEqual([c["cobro_id"] for c in data["cobros"]], [cobro.pk, cobro_ajeno.pk])
+        self.assertEqual([m["id"] for m in data["movimientos_inventario"]], [mov.pk, mov_ajeno.pk])
+
+    def test_oc_de_todos_los_pedidos_que_surte(self):
+        """#1263: la OC cuenta en cada pedido que surte (M2M ``pedidos``), no solo en
+        su primero (FK ``pedido``); una OC vieja con solo la FK también."""
+        from compras.models import OrdenCompra
+
+        primero, segundo, tercero = self._pedido(), self._pedido(), self._pedido()
+        base = {
+            "empresa": self.empresa, "sucursal": self.sucursal, "moneda": self.moneda,
+            "usuario": self.usuario, "fecha_oc": timezone.localdate(),
+        }
+        oc = OrdenCompra.objects.create(pedido=primero, folio=self._siguiente("OC"), **base)
+        oc.pedidos.set([primero, segundo])
+        solo_fk = OrdenCompra.objects.create(pedido=tercero, folio=self._siguiente("OC"), **base)
+
+        for pedido, esperadas in ((primero, [oc.pk]), (segundo, [oc.pk]), (tercero, [solo_fk.pk])):
+            self.assertEqual([o["id"] for o in self._data(pedido)["ordenes_compra"]], esperadas)
+            client = APIClient()
+            client.force_authenticate(user=self.admin)
+            detalle = client.get(f"/api/v1/ventas/pedidos/{pedido.pk}/").json()
+            self.assertEqual(
+                [d["id"] for d in detalle["documentos"] if d["tipo"] == "orden_compra"], esperadas,
+            )
 
     # --- movimientos de inventario ------------------------------------------
 
@@ -5617,7 +5721,8 @@ class PedidoDocumentosTests(TestCase):
             empresa=self.empresa, codigo="conta-ventas-doc", nombre="Conta ventas",
             estatus=Rol.Estatus.ACTIVO, clave_departamento="CONTAVENTAS",
         )
-        _con_claves(rol, ["R-PRODUCCION-COSTOS"])
+        # Cada sección con el permiso de su módulo (#1243).
+        _con_claves(rol, ["R-PRODUCCION-COSTOS", "R-PRODUCCION-OP", "R-CONTABILIDAD"])
         conta = Usuario.objects.create(
             username="conta@acme.test", email="conta@acme.test",
             empresa=self.empresa, sucursal_default=self.sucursal,

@@ -2167,7 +2167,19 @@ Cada documento que nació del pedido, para la pestaña "Documentos" del detalle.
 
 - **Endpoint**: `GET /api/v1/ventas/pedidos/{id}/documentos/`
 - Solo lectura. Mismo alcance que `trazabilidad/` (`404` para un pedido de otra empresa). Cada bloque, además, solo trae documentos de la empresa del pedido (EC-916).
-- **Por sucursal** (EC-920, regla #536 de `pedido.documentos`): para quien no es admin ni superusuario, `ordenes_bordado`, `ordenes_reflejante`, `ordenes_corte_manga`, `packings` y `pickings` solo traen documentos de sus sucursales (`sucursales_permitidas()`), y `despachos` solo los de un packing visible (ni su `packing_id` ni su `packing_folio` salen si no). Admin y superusuario, todas las sucursales de la empresa activa. `movimientos_inventario`, `pre_ordenes`, `salidas_maquila`, `facturas` y `cobros` todavía no se acotan por sucursal (#1243): una TR puede ir entre almacenes de sucursales distintas y falta decidir qué sucursal cuenta.
+- **Cada sección con las reglas de su módulo** (#1243): el mismo permiso de lectura y el mismo alcance por sucursal que el endpoint propio de esos documentos. Sin el permiso, la sección es `null` (ocultarla); con él, para quien no es admin ni superusuario, solo las filas de sus sucursales (`sucursales_permitidas()`). Admin y superusuario lo ven todo en la empresa activa.
+
+  | Sección | Permiso (si no, `null`) | Por sucursal |
+  |---|---|---|
+  | `salidas_maquila` | `R-PRODUCCION-OP` (como `GET /produccion/salidas-maquila/`) | sucursal de la SM (EC-871) |
+  | `facturas` | `R-CONTABILIDAD` o `R-CONTABILIDAD-FACTURACION` | sucursal de la factura (#753) |
+  | `cobros` | `R-CONTABILIDAD` o `R-CONTABILIDAD-CXC` | un cobro con alguna línea de una factura de otra sucursal no sale (#1078) |
+  | `movimientos_inventario` | — | sucursal del movimiento |
+  | `pickings`, `despachos` | — | sucursal del picking; un despacho solo si su packing es visible (ni su `packing_id` ni su `packing_folio` salen si no) |
+  | `ordenes_bordado`, `ordenes_reflejante`, `ordenes_corte_manga`, `packings` | — | regla #536 de `pedido.documentos` (EC-920) |
+  | `pre_ordenes`, `envios`, `cotizaciones`, `ordenes_compra`, `ordenes_produccion` | — | no (son de la empresa) |
+
+  Una sola resolución de permisos por petición (`permisos_efectivos`): las claves de departamento (`puede_ver_contabilidad`) ya no deciden facturas ni cobros (#1259).
 - Número fijo de consultas, sin importar cuántos documentos tenga el pedido.
 - **Respuesta** (`200`), siempre con las 15 llaves; una lista vacía es "sin registros":
   ```json
@@ -2193,9 +2205,9 @@ Cada documento que nació del pedido, para la pestaña "Documentos" del detalle.
     "packings": [{ "id": 12, "folio": "PACK-00012", "estatus": "COMPLETADO", "estatus_label": "Completado", "fecha": "..." }]
   }
   ```
-- **`cotizaciones`, `ordenes_compra`, `ordenes_produccion`, `ordenes_bordado`, `ordenes_reflejante`, `ordenes_corte_manga`, `packings`** (EC-920): los mismos documentos que `documentos[]` del detalle del pedido (`GET /pedidos/{id}/`), con la misma relación y el mismo alcance (`documentos_visibles` en `ventas/services/pedido_documentos_service.py`): activos, de la empresa del pedido y, para quien no es admin ni superusuario, las OB/OR/OCM y packings solo de sus sucursales (#536). La OC es la ligada por `OrdenCompra.pedido` (el primer pedido de la OC); la OP, la principal o ligada por `pedidos_ids`. `folio` es `null` en la cotización (el modelo no tiene folio; se identifica por `id`). `estatus` es el valor guardado (entero o texto según el documento) y `estatus_label` su etiqueta; `fecha` es `created_at` (cotización y packing), `fecha_oc` (OC, solo fecha) o `fecha_inicio` (órdenes de producción). Sin importes: la pestaña no los necesita.
-- **`facturas` / `cobros`**: `null` si el usuario no puede ver contabilidad (`puede_ver_contabilidad`): ocultar esas secciones. Facturas activas; cobros activos y no cancelados aplicados a ellas. `moneda_codigo` es el código ISO (en un cobro sin moneda, la de su cuenta bancaria).
-- **`salidas_maquila[].total`**: `null` sin `R-PRODUCCION-COSTOS` (mismo permiso que `GET /produccion/salidas-maquila/`). Es el total del documento SM, que puede cubrir más de un pedido; no es la parte de este pedido.
+- **`cotizaciones`, `ordenes_compra`, `ordenes_produccion`, `ordenes_bordado`, `ordenes_reflejante`, `ordenes_corte_manga`, `packings`** (EC-920): los mismos documentos que `documentos[]` del detalle del pedido (`GET /pedidos/{id}/`), con la misma relación y el mismo alcance (`documentos_visibles` en `ventas/services/pedido_documentos_service.py`): activos, de la empresa del pedido y, para quien no es admin ni superusuario, las OB/OR/OCM y packings solo de sus sucursales (#536). La OC cuenta en todos los pedidos que surte (#1263): los de `OrdenCompra.pedidos` (M2M) y el de la FK `pedido` (su primero); también en `documentos[]` del detalle. La OP, la principal o ligada por `pedidos_ids`. `folio` es `null` en la cotización (el modelo no tiene folio; se identifica por `id`). `estatus` es el valor guardado (entero o texto según el documento) y `estatus_label` su etiqueta; `fecha` es `created_at` (cotización y packing), `fecha_oc` (OC, solo fecha) o `fecha_inicio` (órdenes de producción). Sin importes: la pestaña no los necesita.
+- **`facturas` / `cobros`**: `null` sin el permiso de su sección (tabla de arriba): ocultar esas secciones. Facturas activas; cobros activos y no cancelados aplicados a ellas. `moneda_codigo` es el código ISO (en un cobro sin moneda, la de su cuenta bancaria).
+- **`salidas_maquila[].total`**: `null` sin `R-PRODUCCION-COSTOS` (mismo permiso que `GET /produccion/salidas-maquila/`); la sección entera es `null` sin `R-PRODUCCION-OP`. Es el total del documento SM, que puede cubrir más de un pedido; no es la parte de este pedido.
 - **`movimientos_inventario`**: los ligados al pedido (p. ej. la salida del despacho) y los de las transferencias (TR) de sus pickings, alta y cada traslado, por `Transferencia.picking` (EC-916). Una TR manual nunca aparece aunque su texto mencione un picking.
 - **`envios`**: el modelo no guarda guía ni fecha, y `Transportista` no tiene nombre (solo `empresa`), así que solo va `transportista_id`; la guía está en `despachos[].guia`.
 
