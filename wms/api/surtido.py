@@ -63,15 +63,28 @@ def _packing_vivo():
         estado="CANCELADO").exclude(packing__estado="CANCELADO")
 
 
-def _comprometidas_por_talla():
-    """Σ por talla de ``max(pedida − surtida, 0)`` del pedido ``OuterRef("pk")`` (#1247)."""
+def _faltante_por_talla(fuente, campo, llave):
+    """Σ por talla de ``max(pedida − Σ campo de fuente, 0)`` del pedido ``OuterRef("pk")``:
+    una talla sobrada no compensa a otra (#1247, #1290)."""
     tallas = (
         PedidoDetalleTalla.objects.filter(pedido_detalle__pedido_id=OuterRef("pk"))
-        .annotate(s=_suma(_picking_vivo(), "cantidad_surtida", "pedido_detalle_talla_id"))
+        .annotate(s=_suma(fuente, campo, llave))
         .annotate(c=Greatest(F("cantidad") - F("s"), CERO, output_field=NUM))
         .order_by().values("pedido_detalle__pedido_id").annotate(t=Sum("c")).values("t")[:1]
     )
     return Coalesce(Subquery(tallas, output_field=NUM), CERO, output_field=NUM)
+
+
+def _comprometidas_por_talla():
+    """Σ por talla de ``max(pedida − surtida, 0)`` del pedido (#1247)."""
+    return _faltante_por_talla(_picking_vivo(), "cantidad_surtida", "pedido_detalle_talla_id")
+
+
+def _por_despachar_por_talla():
+    """Σ por talla de ``max(pedida − despachada, 0)`` del pedido (#1290)."""
+    return _faltante_por_talla(
+        _despachado(_packing_vivo()), "cantidad_empacada", "picking_detalle__pedido_detalle_talla_id",
+    )
 
 
 def _salidas_manuales():
@@ -116,10 +129,13 @@ def anotar_avance(qs, nivel):
         empacadas=_suma(_packing_vivo(), "cantidad_empacada", llaves["pack"]),
         despachadas=_suma(_despachado(_packing_vivo()), "cantidad_empacada", llaves["pack"]),
     )
+    # ``por_despachar`` solo decide la etapa (no sale en la respuesta).
     if nivel == "pedido":
-        qs = qs.annotate(comprometidas=_comprometidas_por_talla(), salidas_manuales=_salidas_manuales())
+        qs = qs.annotate(comprometidas=_comprometidas_por_talla(), por_despachar=_por_despachar_por_talla(),
+                         salidas_manuales=_salidas_manuales())
     else:
-        qs = qs.annotate(comprometidas=Greatest(F("pedidas") - F("surtidas"), CERO, output_field=NUM))
+        qs = qs.annotate(comprometidas=Greatest(F("pedidas") - F("surtidas"), CERO, output_field=NUM),
+                         por_despachar=Greatest(F("pedidas") - F("despachadas"), CERO, output_field=NUM))
     return qs
 
 
@@ -138,9 +154,11 @@ def _totales(o):
 
 
 def _etapa(o):
-    if o.pedidas and o.despachadas >= o.pedidas:
+    """Por talla, no por totales (#1290): con una talla sobre-surtida y otra corta el
+    pedido sigue PARCIAL (``comprometidas > 0``), aunque Σ surtidas ≥ Σ pedidas."""
+    if o.pedidas and o.por_despachar <= 0:
         return "DESPACHADO"
-    if o.pedidas and o.surtidas >= o.pedidas:
+    if o.pedidas and o.comprometidas <= 0:
         return "SURTIDO"
     if o.surtidas > 0:
         return "PARCIAL"
