@@ -136,7 +136,7 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
                 continue
             fila = {"id": f.pk, "folio": f.folio, "estatus": f.estatus, "recepcion": f.recepcion_id}
             if ve:
-                fila["total"] = f.total
+                fila["total"] = f"{f.total:.2f}"  # string con 2 decimales, como el serializer (#1296)
             filas.append(fila)
         return filas
 
@@ -353,12 +353,12 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
         origen = (p.get("origen") or "").upper()
         if origen:
             if origen not in ("OP", "OB", "OR"):
-                raise ValidationError({"origen": "Opciones: OP, OB, OR."})
+                raise ValidationError({"origen": ["Opciones: OP, OB, OR."]})
             campo = {"OP": "op", "OB": "ob", "OR": "orden_r"}[origen]
             qs = qs.filter(**{f"{campo}__isnull": False})
         if p.get("estatus"):
             if p["estatus"] not in SalidaMaquila.Estatus.values:
-                raise ValidationError({"estatus": f"Opciones: {', '.join(SalidaMaquila.Estatus.values)}."})
+                raise ValidationError({"estatus": [f"Opciones: {', '.join(SalidaMaquila.Estatus.values)}."]})
             qs = qs.filter(estatus=p["estatus"])
         return qs
 
@@ -472,7 +472,15 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
         with transaction.atomic():
             sm = self.get_queryset().select_for_update(of=("self",)).get(pk=self.get_object().pk)
             if sm.estatus not in permitido_desde:
-                raise ValidationError({"estatus": f"No se puede pasar de {sm.get_estatus_display()} a {nuevo.label}."})
+                raise ValidationError({"estatus": [f"No se puede pasar de {sm.get_estatus_display()} a {nuevo.label}."]})
+            # Con recepciones activas la SM ya no se cancela (#1294): el faltante se
+            # cierra desde la recepción con ``cerrar_salida_maquila``.
+            if nuevo == SalidaMaquila.Estatus.CANCELADA and sm.recepciones.filter(activo=True).exclude(
+                estatus=Recepcion.EstatusRecepcion.CANCELADA
+            ).exists():
+                raise ValidationError({"estatus": [
+                    "La SM ya tiene recepciones; cierra el faltante desde la recepción."
+                ]})
             sm.estatus = nuevo
             campos = ["estatus", "updated_at"]
             if nuevo == SalidaMaquila.Estatus.RECIBIDA:
@@ -488,7 +496,7 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
         registra la recepción y crea la factura de maquila para CxP.
         Antes: ``self._cambiar(request, SalidaMaquila.Estatus.RECIBIDA, {SalidaMaquila.Estatus.ENVIADA})``."""
         self.get_object()  # 404 fuera de alcance, como antes
-        raise ValidationError({"estatus": "La SM se recibe en WMS (Recepciones → Orden de Producción)."})
+        raise ValidationError({"estatus": ["La SM se recibe en WMS (Recepciones → Orden de Producción)."]})
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):

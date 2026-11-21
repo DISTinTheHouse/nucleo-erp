@@ -241,7 +241,10 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
         cls.almacen_sin_empresa = Almacen.objects.create(sucursal=cls.suc_1, codigo="SE", nombre="Sin empresa")
         cls.almacen_sin_sucursal = Almacen.objects.create(empresa=cls.empresa, codigo="SS", nombre="Sin sucursal")
 
-        cls.usuario = Usuario.objects.create(username="u@acme-ra.test", email="u@acme-ra.test", empresa=cls.empresa)
+        # Admin: el onboarding exige R-/C-WMS-RECEPCIONES (#1295); el admin pasa.
+        cls.usuario = Usuario.objects.create(
+            username="u@acme-ra.test", email="u@acme-ra.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
         cls.usuario.sucursales.add(cls.suc_1)
         proveedor = Proveedor.objects.create(
             empresa=cls.empresa, nombre="Proveedor", moneda=moneda, sat_regimen_fiscal=regimen,
@@ -257,13 +260,13 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
             orden_compra=cls.oc, producto=cls.producto, sucursal=cls.suc_1, cantidad=100,
         )
 
-    def _recibir(self, user, almacen, cantidad="1"):
+    def _recibir(self, user, almacen, cantidad="1", serie_codigo="RC"):
         client = APIClient()
         client.force_authenticate(user=user)
         return client.post(
             RECEPCION_ONBOARDING_URL,
             {
-                "recepcion": {"orden_compra": self.oc.pk, "almacen": almacen.pk, "serie_codigo": "RC"},
+                "recepcion": {"orden_compra": self.oc.pk, "almacen": almacen.pk, "serie_codigo": serie_codigo},
                 "detalle": [{"orden_compra_detalle": self.oc_detalle.pk, "cantidad_recibida": cantidad}],
             },
             format="json",
@@ -281,7 +284,7 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
         antes = self._huella()
         resp = self._recibir(user, almacen)
         self.assertEqual(resp.status_code, 400, resp.content)
-        self.assertEqual(resp.json(), {campo: mensaje})
+        self.assertEqual(resp.json(), {campo: [mensaje]})  # forma de DRF en toda llave (#1296)
         self.assertEqual(self._huella(), antes)
 
     # --- almacén fuera de la empresa/sucursal de la orden ------------------------
@@ -311,7 +314,7 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
     # --- quién puede recibir ---------------------------------------------------
 
     def test_usuario_sin_empresa_es_rechazado(self):
-        sin_empresa = Usuario.objects.create(username="n@acme-ra.test", email="n@acme-ra.test")
+        sin_empresa = Usuario.objects.create(username="n@acme-ra.test", email="n@acme-ra.test", is_admin_empresa=True)
         sin_empresa.sucursales.add(self.suc_1)
         self._assert_rechazo_sin_escrituras(
             sin_empresa, self.almacen, "empresa", "El usuario no tiene empresa asignada.",
@@ -328,7 +331,9 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
     def test_convencion_de_compras_no_exige_sucursal_asignada_al_usuario(self):
         # Compras acota por empresa; el almacén queda atado a la sucursal de la
         # orden, no a ``user.sucursales``. Se fija el comportamiento actual.
-        solo_suc_2 = Usuario.objects.create(username="s2@acme-ra.test", email="s2@acme-ra.test", empresa=self.empresa)
+        solo_suc_2 = Usuario.objects.create(
+            username="s2@acme-ra.test", email="s2@acme-ra.test", empresa=self.empresa, is_admin_empresa=True,
+        )
         solo_suc_2.sucursales.add(self.suc_2)
         resp = self._recibir(solo_suc_2, self.almacen)
         self.assertEqual(resp.status_code, 200, resp.content)
@@ -346,6 +351,56 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
         self.assertEqual((detalle.producto_id, detalle.cantidad_recibida), (self.producto.pk, Decimal("5")))
         self.assertFalse(Existencia.objects.filter(almacen=self.almacen, producto=self.producto).exists())
         self.assertFalse(MovimientoInventario.objects.filter(recepcion=recepcion).exists())
+
+    # --- serie de folios (#1291, #1292) ----------------------------------------
+
+    def test_serie_elegida_que_la_sucursal_no_tiene_es_400(self):
+        # Antes se cambiaba sin avisar por la RC de la sucursal (#1292).
+        antes = self._huella()
+        resp = self._recibir(self.usuario, self.almacen, serie_codigo="RT")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"serie_codigo": ["La serie RT no está activa en la sucursal acme-ra 1."]})
+        self.assertEqual(self._huella(), antes)
+
+    def test_sin_serie_usa_la_de_la_sucursal(self):
+        resp = self._recibir(self.usuario, self.almacen, serie_codigo="")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.json()["recepcion"]["folio"].startswith("RC"))
+
+    def test_series_recepcion_sin_tope_y_por_sucursal(self):
+        for i in range(60):  # más de las 50 que cortaba el GET (#1291)
+            SerieFolio.objects.create(empresa=self.empresa, sucursal=self.suc_2, tipo_documento="RECEPCION",
+                                      serie=("RC", "RT", "RZ")[i % 3])
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        series = client.get(RECEPCION_ONBOARDING_URL).json()["catalogos"]["series_recepcion"]
+        self.assertEqual(len(series), 61)
+        series = client.get(RECEPCION_ONBOARDING_URL, {"sucursal_id": self.suc_1.pk}).json()["catalogos"]["series_recepcion"]
+        self.assertEqual([s["sucursal_id"] for s in series], [self.suc_1.pk])
+
+    # --- permiso de WMS (#1295) -------------------------------------------------
+
+    def test_sin_permiso_de_wms_es_403(self):
+        sin_permiso = Usuario.objects.create(username="w@acme-ra.test", email="w@acme-ra.test", empresa=self.empresa)
+        client = APIClient()
+        client.force_authenticate(user=sin_permiso)
+        self.assertEqual(client.get(RECEPCION_ONBOARDING_URL).status_code, 403)
+        antes = self._huella()
+        self.assertEqual(self._recibir(sin_permiso, self.almacen).status_code, 403)
+        self.assertEqual(self._huella(), antes)
+
+    def test_con_permiso_de_wms_recibe(self):
+        from seguridad.models import Permiso, UsuarioPermiso
+        con_permiso = Usuario.objects.create(username="c@acme-ra.test", email="c@acme-ra.test", empresa=self.empresa)
+        for clave in ("R-WMS-RECEPCIONES", "C-WMS-RECEPCIONES"):
+            UsuarioPermiso.objects.create(
+                usuario=con_permiso, permiso=Permiso.objects.create(clave=clave, nombre=clave),
+                tipo=UsuarioPermiso.TIPO_GRANT,
+            )
+        client = APIClient()
+        client.force_authenticate(user=con_permiso)
+        self.assertEqual(client.get(RECEPCION_ONBOARDING_URL).status_code, 200)
+        self.assertEqual(self._recibir(con_permiso, self.almacen).status_code, 200)
 
 
 class RecepcionOnboardingRenglonesTests(TestCase):

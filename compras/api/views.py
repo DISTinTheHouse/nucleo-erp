@@ -12,6 +12,7 @@ from django.utils import timezone
 from rest_framework import generics, status, viewsets
 from rest_framework.filters import OrderingFilter
 from rest_framework.decorators import action
+from rest_framework.permissions import SAFE_METHODS
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from inventarios.services import costeo
@@ -45,6 +46,7 @@ from compras.services.kpi_criterios import (
     porcentaje,
     rechazos_oc,
 )
+from nucleo.permisos import permisos_de_la_peticion
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, marcar_tope, rango_fechas, validar_parametros
 from nucleo.listados import (
     OrdenamientoEstableFilter,
@@ -104,6 +106,9 @@ from terceros.models import Proveedor, Transportista
 logger = logging.getLogger(__name__)
 
 PERMISO_EDITAR_RUTA_CRITICA_OC = "E-COMPRAS-OC"
+# Onboarding de recepciones (#1295): los códigos de WMS que usa el front.
+PERMISO_LEER_RECEPCIONES = "R-WMS-RECEPCIONES"
+PERMISO_CREAR_RECEPCIONES = "C-WMS-RECEPCIONES"
 
 
 _ip_auditoria = ip_auditoria
@@ -111,9 +116,9 @@ _ip_auditoria = ip_auditoria
 
 
 def _error_detalle(errores):
-    """400 del onboarding de recepciones: ``detalle`` siempre en lista, como lo deja el
-    serializer (#1189). Las demás claves no cambian de forma."""
-    return ValidationError({k: [v] if k == "detalle" and isinstance(v, str) else v for k, v in errores.items()})
+    """400 de recepciones con la forma de DRF: cada llave con lista de mensajes, como
+    lo deja el serializer (#1189, #1296)."""
+    return ValidationError({k: [v] if isinstance(v, str) else v for k, v in errores.items()})
 
 
 def _ref_renglon(idx, detalle):
@@ -1689,7 +1694,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 Recepcion.TipoOrigen.SALIDA_MAQUILA,
             }
             if tipo_origen not in validos:
-                raise ValidationError(
+                raise _error_detalle(
                     {"tipo_origen": "Valor inválido. Usa OC (orden de compra), OP (orden de producción) o SM (salida a maquila)."}
                 )
             if tipo_origen == Recepcion.TipoOrigen.SALIDA_MAQUILA:
@@ -1748,6 +1753,9 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         return RecepcionSerializer
 
     def _serie_folio_recepcion(self, empresa, sucursal, serie_codigo):
+        """Serie elegida (``serie_codigo``) en la sucursal, o ``None`` si no está activa:
+        no se cambia por otra sin avisar (#1292). Sin ``serie_codigo``, RC y si no hay,
+        la primera de RC/RT/RZ de la sucursal, como antes."""
         qs = SerieFolio.objects.select_for_update().filter(
             empresa=empresa,
             sucursal=sucursal,
@@ -1755,14 +1763,13 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         serie_codigo = (serie_codigo or "").strip().upper()
         series_validas = ["RC", "RT", "RZ"]
-        if serie_codigo:
-            serie_especifica = qs.filter(
-                Q(tipo_documento__iexact="RECEPCION", serie__iexact=serie_codigo)
-                | Q(tipo_documento__iexact=serie_codigo)
-            )
-            serie_folio = serie_especifica.order_by("id_serie_folio").first()
-            if serie_folio:
-                return serie_folio
+        pedida = serie_codigo or "RC"
+        serie_folio = qs.filter(
+            Q(tipo_documento__iexact="RECEPCION", serie__iexact=pedida)
+            | Q(tipo_documento__iexact=pedida)
+        ).order_by("id_serie_folio").first()
+        if serie_folio or serie_codigo:
+            return serie_folio
 
         qs = qs.filter(
             Q(tipo_documento__iexact="RECEPCION", serie__in=series_validas)
@@ -1855,20 +1862,17 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             recepcion.empresa, recepcion.sucursal, serie_codigo
         )
         if not serie_folio:
-            codigo = (serie_codigo or "RC/RT/RZ").upper()
-            raise ValidationError(
-                {
-                    "serie_codigo": (
-                        "No hay una Serie/Folio activa configurada para recepción "
-                        f"con serie {codigo} ni una alternativa disponible entre RC, RT o RZ."
-                    )
-                }
-            )
+            sucursal = getattr(recepcion.sucursal, "nombre", None) or recepcion.sucursal_id
+            if serie_codigo:
+                mensaje = f"La serie {serie_codigo.upper()} no está activa en la sucursal {sucursal}."
+            else:
+                mensaje = f"La sucursal {sucursal} no tiene una serie de recepción activa (RC, RT o RZ)."
+            raise _error_detalle({"serie_codigo": mensaje})
 
         try:
             folio_formateado, nuevo_consecutivo, anio_actual = serie_folio.get_siguiente_folio()
         except Exception:
-            raise ValidationError({"folio": "No se pudo generar el folio de la recepción."})
+            raise _error_detalle({"folio": "No se pudo generar el folio de la recepción."})
 
         serie_folio.folio_actual = nuevo_consecutivo
         serie_folio.ultimo_anio = anio_actual
@@ -1960,7 +1964,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             ubicacion = None
             ubicacion_id = item.get("ubicacion")
             if recepcion.almacen.requiere_ubicacion and not ubicacion_id:
-                raise ValidationError(
+                raise _error_detalle(
                     {"ubicacion": "La ubicación es requerida para este almacén."}
                 )
             if ubicacion_id:
@@ -1969,7 +1973,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     almacen_id=recepcion.almacen_id,
                 ).first()
                 if not ubicacion:
-                    raise ValidationError(
+                    raise _error_detalle(
                         {"ubicacion": "La ubicación no pertenece al almacén seleccionado."}
                     )
 
@@ -1978,7 +1982,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 if item.get(campo) and (item["producto"] is None or not modelo.objects.filter(
                     pk=item[campo], producto_id=item["producto"].pk
                 ).exists()):
-                    raise ValidationError(
+                    raise _error_detalle(
                         {campo: f"El {campo} no existe o no pertenece al producto del renglón."}
                     )
 
@@ -2057,7 +2061,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         empresa = getattr(user, "empresa", None)
         # Superusuario incluido: mismo alcance que el listado de recepciones (#834, #862).
         if not empresa:
-            raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
+            raise _error_detalle({"empresa": "El usuario no tiene empresa asignada."})
 
         oc_q = (request.query_params.get("q") or "").strip()
         almacen_id = request.query_params.get("almacen_id")
@@ -2075,14 +2079,14 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         tipo_compra = (request.query_params.get("tipo_compra") or "").strip().upper()
         if tipo_compra:
             if tipo_compra not in OrdenCompra.TipoCompra.values:
-                raise ValidationError({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
+                raise _error_detalle({"tipo_compra": "Valor inválido. Usa MP (OC) o PT (O)."})
             ordenes_qs = ordenes_qs.filter(tipo_compra=tipo_compra)
         orden_compra_id = request.query_params.get("orden_compra_id")
         if orden_compra_id not in (None, ""):
             try:
                 ordenes_qs = ordenes_qs.filter(pk=int(orden_compra_id))
             except (TypeError, ValueError):
-                raise ValidationError({"orden_compra_id": "Debe ser un entero."})
+                raise _error_detalle({"orden_compra_id": "Debe ser un entero."})
         if oc_q:
             ordenes_qs = ordenes_qs.filter(
                 Q(folio__icontains=oc_q)
@@ -2300,14 +2304,20 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             )
         )
 
+        # Sin tope (#1291): antes ``[:50]`` de toda la empresa dejaba fuera las RT/RZ
+        # de algunas sucursales; son pocas filas por sucursal. ``?sucursal_id=`` acota
+        # a la sucursal de la orden que se va a recibir.
         series_qs = SerieFolio.objects.filter(activo=True, empresa=empresa)
+        sucursal_serie = entero_param(request, "sucursal_id")
+        if sucursal_serie is not None:
+            series_qs = series_qs.filter(sucursal_id=sucursal_serie)
         series_qs = series_qs.filter(
             Q(tipo_documento__iexact="RECEPCION", serie__in=["RC", "RT", "RZ"])
             | Q(tipo_documento__in=["RC", "RT", "RZ"])
         )
         series = list(
-            series_qs.order_by("serie", "tipo_documento")
-            .values("id_serie_folio", "tipo_documento", "serie", "sucursal_id")[:50]
+            series_qs.order_by("sucursal_id", "serie", "tipo_documento")
+            .values("id_serie_folio", "tipo_documento", "serie", "sucursal_id")
         )
 
         return {
@@ -2329,6 +2339,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
     def onboarding(self, request):
         user = request.user
         empresa = getattr(user, "empresa", None)
+        # Mismos códigos que el front (#1295): R- para leer el alta, C- para recibir
+        # (OC/OP/SM y cerrar la SM). Superusuario y admin pasan sin consultar; la
+        # resolución queda en caché de la petición (``_sm_pendientes`` la reutiliza).
+        codigo = PERMISO_LEER_RECEPCIONES if request.method in SAFE_METHODS else PERMISO_CREAR_RECEPCIONES
+        if codigo not in permisos_de_la_peticion(request):
+            raise PermissionDenied(f"No tienes permiso para esta acción ({codigo}).")
 
         if request.method.lower() == "get":
             return Response(self.handle_get_onboarding(request))
@@ -2339,12 +2355,14 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             data = serializer.validated_data
             header = data["recepcion"]
             detalle_raw = data["detalle"]
-            serie_codigo = (header.get("serie_codigo") or "RC").strip().upper()
+            # Vacío = la serie por omisión (RC o la que tenga la sucursal); una serie
+            # elegida que la sucursal no tiene es 400, no se cambia por otra (#1292).
+            serie_codigo = (header.get("serie_codigo") or "").strip().upper()
 
             # Superusuario incluido, igual que el GET (#875).
             if not empresa:
                 raise _error_detalle({"empresa": "El usuario no tiene empresa asignada."})
-            if serie_codigo not in {"RC", "RT", "RZ"}:
+            if serie_codigo and serie_codigo not in {"RC", "RT", "RZ"}:
                 raise _error_detalle({"serie_codigo": "serie_codigo debe ser RC, RT o RZ."})
 
             with transaction.atomic():
@@ -3627,6 +3645,12 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
 
 
 
+def _dec2(valor):
+    """Decimal como string con 2 decimales (``"20.00"``), la forma de los
+    ``DecimalField`` del serializer (#1296)."""
+    return f"{Decimal(str(valor or 0)).quantize(Decimal('0.01'))}"
+
+
 def _sm_pendientes(request):
     """SM Enviadas (por recibir) del alcance del usuario. Una consulta.
 
@@ -3635,7 +3659,6 @@ def _sm_pendientes(request):
     - SM de OB/OR: ``detalle`` con sus renglones (SKU, talla, color y
       ``cantidad_pendiente``, el tope al recibir). Una consulta más, solo si hay.
     - ``total`` solo con ``R-PRODUCCION-COSTOS``, como en las SM (#1235)."""
-    from nucleo.permisos import permisos_de_la_peticion
     from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
     from produccion.scope import ordenes_produccion_visibles
 
@@ -3657,12 +3680,13 @@ def _sm_pendientes(request):
             "id": sm.pk, "folio": sm.folio, "folio_display": f"{sm.folio} · {folio_origen}",
             "origen": origen, "origen_folio": folio_origen, "op_id": sm.op_id,
             "centro_confeccion": sm.centro_confeccion_id, "centro_confeccion_nombre": sm.centro_confeccion.nombre,
-            "sucursal_id": sm.sucursal_id, "fecha_envio": sm.fecha_envio, "total_piezas": sm.total_piezas,
-            "piezas_pendientes": (sm.total_piezas - sm.piezas_recibidas).quantize(Decimal("0.01")),
+            # Decimales como string con 2 decimales, como los del serializer (#1296).
+            "sucursal_id": sm.sucursal_id, "fecha_envio": sm.fecha_envio, "total_piezas": _dec2(sm.total_piezas),
+            "piezas_pendientes": _dec2(sm.total_piezas - sm.piezas_recibidas),
         }
         if sm.op_id is None:
             fila["detalle"] = renglones.get(sm.pk, [])
         if ve_costos:
-            fila["total"] = sm.total
+            fila["total"] = _dec2(sm.total)
         filas.append(fila)
     return filas
