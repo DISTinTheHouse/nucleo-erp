@@ -1056,11 +1056,16 @@ class PedidoDetalleSerializer(serializers.ModelSerializer):
     def validate_direccion_envio_cliente(self, direccion):
         return _exigir_empresa_del_usuario(self, "direccion_envio_cliente", direccion)
 
+    def validate_categoria_producto(self, categoria):
+        # Como en ``CotizacionDetalleSerializer`` (#1036): una categoría de otra
+        # empresa se trataba como válida.
+        return _exigir_empresa_del_usuario(self, "categoria_producto", categoria)
+
     def validate(self, attrs):
         pedido = attrs.get("pedido") or self.instance.pedido
         _exigir_empresa_del_padre(
             self, attrs, "pedido", pedido.empresa_id,
-            ("producto", "direccion_envio_cliente"),
+            ("producto", "direccion_envio_cliente", "categoria_producto"),
         )
         # Matriz prenda/proceso (EC-575): cambiar el producto de un renglón existente
         # re-evalúa sus tallas (uno nuevo aún no tiene).
@@ -1225,6 +1230,13 @@ class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
                 "La sucursal no pertenece a la empresa del usuario."
             )
         return sucursal
+
+    def validate_moneda(self, moneda):
+        # Global o privada de la empresa, como ``PedidoSerializer.validate_moneda``
+        # (#1036): ``editar-mesa-control`` aceptaba la moneda privada de otra empresa.
+        return _exigir_empresa(
+            self, "moneda", moneda, _moneda_de_la_empresa, getattr(_usuario(self), "empresa_id", None),
+        )
 
 
 class PedidoMesaControlDetalleInputSerializer(serializers.Serializer):

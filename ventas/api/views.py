@@ -123,6 +123,7 @@ from ventas.services.pedido_field_filter_service import (
 from nucleo.permisos import CODIGOS_COTIZACIONES, CODIGOS_PEDIDO_NEUTRO, LecturaPorCodigo
 from rest_framework.permissions import IsAuthenticated
 from nucleo.importes import quitar_montos
+from nucleo.scope import exigir_empresa_activa
 from wms.models import Estado as EstadoWms, Picking, PickingDetalle
 
 logger = logging.getLogger(__name__)
@@ -511,10 +512,13 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             return qs
         return self._apply_filters(qs)
 
+    def create(self, request, *args, **kwargs):
+        exigir_empresa_activa(request.user)  # #1036: 400 explícito antes de validar
+        return super().create(request, *args, **kwargs)
+
     def perform_create(self, serializer):
         user = self.request.user
-        empresa = getattr(user, "empresa", None)
-        serializer.save(empresa=empresa, vendedor=user)
+        serializer.save(empresa=user.empresa, vendedor=user)
 
     def perform_update(self, serializer):
         user = self.request.user
@@ -3450,6 +3454,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         return response
 
     def create(self, request, *args, **kwargs):
+        exigir_empresa_activa(request.user)  # #1036: 400 explícito antes de validar
         return self._filtrar_respuesta_contabilidad(super().create(request, *args, **kwargs))
 
     def update(self, request, *args, **kwargs):

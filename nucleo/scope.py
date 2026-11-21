@@ -37,6 +37,16 @@ def empresa_ids_lectura(user):
     return [empresa_id] if empresa_id else []
 
 
+def exigir_empresa_activa(user):
+    """Alta sin empresa activa → ``400 {"empresa": [...]}`` antes de validar el body:
+    no depende de que cada FK falle por su cuenta ni llega a guardar
+    ``empresa=None`` (#1036). Lee ``empresa_id``: no consulta la BD."""
+    from rest_framework.exceptions import ValidationError
+
+    if not getattr(user, "empresa_id", None):
+        raise ValidationError({"empresa": ["El usuario no tiene empresa activa."]})
+
+
 def es_empresa_activa(user, empresa_id):
     """``True`` si ``empresa_id`` es la empresa activa del usuario."""
     return bool(empresa_id) and empresa_id == getattr(user, "empresa_id", None)
