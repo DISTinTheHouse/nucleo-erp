@@ -948,6 +948,9 @@ class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnSe
         # list/retrieve. Se sube y se descarga por las acciones dedicadas
         # (``adjuntar-pdf`` / ``pdf-fusionado``); aquí solo se informa si existe.
         exclude = ["pdf_adjunto"]
+        # La factura de maquila nace en el servidor al recibir la SM (``facturar_maquila``):
+        # por la API no se liga ni se cambia de SM, ni a una de otra empresa (#1293).
+        read_only_fields = ["salida_maquila"]
 
     def get_tiene_pdf_adjunto(self, obj):
         anotado = getattr(obj, "_tiene_pdf", None)
