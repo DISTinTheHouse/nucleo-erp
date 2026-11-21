@@ -19,13 +19,13 @@ from django.db.models import (
 from django.db.models import Subquery
 from django.utils import timezone
 from django.utils.dateparse import parse_date
-from django.db.models.functions import Coalesce, Concat, Greatest, NullIf, Trim
+from django.db.models.functions import Coalesce, Greatest
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import SearchFilter
 
-from nucleo.listados import OrdenamientoEstableFilter
+from nucleo.listados import OrdenamientoEstableFilter, nombre_para_mostrar_sql
 
 from ventas.services.clasificacion_service import _RANGOS_DIAS, rango_fecha_entrega
 from wms.models import Despacho, Packing, Picking, PickingDetalle, Transferencia
@@ -209,18 +209,7 @@ PRIORIDAD_RANGO = Case(
 # ``operador_nombre`` del serializer (``get_full_name().strip() or email``): nombre
 # completo o, si queda vacío, el correo. Mismo armado que ``vendedor_nombre`` de
 # ``pedidos_listado``.
-OPERADOR_NOMBRE = Coalesce(
-    NullIf(
-        Trim(Concat(
-            Coalesce(F("operador__first_name"), Value("")),
-            Value(" "),
-            Coalesce(F("operador__last_name"), Value("")),
-        )),
-        Value(""),
-    ),
-    F("operador__email"),
-    output_field=CharField(),
-)
+OPERADOR_NOMBRE = nombre_para_mostrar_sql("operador")
 
 # ``pedido_fecha_entrega`` en SQL: ``fecha_clasificacion`` + días máximos de la
 # clasificación (``rango_fecha_entrega``); sin clasificación o ``X``, NULL.

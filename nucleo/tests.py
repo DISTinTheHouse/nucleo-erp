@@ -2597,3 +2597,18 @@ class SucursalesPermitidasQTests(TestCase):
             qs = Sucursal.objects.filter(sucursales_permitidas_q(u, "pk"))
         with self.assertNumQueries(1):
             self.assertEqual(set(qs.values_list("pk", flat=True)), {self.s1.pk, self.s3.pk})
+
+
+class NombreParaMostrarSqlTests(TestCase):
+    """#1262: ``nombre_para_mostrar_sql`` da lo mismo que ``nombre_para_mostrar``."""
+
+    def test_igual_que_la_version_python(self):
+        from nucleo.listados import nombre_para_mostrar_sql
+        from ventas.utils.helpers import nombre_para_mostrar
+
+        casos = [("Ana", "López"), ("Ana", ""), ("", "López"), ("", ""), ("  ", "  "), (" Ana ", " ")]
+        for i, (first, last) in enumerate(casos):
+            Usuario.objects.create(username=f"nps{i}", email=f"nps{i}@x.test", first_name=first, last_name=last)
+        for u in Usuario.objects.filter(username__startswith="nps").annotate(n=nombre_para_mostrar_sql("")):
+            with self.subTest(first=u.first_name, last=u.last_name):
+                self.assertEqual(u.n, nombre_para_mostrar(u.first_name, u.last_name, u.email))

@@ -32,12 +32,12 @@ una sola consulta agregada: nada por fila.
 from decimal import Decimal
 
 from django.contrib.postgres.aggregates import ArrayAgg
-from django.db.models import CharField, Count, DateField, F, Func, IntegerField, OuterRef, Q, Subquery, Sum, Value
-from django.db.models.functions import Coalesce, Concat, JSONObject, NullIf, Trim, Trunc
+from django.db.models import Count, DateField, F, Func, IntegerField, OuterRef, Q, Subquery, Sum, Value
+from django.db.models.functions import Coalesce, JSONObject, NullIf, Trim, Trunc
 from rest_framework.exceptions import ValidationError
 
 from nucleo.kpis import entero_param, vacio
-from nucleo.listados import OrdenamientoEstableFilter, booleano_param, filtrar_rango
+from nucleo.listados import OrdenamientoEstableFilter, booleano_param, filtrar_rango, nombre_para_mostrar_sql
 from nucleo.opciones_filtros import clave_orden, mes_param, opciones_meses
 from ventas.models import Pedido, PedidoDetalleTalla
 from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
@@ -121,18 +121,7 @@ def anotar_columnas(qs):
         # reproduce ``nombre_para_mostrar``: nombre completo o, si queda vacío, el
         # correo; ``None`` sin cotización o sin vendedor. Solo las columnas del
         # nombre, no las filas completas de cotización y usuario.
-        vendedor_nombre=Coalesce(
-            NullIf(
-                Trim(Concat(
-                    Coalesce(F("cotizacion__vendedor__first_name"), Value("")),
-                    Value(" "),
-                    Coalesce(F("cotizacion__vendedor__last_name"), Value("")),
-                )),
-                Value(""),
-            ),
-            F("cotizacion__vendedor__email"),
-            output_field=CharField(),
-        ),
+        vendedor_nombre=nombre_para_mostrar_sql("cotizacion__vendedor"),
     )
 
 
