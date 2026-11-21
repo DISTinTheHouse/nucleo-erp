@@ -11,7 +11,6 @@ from django.core.cache import cache
 from django.db.models import F, Q
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
 from django.utils import timezone
 
 from wms.models import EtiquetaRFIDDetalle, LectorRFID, RfidScan
@@ -446,6 +445,45 @@ def lector_desde_request(request):
     return LectorRFID.objects.filter(token=token, activo=True).first()
 
 
+# Sin POST del FX en este lapso, el lector se da por apagado/desconectado.
+SEGUNDOS_LECTOR_VIVO = 300
+
+
+def lectores_estado(user):
+    """Lectores de la empresa activa de ``user`` con su último contacto (1 consulta).
+
+    ``estado``: ``SIN_CONEXION`` (nunca se ha reportado o hace más de
+    ``SEGUNDOS_LECTOR_VIVO``), ``LEYENDO`` (entraron tags en ese lapso) o
+    ``CONECTADO_SIN_TAGS`` (se reporta, pero sin tags enfrente).
+    """
+    empresa_id = getattr(user, "empresa_id", None)
+    if not empresa_id:
+        return []
+    ahora = timezone.now()
+
+    def hace(ts):
+        return int((ahora - ts).total_seconds()) if ts else None
+
+    filas = []
+    for lc in LectorRFID.objects.filter(empresa_id=empresa_id).order_by("nombre").values(
+        "id", "nombre", "sucursal_id", "activo", "ultima_conexion", "ultima_lectura"
+    ):
+        seg_con, seg_lec = hace(lc["ultima_conexion"]), hace(lc["ultima_lectura"])
+        if seg_con is None or seg_con > SEGUNDOS_LECTOR_VIVO:
+            estado = "SIN_CONEXION"
+        elif seg_lec is not None and seg_lec <= SEGUNDOS_LECTOR_VIVO:
+            estado = "LEYENDO"
+        else:
+            estado = "CONECTADO_SIN_TAGS"
+        filas.append({
+            **lc,
+            "segundos_desde_conexion": seg_con,
+            "segundos_desde_lectura": seg_lec,
+            "estado": estado,
+        })
+    return filas
+
+
 # Retención de lecturas huérfanas (#1155): tags ajenos leídos por un FX sin
 # token que no ligan con ninguna etiqueta del ERP. Una que sí se liga después
 # toma empresa y etiqueta y deja de ser huérfana, así que el corte no la toca.
@@ -819,13 +857,20 @@ def recibir_lecturas(request, lector):
         )
 
 
-@csrf_exempt
-@require_POST
-def receive_scan_sin_token(request):
-    """``POST /api/receive-scan/``: la URL que ya tiene configurada el FX.
+URL_RECEIVE = "/api/v1/wms/etiquetas-rfid/scans/receive/"
 
-    Misma lógica que ``scans/receive/`` pero sin token. Si llega un token
-    válido se usa su lector; si no, cada lectura toma la empresa de la
-    etiqueta impresa con su EPC.
-    """
-    return recibir_lecturas(request, lector_desde_request(request))
+
+@csrf_exempt
+def receive_scan_sin_token(request):
+    """``/api/receive-scan/``: retirada. Responde ``410 Gone`` sin guardar nada,
+    para que un FX que aún apunte aquí no parezca funcionar. El FX debe postear
+    a ``scans/receive/`` con el token de su ``LectorRFID``."""
+    return JsonResponse(
+        {
+            "status": "error",
+            "message": "Endpoint retirado. Configure el lector con POST " + URL_RECEIVE
+                       + " y el token de su LectorRFID.",
+            "receive_url": URL_RECEIVE,
+        },
+        status=410,
+    )

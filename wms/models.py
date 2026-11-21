@@ -652,6 +652,9 @@ class LectorRFID(models.Model):
     token = models.CharField(max_length=64, unique=True, default=_generar_token_lector)
     activo = models.BooleanField(default=True)
     ultima_lectura = models.DateTimeField(null=True, blank=True)
+    # Último POST autenticado del FX, traiga tags o no (heartbeat incluido): con
+    # ``ultima_lectura`` distingue "lector apagado" de "encendido sin tags".
+    ultima_conexion = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

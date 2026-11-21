@@ -787,6 +787,22 @@ class ScannerRFIDSeguridadTests(TestCase):
         with self.assertRaises(DjangoValidationError):
             lector.full_clean()
 
+    def test_receive_scan_legado_410_sin_guardar(self):
+        antes = RfidScan.objects.count()
+        resp = self.client.post("/api/receive-scan/", data='[{"epcId":"aaaa"}]', content_type="application/json")
+        self.assertEqual(resp.status_code, 410)
+        self.assertEqual(resp.json()["receive_url"], self.RECEIVE_URL)
+        self.assertEqual(RfidScan.objects.count(), antes)
+
+    def test_heartbeat_sin_tags_marca_conexion(self):
+        resp = self.client.post(
+            self.RECEIVE_URL, data="{}", content_type="application/json", HTTP_X_RFID_TOKEN=self.lector_a.token,
+        )
+        self.assertEqual(resp.status_code, 200)
+        lector = self._api(self.superuser).get(self.STATS_URL).json()["lectores"]
+        fila = next(x for x in lector if x["id"] == self.lector_a.pk)
+        self.assertEqual(fila["estado"], "CONECTADO_SIN_TAGS")
+
     # ── Superusuario en su empresa activa (EC-884) ────────────────────
 
     def _sembrar_huerfanas(self, n):
