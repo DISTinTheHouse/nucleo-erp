@@ -787,6 +787,15 @@ class ScannerRFIDSeguridadTests(TestCase):
         with self.assertRaises(DjangoValidationError):
             lector.full_clean()
 
+    def test_heartbeat_sin_tags_marca_conexion(self):
+        resp = self.client.post(
+            f"/api/receive-scan/?token={self.lector_a.token}", data="{}", content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        lector = self._api(self.superuser).get(self.STATS_URL).json()["lectores"]
+        fila = next(x for x in lector if x["id"] == self.lector_a.pk)
+        self.assertEqual(fila["estado"], "CONECTADO_SIN_TAGS")
+
     # ── Superusuario en su empresa activa (EC-884) ────────────────────
 
     def _sembrar_huerfanas(self, n):

@@ -44,6 +44,7 @@ from wms.scope import documentos_wms_visibles
 from wms.services.despacho_service import DespachoService
 from wms.services.rfid_scan_service import (
     lector_desde_request,
+    lectores_estado,
     normalizar_epc,
     recibir_lecturas,
     variantes_epc,
@@ -1005,6 +1006,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
 
         payload = {
             "status": "ok",
+            "lectores": lectores_estado(user),
             "total_rfidscan_rows": total,
             "last_scan_ts": last_scan_ts,
             "last_scan_seconds_ago": last_scan_how_old_secs,
