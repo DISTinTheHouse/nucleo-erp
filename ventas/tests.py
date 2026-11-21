@@ -5176,6 +5176,16 @@ class PedidoTrazabilidadTests(TestCase):
         self.assertEqual(data["resumen"]["facturado_pct"], 50.0)
         self.assertEqual(data["resumen"]["cobrado_pct"], 75.0)
 
+    def test_facturado_sin_cfdi_cancelado_ante_el_sat(self):
+        # #1302: un CFDI cancelado ante el SAT ya no es comprobante vigente; una
+        # cancelación solo solicitada sí cuenta (el CFDI sigue vigente).
+        pedido = self._pedido(cantidad=10)
+        self._factura(pedido, piezas=5)
+        Factura.objects.filter(pedido=pedido).update(cfdi_cancelado=True)
+        self._factura(pedido, piezas=2)
+        Factura.objects.filter(pedido=pedido, cfdi_cancelado=False).update(cfdi_cancelacion_solicitada=True)
+        self.assertEqual(self._data(pedido)["resumen"]["facturado_pct"], 20.0)
+
     def test_cobrado_oculto_sin_permiso_de_contabilidad(self):
         pedido = self._pedido()
         self._factura(pedido, total="100", saldo="0")
