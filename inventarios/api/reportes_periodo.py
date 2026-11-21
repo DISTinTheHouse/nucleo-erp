@@ -165,8 +165,14 @@ def almacen_ids_movimientos(user, query_params):
 # --- Existencias por periodo ---------------------------------------------------
 
 
+#: Las transferencias se leen del ledger (``_iter_ledger_sin_bitacora``), no de la
+#: bitácora: su evento no trae ``delta`` ni almacén por item y las TR anteriores a
+#: ese evento ni lo tienen (#1019, EC-823).
+ACCION_TRANSFERENCIA = "TRANSFERENCIA"
+
+
 def _iter_auditoria_items(eventos, allowed_almacen_ids, producto_id=None, producto_variante_id=None):
-    for evento in eventos.iterator():
+    for evento in eventos.exclude(accion=ACCION_TRANSFERENCIA).iterator():
         payload = evento.despues_json or evento.antes_json or {}
         evento_almacen_id = to_int(payload.get("almacen_id"))
         for item in payload.get("items", []) or []:
@@ -191,6 +197,56 @@ def _iter_auditoria_items(eventos, allowed_almacen_ids, producto_id=None, produc
                 "producto_variante_id": item_variante_id,
                 "delta": to_decimal(item.get("delta")),
             }
+
+
+def _iter_ledger_sin_bitacora(desde, empresa_ids, allowed_almacen_ids, producto_id=None, producto_variante_id=None):
+    """Movimientos del ledger desde ``desde`` que la bitácora no registra (#1019):
+
+    - Transferencias (TR), un renglón por lado: la salida (``-cantidad``) del almacén
+      de origen y la entrada del de destino. Almacén de cada lado: el de su ubicación
+      o, si no tiene, el de la TR, como en el costo.
+    - Salidas por despacho (``MovimientoInventario.despacho``): el despacho no escribe
+      evento de existencias. Almacén: el de la ubicación de origen o ``detalle.almacen``.
+
+    Cada fila trae su ``fecha`` para repartirla entre el periodo y lo posterior al
+    corte. Una consulta, sin importar cuántos movimientos haya."""
+    qs = MovimientoInventarioDetalle.objects.filter(
+        models.Q(movimiento_inventario__transferencia__isnull=False)
+        | models.Q(movimiento_inventario__despacho__isnull=False, movimiento_inventario__tipo_movimiento="SALIDA"),
+        movimiento_inventario__activo=True,
+        movimiento_inventario__empresa_id__in=empresa_ids,
+        movimiento_inventario__fecha_movimiento__gte=desde,
+    )
+    if producto_variante_id:
+        qs = qs.filter(producto_variante_id=producto_variante_id)
+    if producto_id:
+        qs = qs.filter(models.Q(producto_id=producto_id) | models.Q(producto_variante__producto_id=producto_id))
+    filas = qs.values_list(
+        "movimiento_inventario__fecha_movimiento", "producto_id", "producto_variante_id",
+        "producto_variante__producto_id", "cantidad",
+        "movimiento_inventario__transferencia_id", "almacen_id",
+        "ubicacion_origen__almacen_id", "movimiento_inventario__transferencia__almacen_origen_id",
+        "ubicacion_destino__almacen_id", "movimiento_inventario__transferencia__almacen_destino_id",
+    )
+    for fila in filas.iterator():
+        fecha, prod_id, variante_id, variante_prod_id, cantidad, transferencia_id, almacen_detalle = fila[:7]
+        ubic_origen, tr_origen, ubic_destino, tr_destino = fila[7:]
+        cantidad = to_decimal(cantidad)
+        # Misma llave que ``Existencia``: el producto de la variante si no trae producto.
+        producto_key = prod_id or variante_prod_id
+        if transferencia_id:
+            lados = ((_primero((ubic_origen, tr_origen)), -cantidad), (_primero((ubic_destino, tr_destino)), cantidad))
+        else:  # salida por despacho
+            lados = ((_primero((ubic_origen, almacen_detalle)), -cantidad),)
+        for almacen_id, delta in lados:
+            if almacen_id in allowed_almacen_ids:
+                yield {
+                    "fecha": fecha,
+                    "almacen_id": almacen_id,
+                    "producto_id": producto_key,
+                    "producto_variante_id": variante_id,
+                    "delta": delta,
+                }
 
 
 # Almacén de origen/destino de un renglón de movimiento para el costo: el de su
@@ -363,6 +419,24 @@ def reporte_existencias(user, query_params, almacen_id=_SIN_LEER):
     ):
         key = (item["almacen_id"], item["producto_id"], item["producto_variante_id"])
         post_end_delta_map[key] += item["delta"]
+        keys.add(key)
+
+    # Transferencias y despachos del ledger (#1019): entradas/salidas en el periodo
+    # y, después del corte, para reconstruir la existencia final.
+    for item in _iter_ledger_sin_bitacora(
+        inicio_dt, empresa_ids, allowed_almacen_ids,
+        producto_id=producto_id, producto_variante_id=producto_variante_id,
+    ):
+        key = (item["almacen_id"], item["producto_id"], item["producto_variante_id"])
+        delta = item["delta"]
+        if item["fecha"] > final_dt:
+            post_end_delta_map[key] += delta
+        else:
+            period_delta_map[key] += delta
+            if delta >= 0:
+                period_in_map[key] += delta
+            else:
+                period_out_map[key] += abs(delta)
         keys.add(key)
 
     product_ids = {key[1] for key in keys if key[1]}

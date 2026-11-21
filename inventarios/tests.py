@@ -1904,6 +1904,31 @@ class ReportesPeriodoBase(TestCase):
         )
         return self._movimiento(tenant, "TRANSFERENCIA", transferencia=transferencia, cantidad=cantidad)
 
+    def _salida_por_despacho(self, tenant, folio, cantidad="1"):
+        """Salida del despacho de un packing (``MovimientoInventario.despacho``): el
+        despacho no escribe evento de existencias en la bitácora (#1019)."""
+        from terceros.models import Cliente
+        from ventas.models import Pedido
+        from wms.models import Despacho, Packing, Picking
+
+        empresa, matriz, usuario = tenant["empresa"], tenant["matriz"], tenant["usuario"]
+        moneda, _ = Moneda.objects.get_or_create(codigo_iso="MXN", defaults={"nombre": "Peso"})
+        pedido = Pedido.objects.create(
+            empresa=empresa, sucursal=matriz, cliente=Cliente.objects.create(empresa=empresa, nombre=folio),
+            moneda=moneda, folio=f"P-{folio}", estatus=3, persona_pagos="Pagos", correo_facturas="p@rp.test",
+            telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        picking = Picking.objects.create(
+            folio=f"PK-{folio}", empresa=empresa, sucursal=matriz, pedido=pedido, operador=usuario,
+            usuario=usuario, almacen=tenant["almacen"],
+        )
+        packing = Packing.objects.create(
+            folio=f"PA-{folio}", empresa=empresa, sucursal=matriz, pedido=pedido, picking=picking,
+            operador=usuario, usuario=usuario,
+        )
+        despacho = Despacho.objects.create(packing=packing, guia=folio)
+        return self._movimiento(tenant, "SALIDA", almacen=tenant["almacen"], cantidad=cantidad, despacho=despacho)
+
     def _entrada_por_recepcion(self, tenant, folio):
         recepcion = Recepcion.objects.create(
             empresa=tenant["empresa"], sucursal=tenant["matriz"], almacen=tenant["almacen"],
@@ -1946,6 +1971,38 @@ class ReporteExistenciasPeriodoTests(ReportesPeriodoBase):
         })
         self.assertEqual([r["almacen_codigo"] for r in data["resumen_por_almacen"]], ["acme-rp-PT"])
         self.assertEqual((data["fecha_inicio"], data["fecha_final"]), ("2026-01-01", "2026-06-30"))
+
+    def test_transferencias_y_despachos_salen_del_ledger(self):
+        """#1019 (EC-823): la TR resta en el almacén de origen y suma en el de destino,
+        en el periodo (entradas/salidas) o después del corte (existencia final). Su
+        evento de auditoría no cuenta: no trae ``delta`` por almacén y las TR viejas ni
+        lo tienen. La salida por despacho tampoco está en la bitácora: sale del ledger."""
+        a = self.a
+        self._transferencia(a, a["almacen_norte"], a["almacen"], folio="TR-RP-P", cantidad="4")
+        self._salida_por_despacho(a, "DES-RP-1", cantidad="1")
+        despues = self._transferencia(a, a["almacen"], a["almacen_norte"], folio="TR-RP-D", cantidad="2")
+        MovimientoInventario.objects.filter(pk=despues.pk).update(fecha_movimiento=_fecha_reporte(2026, 8, 15))
+        evento = AuditoriaEvento.objects.create(
+            empresa=a["empresa"], usuario=a["usuario"], modulo="inventarios", accion="TRANSFERENCIA",
+            tabla="existencias", id_registro="1",
+            despues_json={"almacen_id": a["almacen"].pk, "items": [
+                {"producto_id": a["producto"].pk, "producto_variante_id": a["variante"].pk, "delta": "50"},
+            ]},
+        )
+        AuditoriaEvento.objects.filter(pk=evento.pk).update(created_at=_fecha_reporte(2026, 4, 1))
+
+        data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL).json()
+        filas = [
+            (f["almacen_codigo"], f["existencia_inicial"], f["entradas"], f["salidas"], f["existencia_final"])
+            for f in data["results"]
+        ]
+        # PT: hoy 10; después del corte -1 (auditoría) y -2 (TR) → final 13; en el
+        # periodo +3, +4 (TR) y -1 (despacho) → inicial 7. NT: hoy 7; +2 después →
+        # final 5; -4 en el periodo → inicial 9.
+        self.assertEqual(filas, [
+            ("acme-rp-PT", "7.0000", "7.0000", "1.0000", "13.0000"),
+            ("acme-rp-NT", "9.0000", "0.0000", "4.0000", "5.0000"),
+        ])
 
     def test_superusuario_ve_todos_los_almacenes_de_su_empresa(self):
         data = self._get(self.superuser, REPORTE_EXISTENCIAS_PERIODO_URL).json()
