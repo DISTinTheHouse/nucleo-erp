@@ -669,6 +669,24 @@ class FacturaDesglose(FinanzasBase):
         resp = self._client(self.b["usuario"]).get(self._url(factura_id))
         self.assertEqual(resp.status_code, 404, resp.data)
 
+    def test_avance_sin_cfdi_cancelado_pero_las_piezas_siguen_apartadas(self):
+        # #1302: el avance no cuenta la factura con el CFDI cancelado ante el SAT,
+        # pero sus piezas siguen apartadas hasta cancelarla también en el ERP.
+        primera = self._facturar([(self.a["talla_pedido"], 2)])
+        Factura.objects.filter(pk=primera).update(cfdi_cancelado=True)
+        segunda = self._facturar([(self.a["talla_pedido"], 1)])
+
+        resp = self._client(self.a["usuario"]).get(self._url(segunda))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(
+            resp.data["avance_pedido"],
+            {"piezas_pedidas": 3, "piezas_facturadas": 1, "piezas_pendientes": 2},
+        )
+        from finanzas.services.factura_service import FacturaService
+
+        piezas = FacturaService.piezas_por_facturar(self.a["pedido"])
+        self.assertEqual(piezas[0]["cantidad_pendiente"], 0)
+
     def test_factura_sin_pedido_ni_renglones(self):
         factura = Factura.objects.create(
             empresa=self.a["empresa"], sucursal=self.a["sucursal"], cliente=self.a["cliente"],

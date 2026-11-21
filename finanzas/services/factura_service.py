@@ -52,13 +52,18 @@ class FacturaService:
     """
 
     @staticmethod
-    def piezas_por_facturar(pedido):
+    def piezas_por_facturar(pedido, sin_cfdi_cancelado=False):
         """Por talla del pedido: piezas pedidas, ya facturadas y pendientes.
 
         Cuenta como facturado todo renglón de una factura activa no cancelada;
         un Borrador también aparta sus piezas. Los renglones anteriores a la
         facturación por talla (sin ``pedido_detalle_talla``) se descuentan del
         renglón del pedido, repartidos en orden entre sus tallas.
+
+        ``sin_cfdi_cancelado`` (avance del desglose, #1302): tampoco cuenta una
+        factura cuyo CFDI ya se canceló ante el SAT. Al dar de alta no se usa: esa
+        factura sigue Emitida en el ERP (CxC abierta, piezas sin reintegrar) hasta
+        cancelarla también aquí, y refacturar antes duplicaría la CxC.
         """
         tallas = list(
             PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
@@ -73,9 +78,12 @@ class FacturaService:
                 pedido_detalle__pedido=pedido, factura__activo=True
             )
             .exclude(factura__estatus=Factura.FacturaStatus.CANCELADA)
-            .values('pedido_detalle_id', 'pedido_detalle_talla_id')
-            .annotate(cantidad_total=Sum('cantidad'))
         )
+        if sin_cfdi_cancelado:
+            renglones_facturados = renglones_facturados.exclude(factura__cfdi_cancelado=True)
+        renglones_facturados = renglones_facturados.values(
+            'pedido_detalle_id', 'pedido_detalle_talla_id'
+        ).annotate(cantidad_total=Sum('cantidad'))
         for renglon in renglones_facturados:
             if renglon['pedido_detalle_talla_id'] is None:
                 sin_talla_por_detalle[renglon['pedido_detalle_id']] += renglon['cantidad_total']
@@ -211,7 +219,8 @@ class FacturaService:
         if pedido is not None:
             piezas_pedido = {
                 pieza['pedido_detalle_talla'].pk: pieza
-                for pieza in FacturaService.piezas_por_facturar(pedido)
+                # Avance vigente: sin facturas con el CFDI cancelado ante el SAT (#1302).
+                for pieza in FacturaService.piezas_por_facturar(pedido, sin_cfdi_cancelado=True)
             }
 
         conceptos = {}

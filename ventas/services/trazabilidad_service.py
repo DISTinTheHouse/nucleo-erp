@@ -279,6 +279,9 @@ def _facturado(pedido_ids):
         factura__pedido_id__in=pedido_ids,
         factura__activo=True,
         factura__estatus=Factura.FacturaStatus.EMITIDA,
+        # Un CFDI ya cancelado ante el SAT no es comprobante vigente (#1302); la
+        # cancelación solo solicitada o en curso sí cuenta: el CFDI sigue vigente.
+        factura__cfdi_cancelado=False,
         producto__isnull=False,  # piezas, no servicios extras (#744)
     )
     return _suma_por_pedido(qs, "factura__pedido_id", "cantidad")
