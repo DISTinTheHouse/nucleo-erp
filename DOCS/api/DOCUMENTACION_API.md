@@ -7076,23 +7076,22 @@ Notas:
 **Autenticación**: `Authorization: Bearer <TOKEN>`
 **Content-Type**: `application/json`
 
-### Quick Start (5 endpoints)
+### Quick Start (4 endpoints)
 
 | Método | Ruta                                                | Para qué                                                                                   |
 | ------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | `GET`  | `/api/v1/notificaciones/sin-leer/count/`            | Badge rojo (contador ligero). Respuesta: `{count, ultima_notificacion_id}`                 |
-| `GET`  | `/api/v1/notificaciones/stream/?token=ACCESS_TOKEN` | **Realtime SSE** — EventSource nativo. Eventos: `abierto`, `nueva`, `ping`, `error`, `fin` |
 | `GET`  | `/api/v1/notificaciones/`                           | Dropdown lista — soporta `?leido=false&modulo=ventas&limit=20&offset=0`. Sin `limit` regresa un arreglo plano; con `limit` regresa `{count, next, previous, results}` (tope 500; `limit`/`offset` inválidos → `400`, #950) |
 | `POST` | `/api/v1/notificaciones/{id}/marcar-leida/`         | Marcar 1 notificación como leída                                                           |
 | `POST` | `/api/v1/notificaciones/marcar-todas-leidas/`       | Marcar TODO como leído                                                                     |
 
-> 💡 El SSE dura ~6min y reconecta solo (`EventSource` lo hace automático). Cierra conexiones idle con keep-alive cada 20s. Perfecto para no abrir 100 requests/hour de polling.
+> 💡 Para la campana, consultar `sin-leer/count/` cada cierto tiempo (el front lo hace cada 60 s) y recargar la lista cuando cambie `ultima_notificacion_id`. `stream/` (SSE) se eliminó (#1315): pedía el JWT en la URL y ocupaba la función y la BD ~6 min por conexión.
 
 ---
 
 ### Notificaciones al vendedor: cotización autorizada / rechazada
 
-Cuando Mesa de Control **autoriza** (`POST /api/v1/ventas/cotizaciones/{id}/autorizar/`) o **rechaza** (`.../rechazar/`, con `comentario` obligatorio; el motivo viaja en el mensaje y en `data.motivo`) una cotización, el **vendedor de la cotización** recibe una `Notificacion` (un solo INSERT dentro de la misma transacción; llega por el SSE `nueva` y aparece en el listado). Se filtra con `?modulo=ventas`. No hay endpoint nuevo.
+Cuando Mesa de Control **autoriza** (`POST /api/v1/ventas/cotizaciones/{id}/autorizar/`) o **rechaza** (`.../rechazar/`, con `comentario` obligatorio; el motivo viaja en el mensaje y en `data.motivo`) una cotización, el **vendedor de la cotización** recibe una `Notificacion` (un solo INSERT dentro de la misma transacción; aparece en el contador y en el listado). Se filtra con `?modulo=ventas`. No hay endpoint nuevo.
 
 | `tipo` | `titulo` | `mensaje` (ejemplo) | `data` |
 | --- | --- | --- | --- |
@@ -7143,59 +7142,6 @@ export async function notificacionMarcarLeida(id: number, token: string) {
     },
   );
   return (await res.json()) as Notificacion;
-}
-
-// 4) Hook de Realtime SSE — pégalo en components/NotificationBell.tsx o AppLayout
-// 0 npm installs, usa EventSource nativo del navegador
-import { useEffect, useState } from "react";
-export function useNotificacionesStream(
-  token: string | undefined | null,
-  onNueva?: () => void,
-) {
-  const [sinLeer, setSinLeer] = useState<number>(0);
-  const [conectado, setConectado] = useState(false);
-
-  useEffect(() => {
-    if (!token) return;
-    const url = `http://localhost:8003/api/v1/notificaciones/stream/?token=${encodeURIComponent(token)}`;
-    const es = new EventSource(url, { withCredentials: false });
-
-    es.addEventListener("abierto", (e: MessageEvent<string>) => {
-      const d = JSON.parse(e.data) as {
-        count: number;
-        ultima_notificacion_id: number;
-      };
-      setSinLeer(d.count);
-      setConectado(true);
-    });
-    es.addEventListener("nueva", (e: MessageEvent<string>) => {
-      const d = JSON.parse(e.data) as {
-        count: number;
-        ultima_notificacion_id: number;
-      };
-      setSinLeer(d.count);
-      onNueva?.(); // refresca la lista del dropdown aquí
-    });
-    es.addEventListener("ping", () => setConectado(true));
-    es.addEventListener("fin", () => setConectado(false));
-    es.addEventListener("error", (e: any) => {
-      setConectado(false);
-      // Si el token expiró, cerramos manualmente (EventSource intentaría reconectar infinito)
-      try {
-        const d = JSON.parse(String(e?.data ?? "{}"));
-        if (d.code === "AUTH_REQUIRED") es.close();
-      } catch {
-        // Evento error sin data = desconexión transitoria; EventSource reconecta solo en ~3s
-      }
-    });
-
-    return () => {
-      es.close();
-      setConectado(false);
-    };
-  }, [token, onNueva]);
-
-  return { sinLeer, conectado };
 }
 ```
 
