@@ -47,6 +47,17 @@ def _tipo_producto():
     return TipoProducto.objects.get_or_create(codigo="PT", defaults={"pk": 3, "nombre": "Producto terminado"})[0]
 
 
+def _conceder(usuario, *claves):
+    """GRANT directo de ``claves`` al usuario en su empresa activa."""
+    from seguridad.models import Permiso, UsuarioPermiso
+
+    for clave in claves:
+        permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+        UsuarioPermiso.objects.create(
+            usuario=usuario, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=usuario.empresa,
+        )
+
+
 RECEPCIONES_URL = "/api/v1/compras/recepciones/"
 
 
@@ -673,6 +684,7 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
             username="u@acme-oc.test", email="u@acme-oc.test", empresa=cls.a["empresa"],
             sucursal_default=cls.a["sucursal"],
         )
+        _conceder(cls.usuario, "A-COMPRAS-OC")
         cls.superuser = Usuario.objects.create(
             username="root@acme-oc.test", email="root@acme-oc.test", empresa=cls.a["empresa"],
             sucursal_default=cls.a["sucursal"], is_superuser=True,
@@ -833,6 +845,20 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
             )
             self._assert_rechazo(resp, "proveedor", "El proveedor no pertenece a la empresa de la orden.", antes)
 
+    def test_aceptar_y_cancelar_sin_a_compras_oc_devuelven_403(self):
+        # #1320: el front sólo muestra «Confirmar» y «Cancelar» con A-COMPRAS-OC.
+        sin_permiso = Usuario.objects.create(
+            username="s@acme-oc.test", email="s@acme-oc.test", empresa=self.a["empresa"],
+            sucursal_default=self.a["sucursal"],
+        )
+        antes = self._huella()
+        for accion, body in (("aceptar", {}), ("cancelar", {"motivo_cancelacion": "Sin stock"})):
+            with self.subTest(accion=accion):
+                resp = self._client(sin_permiso).post(f"{ORDENES_URL}{self.oc.pk}/{accion}/", body, format="json")
+
+                self.assertEqual(resp.status_code, 403, resp.content)
+                self.assertEqual(self._huella(), antes)
+
     def test_aceptar_superusuario_sin_empresa_sigue_siendo_404(self):
         # ``get_object`` ya acota por ``user.empresa``: sin empresa, 404 antes de
         # la guarda; cerrarla no cambia nada.
@@ -928,6 +954,7 @@ class OrdenCompraCancelacionTests(TestCase):
             usuario = Usuario.objects.create(
                 username=f"u@{codigo}.test", email=f"u@{codigo}.test", empresa=empresa, sucursal_default=sucursal,
             )
+            _conceder(usuario, "A-COMPRAS-OC")
             return {
                 "empresa": empresa, "sucursal": sucursal, "proveedor": proveedor,
                 "almacen": almacen, "producto": producto, "usuario": usuario,
@@ -3547,6 +3574,7 @@ class RecepcionRetrieveOrigenTallaTests(TestCase):
             username="u@acme-879.test", email="u@acme-879.test", empresa=cls.empresa,
             sucursal_default=cls.sucursal,
         )
+        _conceder(cls.usuario, "A-COMPRAS-OC")
         moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso 879")
         cls.oc = OrdenCompra.objects.create(
             empresa=cls.empresa, sucursal=cls.sucursal, moneda=moneda, usuario=cls.usuario,

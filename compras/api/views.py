@@ -106,6 +106,9 @@ from terceros.models import Proveedor, Transportista
 logger = logging.getLogger(__name__)
 
 PERMISO_EDITAR_RUTA_CRITICA_OC = "E-COMPRAS-OC"
+# Confirmar (aceptar/) y cancelar una OC: el código con el que el front muestra
+# los dos botones (#1320).
+PERMISO_AUTORIZAR_OC = "A-COMPRAS-OC"
 # Onboarding de recepciones (#1295): los códigos de WMS que usa el front.
 PERMISO_LEER_RECEPCIONES = "R-WMS-RECEPCIONES"
 PERMISO_CREAR_RECEPCIONES = "C-WMS-RECEPCIONES"
@@ -214,6 +217,13 @@ PARAMETROS_LISTADO_RECEPCIONES = PARAMETROS_LISTADO_COMPRAS + [
 PARAMETROS_KPIS_RECEPCIONES = [
     p for p in PARAMETROS_LISTADO_COMPRAS if p.name in {"sucursal", "proveedor", "fecha_desde", "fecha_hasta"}
 ]
+
+
+def _exigir_autorizar_oc(request):
+    """403 sin ``A-COMPRAS-OC`` (#1320). Va después de ``get_object``: la OC de otra
+    empresa sigue siendo 404. Superusuario y admin de empresa pasan sin consultas."""
+    if PERMISO_AUTORIZAR_OC not in permisos_de_la_peticion(request):
+        raise PermissionDenied(f"No tienes permiso para esta acción ({PERMISO_AUTORIZAR_OC}).")
 
 
 class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
@@ -430,6 +440,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
         # ``get_object`` acota por ``user.empresa``: la OC de otra empresa es 404.
         oc = self.get_object()
+        _exigir_autorizar_oc(request)
         motivo = request.data.get("motivo_cancelacion")
         if not isinstance(motivo, str) or not motivo.strip():
             raise ValidationError({"motivo_cancelacion": "El motivo de cancelación es requerido."})
@@ -1111,6 +1122,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         # esta guarda no cambia nada; se cierra para que no dependa de ello.
         if empresa is None or oc.empresa_id != empresa.pk:
             raise ValidationError({"orden_compra_id": "No tienes acceso a esta orden de compra."})
+        _exigir_autorizar_oc(request)
         body_proveedor_id = request.data.get("proveedor") or request.data.get("proveedor_id")
         try:
             body_proveedor_id = int(body_proveedor_id) if body_proveedor_id not in (None, "") else None
