@@ -3541,7 +3541,7 @@ si la cuenta es de otra empresa, está de baja o es de agrupación.
 - `fecha_inicio`, `fecha_fin`
 - `ordering`
 
-Cada CxC trae `factura_cfdi_cancelado`, `factura_cfdi_cancelacion_solicitada`, `factura_cfdi_pendiente` y `cobrable` (misma regla que el filtro). Aplicar un cobro sobre una CxC no cobrable responde `400 cobro_detalles`.
+Cada CxC trae `factura_cfdi_cancelado`, `factura_cfdi_cancelacion_solicitada`, `factura_cfdi_pendiente` y `cobrable` (misma regla que el filtro), más `motivo_no_cobrable` (null si es cobrable) y su texto `motivo_no_cobrable_display` (#1328). Motivos, en el orden en que se evalúan: `CXC_CANCELADA`, `FACTURA_CANCELADA`, `CFDI_CANCELADO`, `CANCELACION_SOLICITADA`, `CANCELACION_EN_CURSO`, `CFDI_PENDIENTE`, `SALDO_CERO`. Aplicar un cobro sobre una CxC no cobrable responde `400 cobro_detalles` con un mensaje por causa (#1330).
 
 #### Facturas proveedor
 

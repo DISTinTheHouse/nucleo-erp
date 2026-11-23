@@ -544,6 +544,16 @@ class CuentaPorCobrar(models.Model):
         PAGADA = 'Pagada', 'Pagada'
         CANCELADA = 'Cancelada', 'Cancelada'
 
+    class MotivoNoCobrable(models.TextChoices):
+        """Por qué una CxC no admite cobros (#1328), en el orden en que se evalúa."""
+        CXC_CANCELADA = 'CXC_CANCELADA', 'CxC cancelada'
+        FACTURA_CANCELADA = 'FACTURA_CANCELADA', 'Factura cancelada'
+        CFDI_CANCELADO = 'CFDI_CANCELADO', 'CFDI cancelado ante el SAT'
+        CANCELACION_SOLICITADA = 'CANCELACION_SOLICITADA', 'Cancelación del CFDI solicitada ante el SAT'
+        CANCELACION_EN_CURSO = 'CANCELACION_EN_CURSO', 'Cancelación del CFDI en curso'
+        CFDI_PENDIENTE = 'CFDI_PENDIENTE', 'CFDI pendiente de timbrar'
+        SALDO_CERO = 'SALDO_CERO', 'Sin saldo por cobrar'
+
     empresa = models.ForeignKey('nucleo.Empresa', on_delete=models.CASCADE, related_name="cuentas_por_cobrar", null=True, blank=True)
     cliente = models.ForeignKey('terceros.Cliente', on_delete=models.PROTECT, related_name="cuentas_por_cobrar")
     factura = models.ForeignKey(Factura, on_delete=models.PROTECT, related_name="cuentas_por_cobrar")
@@ -588,6 +598,41 @@ class CuentaPorCobrar(models.Model):
         sin empresa cuya factura es de ella."""
         empresa_id = getattr(empresa, "pk", empresa)
         return models.Q(empresa_id=empresa_id) | models.Q(empresa__isnull=True, factura__empresa_id=empresa_id)
+
+    # Regla de «cobrable» (lazzar-erp#353, #1328): la misma para una instancia
+    # cargada (``motivo_no_cobrable``, sin consultas si la factura viene en
+    # ``select_related``) y para filtrar (``q_cobrable``). Aplicar un cobro, el
+    # campo ``cobrable`` y el filtro ``?cobrable=true`` salen de aquí.
+
+    def motivo_no_cobrable(self, *, considerar_saldo=True):
+        """``MotivoNoCobrable`` o ``None`` si admite cobros. ``considerar_saldo=False``
+        para quien valida el saldo contra el importe aplicado (``CobroService``)."""
+        M = CuentaPorCobrar.MotivoNoCobrable
+        if self.estatus == CuentaPorCobrar.EstatusCxC.CANCELADA:
+            return M.CXC_CANCELADA
+        f = self.factura
+        if f.estatus == Factura.FacturaStatus.CANCELADA:
+            return M.FACTURA_CANCELADA
+        if f.cfdi_cancelado:
+            return M.CFDI_CANCELADO
+        if f.cfdi_cancelacion_solicitada:
+            return M.CANCELACION_SOLICITADA
+        if f.cfdi_cancelacion_en_curso_desde is not None:
+            return M.CANCELACION_EN_CURSO
+        if f.cfdi_pendiente:
+            return M.CFDI_PENDIENTE
+        if considerar_saldo and (self.saldo or 0) <= 0:
+            return M.SALDO_CERO
+        return None
+
+    @staticmethod
+    def q_cobrable():
+        """Filtro de las CxC sin ``motivo_no_cobrable``."""
+        return models.Q(saldo__gt=0) & ~models.Q(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA) & ~(
+            models.Q(factura__estatus=Factura.FacturaStatus.CANCELADA) | models.Q(factura__cfdi_cancelado=True)
+            | models.Q(factura__cfdi_cancelacion_solicitada=True) | models.Q(factura__cfdi_pendiente=True)
+            | models.Q(factura__cfdi_cancelacion_en_curso_desde__isnull=False)
+        )
 
 class CuentaPorPagar(models.Model):
     class EstatusCxP(models.TextChoices):
