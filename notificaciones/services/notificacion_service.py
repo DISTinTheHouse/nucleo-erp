@@ -23,7 +23,7 @@ def notificaciones_para_usuario(qs, user):
     ES el aislamiento, y no admite rama de admin/superuser —ser
     ``is_admin_empresa`` no te vuelve destinatario de la notificación de otro—
     ni necesita un filtro por empresa encima, que sólo podía restar filas
-    propias. Es el mismo criterio que ``marcar_todas_leidas()`` y el stream SSE.
+    propias. Es el mismo criterio que ``marcar_todas_leidas()``.
     """
     return qs.filter(usuario=user)
 
