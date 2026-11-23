@@ -46,6 +46,7 @@ AVISOS = {
     "por_aceptar": (("produccion", "Resurtido por aceptar"),),
     "aceptada": (("almacen", "Pre-orden por validar"),),
     "necesidad_enviada": (("compras", "Faltantes de pre-orden"),),
+    "oc_autorizada": (("produccion", "OC de faltantes autorizada"),),  # #1317
     "material_recibido": (("produccion", "Material recibido"),),
     "lista": (("produccion", "Pre-orden lista para producir"),),
     "regreso_consumo": (("almacen", "Pre-orden regresó por consumo"), ("produccion", "Pre-orden regresó por consumo")),

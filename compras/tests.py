@@ -1249,6 +1249,26 @@ class OrdenCompraCancelacionTests(TestCase):
             resp = self._client().post(f"{ORDENES_URL}{oc.pk}/aceptar/", {}, format="json")
         self._assert_rechazo(resp, {"estatus": "La orden ya no puede aceptarse."}, oc, antes)
 
+    def test_aceptar_avisa_a_almacen_y_produccion(self):
+        """#1317: la OC autorizada avisa a Almacén (WMS) al confirmar; con
+        pre-orden, Producción recibe ``pre_orden_oc_autorizada`` (``AVISOS``)."""
+        from produccion.services.pre_orden_service import AVISOS
+
+        admin = Usuario.objects.create(username="acep@acme-cx.test", email="acep@acme-cx.test",
+                                       empresa=self.a["empresa"], is_admin_empresa=True)
+        oc = self._oc(Estatus.POR_AUTORIZAR)
+        with mock.patch("notificaciones.services.notificacion_service.crear_notificacion_por_rol") as avisar:
+            with self.captureOnCommitCallbacks(execute=True):
+                resp = self._client(admin).post(
+                    f"{ORDENES_URL}{oc.pk}/aceptar/", {"proveedor": self.a["proveedor"].pk}, format="json",
+                )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(avisar.call_count, 1)
+        kwargs = avisar.call_args.kwargs
+        self.assertEqual((kwargs["tipo"], kwargs["clave_departamento"]), ("oc_autorizada", "WMS"))
+        self.assertEqual(kwargs["data"]["orden_compra_id"], oc.pk)
+        self.assertIn("oc_autorizada", AVISOS)
+
     def test_aceptar_sin_renglones_sigue_rechazandose(self):
         oc = self._oc(Estatus.POR_AUTORIZAR)
         OrdenCompraDetalle.objects.filter(orden_compra=oc).delete()
