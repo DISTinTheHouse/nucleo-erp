@@ -821,6 +821,9 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
     def scans(self, request):
         """Polling endpoint p/ Next.js: últimas 50 lecturas del FX + match automático.
 
+        Filtros opcionales: ``solo_match=1`` (solo etiquetas impresas por el ERP),
+        ``unicos=1`` (última lectura por EPC) y ``limite`` (1-200, default 50).
+
         Acotado a la empresa activa del usuario, superusuario incluido (EC-884,
         ``RfidScan.objects.visibles_para``); no admin: lectores de sus sucursales.
 
@@ -842,16 +845,32 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             }
         """
         user = request.user
+        params = request.query_params
+        base = RfidScan.objects.visibles_para(user)
+        # ``solo_match=1``: solo lecturas de etiquetas impresas por el ERP; los tags
+        # ajenos cerca del lector llenaban las 50 en un minuto.
+        if str(params.get("solo_match", "")).lower() in {"1", "true", "si"}:
+            base = base.filter(etiqueta__isnull=False)
+        # ``unicos=1``: la última lectura de cada EPC (el FX repite el mismo tag
+        # varias veces por segundo).
+        if str(params.get("unicos", "")).lower() in {"1", "true", "si"}:
+            base = base.filter(
+                pk__in=base.order_by("epc", "-created_at", "-id").distinct("epc").values("pk")
+            )
+        try:
+            limite = min(max(int(params.get("limite", 50)), 1), 200)
+        except (TypeError, ValueError):
+            limite = 50
         # El match ya viene ligado desde que se recibió la lectura (``etiqueta``):
         # una sola consulta, sin recalcular variantes de EPC en cada polling.
         scans = list(
-            RfidScan.objects.visibles_para(user)
+            base
             .select_related(
                 "etiqueta__impresion__producto",
                 "etiqueta__impresion__producto_variante__color",
                 "etiqueta__impresion__producto_variante__talla",
             )
-            .order_by("-created_at", "-id")[:50]
+            .order_by("-created_at", "-id")[:limite]
         )
         # Mismo alcance que get_queryset: un no admin solo ve el detalle de las
         # etiquetas impresas en sus sucursales.
