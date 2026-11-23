@@ -2974,12 +2974,14 @@ Ya NO trae `movimiento_id`/`movimiento_inventario_id` — no hubo movimiento de 
 
 `POST /api/v1/compras/recepciones/{id}/cancelar/` con `{"motivo": "Captura duplicada"}` (#1307). Responde `200` con la recepción (forma de `RecepcionSerializer`, `estatus: 6`).
 
-- **Quién:** admin de la empresa o superusuario; otro usuario, `403`. Una recepción de otra empresa, `404`. Sin `motivo`, `400 {"motivo"}`.
+- **Quién:** admin de la empresa o superusuario; otro usuario, `403`. Una recepción de otra empresa, `404`. Sin `motivo` o con más de 500 caracteres (tras quitar espacios de los extremos), `400 {"motivo"}`.
 - **Solo antes de calidad:** `estatus` En calidad (`4`) sin inspección ni movimiento de inventario; la de una SM de OB/OR, que no pasa por calidad, Cerrada (`5`). Ya inspeccionada, de antes del flujo de calidad o ya cancelada: `400 {"estatus"}`.
 - **SM:** su factura de maquila en Borrador se cancela y la SM vuelve a Enviada (`fecha_recepcion` nula): lo recibido con esa recepción vuelve a estar pendiente. Si la recepción tiene otra factura de proveedor sin cancelar (la de maquila ya Registrada, o una de OC), `400 {"facturas_proveedores"}`: se cancela primero en Finanzas.
 - **OC:** se recalcula su estatus (Autorizada / Parcialmente recibida / Recibida); después la OC se puede cancelar con `ordenes/{id}/cancelar/`. El `DELETE` de la OC sigue rechazando cualquier recepción, aun cancelada.
-- **OP:** si ya está Completada, `400 {"op"}`.
+- **OP:** si ya está Completada, `400 {"op"}` (también cuando la completó esa misma recepción con `cerrar_orden`, #1326).
 - Queda en auditoría (`modulo=compras`, `accion=CANCELAR`, `tabla=recepciones`) con el motivo, y en el historial de la recepción.
+- **Datos de la cancelación (EC-926):** se guardan en la recepción `motivo_cancelacion` (completo, hasta 500), `fecha_cancelacion` (ISO 8601) y `cancelado_por` (id del usuario), con `cancelado_por_nombre` (nombre completo o email). Los cuatro vienen en la respuesta de `cancelar/`, en el retrieve y en el listado; `null` si no está cancelada. Las canceladas antes de existir los campos se recuperaron del evento `CANCELAR` de auditoría.
+- **`puede_cancelar` (solo en el retrieve `GET recepciones/{id}/`):** `true` si `cancelar/` procedería para el usuario que consulta, con la misma regla (`compras/services/cancelacion_recepcion.py`): admin/superusuario, empresa activa, estatus y origen, sin inspección ni movimiento, OP no Completada y sin factura de proveedor viva salvo la de maquila en Borrador. No valida el `motivo`. No va en el listado.
 
 ---
 

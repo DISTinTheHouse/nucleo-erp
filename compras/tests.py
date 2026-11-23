@@ -4101,3 +4101,254 @@ class RecepcionSalidaMaquilaServicioTests(TestCase):
     def test_cerrar_sigue_en_400(self):
         r = self.client.post(f"/api/v1/produccion/salidas-maquila/{self.sm.pk}/cerrar/")
         self.assertIn(r.status_code, (400, 403))
+
+
+class RecepcionPuedeCancelarTests(TestCase):
+    """``puede_cancelar`` del retrieve y ``POST recepciones/{id}/cancelar/`` (EC-926).
+
+    Ambos usan ``compras.services.cancelacion_recepcion``: cada caso consulta el
+    retrieve y luego intenta cancelar, y exige que coincidan. También cubre los
+    campos persistentes de la cancelación (motivo, fecha y usuario).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from produccion.models import OrdenProduccion, SalidaMaquila
+
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+
+        def tenant(codigo):
+            empresa = Empresa.objects.create(codigo=codigo, razon_social=f"{codigo} SA")
+            sucursal = Sucursal.objects.create(empresa=empresa, codigo=codigo[:3].upper(), nombre=codigo)
+            proveedor = Proveedor.objects.create(
+                empresa=empresa, nombre=f"Proveedor {codigo}", moneda=cls.moneda, sat_regimen_fiscal=regimen,
+                sat_forma_pago=forma, sat_metodo_pago=metodo, codigo=f"PROV-{codigo}", razon_social="Prov SA",
+                telefono="8100000000", contacto_principal="Contacto", rfc="XAXX010101000", email=f"p@{codigo}.test",
+                es_maquilero=True,
+            )
+            almacen = Almacen.objects.create(empresa=empresa, sucursal=sucursal, codigo="ALM", nombre="Almacen")
+            admin = Usuario.objects.create(
+                username=f"adm@{codigo}.test", email=f"adm@{codigo}.test", empresa=empresa,
+                is_admin_empresa=True, first_name="Ana", last_name="Admin",
+            )
+            return {"empresa": empresa, "sucursal": sucursal, "proveedor": proveedor, "almacen": almacen, "admin": admin}
+
+        cls.a = tenant("acme-pc")
+        cls.b = tenant("globex-pc")
+        empresa, sucursal = cls.a["empresa"], cls.a["sucursal"]
+        cls.no_admin = Usuario.objects.create(username="u@acme-pc.test", email="u@acme-pc.test", empresa=empresa)
+        cls.superusuario = Usuario.objects.create(
+            username="su@acme-pc.test", email="su@acme-pc.test", empresa=empresa, is_superuser=True,
+        )
+        cls.oc = OrdenCompra.objects.create(
+            empresa=empresa, sucursal=sucursal, proveedor=cls.a["proveedor"], moneda=cls.moneda,
+            usuario=cls.a["admin"], fecha_oc=timezone.localdate(), estatus=Estatus.PARCIALMENTE_RECIBIDA,
+        )
+        cls.op = OrdenProduccion.objects.create(empresa=empresa, sucursal=sucursal, folio_op="OP-PC-1")
+        cls.op_completada = OrdenProduccion.objects.create(
+            empresa=empresa, sucursal=sucursal, folio_op="OP-PC-2",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+        )
+        cls.sm = SalidaMaquila.objects.create(
+            empresa=empresa, sucursal=sucursal, op=cls.op, centro_confeccion=cls.a["proveedor"],
+            folio="SM-PC-1", fecha_envio=timezone.localdate(), total_piezas=1, total=10,
+        )
+        departamento = Departamento.objects.create(empresa=empresa, sucursal=sucursal, codigo="CAL", nombre="Calidad")
+        cls.inspector = Empleado.objects.create(
+            empresa=empresa, sucursal=sucursal, departamento=departamento,
+            puesto=Puesto.objects.create(empresa=empresa, nombre="Inspector"),
+            numero_empleado="EMP-PC", nombre="Ana", apellido_paterno="Lopez", fecha_ingreso=timezone.localdate(),
+        )
+
+    # --- helpers ---------------------------------------------------------------
+
+    def _rc(self, estatus=Recepcion.EstatusRecepcion.EN_CALIDAD, tipo_origen="OC", **extra):
+        E = Recepcion.TipoOrigen
+        origen = {
+            E.ORDEN_COMPRA: {"orden_compra": self.oc, "proveedor": self.a["proveedor"]},
+            E.ORDEN_PRODUCCION: {"op": self.op},
+            E.SALIDA_MAQUILA: {"salida_maquila": self.sm, "proveedor": self.a["proveedor"]},
+        }[tipo_origen]
+        return Recepcion.objects.create(
+            tipo_origen=tipo_origen, empresa=self.a["empresa"], sucursal=self.a["sucursal"],
+            almacen=self.a["almacen"], usuario=self.a["admin"], folio=f"RC-PC-{Recepcion.objects.count() + 1}",
+            fecha_recepcion=timezone.now(), estatus=estatus, **{**origen, **extra},
+        )
+
+    def _factura(self, rc, estatus, **extra):
+        return FacturaProveedor.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.a["proveedor"],
+            recepcion=rc, moneda=self.moneda, estatus=estatus, **extra,
+        )
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _retrieve(self, rc, user=None):
+        return self._client(user or self.a["admin"]).get(f"{RECEPCIONES_URL}{rc.pk}/")
+
+    def _cancelar(self, rc, user=None, motivo="Captura duplicada"):
+        return self._client(user or self.a["admin"]).post(
+            f"{RECEPCIONES_URL}{rc.pk}/cancelar/", {"motivo": motivo}, format="json",
+        )
+
+    def _assert_coinciden(self, rc, esperado, user=None, status_code=200, clave=None):
+        """``puede_cancelar`` del retrieve == resultado de ``cancelar/``."""
+        r = self._retrieve(rc, user)
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertIs(r.data["puede_cancelar"], esperado)
+        resp = self._cancelar(rc, user)
+        self.assertEqual(resp.status_code, 200 if esperado else status_code, resp.content)
+        if clave:
+            self.assertEqual(list(resp.json()), [clave])
+            self.assertIsInstance(resp.json()[clave], str)  # forma plana, sin lista
+        return resp
+
+    # --- la regla: retrieve y cancelar coinciden ---------------------------------
+
+    def test_en_calidad_de_cada_origen_se_puede_cancelar(self):
+        for tipo in ("OC", "OP", "SM"):
+            with self.subTest(tipo=tipo):
+                self._assert_coinciden(self._rc(tipo_origen=tipo), True)
+
+    def test_superusuario_de_la_empresa_activa(self):
+        self._assert_coinciden(self._rc(), True, user=self.superusuario)
+
+    def test_no_admin_no_puede(self):
+        self._assert_coinciden(self._rc(), False, user=self.no_admin, status_code=403, clave="detail")
+
+    def test_cerrada_solo_si_es_de_sm(self):
+        self._assert_coinciden(self._rc(Recepcion.EstatusRecepcion.CERRADA, tipo_origen="SM"), True)
+        for tipo in ("OC", "OP"):
+            with self.subTest(tipo=tipo):
+                self._assert_coinciden(
+                    self._rc(Recepcion.EstatusRecepcion.CERRADA, tipo_origen=tipo), False, status_code=400,
+                    clave="estatus",
+                )
+
+    def test_otros_estatus_no(self):
+        E = Recepcion.EstatusRecepcion
+        for estatus in (E.BORRADOR, E.RECIBIDA, E.PARCIAL, E.CANCELADA):
+            with self.subTest(estatus=estatus):
+                self._assert_coinciden(self._rc(estatus), False, status_code=400, clave="estatus")
+
+    def test_con_inspeccion_o_movimiento_no(self):
+        rc = self._rc()
+        CalidadInspeccion.objects.create(
+            recepcion=rc, inspector=self.inspector, fecha=timezone.localdate(), estado="pendiente",
+        )
+        self._assert_coinciden(rc, False, status_code=400, clave="estatus")
+        rc = self._rc()
+        MovimientoInventario.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], usuario=self.a["admin"], recepcion=rc,
+        )
+        self._assert_coinciden(rc, False, status_code=400, clave="estatus")
+
+    def test_op_completada_no(self):
+        rc = self._rc(tipo_origen="OP", op=self.op_completada)
+        resp = self._assert_coinciden(rc, False, status_code=400, clave="op")
+        self.assertIn("OP-PC-2", resp.json()["op"])
+
+    def test_factura_viva_no_y_la_de_maquila_en_borrador_si(self):
+        F = FacturaProveedor.FacturaProveedorStatus
+        rc = self._rc()
+        self._factura(rc, F.BORRADOR)  # factura de OC: no es de maquila
+        self._assert_coinciden(rc, False, status_code=400, clave="facturas_proveedores")
+        rc = self._rc(tipo_origen="SM")
+        self._factura(rc, F.REGISTRADA, salida_maquila=self.sm, activo=False)  # dada de baja también cuenta
+        self._assert_coinciden(rc, False, status_code=400, clave="facturas_proveedores")
+        rc = self._rc(tipo_origen="SM")
+        self._factura(rc, F.CANCELADA)
+        maquila = self._factura(rc, F.BORRADOR, salida_maquila=self.sm)
+        self._assert_coinciden(rc, True)
+        maquila.refresh_from_db()
+        self.assertEqual(maquila.estatus, F.CANCELADA)
+
+    def test_otra_empresa_es_404(self):
+        rc = self._rc()
+        self.assertEqual(self._retrieve(rc, self.b["admin"]).status_code, 404)
+        self.assertEqual(self._cancelar(rc, self.b["admin"]).status_code, 404)
+        self.assertEqual(Recepcion.objects.get(pk=rc.pk).estatus, Recepcion.EstatusRecepcion.EN_CALIDAD)
+
+    def test_puede_cancelar_no_va_en_el_listado(self):
+        self._rc()
+        r = self._client(self.a["admin"]).get(RECEPCIONES_URL)
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("puede_cancelar", r.json()[0])
+        self.assertIn("motivo_cancelacion", r.json()[0])
+
+    # --- motivo y campos persistentes ------------------------------------------
+
+    def test_motivo_mas_largo_que_el_campo_es_400(self):
+        rc = self._rc()
+        resp = self._cancelar(rc, motivo="x" * 501)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(list(resp.json()), ["motivo"])
+        self.assertIsInstance(resp.json()["motivo"], str)
+        self.assertEqual(Recepcion.objects.get(pk=rc.pk).estatus, Recepcion.EstatusRecepcion.EN_CALIDAD)
+        self.assertEqual(self._cancelar(rc, motivo="  " + "y" * 500 + "  ").status_code, 200)
+        self.assertEqual(Recepcion.objects.get(pk=rc.pk).motivo_cancelacion, "y" * 500)
+
+    def test_cancelar_guarda_y_expone_motivo_fecha_y_usuario(self):
+        rc = self._rc()
+        motivo = "Se capturó dos veces la misma remisión del proveedor; la buena es la siguiente. " * 2
+        antes = timezone.now()
+        resp = self._cancelar(rc, motivo=f"  {motivo}  ")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        rc.refresh_from_db()
+        self.assertEqual(rc.motivo_cancelacion, motivo.strip())  # completo (más de 100)
+        self.assertGreaterEqual(rc.fecha_cancelacion, antes)
+        self.assertEqual(rc.cancelado_por_id, self.a["admin"].pk)
+        self.assertEqual(rc.history.first().history_change_reason, motivo.strip()[:100])
+        for data in (resp.json(), self._retrieve(rc).json()):
+            self.assertEqual(data["motivo_cancelacion"], motivo.strip())
+            self.assertEqual(data["cancelado_por"], self.a["admin"].pk)
+            self.assertEqual(data["cancelado_por_nombre"], "Ana Admin")
+            self.assertIsNotNone(data["fecha_cancelacion"])
+        self.assertIs(self._retrieve(rc).data["puede_cancelar"], False)
+        sin_cancelar = self._retrieve(self._rc()).json()
+        self.assertEqual(
+            [sin_cancelar[k] for k in ("motivo_cancelacion", "fecha_cancelacion", "cancelado_por", "cancelado_por_nombre")],
+            [None, None, None, None],
+        )
+
+    def test_campos_de_cancelacion_son_de_solo_lectura(self):
+        from compras.api.serializers import RecepcionRetrieveSerializer, RecepcionSerializer
+
+        for serializer in (RecepcionSerializer, RecepcionRetrieveSerializer):
+            campos = serializer().fields
+            for nombre in ("motivo_cancelacion", "fecha_cancelacion", "cancelado_por", "cancelado_por_nombre"):
+                with self.subTest(serializer=serializer.__name__, campo=nombre):
+                    self.assertTrue(campos[nombre].read_only)
+
+    # --- consultas -------------------------------------------------------------
+
+    def test_listado_no_suma_consultas_por_fila_cancelada(self):
+        client = self._client(self.a["admin"])
+        self._cancelar(self._rc())
+        with CaptureQueriesContext(connection) as una:
+            self.assertEqual(client.get(RECEPCIONES_URL).status_code, 200)
+        for _ in range(3):
+            self._cancelar(self._rc())
+        with CaptureQueriesContext(connection) as varias:
+            self.assertEqual(len(client.get(RECEPCIONES_URL).json()), 4)
+        self.assertEqual(len(varias), len(una))
+
+    def test_retrieve_consultas_acotadas(self):
+        """``puede_cancelar`` suma a lo más 3 consultas (inspección, movimiento,
+        facturas) y ninguna si el estatus o el usuario ya lo descartan."""
+        rc = self._rc()
+        with CaptureQueriesContext(connection) as no_admin:
+            self._retrieve(rc, self.no_admin)
+        with CaptureQueriesContext(connection) as admin:
+            self._retrieve(rc)
+        self.assertEqual(len(admin) - len(no_admin), 3)
+        cerrada = self._rc(Recepcion.EstatusRecepcion.CERRADA)
+        with CaptureQueriesContext(connection) as descartada:
+            self._retrieve(cerrada)
+        self.assertEqual(len(descartada), len(no_admin))

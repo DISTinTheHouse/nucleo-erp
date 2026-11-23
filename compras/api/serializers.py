@@ -485,10 +485,25 @@ class RecepcionDetalleSerializer(serializers.ModelSerializer):
         read_only_fields = ('recepcion',)
 
 
-class RecepcionSerializer(serializers.ModelSerializer):
+def _nombre_usuario(u):
+    return (u.get_full_name().strip() or u.email) if u else None
+
+
+class _CancelacionRecepcionMixin(serializers.Serializer):
+    """Quién canceló la recepción (EC-926), como ``usuario``/``usuario_nombre``.
+    ``cancelado_por`` va en el ``select_related`` del viewset."""
+
+    cancelado_por_nombre = serializers.SerializerMethodField()
+
+    def get_cancelado_por_nombre(self, obj):
+        return _nombre_usuario(obj.cancelado_por) if obj.cancelado_por_id else None
+
+
+class RecepcionSerializer(_CancelacionRecepcionMixin, serializers.ModelSerializer):
     class Meta:
         model = Recepcion
         fields = '__all__'
+        read_only_fields = ('motivo_cancelacion', 'fecha_cancelacion', 'cancelado_por')
 
 
 class _OrigenSalidaMaquilaMixin(serializers.Serializer):
@@ -579,7 +594,7 @@ class RecepcionDetalleRetrieveSerializer(RecepcionDetalleResumenSerializer):
     """
 
 
-class RecepcionRetrieveSerializer(_OrigenSalidaMaquilaMixin, serializers.ModelSerializer):
+class RecepcionRetrieveSerializer(_OrigenSalidaMaquilaMixin, _CancelacionRecepcionMixin, serializers.ModelSerializer):
     """Detalle individual de una recepción (acción ``retrieve``).
 
     Forma dedicada, independiente de ``RecepcionListSerializer`` (que conserva la
@@ -612,6 +627,14 @@ class RecepcionRetrieveSerializer(_OrigenSalidaMaquilaMixin, serializers.ModelSe
         read_only=True,
         source="recepciondetalle_set",
     )
+    # Solo el retrieve (EC-926): misma regla que ``cancelar/``, para quien consulta.
+    puede_cancelar = serializers.SerializerMethodField()
+
+    def get_puede_cancelar(self, obj) -> bool:
+        from compras.services.cancelacion_recepcion import puede_cancelar_recepcion
+
+        request = self.context.get("request")
+        return bool(request) and puede_cancelar_recepcion(request.user, obj)
 
     class Meta:
         model = Recepcion
@@ -639,10 +662,16 @@ class RecepcionRetrieveSerializer(_OrigenSalidaMaquilaMixin, serializers.ModelSe
             "transportista",
             "transportista_nombre",
             "observaciones",
+            "motivo_cancelacion",
+            "fecha_cancelacion",
+            "cancelado_por",
+            "cancelado_por_nombre",
+            "puede_cancelar",
             "created_at",
             "updated_at",
             "detalles",
         ]
+        read_only_fields = ["motivo_cancelacion", "fecha_cancelacion", "cancelado_por"]
 
 
 class RecepcionOnboardingHeaderSerializer(serializers.Serializer):
