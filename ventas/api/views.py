@@ -462,6 +462,38 @@ FILTER_BACKENDS_LISTADO = (*FILTER_BACKENDS_SIN_ORDERING, cotizaciones_listado.O
 PARAMETROS_FILTRO_COTIZACIONES = list(cotizaciones_listado.PARAMETROS_FILTRO_OPENAPI)
 
 
+def _notificar_cambios_solicitados(cotizacion):
+    """Aviso a Mesa de Control cuando una cotización autorizada entra a Cambios
+    solicitados (5): es quien la resuelve con ``aceptar-cambios`` /
+    ``rechazar-cambios`` (#1316). Mismo destinatario que ``enviar-revision``."""
+    from notificaciones.services.notificacion_service import crear_notificacion_por_rol
+
+    vendedor = cotizacion.vendedor
+    vendedor_nombre = (vendedor.get_full_name() or vendedor.username) if vendedor else "Sistema"
+    cliente = cotizacion.cliente
+    cliente_nombre = (getattr(cliente, "razon_social", None) or getattr(cliente, "nombre", None)) if cliente else None
+    pedido_id = cotizacion.pedidos.order_by("id").values_list("id", flat=True).first()
+    crear_notificacion_por_rol(
+        empresa=cotizacion.empresa,
+        codigo_rol="MESA-DE-CONTROL",
+        titulo="Cotización con cambios solicitados",
+        mensaje=(
+            f"El vendedor {vendedor_nombre} editó la cotización autorizada #{cotizacion.id} "
+            f"({cliente_nombre or 'Sin cliente asignado'}): requiere aceptar o rechazar los cambios."
+        ),
+        modulo="ventas",
+        tipo="cotizacion_cambios_solicitados",
+        data={
+            "cotizacion_id": cotizacion.id,
+            "pedido_id": pedido_id,
+            "vendedor_id": cotizacion.vendedor_id,
+            "vendedor_nombre": vendedor_nombre,
+            "cliente_nombre": cliente_nombre,
+        },
+        clave_departamento=CLAVE_DEPARTAMENTO_MESA_CONTROL,
+    )
+
+
 class CotizacionViewSet(viewsets.ModelViewSet):
     # #1020: lecturas con código R-*; el detalle también desde ``/orders/[id]``.
     permission_classes = [IsAuthenticated, LecturaPorCodigo]
@@ -552,10 +584,16 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                 )
             cotizacion.estatus = 5
             cotizacion.cambios_solicitados_at = timezone.now()
+            entra_a_cambios = True
+        else:
+            entra_a_cambios = False
 
-        serializer.save()
-        if cotizacion.estatus == 5:
-            cotizacion.save(update_fields=["estatus", "cambios_solicitados_at"])
+        with transaction.atomic():
+            serializer.save()
+            if cotizacion.estatus == 5:
+                cotizacion.save(update_fields=["estatus", "cambios_solicitados_at"])
+            if entra_a_cambios:  # #1316: solo al entrar a 5 (desde Autorizada)
+                _notificar_cambios_solicitados(cotizacion)
 
     def _apply_filters(self, qs):
         if getattr(self, "action", None) == "retrieve":
@@ -1534,6 +1572,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             res = self.handle_get_onboarding(request)
             return Response(res)
 
+        # Antes de validar el body, como el alta de cotizaciones y pedidos (#1313).
+        exigir_empresa_activa(user)
         raw = request.data
         if isinstance(raw, dict):
             raw_dict = raw
@@ -1657,9 +1697,6 @@ class CotizacionViewSet(viewsets.ModelViewSet):
         detalle_data = serializer.validated_data["detalle"]
         servicios_extras_data = serializer.validated_data.get("servicios_extras") or []
 
-        if not empresa:  # superusuario incluido (EC-798)
-            raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
-
         with transaction.atomic():
             edit_minutes = int(getattr(settings, "COTIZACION_EDIT_WINDOW_MINUTES", 30))
             edit_minutes = max(1, edit_minutes)
@@ -1674,6 +1711,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     )
                     self._exigir_acceso_cotizacion_onboarding(cotizacion, user, empresa)
 
+                    entra_a_cambios = cotizacion.estatus == 3 and bool(cotizacion.autorizada_at)
                     if cotizacion.estatus == 3 and cotizacion.autorizada_at:
                         limite = cotizacion.autorizada_at + timedelta(
                             minutes=edit_minutes
@@ -1698,6 +1736,8 @@ class CotizacionViewSet(viewsets.ModelViewSet):
                     update_fields = list(cotizacion_data.keys())
                     update_fields += ["estatus", "cambios_solicitados_at"]
                     cotizacion.save(update_fields=list(dict.fromkeys(update_fields)))
+                    if entra_a_cambios:  # #1316: solo al entrar a 5 (desde Autorizada)
+                        _notificar_cambios_solicitados(cotizacion)
                 else:
                     cotizacion = Cotizacion.objects.create(
                         empresa=empresa, vendedor=user, estatus=1, **cotizacion_data
