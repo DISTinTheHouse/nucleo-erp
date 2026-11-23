@@ -4340,15 +4340,72 @@ class RecepcionPuedeCancelarTests(TestCase):
         self.assertEqual(len(varias), len(una))
 
     def test_retrieve_consultas_acotadas(self):
-        """``puede_cancelar`` suma a lo más 3 consultas (inspección, movimiento,
-        facturas) y ninguna si el estatus o el usuario ya lo descartan."""
+        """``puede_cancelar`` no suma consultas: sus bloqueos van anotados con
+        ``Exists`` en la consulta del retrieve (EC-926). Recepción + renglones."""
         rc = self._rc()
-        with CaptureQueriesContext(connection) as no_admin:
-            self._retrieve(rc, self.no_admin)
-        with CaptureQueriesContext(connection) as admin:
-            self._retrieve(rc)
-        self.assertEqual(len(admin) - len(no_admin), 3)
+        with self.assertNumQueries(2):
+            r = self._retrieve(rc)
+        self.assertIs(r.data["puede_cancelar"], True)
+        with self.assertNumQueries(2):
+            self.assertIs(self._retrieve(rc, self.no_admin).data["puede_cancelar"], False)
         cerrada = self._rc(Recepcion.EstatusRecepcion.CERRADA)
-        with CaptureQueriesContext(connection) as descartada:
-            self._retrieve(cerrada)
-        self.assertEqual(len(descartada), len(no_admin))
+        with self.assertNumQueries(2):
+            self.assertIs(self._retrieve(cerrada).data["puede_cancelar"], False)
+
+    def test_borrar_al_usuario_que_cancelo_deja_cancelado_por_en_nulo(self):
+        otro_admin = Usuario.objects.create(
+            username="adm2@acme-pc.test", email="adm2@acme-pc.test", empresa=self.a["empresa"], is_admin_empresa=True,
+        )
+        rc = self._rc()
+        self.assertEqual(self._cancelar(rc, otro_admin).status_code, 200)
+        otro_admin.delete()  # antes PROTECT: ProtectedError
+        rc.refresh_from_db()
+        self.assertEqual((rc.estatus, rc.cancelado_por_id), (Recepcion.EstatusRecepcion.CANCELADA, None))
+        self.assertEqual(rc.motivo_cancelacion, "Captura duplicada")
+        self.assertIsNone(self._retrieve(rc).data["cancelado_por_nombre"])
+
+
+class RecepcionCancelacionBackfillTests(TestCase):
+    """``compras/migrations/0033``: motivo, fecha y usuario desde el evento ``CANCELAR``."""
+
+    def test_recupera_del_evento_y_corta_el_motivo_largo(self):
+        import importlib
+
+        from django.apps import apps
+
+        recuperar = importlib.import_module("compras.migrations.0033_recepcion_cancelacion_datos").recuperar
+        empresa = Empresa.objects.create(codigo="bf-926", razon_social="BF SA")
+        sucursal = Sucursal.objects.create(empresa=empresa, codigo="BF", nombre="BF")
+        almacen = Almacen.objects.create(empresa=empresa, sucursal=sucursal, codigo="ALM", nombre="Almacen")
+        usuario = Usuario.objects.create(username="u@bf-926.test", email="u@bf-926.test", empresa=empresa)
+
+        def cancelada(folio):
+            return Recepcion.objects.create(
+                tipo_origen="OC", empresa=empresa, sucursal=sucursal, almacen=almacen, usuario=usuario, folio=folio,
+                fecha_recepcion=timezone.now(), estatus=Recepcion.EstatusRecepcion.CANCELADA,
+            )
+
+        con_evento, sin_evento = cancelada("RC-BF-1"), cancelada("RC-BF-2")
+        motivo = "m" * 520
+        evento = AuditoriaEvento.objects.create(
+            empresa=empresa, usuario=usuario, modulo="compras", accion="CANCELAR", tabla="recepciones",
+            id_registro=str(con_evento.pk), antes_json={"estatus": 4}, despues_json={"estatus": 6, "motivo": motivo},
+        )
+        # Otro módulo o tabla con el mismo id no cuenta.
+        AuditoriaEvento.objects.create(
+            empresa=empresa, usuario=usuario, modulo="compras", accion="CANCELAR", tabla="ordenes_compra",
+            id_registro=str(sin_evento.pk), despues_json={"motivo": "De una OC"},
+        )
+
+        with mock.patch("builtins.print"):
+            self.assertEqual(recuperar(apps, None), (1, 1))
+        con_evento.refresh_from_db()
+        sin_evento.refresh_from_db()
+        self.assertEqual(con_evento.motivo_cancelacion, "m" * 500)
+        self.assertEqual(con_evento.fecha_cancelacion, evento.created_at)
+        self.assertEqual(con_evento.cancelado_por_id, usuario.pk)
+        self.assertEqual(
+            (sin_evento.motivo_cancelacion, sin_evento.fecha_cancelacion, sin_evento.cancelado_por_id), (None, None, None),
+        )
+        with mock.patch("builtins.print"):
+            self.assertEqual(recuperar(apps, None), (0, 0))  # no pisa lo ya escrito

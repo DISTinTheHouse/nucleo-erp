@@ -336,7 +336,8 @@ class Recepcion(models.Model):
     motivo_cancelacion = models.CharField(max_length=500, null=True, blank=True)
     fecha_cancelacion = models.DateTimeField(null=True, blank=True)
     cancelado_por = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        # SET_NULL como ``AuditoriaEvento.usuario``: borrar al usuario no se bloquea.
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='recepciones_canceladas',
     )
 

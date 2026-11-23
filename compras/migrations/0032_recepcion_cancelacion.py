@@ -31,7 +31,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='recepcion',
             name='cancelado_por',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='recepciones_canceladas', to=settings.AUTH_USER_MODEL),
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='recepciones_canceladas', to=settings.AUTH_USER_MODEL),
         ),
         migrations.AddField(
             model_name='recepcion',

@@ -103,6 +103,7 @@ from compras.services.maquila import (
 from compras.services.recepcion_pedidos import RELACIONES_PEDIDO, origen_folio, pedidos_de_recepciones
 from compras.services.cancelacion_recepcion import (
     MOTIVO_CANCELACION_MAX,
+    anotar_bloqueos_cancelacion,
     puede_cancelar_recepciones,
     validar_cancelacion_recepcion,
 )
@@ -1688,6 +1689,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     ).order_by("id"),
                 )
             )
+            # ``puede_cancelar`` (EC-926): sus bloqueos en la misma consulta. Sin
+            # permiso de cancelar ya es ``false`` y no hace falta anotar.
+            if puede_cancelar_recepciones(user):
+                qs = anotar_bloqueos_cancelacion(qs)
 
         # Filtro opcional por origen (OC / OP). Sigue la convención del proyecto:
         # query param manual validado en get_queryset (no se usa django-filter).

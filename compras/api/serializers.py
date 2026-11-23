@@ -14,6 +14,13 @@ from compras.models import (
 )
 
 
+def _nombre_usuario(u):
+    # ``Usuario`` extiende ``AbstractUser`` y su ``__str__`` devuelve
+    # ``username``, que no es el identificador de login (se entra por email).
+    # Mismo fallback que en producción/wms/inventarios.
+    return (u.get_full_name().strip() or u.email) if u else None
+
+
 class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
     # ``id`` permite casar cada renglón de la OC con el ``orden_compra_detalle``
     # que referencian los renglones anidados en ``recepciones[].detalles[]``.
@@ -255,12 +262,7 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
         return obj.proveedor.email if obj.proveedor_id else None
 
     def get_usuario_nombre(self, obj):
-        # ``Usuario`` extiende ``AbstractUser`` y su ``__str__`` devuelve
-        # ``username``, que no es el identificador de login (se entra por email).
-        # Mismo fallback que en producción/wms/inventarios.
-        if obj.usuario:
-            return obj.usuario.get_full_name().strip() or obj.usuario.email
-        return None
+        return _nombre_usuario(obj.usuario)
 
     def to_internal_value(self, data):
         # Convert "0" or 0 to None for FK fields if they are optional
@@ -485,10 +487,6 @@ class RecepcionDetalleSerializer(serializers.ModelSerializer):
         read_only_fields = ('recepcion',)
 
 
-def _nombre_usuario(u):
-    return (u.get_full_name().strip() or u.email) if u else None
-
-
 class _CancelacionRecepcionMixin(serializers.Serializer):
     """Quién canceló la recepción (EC-926), como ``usuario``/``usuario_nombre``.
     ``cancelado_por`` va en el ``select_related`` del viewset."""
@@ -570,8 +568,7 @@ class RecepcionListSerializer(_OrigenSalidaMaquilaMixin, RecepcionSerializer):
     pedidos = serializers.SerializerMethodField()
 
     def get_usuario_nombre(self, obj):
-        u = obj.usuario
-        return (u.get_full_name().strip() or u.email) if u else None
+        return _nombre_usuario(obj.usuario)
 
     def get_pedidos(self, obj):
         mapa = self.context.get("pedidos_por_recepcion")
