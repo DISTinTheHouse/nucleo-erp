@@ -1146,6 +1146,8 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="aceptar")
     def aceptar(self, request, pk=None):
+        from compras.services.orden_compra_view_service import filtrar_campos_contabilidad_orden_compra
+
         user = request.user
         empresa = getattr(user, "empresa", None)
         oc = self.get_object()
@@ -1191,10 +1193,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 eventos_oc(oc.pk, PreOrdenEvento.Evento.OC_AUTORIZADA, user)
             transaction.on_commit(lambda oc=oc: _avisar_oc_autorizada_a_almacen(oc))
 
-        return Response(
-            {"orden_compra": OrdenCompraSerializer(self._oc_para_respuesta(oc.pk)).data},
-            status=status.HTTP_200_OK,
+        # Importes por rol, igual que ``retrieve``/``cancelar`` (#1332).
+        data = filtrar_campos_contabilidad_orden_compra(
+            OrdenCompraSerializer(self._oc_para_respuesta(oc.pk)).data, user
         )
+        return Response({"orden_compra": data}, status=status.HTTP_200_OK)
 
     def update(self, request, pk=None, *args, **kwargs):
         user = request.user
