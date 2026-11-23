@@ -329,7 +329,18 @@ class Recepcion(models.Model):
     activo = models.BooleanField(default=True)
 
     observaciones = models.TextField(blank=True, null=True)
-    
+
+    # Solo los escribe ``POST recepciones/{id}/cancelar/`` (EC-926). Nulos en las
+    # recepciones no canceladas y en las canceladas antes de existir los campos
+    # sin evento ``CANCELAR`` en auditoría.
+    motivo_cancelacion = models.CharField(max_length=500, null=True, blank=True)
+    fecha_cancelacion = models.DateTimeField(null=True, blank=True)
+    cancelado_por = models.ForeignKey(
+        # SET_NULL como ``AuditoriaEvento.usuario``: borrar al usuario no se bloquea.
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='recepciones_canceladas',
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

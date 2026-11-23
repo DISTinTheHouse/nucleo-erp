@@ -101,6 +101,12 @@ from compras.services.maquila import (
     renglones_sm_servicio, pendiente_de_sm, pendiente_por_renglon_sm, recibido_sm_subquery,
 )
 from compras.services.recepcion_pedidos import RELACIONES_PEDIDO, origen_folio, pedidos_de_recepciones
+from compras.services.cancelacion_recepcion import (
+    MOTIVO_CANCELACION_MAX,
+    anotar_bloqueos_cancelacion,
+    puede_cancelar_recepciones,
+    validar_cancelacion_recepcion,
+)
 from terceros.models import Proveedor, Transportista
 
 logger = logging.getLogger(__name__)
@@ -1644,6 +1650,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         "almacen",
         "transportista",
         "usuario",
+        "cancelado_por",  # ``cancelado_por_nombre`` (EC-926), sin consulta extra
         # SM y su origen (folio OB/OR/OP) en la misma consulta (#1237).
         "salida_maquila__ob",
         "salida_maquila__orden_r",
@@ -1694,6 +1701,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                     ).order_by("id"),
                 )
             )
+            # ``puede_cancelar`` (EC-926): sus bloqueos en la misma consulta. Sin
+            # permiso de cancelar ya es ``false`` y no hace falta anotar.
+            if puede_cancelar_recepciones(user):
+                qs = anotar_bloqueos_cancelacion(qs)
 
         # Filtro opcional por origen (OC / OP). Sigue la convención del proyecto:
         # query param manual validado en get_queryset (no se usa django-filter).
@@ -1781,12 +1792,14 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         - Queda en auditoría (``CANCELAR``) y en el historial, con el motivo.
         """
         user = request.user
-        if not (user.is_superuser or getattr(user, "is_admin_empresa", False)):
+        if not puede_cancelar_recepciones(user):
             raise PermissionDenied("Solo un administrador de la empresa puede cancelar recepciones.")
         motivo = request.data.get("motivo")
         if not isinstance(motivo, str) or not motivo.strip():
             raise ValidationError({"motivo": "El motivo de cancelación es requerido."})
         motivo = motivo.strip()
+        if len(motivo) > MOTIVO_CANCELACION_MAX:
+            raise ValidationError({"motivo": f"El motivo de cancelación admite a lo más {MOTIVO_CANCELACION_MAX} caracteres."})
         # ``get_object`` acota por la empresa del usuario: la de otra empresa es 404.
         recepcion = self.get_object()
         E = Recepcion.EstatusRecepcion
@@ -1805,40 +1818,21 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 op = OrdenProduccion.objects.select_for_update().get(pk=recepcion.op_id)
             recepcion = Recepcion.objects.select_for_update().get(pk=recepcion.pk)
 
-            if recepcion.estatus == E.CANCELADA:
-                raise ValidationError({"estatus": "La recepción ya está cancelada."})
-            antes_de_calidad = recepcion.estatus == E.EN_CALIDAD or (
-                recepcion.tipo_origen == Recepcion.TipoOrigen.SALIDA_MAQUILA and recepcion.estatus == E.CERRADA
-            )
-            if (
-                not antes_de_calidad
-                or CalidadInspeccion.objects.filter(recepcion=recepcion).exists()
-                or MovimientoInventario.objects.filter(recepcion=recepcion).exists()
-            ):
-                raise ValidationError({"estatus": (
-                    "La recepción ya pasó por calidad y no puede cancelarse: lo aprobado ya es existencia."
-                )})
-            if op is not None and op.estatus_op == OrdenProduccion.EstatusOrdenProduccion.COMPLETADO:
-                raise ValidationError({"op": f"La OP {op.folio_op} ya está completada y la recepción no puede cancelarse."})
-            # Facturas sin cancelar, dadas de baja o no (como ``OrdenCompraViewSet.cancelar``).
-            facturas = list(
-                FacturaProveedor.objects.select_for_update().filter(recepcion=recepcion)
-                .exclude(estatus=Factura.CANCELADA).order_by("id")
-            )
-            for factura in facturas:
-                if not (factura.salida_maquila_id and factura.estatus == Factura.BORRADOR):
-                    raise ValidationError({"facturas_proveedores": (
-                        f"La factura de proveedor {factura.folio or factura.pk} de la recepción está "
-                        f"{factura.estatus.lower()}: cancélala primero en Finanzas."
-                    )})
+            # Misma regla que ``puede_cancelar`` del retrieve (EC-926), con las facturas bloqueadas.
+            facturas = validar_cancelacion_recepcion(recepcion, op, bloquear=True)
 
             antes = {"estatus": recepcion.estatus}
             for factura in facturas:  # factura de maquila en Borrador: sin CxP ni póliza
                 factura.estatus = Factura.CANCELADA
                 factura.save(update_fields=["estatus", "updated_at"])
             recepcion.estatus = E.CANCELADA
+            recepcion.motivo_cancelacion = motivo
+            recepcion.fecha_cancelacion = timezone.now()
+            recepcion.cancelado_por = user if getattr(user, "pk", None) else None
             recepcion._change_reason = motivo[:100]  # ``history_change_reason`` (100 caracteres)
-            recepcion.save(update_fields=["estatus", "updated_at"])
+            recepcion.save(update_fields=[
+                "estatus", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por", "updated_at",
+            ])
             despues = {"estatus": recepcion.estatus, "motivo": motivo}
             if facturas:
                 despues["facturas_proveedor_canceladas"] = [f.pk for f in facturas]
