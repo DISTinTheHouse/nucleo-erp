@@ -232,6 +232,31 @@ def _exigir_autorizar_oc(request):
         raise PermissionDenied(f"No tienes permiso para esta acción ({PERMISO_AUTORIZAR_OC}).")
 
 
+def _avisar_oc_autorizada_a_almacen(oc):
+    """Aviso a Almacén (departamento WMS) de una OC recién autorizada: es quien
+    recibirá la mercancía (#1317). Al confirmar la transacción de ``aceptar``."""
+    from notificaciones.services.notificacion_service import crear_notificacion_por_rol
+    from seguridad.role_identity import CLAVE_DEPARTAMENTO_WMS
+
+    proveedor = getattr(oc.proveedor, "nombre", None) if oc.proveedor_id else None
+    entrega = oc.fecha_entrega_estimada.isoformat() if oc.fecha_entrega_estimada else None
+    crear_notificacion_por_rol(
+        empresa=oc.empresa,
+        codigo_rol="almacen-mp",
+        titulo=f"OC autorizada por recibir: {oc.folio}",
+        mensaje=f"La OC {oc.folio}" + (f" con {proveedor}" if proveedor else "") + " se autorizó"
+        + (f"; entrega estimada {entrega}." if entrega else "."),
+        modulo="compras",
+        tipo="oc_autorizada",
+        data={
+            "orden_compra_id": oc.pk, "folio": oc.folio, "proveedor_nombre": proveedor,
+            "sucursal_id": oc.sucursal_id, "fecha_entrega_estimada": entrega,
+            "url": f"/compras/ordenes/{oc.pk}",
+        },
+        clave_departamento=CLAVE_DEPARTAMENTO_WMS,
+    )
+
+
 class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = OrdenCompra.objects.filter(activo=True)
     serializer_class = OrdenCompraSerializer
@@ -1160,9 +1185,11 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             oc.fecha_autorizacion = timezone.now()
             oc.save(update_fields=["proveedor", "folio", "estatus", "fecha_autorizacion", "updated_at"])
             if oc.necesidades.exists():
+                # Con pre-orden, además avisa a Producción (``AVISOS["oc_autorizada"]``, #1317).
                 from produccion.models import PreOrdenEvento
                 from produccion.services.pre_orden_service import eventos_oc
                 eventos_oc(oc.pk, PreOrdenEvento.Evento.OC_AUTORIZADA, user)
+            transaction.on_commit(lambda oc=oc: _avisar_oc_autorizada_a_almacen(oc))
 
         return Response(
             {"orden_compra": OrdenCompraSerializer(self._oc_para_respuesta(oc.pk)).data},
