@@ -95,6 +95,10 @@ MENSAJE_ENTRADA_YA_REGISTRADA = (
     "La entrada de este empleado para esta fecha ya está registrada. "
     "Para corregirla, edita el registro de asistencia."
 )
+MENSAJE_FALTA_REGISTRADA = (
+    "El empleado tiene una falta registrada para esta fecha. "
+    "Para reemplazarla, edita el registro de asistencia."
+)
 MENSAJE_SALIDA_YA_REGISTRADA = (
     "La salida de este empleado para esta fecha ya está registrada. "
     "Para corregirla, edita el registro de asistencia."
@@ -444,11 +448,14 @@ class AsistenciaViewSet(
     def _poner_entrada(self, asistencia, turno, ahora):
         """Pone la entrada en un registro existente del día, ya bloqueado.
 
-        Solo si aún no tiene entrada (p. ej. una falta capturada a mano); si la
-        tiene, 409. Si ya guarda una salida, la entrada debe ser anterior.
+        Solo si aún no tiene entrada; si la tiene, 409. Una falta registrada no
+        se reemplaza en silencio con la checada: 400, y se corrige editando el
+        registro (#1333). Si ya guarda una salida, la entrada debe ser anterior.
         """
         if asistencia.hora_entrada is not None:
             raise ChecadaYaRegistradaError(MENSAJE_ENTRADA_YA_REGISTRADA)
+        if asistencia.estado == 'falta':
+            raise ChecadaInvalidaError(MENSAJE_FALTA_REGISTRADA)
         if asistencia.hora_salida is not None and ahora >= asistencia.hora_salida:
             raise ChecadaInvalidaError('La hora de entrada debe ser anterior a la hora de salida registrada.')
         asistencia.hora_entrada = ahora
@@ -571,6 +578,13 @@ def _avisar_resolucion_hr(obj, usuario):
     )
 
 
+def _estado_bajo_lock(modelo, pk):
+    """``estado`` de la solicitud releído con la fila bloqueada hasta el fin de la
+    transacción, como en ``perform_update``: aprobar y rechazar simultáneos ya no
+    pasan los dos la guarda de ``pendiente`` (#1334)."""
+    return modelo.objects.select_for_update().values_list('estado', flat=True).get(pk=pk)
+
+
 def _avisar_alta_a_rh(obj):
     """Aviso al departamento de RH de una solicitud nueva por aprobar (#1318),
     al confirmar la transacción del alta."""
@@ -644,12 +658,14 @@ class VacacionesViewSet(
         empresa = getattr(request.user, "empresa", None)
         if not empresa or obj.empleado.empresa_id != empresa.pk:
             return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
-        if obj.estado != 'pendiente':
-            return Response({'detail': 'Solo se pueden aprobar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
-        obj.estado = 'aprobado'
-        obj.autorizado_por = request.user
-        obj.fecha_aprobacion = timezone.now()
-        obj.save()
+        with transaction.atomic():
+            obj.estado = _estado_bajo_lock(Vacaciones, obj.pk)
+            if obj.estado != 'pendiente':
+                return Response({'detail': 'Solo se pueden aprobar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
+            obj.estado = 'aprobado'
+            obj.autorizado_por = request.user
+            obj.fecha_aprobacion = timezone.now()
+            obj.save()
         _avisar_resolucion_hr(obj, request.user)
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -660,14 +676,16 @@ class VacacionesViewSet(
         empresa = getattr(request.user, "empresa", None)
         if not empresa or obj.empleado.empresa_id != empresa.pk:
             return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
-        if obj.estado != 'pendiente':
-            return Response({'detail': 'Solo se pueden rechazar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
         motivo = request.data.get('motivo_rechazo', '')
-        obj.estado = 'rechazado'
-        obj.rechazado_por = request.user
-        obj.fecha_rechazo = timezone.now()
-        obj.motivo_rechazo = motivo
-        obj.save()
+        with transaction.atomic():
+            obj.estado = _estado_bajo_lock(Vacaciones, obj.pk)
+            if obj.estado != 'pendiente':
+                return Response({'detail': 'Solo se pueden rechazar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
+            obj.estado = 'rechazado'
+            obj.rechazado_por = request.user
+            obj.fecha_rechazo = timezone.now()
+            obj.motivo_rechazo = motivo
+            obj.save()
         _avisar_resolucion_hr(obj, request.user)
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -731,12 +749,14 @@ class PermisoAusenciaViewSet(
         empresa = getattr(request.user, "empresa", None)
         if not empresa or obj.empleado.empresa_id != empresa.pk:
             return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
-        if obj.estado != 'pendiente':
-            return Response({'detail': 'Solo se pueden aprobar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
-        obj.estado = 'aprobado'
-        obj.autorizado_por = request.user
-        obj.fecha_aprobacion = timezone.now()
-        obj.save()
+        with transaction.atomic():
+            obj.estado = _estado_bajo_lock(PermisoAusencia, obj.pk)
+            if obj.estado != 'pendiente':
+                return Response({'detail': 'Solo se pueden aprobar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
+            obj.estado = 'aprobado'
+            obj.autorizado_por = request.user
+            obj.fecha_aprobacion = timezone.now()
+            obj.save()
         _avisar_resolucion_hr(obj, request.user)
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -747,14 +767,16 @@ class PermisoAusenciaViewSet(
         empresa = getattr(request.user, "empresa", None)
         if not empresa or obj.empleado.empresa_id != empresa.pk:
             return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
-        if obj.estado != 'pendiente':
-            return Response({'detail': 'Solo se pueden rechazar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
         motivo = request.data.get('motivo_rechazo', '')
-        obj.estado = 'rechazado'
-        obj.rechazado_por = request.user
-        obj.fecha_rechazo = timezone.now()
-        obj.motivo_rechazo = motivo
-        obj.save()
+        with transaction.atomic():
+            obj.estado = _estado_bajo_lock(PermisoAusencia, obj.pk)
+            if obj.estado != 'pendiente':
+                return Response({'detail': 'Solo se pueden rechazar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
+            obj.estado = 'rechazado'
+            obj.rechazado_por = request.user
+            obj.fecha_rechazo = timezone.now()
+            obj.motivo_rechazo = motivo
+            obj.save()
         _avisar_resolucion_hr(obj, request.user)
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_200_OK)

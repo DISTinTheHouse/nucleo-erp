@@ -7504,6 +7504,9 @@ Solo se requieren los campos marcados con `*`. El resto es opcional (blank).
 }
 ```
 
+- **409**: el registro del día ya tiene entrada.
+- **400**: el registro del día es una falta (`estado: "falta"`). La checada no la reemplaza; se corrige editando el registro (`PATCH /api/v1/hr/asistencias/{id}/`). Una falta `justificada` sí se completa con la checada.
+
 #### 2.2 Registrar Salida (checador)
 
 - **Endpoint**: `POST /api/v1/hr/asistencias/registrar_salida/`
