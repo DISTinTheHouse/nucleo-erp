@@ -156,8 +156,6 @@ class PuestoViewSet(
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset().select_related("empresa", "area", "area__departamento")
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -186,8 +184,6 @@ class EmpleadoViewSet(
         qs = super().get_queryset().select_related(
             "empresa", "sucursal", "departamento", "puesto", "turno"
         )
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -216,8 +212,6 @@ class AreaViewSet(
         qs = super().get_queryset().select_related(
             "departamento", "departamento__empresa", "responsable"
         )
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -251,8 +245,6 @@ class ContratoViewSet(
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset().select_related("empleado", "empleado__empresa", "creado_por")
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -282,8 +274,6 @@ class TurnoViewSet(
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset().select_related("empresa")
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -314,8 +304,6 @@ class CalendarioViewSet(
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset().select_related("turno", "turno__empresa")
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -349,8 +337,6 @@ class AsistenciaViewSet(
         qs = super().get_queryset().select_related(
             "empleado", "empleado__empresa", "empleado__sucursal", "empleado__departamento", "turno", "autorizado_por"
         )
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -374,12 +360,10 @@ class AsistenciaViewSet(
             raise ValidationError({'empleado_id': exc.detail})
 
         user = request.user
-        empleados_qs = Empleado.objects.all()
-        if not getattr(user, "is_superuser", False):
-            empresa = getattr(user, "empresa", None)
-            if not empresa:
-                raise PermissionDenied('No autorizado.')
-            empleados_qs = empleados_qs.filter(empresa=empresa)
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
+            raise PermissionDenied('No autorizado.')
+        empleados_qs = Empleado.objects.filter(empresa=empresa)
         try:
             empleado = empleados_qs.get(pk=empleado_id)
         except Empleado.DoesNotExist:
@@ -530,12 +514,21 @@ class ControlHorasViewSet(
         qs = super().get_queryset().select_related(
             "empleado", "empleado__empresa", "asistencia", "op"
         )
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
         return qs.filter(empleado__empresa=empresa)
+
+
+class PermisoAprobarSolicitud(BasePermission):
+    """Aprobar o rechazar vacaciones y permisos/ausencias exige D-RH, el código
+    con el que el frontend muestra esos botones (#1319). Superusuario y admin de
+    empresa pasan sin consultas (``permisos_efectivos``)."""
+
+    message = 'Aprobar o rechazar solicitudes requiere el permiso D-RH.'
+
+    def has_permission(self, request, view):
+        return 'D-RH' in permisos_efectivos(request.user)
 
 
 class VacacionesViewSet(
@@ -566,8 +559,6 @@ class VacacionesViewSet(
         qs = super().get_queryset().select_related(
             "empleado", "empleado__empresa", "solicitado_por", "autorizado_por", "rechazado_por"
         )
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -593,14 +584,12 @@ class VacacionesViewSet(
                 raise ValidationError({'detail': 'No se puede eliminar una solicitud rechazada.'})
             super().perform_destroy(instance)
 
-    @action(detail=True, methods=['POST'])
+    @action(detail=True, methods=['POST'], permission_classes=[IsAuthenticated, PermisoAprobarSolicitud])
     def aprobar(self, request, pk=None):
         obj = self.get_object()
-        user = request.user
-        if not getattr(user, "is_superuser", False):
-            empresa = getattr(user, "empresa", None)
-            if not empresa or obj.empleado.empresa_id != empresa.pk:
-                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+        empresa = getattr(request.user, "empresa", None)
+        if not empresa or obj.empleado.empresa_id != empresa.pk:
+            return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
         if obj.estado != 'pendiente':
             return Response({'detail': 'Solo se pueden aprobar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
         obj.estado = 'aprobado'
@@ -610,14 +599,12 @@ class VacacionesViewSet(
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=['POST'])
+    @action(detail=True, methods=['POST'], permission_classes=[IsAuthenticated, PermisoAprobarSolicitud])
     def rechazar(self, request, pk=None):
         obj = self.get_object()
-        user = request.user
-        if not getattr(user, "is_superuser", False):
-            empresa = getattr(user, "empresa", None)
-            if not empresa or obj.empleado.empresa_id != empresa.pk:
-                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+        empresa = getattr(request.user, "empresa", None)
+        if not empresa or obj.empleado.empresa_id != empresa.pk:
+            return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
         if obj.estado != 'pendiente':
             return Response({'detail': 'Solo se pueden rechazar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
         motivo = request.data.get('motivo_rechazo', '')
@@ -660,8 +647,6 @@ class PermisoAusenciaViewSet(
         qs = super().get_queryset().select_related(
             "empleado", "empleado__empresa", "solicitado_por", "autorizado_por", "rechazado_por"
         )
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -684,14 +669,12 @@ class PermisoAusenciaViewSet(
                 raise ValidationError({'detail': 'No se puede eliminar una solicitud rechazada.'})
             super().perform_destroy(instance)
 
-    @action(detail=True, methods=['POST'])
+    @action(detail=True, methods=['POST'], permission_classes=[IsAuthenticated, PermisoAprobarSolicitud])
     def aprobar(self, request, pk=None):
         obj = self.get_object()
-        user = request.user
-        if not getattr(user, "is_superuser", False):
-            empresa = getattr(user, "empresa", None)
-            if not empresa or obj.empleado.empresa_id != empresa.pk:
-                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+        empresa = getattr(request.user, "empresa", None)
+        if not empresa or obj.empleado.empresa_id != empresa.pk:
+            return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
         if obj.estado != 'pendiente':
             return Response({'detail': 'Solo se pueden aprobar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
         obj.estado = 'aprobado'
@@ -701,14 +684,12 @@ class PermisoAusenciaViewSet(
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=['POST'])
+    @action(detail=True, methods=['POST'], permission_classes=[IsAuthenticated, PermisoAprobarSolicitud])
     def rechazar(self, request, pk=None):
         obj = self.get_object()
-        user = request.user
-        if not getattr(user, "is_superuser", False):
-            empresa = getattr(user, "empresa", None)
-            if not empresa or obj.empleado.empresa_id != empresa.pk:
-                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+        empresa = getattr(request.user, "empresa", None)
+        if not empresa or obj.empleado.empresa_id != empresa.pk:
+            return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
         if obj.estado != 'pendiente':
             return Response({'detail': 'Solo se pueden rechazar solicitudes pendientes.'}, status=status.HTTP_400_BAD_REQUEST)
         motivo = request.data.get('motivo_rechazo', '')
@@ -750,8 +731,6 @@ class IncidenciaViewSet(
         qs = super().get_queryset().select_related(
             "empleado", "empleado__empresa", "reportado_por"
         )
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -791,8 +770,6 @@ class EvaluacionViewSet(
         qs = super().get_queryset().select_related(
             "empleado", "empleado__empresa", "evaluador"
         )
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -826,8 +803,6 @@ class CapacitacionViewSet(
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset().select_related("empleado", "empleado__empresa")
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -896,8 +871,6 @@ class NominaViewSet(
         qs = super().get_queryset().select_related(
             "empresa", "sucursal", "empleado", "creado_por"
         ).prefetch_related("detalles")
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -918,11 +891,9 @@ class NominaViewSet(
     @action(detail=True, methods=['POST'])
     def calcular_totales(self, request, pk=None):
         obj = self.get_object()
-        user = request.user
-        if not getattr(user, "is_superuser", False):
-            empresa = getattr(user, "empresa", None)
-            if not empresa or obj.empresa_id != empresa.pk:
-                return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
+        empresa = getattr(request.user, "empresa", None)
+        if not empresa or obj.empresa_id != empresa.pk:
+            return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
         obj._recalcular_totales()
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -947,13 +918,12 @@ class NominaViewSet(
         fpago = _fecha_param('fecha_pago', fecha_pago) if fecha_pago else None
 
         user = request.user
-        es_superuser = getattr(user, "is_superuser", False)
-        empresa = None if es_superuser else getattr(user, "empresa", None)
-        if not es_superuser and not empresa:
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
             return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
 
-        # La sucursal es obligatoria: sin ella un superusuario generaba para los
-        # empleados de TODAS las empresas. Se genera sólo para esa sucursal.
+        # La sucursal es obligatoria: se genera sólo para esa sucursal de la
+        # empresa activa (también el superusuario, #1314).
         if sucursal_id in (None, ''):
             return Response({'sucursal_id': ['Este campo es requerido.']}, status=status.HTTP_400_BAD_REQUEST)
         try:
@@ -963,15 +933,11 @@ class NominaViewSet(
         except ValidationError as exc:
             return Response({'sucursal_id': exc.detail}, status=status.HTTP_400_BAD_REQUEST)
         from nucleo.models import Sucursal
-        sucursal_qs = Sucursal.objects.filter(pk=sucursal_id)
-        if not es_superuser:
-            sucursal_qs = sucursal_qs.filter(empresa=empresa)
-        sucursal = sucursal_qs.first()
+        sucursal = Sucursal.objects.filter(pk=sucursal_id, empresa=empresa).first()
         if sucursal is None:
             return Response({'sucursal_id': ['La sucursal no existe o no pertenece a la empresa del usuario.']}, status=status.HTTP_400_BAD_REQUEST)
 
-        # La empresa sale de la sucursal, también para el superusuario: cada
-        # nómina queda en la empresa y la sucursal que se pidieron.
+        # Cada nómina queda en la empresa y la sucursal que se pidieron.
         # Entra quien trabajó algún día del periodo, aunque ya esté dado de baja (#402).
         empleados = list(
             Empleado.objects.filter(empresa_id=sucursal.empresa_id, sucursal=sucursal, fecha_ingreso__lte=pf)
@@ -1091,8 +1057,6 @@ class ProductividadViewSet(
         qs = super().get_queryset().select_related(
             "empresa", "departamento", "empleado", "meta_unidad", "creado_por"
         ).prefetch_related("detalles")
-        if getattr(user, "is_superuser", False):
-            return qs
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -1107,9 +1071,8 @@ class DashboardRH(APIView):
 
     def get(self, request):
         user = request.user
-        es_superuser = getattr(user, "is_superuser", False)
-        empresa = None if es_superuser else getattr(user, "empresa", None)
-        if not es_superuser and not empresa:
+        empresa = getattr(user, "empresa", None)
+        if not empresa:
             return Response({'detail': 'No autorizado.'}, status=status.HTTP_403_FORBIDDEN)
 
         sucursal_id = request.query_params.get('sucursal_id')
@@ -1137,16 +1100,16 @@ class DashboardRH(APIView):
         nominas_qs = Nomina.objects.all()
         capacitaciones_qs = Capacitacion.objects.all()
         evaluaciones_qs = Evaluacion.objects.all()
-        if not es_superuser:
-            empleados_qs = empleados_qs.filter(empresa=empresa)
-            asistencias_qs = asistencias_qs.filter(empleado__empresa=empresa)
-            vacaciones_qs = vacaciones_qs.filter(empleado__empresa=empresa)
-            permisos_qs = permisos_qs.filter(empleado__empresa=empresa)
-            incidencias_qs = incidencias_qs.filter(empleado__empresa=empresa)
-            contratos_qs = contratos_qs.filter(empleado__empresa=empresa)
-            nominas_qs = nominas_qs.filter(empresa=empresa)
-            capacitaciones_qs = capacitaciones_qs.filter(empleado__empresa=empresa)
-            evaluaciones_qs = evaluaciones_qs.filter(empleado__empresa=empresa)
+        # Sólo la empresa activa, también para el superusuario (EC-798, #1314).
+        empleados_qs = empleados_qs.filter(empresa=empresa)
+        asistencias_qs = asistencias_qs.filter(empleado__empresa=empresa)
+        vacaciones_qs = vacaciones_qs.filter(empleado__empresa=empresa)
+        permisos_qs = permisos_qs.filter(empleado__empresa=empresa)
+        incidencias_qs = incidencias_qs.filter(empleado__empresa=empresa)
+        contratos_qs = contratos_qs.filter(empleado__empresa=empresa)
+        nominas_qs = nominas_qs.filter(empresa=empresa)
+        capacitaciones_qs = capacitaciones_qs.filter(empleado__empresa=empresa)
+        evaluaciones_qs = evaluaciones_qs.filter(empleado__empresa=empresa)
         if sucursal_id:
             empleados_qs = empleados_qs.filter(sucursal_id=sucursal_id)
             asistencias_qs = asistencias_qs.filter(empleado__sucursal_id=sucursal_id)

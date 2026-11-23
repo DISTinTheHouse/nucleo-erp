@@ -796,8 +796,10 @@ class GenerarPeriodoIntegridadTests(NominaBase):
             apellido_paterno="López", fecha_ingreso=date(2025, 1, 6),
         )
         cls.empleado_b = cls._empleado(cls.b, "E-B01")
+        # El superusuario también se limita a su empresa activa (#1314).
         cls.superusuario = Usuario.objects.create(
             username="root@x.test", email="root@x.test", is_superuser=True, is_staff=True,
+            empresa=cls.a["empresa"],
         )
 
     def _generar(self, user=None, **kwargs):
@@ -891,15 +893,14 @@ class GenerarPeriodoIntegridadTests(NominaBase):
         )
         self.assertFalse(Nomina.objects.exists())
 
-    def test_superusuario_genera_solo_para_la_empresa_de_la_sucursal(self):
+    def test_superusuario_no_genera_para_otra_empresa(self):
         resp = self._generar(user=self.superusuario, sucursal_id=self.b["sucursal"].pk)
 
-        self.assertEqual(resp.status_code, 201, resp.content)
-        nomina = Nomina.objects.get()
+        self.assertEqual(resp.status_code, 400, resp.content)
         self.assertEqual(
-            (nomina.empleado_id, nomina.empresa_id, nomina.sucursal_id),
-            (self.empleado_b.pk, self.b["empresa"].pk, self.b["sucursal"].pk),
+            resp.json(), {"sucursal_id": ["La sucursal no existe o no pertenece a la empresa del usuario."]},
         )
+        self.assertFalse(Nomina.objects.exists())
 
     def test_superusuario_sin_sucursal_id_devuelve_400(self):
         resp = self._generar(user=self.superusuario, sucursal_id=None)
@@ -1791,6 +1792,99 @@ class PermisoAusenciaEstadoApiTests(HrBase):
         self.assertTrue(PermisoAusencia.objects.filter(pk=p.pk).exists())
 
 
+class AprobarSolicitudesPermisoTests(HrBase):
+    """#1319: aprobar/ y rechazar/ de vacaciones y permisos/ausencias exigen D-RH,
+    el código con el que el frontend muestra los botones. Sin él, 403 y la
+    solicitud sigue pendiente."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.sin_d_rh = Usuario.objects.create(
+            username="lector@acme.test", email="lector@acme.test",
+            empresa=cls.a["empresa"], sucursal_default=cls.a["sucursal"],
+        )
+        cls._dar_permisos(cls.sin_d_rh, cls.a["empresa"], "R-RH", "E-RH")
+
+    def _solicitudes(self):
+        return (
+            (VACACIONES_URL, Vacaciones.objects.create(
+                empleado=self.empleado, fecha_inicio=date(2026, 1, 1),
+                fecha_fin=date(2026, 1, 5), dias_solicitados=5,
+            )),
+            (PERMISOS_URL, PermisoAusencia.objects.create(
+                empleado=self.empleado, fecha_inicio=date(2026, 1, 1), fecha_fin=date(2026, 1, 2),
+            )),
+        )
+
+    def test_sin_d_rh_aprobar_y_rechazar_devuelven_403(self):
+        for url, obj in self._solicitudes():
+            for accion in ("aprobar", "rechazar"):
+                with self.subTest(url=url, accion=accion):
+                    resp = self._client(self.sin_d_rh).post(f"{url}{obj.pk}/{accion}/")
+
+                    self.assertEqual(resp.status_code, 403, resp.content)
+                    obj.refresh_from_db()
+                    self.assertEqual(obj.estado, "pendiente")
+
+    def test_con_d_rh_aprueba(self):
+        for url, obj in self._solicitudes():
+            with self.subTest(url=url):
+                resp = self._client().post(f"{url}{obj.pk}/aprobar/")
+
+                self.assertEqual(resp.status_code, 200, resp.content)
+                obj.refresh_from_db()
+                self.assertEqual(obj.estado, "aprobado")
+
+
+class SuperusuarioEmpresaActivaTests(HrBase):
+    """#1314 (EC-798): el superusuario ve y escribe sólo en su empresa activa, como
+    cualquier usuario; otra empresa es 404 y sin empresa no ve nada."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.root = Usuario.objects.create(
+            username="root@x.test", email="root@x.test", is_superuser=True, empresa=cls.a["empresa"],
+        )
+        cls.empleado_b = cls._empleado(cls.b, "B-001")
+        datos = {"fecha_inicio": date(2026, 1, 1), "fecha_fin": date(2026, 1, 5), "dias_solicitados": 5}
+        cls.vac_a = Vacaciones.objects.create(empleado=cls.empleado, **datos)
+        cls.vac_b = Vacaciones.objects.create(empleado=cls.empleado_b, **datos)
+
+    def test_listado_y_detalle_solo_de_la_empresa_activa(self):
+        resp = self._client(self.root).get(VACACIONES_URL)
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        filas = resp.json()
+        filas = filas.get("results", filas) if isinstance(filas, dict) else filas
+        self.assertEqual([f["id"] for f in filas], [self.vac_a.pk])
+        self.assertEqual(self._client(self.root).get(f"{VACACIONES_URL}{self.vac_b.pk}/").status_code, 404)
+
+    def test_no_aprueba_solicitudes_de_otra_empresa(self):
+        resp = self._client(self.root).post(f"{VACACIONES_URL}{self.vac_b.pk}/aprobar/")
+
+        self.assertEqual(resp.status_code, 404, resp.content)
+        self.vac_b.refresh_from_db()
+        self.assertEqual(self.vac_b.estado, "pendiente")
+
+    def test_dashboard_solo_cuenta_la_empresa_activa(self):
+        resp = self._client(self.root).get("/api/v1/hr/dashboard/")
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["vacaciones_pendientes"], 1)
+
+    def test_sin_empresa_no_ve_nada(self):
+        root = Usuario.objects.create(username="root2@x.test", email="root2@x.test", is_superuser=True)
+
+        resp = self._client(root).get(VACACIONES_URL)
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        filas = resp.json()
+        self.assertEqual(filas.get("results", filas) if isinstance(filas, dict) else filas, [])
+        self.assertEqual(self._client(root).get("/api/v1/hr/dashboard/").status_code, 403)
+
+
 class NominaCoherenciaYFechasTests(NominaBase):
     """#398 empresa/sucursal/empleado coherentes (también superusuario), #399
     sucursal = la del empleado, #404 fechas no-string en generar_periodo → 400."""
@@ -1798,7 +1892,9 @@ class NominaCoherenciaYFechasTests(NominaBase):
     @classmethod
     def setUpTestData(cls):
         super().setUpTestData()
-        cls.root = Usuario.objects.create(username="root", email="root@x.test", is_superuser=True)
+        cls.root = Usuario.objects.create(
+            username="root", email="root@x.test", is_superuser=True, empresa=cls.a["empresa"],
+        )
         cls.gdl = Sucursal.objects.create(empresa=cls.a["empresa"], codigo="GDL", nombre="Guadalajara")
         cls.empleado_b = cls._empleado(cls.b, "B-001")
 

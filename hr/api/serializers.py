@@ -32,19 +32,17 @@ from decimal import Decimal
 
 
 class EmpresaScopedSerializerMixin:
-    """Aislamiento multi-tenant en ESCRITURA (POST/PUT/PATCH) para HR."""
+    """Aislamiento multi-tenant en ESCRITURA (POST/PUT/PATCH) para HR.
+
+    Siempre la empresa activa del usuario, también la del superusuario (EC-798, #1314).
+    """
 
     def _empresa_usuario(self):
         request = self.context.get("request")
-        user = getattr(request, "user", None)
-        if getattr(user, "is_superuser", False):
-            return None, True
-        return getattr(user, "empresa", None), False
+        return getattr(getattr(request, "user", None), "empresa", None)
 
     def _validar_empresa_id(self, empresa_id, mensaje):
-        empresa, es_superuser = self._empresa_usuario()
-        if es_superuser:
-            return
+        empresa = self._empresa_usuario()
         if empresa is None or empresa_id != empresa.pk:
             raise serializers.ValidationError(mensaje)
 

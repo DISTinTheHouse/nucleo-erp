@@ -7290,7 +7290,7 @@ El asistente valida campos críticos (RFC, SAT) y solicitará datos faltantes.
 - Listados (GET /collection): usuario sin `empresa` asignada recibe `[]` vacío.
 - Detalle (GET /{id}/): registro de otra empresa responde `404 Not Found`.
 - Creación/edición cross-empresa: `400 Bad Request` con detalle del campo que violenta la regla.
-- Superusuario: ve todo (sin scoping).
+- Superusuario: igual que cualquier usuario, sólo su empresa activa (EC-798, #1314): lecturas, escrituras, `aprobar`/`rechazar`, `generar_periodo` y el dashboard. Sin empresa activa: listados `[]` y dashboard `403`.
 
 **Delete = siempre soft-delete** (`activo=False`). Nada se borra físicamente. Si el registro tiene dependencias FK (PROTECT) responde `409 Conflict` con lista de las dependencias que lo bloquean.
 
@@ -7735,6 +7735,8 @@ Campos auto-set por backend (**no mandar**):
 ```
 
 **Regla**: No se puede aprobar o rechazar una solicitud ya procesada (estado ≠ pendiente) → `400`.
+
+**Permiso**: `aprobar/` y `rechazar/` (de vacaciones y de permisos/ausencias) exigen `D-RH`; sin él → `403` (#1319). Superusuario y admin de empresa pasan.
 
 ---
 
