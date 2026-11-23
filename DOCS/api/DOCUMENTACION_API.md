@@ -2771,6 +2771,7 @@ Respuesta (`GET` lista/detalle, y `orden_compra` de onboarding/PUT/aceptar) aña
 Cancelar = la orden al proveedor queda anulada **pero se conserva y sigue visible**. Para borrar una OC capturada por error, ver "Eliminar" abajo.
 
 - **Endpoint**: `POST /api/v1/compras/ordenes/{id}/cancelar/`
+- **Permiso**: `A-COMPRAS-OC`, igual que `POST .../aceptar/` (los botones «Cancelar» y «Confirmar» del front); sin él → `403` (#1320). Superusuario y admin de empresa pasan. La OC de otra empresa sigue siendo `404`.
 - **Body**: `{ "motivo_cancelacion": "El proveedor ya no surte el insumo" }` — requerido; vacío o solo espacios → `400 {"motivo_cancelacion": "El motivo de cancelación es requerido."}`. Se guarda sin espacios al inicio/fin.
 - **Solo desde** `BORRADOR` (1), `POR_AUTORIZAR` (2) o `AUTORIZADA` (3). Con `PARCIALMENTE_RECIBIDA` (4), `RECIBIDA` (5) o `CANCELADA` (6) → `400 {"estatus": "La orden ya no puede cancelarse."}` (re-cancelar **no** es idempotente).
 - Además revisa los registros reales, no solo el estatus:
