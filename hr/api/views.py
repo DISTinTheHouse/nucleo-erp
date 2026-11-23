@@ -531,6 +531,60 @@ class PermisoAprobarSolicitud(BasePermission):
         return 'D-RH' in permisos_efectivos(request.user)
 
 
+def _solicitud_hr(obj):
+    """``(clave, etiqueta, url)`` de una solicitud de vacaciones o de permiso/ausencia."""
+    if isinstance(obj, Vacaciones):
+        return "vacaciones", "vacaciones", f"/rh/vacaciones/{obj.pk}"
+    return "permiso_ausencia", (obj.get_tipo_display() or "permiso").lower(), f"/rh/permisos-ausencias/{obj.pk}"
+
+
+def _datos_solicitud_hr(obj):
+    empleado = obj.empleado
+    nombre = " ".join(p for p in (empleado.nombre, empleado.apellido_paterno, empleado.apellido_materno) if p)
+    clave, etiqueta, url = _solicitud_hr(obj)
+    return clave, etiqueta, nombre, {
+        "solicitud_id": obj.pk, "tipo_solicitud": clave, "empleado_id": empleado.pk, "empleado_nombre": nombre,
+        "fecha_inicio": obj.fecha_inicio.isoformat(), "fecha_fin": obj.fecha_fin.isoformat(), "url": url,
+    }
+
+
+def _avisar_resolucion_hr(obj, usuario):
+    """Aviso a quien capturó la solicitud al aprobarla o rechazarla (#1318), salvo
+    que la resuelva él mismo. ``Empleado`` no tiene usuario: el capturista es el
+    único destinatario posible. Un solo INSERT."""
+    from notificaciones.services.notificacion_service import crear_notificacion_usuario
+
+    if not obj.solicitado_por_id or obj.solicitado_por_id == getattr(usuario, "pk", None):
+        return
+    clave, etiqueta, nombre, data = _datos_solicitud_hr(obj)
+    aprobada = obj.estado == "aprobado"
+    data["estado"] = obj.estado
+    if not aprobada:
+        data["motivo_rechazo"] = obj.motivo_rechazo or ""
+    mensaje = f"Se {'aprobó' if aprobada else 'rechazó'} la solicitud de {etiqueta} de {nombre} ({obj.fecha_inicio:%d/%m/%Y}–{obj.fecha_fin:%d/%m/%Y})."
+    if not aprobada and obj.motivo_rechazo:
+        mensaje += f" Motivo: {obj.motivo_rechazo}"
+    crear_notificacion_usuario(
+        obj.empleado.empresa, obj.solicitado_por_id,
+        f"Solicitud de {etiqueta} {'aprobada' if aprobada else 'rechazada'}", mensaje,
+        "rh", f"{clave}_{obj.estado}", data=data,
+    )
+
+
+def _avisar_alta_a_rh(obj):
+    """Aviso al departamento de RH de una solicitud nueva por aprobar (#1318),
+    al confirmar la transacción del alta."""
+    from notificaciones.services.notificacion_service import crear_notificacion_por_rol
+    from seguridad.role_identity import CLAVE_DEPARTAMENTO_RH
+
+    clave, etiqueta, nombre, data = _datos_solicitud_hr(obj)
+    transaction.on_commit(lambda: crear_notificacion_por_rol(
+        obj.empleado.empresa, "rh", f"Solicitud de {etiqueta} por aprobar",
+        f"{nombre} solicita {etiqueta} del {obj.fecha_inicio:%d/%m/%Y} al {obj.fecha_fin:%d/%m/%Y}.",
+        "rh", f"{clave}_solicitada", data=data, clave_departamento=CLAVE_DEPARTAMENTO_RH,
+    ))
+
+
 class VacacionesViewSet(
     SoftDeleteDestroyMixin,
     mixins.ListModelMixin,
@@ -565,7 +619,7 @@ class VacacionesViewSet(
         return qs.filter(empleado__empresa=empresa)
 
     def perform_create(self, serializer):
-        serializer.save(solicitado_por=self.request.user)
+        _avisar_alta_a_rh(serializer.save(solicitado_por=self.request.user))
 
     def perform_update(self, serializer):
         # select_for_update cierra la ventana entre leer el estatus y guardar:
@@ -596,6 +650,7 @@ class VacacionesViewSet(
         obj.autorizado_por = request.user
         obj.fecha_aprobacion = timezone.now()
         obj.save()
+        _avisar_resolucion_hr(obj, request.user)
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -613,6 +668,7 @@ class VacacionesViewSet(
         obj.fecha_rechazo = timezone.now()
         obj.motivo_rechazo = motivo
         obj.save()
+        _avisar_resolucion_hr(obj, request.user)
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -653,7 +709,7 @@ class PermisoAusenciaViewSet(
         return qs.filter(empleado__empresa=empresa)
 
     def perform_create(self, serializer):
-        serializer.save(solicitado_por=self.request.user)
+        _avisar_alta_a_rh(serializer.save(solicitado_por=self.request.user))
 
     def perform_update(self, serializer):
         with transaction.atomic():
@@ -681,6 +737,7 @@ class PermisoAusenciaViewSet(
         obj.autorizado_por = request.user
         obj.fecha_aprobacion = timezone.now()
         obj.save()
+        _avisar_resolucion_hr(obj, request.user)
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -698,6 +755,7 @@ class PermisoAusenciaViewSet(
         obj.fecha_rechazo = timezone.now()
         obj.motivo_rechazo = motivo
         obj.save()
+        _avisar_resolucion_hr(obj, request.user)
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_200_OK)
 

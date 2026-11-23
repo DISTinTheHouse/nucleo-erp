@@ -1748,6 +1748,37 @@ class VacacionesEstadoApiTests(HrBase):
         self.assertEqual(v2.motivo_rechazo, "no hay cobertura")
 
 
+class AvisosSolicitudesHrTests(HrBase):
+    """#1318: el alta avisa a RH; aprobar/rechazar avisa a quien la capturó."""
+
+    def test_alta_avisa_a_rh_y_resolucion_al_capturista(self):
+        from unittest import mock
+
+        capturista = Usuario.objects.create(username="cap@acme.test", email="cap@acme.test", empresa=self.a["empresa"])
+        with mock.patch("notificaciones.services.notificacion_service.crear_notificacion_por_rol") as rh:
+            with self.captureOnCommitCallbacks(execute=True):
+                resp = self._client().post(VACACIONES_URL, {
+                    "empleado": self.empleado.pk, "fecha_inicio": "2026-02-02",
+                    "fecha_fin": "2026-02-04", "dias_solicitados": 3,
+                }, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual((rh.call_count, rh.call_args.kwargs["clave_departamento"]), (1, "RH"))
+
+        v = Vacaciones.objects.create(empleado=self.empleado, fecha_inicio=date(2026, 3, 2), fecha_fin=date(2026, 3, 3),
+                                      dias_solicitados=2, solicitado_por=capturista)
+        with mock.patch("notificaciones.services.notificacion_service.crear_notificacion_usuario") as avisar:
+            resp = self._client().post(f"{VACACIONES_URL}{v.pk}/rechazar/", {"motivo_rechazo": "sin cobertura"})
+            self.assertEqual(resp.status_code, 200, resp.content)
+            self.assertEqual(avisar.call_args.args[1], capturista.pk)
+            self.assertEqual(avisar.call_args.kwargs["data"]["motivo_rechazo"], "sin cobertura")
+            # Quien la resuelve es el mismo capturista: sin aviso.
+            propia = Vacaciones.objects.create(empleado=self.empleado, fecha_inicio=date(2026, 4, 1),
+                                               fecha_fin=date(2026, 4, 1), dias_solicitados=1,
+                                               solicitado_por=self.a["usuario"])
+            self._client().post(f"{VACACIONES_URL}{propia.pk}/aprobar/")
+            self.assertEqual(avisar.call_count, 1)
+
+
 class PermisoAusenciaEstadoApiTests(HrBase):
     """Mismas reglas que ``VacacionesEstadoApiTests`` (Issue #264), aquí solo
     lo que no está ya cubierto por ser código idéntico entre ambos recursos."""
