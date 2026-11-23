@@ -1276,6 +1276,17 @@ class OrdenCompraCancelacionTests(TestCase):
         resp = self._client().post(f"{ORDENES_URL}{oc.pk}/aceptar/", {}, format="json")
         self._assert_rechazo(resp, {"detalle": "Agrega al menos un producto antes de aceptar."}, oc, antes)
 
+    def test_aceptar_sin_contabilidad_no_devuelve_importes(self):
+        """#1332: ``aceptar/`` filtra importes por rol, como ``retrieve``/``cancelar``."""
+        oc = self._oc(Estatus.POR_AUTORIZAR)
+        OrdenCompra.objects.filter(pk=oc.pk).update(folio="OC-CX-1")
+        resp = self._client().post(f"{ORDENES_URL}{oc.pk}/aceptar/", {}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()["orden_compra"]
+        self.assertEqual(data["estatus"], Estatus.AUTORIZADA)
+        for campo in ("subtotal", "impuestos", "total", "gran_total"):
+            self.assertNotIn(campo, data)
+
     def test_recepcion_rechaza_oc_cancelada_y_no_la_ofrece(self):
         oc = self._oc(Estatus.CANCELADA, motivo="original")
         detalle = OrdenCompraDetalle.objects.get(orden_compra=oc)
