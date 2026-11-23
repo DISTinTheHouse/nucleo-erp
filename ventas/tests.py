@@ -512,7 +512,8 @@ class PedidoDetalleScopeTenantTests(TestCase):
         """#1036: sin empresa activa, 400 en ``empresa`` antes de validar el body; la
         cotización se creaba con ``empresa=None``."""
         client = self._client(self.sin_empresa)
-        for url in ("/api/v1/ventas/pedidos/", "/api/v1/ventas/cotizaciones/"):
+        # Onboarding de cotizaciones, igual (#1313).
+        for url in ("/api/v1/ventas/pedidos/", "/api/v1/ventas/cotizaciones/", COTIZACION_ONBOARDING_URL):
             resp = client.post(url, {}, format="json")
             self.assertEqual(resp.status_code, 400, url)
             self.assertEqual(resp.data, {"empresa": ["El usuario no tiene empresa activa."]}, url)
@@ -7702,6 +7703,22 @@ class RechazoCotizacionComentarioTests(TestCase):
         self.assertEqual(hist.status_code, 200)
         self.assertEqual([c["tipo"] for c in hist.data], ["RECHAZO", "REENVIO"])
         self.assertEqual([c["comentario"] for c in hist.data], ["Precio mal", "Ya corregí el precio"])
+
+    def test_editar_autorizada_avisa_a_mesa_al_entrar_a_cambios(self):
+        """#1316: la cotización autorizada que pasa a Cambios solicitados avisa a
+        Mesa de Control una vez (no en cada edición posterior)."""
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=3, autorizada_at=timezone.now())
+        with patch("notificaciones.services.notificacion_service.crear_notificacion_por_rol") as avisar:
+            resp = self._como(self.vendedor).patch(self.url, {"oc": "OC-1316"}, format="json")
+            self.assertEqual(resp.status_code, 200, resp.content)
+            self.cotizacion.refresh_from_db()
+            self.assertEqual(self.cotizacion.estatus, 5)
+            self.assertEqual(avisar.call_count, 1)
+            kwargs = avisar.call_args.kwargs
+            self.assertEqual((kwargs["tipo"], kwargs["codigo_rol"]), ("cotizacion_cambios_solicitados", "MESA-DE-CONTROL"))
+            self.assertEqual(kwargs["data"]["cotizacion_id"], self.cotizacion.pk)
+            self._como(self.vendedor).patch(self.url, {"oc": "OC-1316-B"}, format="json")
+            self.assertEqual(avisar.call_count, 1)
 
     def test_cambios_solicitados_no_se_envian_a_revision(self):  # #710
         Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=5)
