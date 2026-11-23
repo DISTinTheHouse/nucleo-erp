@@ -7735,6 +7735,19 @@ class RechazoCotizacionComentarioTests(TestCase):
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(self.cotizacion.comentarios.count(), 1)
 
+    def test_reenvio_relee_el_estatus_bajo_el_lock(self):  # #1334
+        # ``get_object`` la ve Rechazada, pero otro envío ya la pasó a revisión:
+        # no se duplican el comentario REENVIO ni el aviso.
+        self._como(self.mesa).post(self.url + "rechazar/", {"comentario": "Precio mal"}, format="json")
+        obsoleta = Cotizacion.objects.get(pk=self.cotizacion.pk)
+        Cotizacion.objects.filter(pk=self.cotizacion.pk).update(estatus=2)
+        with patch("ventas.api.views.CotizacionViewSet.get_object", return_value=obsoleta):
+            resp = self._como(self.vendedor).post(
+                self.url + "enviar-revision/", {"comentario": "Otra vez"}, format="json"
+            )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(self.cotizacion.comentarios.count(), 1)
+
 
 class CotizacionOnboardingRendimientoTests(TestCase):
     """``POST /cotizaciones/onboarding/`` (guardar cotización, alta y edición).

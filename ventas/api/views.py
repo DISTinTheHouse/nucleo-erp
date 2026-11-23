@@ -2269,6 +2269,18 @@ class CotizacionViewSet(viewsets.ModelViewSet):
 
         comentario = _texto_comentario(request.data)
         with transaction.atomic():
+            # Estatus releído con la fila bloqueada, como ``autorizar``: dos envíos
+            # simultáneos pasaban la guarda y duplicaban el REENVIO y el aviso (#1334).
+            cotizacion.estatus = (
+                Cotizacion.objects.select_for_update()
+                .filter(pk=cotizacion.pk)
+                .values_list("estatus", flat=True)
+                .first()
+            )
+            if cotizacion.estatus not in [1, 4]:
+                raise ValidationError(
+                    {"estatus": "La cotización ya está en revisión o autorizada."}
+                )
             if cotizacion.estatus == 4 and comentario:
                 CotizacionComentario.objects.create(
                     cotizacion=cotizacion,

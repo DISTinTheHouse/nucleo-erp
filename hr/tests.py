@@ -1102,6 +1102,10 @@ MENSAJE_ENTRADA_DUPLICADA = (
     "La entrada de este empleado para esta fecha ya está registrada. "
     "Para corregirla, edita el registro de asistencia."
 )
+MENSAJE_FALTA_REGISTRADA = (
+    "El empleado tiene una falta registrada para esta fecha. "
+    "Para reemplazarla, edita el registro de asistencia."
+)
 MENSAJE_SALIDA_DUPLICADA = (
     "La salida de este empleado para esta fecha ya está registrada. "
     "Para corregirla, edita el registro de asistencia."
@@ -1333,16 +1337,17 @@ class AsistenciaChecadorTests(AsistenciaBase):
         asistencia = Asistencia.objects.get(empleado=self.empleado, fecha=DIA)
         self.assertEqual(asistencia.hora_entrada, _mx(DIA, 8, 12))
 
-    def test_la_entrada_se_pone_en_un_registro_existente_sin_entrada(self):
+    def test_la_entrada_sobre_una_falta_registrada_responde_400(self):
+        # #1333: la checada no reemplaza en silencio una falta; se corrige editando.
         falta = self._asistencia()
         self.assertEqual(falta.estado, "falta")
 
         resp = self._entrada(hora="2026-09-28 08:00:00")
 
-        self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(resp.json()["id"], falta.pk)
-        self.assertEqual(resp.json()["estado"], "puntual")
-        self.assertEqual(Asistencia.objects.filter(empleado=self.empleado).count(), 1)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"detail": MENSAJE_FALTA_REGISTRADA})
+        falta.refresh_from_db()
+        self.assertEqual((falta.estado, falta.hora_entrada), ("falta", None))
 
     def test_una_creacion_concurrente_responde_409_y_no_500(self):
         # Simula la carrera: la revisión previa no ve el registro que otra
@@ -1559,16 +1564,16 @@ class AsistenciaRevisionTests(AsistenciaBase):
 
     # -- 4. Creación concurrente contra una fila sin entrada -------------------------
 
-    def test_creacion_concurrente_contra_una_fila_sin_entrada_la_completa(self):
-        # La fila rival no tiene entrada (una falta capturada a mano): el INSERT
-        # choca, se relee y se le pone la entrada en vez de responder 409.
-        rival = self._asistencia()
+    def test_creacion_concurrente_contra_una_falta_responde_400(self):
+        # La fila rival es una falta capturada a mano: el INSERT choca, se relee
+        # y, como en la ruta normal, la falta no se reemplaza (#1333).
+        self._asistencia()
 
         with patch("hr.api.views.AsistenciaViewSet._asistencia_del_dia", return_value=None):
             resp = self._entrada()
 
-        self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual((resp.json()["id"], resp.json()["estado"]), (rival.pk, "retardo"))
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"detail": MENSAJE_FALTA_REGISTRADA})
         self.assertEqual(Asistencia.objects.filter(empleado=self.empleado, fecha=DIA).count(), 1)
 
     # -- 5. Turno de duración cero en el serializer ----------------------------------
@@ -1746,6 +1751,19 @@ class VacacionesEstadoApiTests(HrBase):
         v2.refresh_from_db()
         self.assertEqual(v2.estado, "rechazado")
         self.assertEqual(v2.motivo_rechazo, "no hay cobertura")
+
+    def test_aprobar_y_rechazar_releen_el_estado_bajo_el_lock(self):
+        # #1334: ``get_object`` la ve pendiente, pero otra petición ya la resolvió.
+        for accion, resuelta in (("aprobar", "rechazado"), ("rechazar", "aprobado")):
+            with self.subTest(accion=accion):
+                v = self._vacaciones()
+                obsoleta = Vacaciones.objects.get(pk=v.pk)
+                Vacaciones.objects.filter(pk=v.pk).update(estado=resuelta)
+                with patch("hr.api.views.VacacionesViewSet.get_object", return_value=obsoleta):
+                    resp = self._client().post(f"{VACACIONES_URL}{v.pk}/{accion}/")
+                self.assertEqual(resp.status_code, 400, resp.content)
+                v.refresh_from_db()
+                self.assertEqual(v.estado, resuelta)
 
 
 class AvisosSolicitudesHrTests(HrBase):
