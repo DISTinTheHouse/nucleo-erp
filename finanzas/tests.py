@@ -6891,6 +6891,44 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         cxc.refresh_from_db()
         self.assertEqual(cxc.saldo, Decimal("100.00"))
 
+    def test_motivo_por_causa_en_cxc_y_al_cobrar(self):
+        """#1328-#1330: cada causa con su motivo en la CxC, su mensaje al cobrar
+        (factura cancelada incluida) y el filtro ``cobrable`` con la misma regla."""
+        from finanzas.services.cobro_service import _MENSAJE_NO_COBRABLE
+
+        M = CuentaPorCobrar.MotivoNoCobrable
+        casos = [
+            (M.CXC_CANCELADA, {}, {"estatus": CuentaPorCobrar.EstatusCxC.CANCELADA}),
+            (M.FACTURA_CANCELADA, {"estatus": Factura.FacturaStatus.CANCELADA}, {}),
+            (M.CFDI_CANCELADO, {"cfdi_cancelado": True}, {}),
+            (M.CANCELACION_SOLICITADA, {"cfdi_cancelacion_solicitada": True}, {}),
+            (M.CANCELACION_EN_CURSO, {"cfdi_cancelacion_en_curso_desde": timezone.now()}, {}),
+            (M.CFDI_PENDIENTE, {"cfdi_pendiente": True}, {}),
+            (M.SALDO_CERO, {}, {"saldo": Decimal("0.00")}),
+        ]
+        cliente = self._client(self.a["usuario"])
+        cobrable = self._cxc()
+        for motivo, factura, cxc_campos in casos:
+            with self.subTest(motivo):
+                cxc = self._cxc()
+                Factura.objects.filter(pk=cxc.factura_id).update(**factura)
+                CuentaPorCobrar.objects.filter(pk=cxc.pk).update(**cxc_campos)
+                fila = cliente.get(f"{CXC_URL}{cxc.pk}/").data
+                self.assertEqual(
+                    (fila["cobrable"], fila["motivo_no_cobrable"], fila["motivo_no_cobrable_display"]),
+                    (False, motivo.value, motivo.label),
+                )
+                data = cliente.get(CXC_URL, {"cobrable": "true"}).data
+                ids = [c["id"] for c in (data["results"] if isinstance(data, dict) else data)]
+                self.assertNotIn(cxc.pk, ids)
+                self.assertIn(cobrable.pk, ids)
+                if motivo != M.SALDO_CERO:
+                    resp = self._cobrar(cxc)
+                    self.assertEqual(resp.status_code, 400, resp.data)
+                    self.assertIn(_MENSAJE_NO_COBRABLE[motivo].format(id=cxc.pk), str(resp.data["cobro_detalles"]))
+        fila = cliente.get(f"{CXC_URL}{cobrable.pk}/").data
+        self.assertEqual((fila["cobrable"], fila["motivo_no_cobrable"]), (True, None))
+
     def test_no_se_puede_cobrar_dos_veces_una_cxc_liquidada(self):
         cxc = self._cxc()
         self.assertEqual(self._cobrar(cxc).status_code, 201)

@@ -12,10 +12,24 @@ from finanzas.models import (
     CobroDetalle,
     CuentaBancaria,
     CuentaPorCobrar,
-    Factura,
     MovimientoBancario,
 )
 from terceros.models import Cliente
+
+_MotivoNoCobrable = CuentaPorCobrar.MotivoNoCobrable
+# Un mensaje por causa (#1330), en el orden de ``CuentaPorCobrar.motivo_no_cobrable``.
+_MENSAJE_NO_COBRABLE = {
+    _MotivoNoCobrable.CXC_CANCELADA: "La CxC {id} está cancelada y no admite cobros.",
+    _MotivoNoCobrable.FACTURA_CANCELADA: "La factura de la CxC {id} está cancelada y no admite cobros.",
+    _MotivoNoCobrable.CFDI_CANCELADO: "El CFDI de la factura de la CxC {id} está cancelado ante el SAT y no admite cobros.",
+    _MotivoNoCobrable.CANCELACION_SOLICITADA: (
+        "La factura de la CxC {id} tiene la cancelación del CFDI solicitada ante el SAT y no admite cobros."
+    ),
+    _MotivoNoCobrable.CANCELACION_EN_CURSO: (
+        "La cancelación del CFDI de la factura de la CxC {id} está en curso y no admite cobros."
+    ),
+    _MotivoNoCobrable.CFDI_PENDIENTE: "El CFDI de la factura de la CxC {id} está pendiente de timbrar y no admite cobros.",
+}
 
 
 class CobroService:
@@ -60,28 +74,16 @@ class CobroService:
                 )
             if cxc.cliente_id != cobro.cliente_id:  # #643: también si el cliente cambió por PATCH
                 raise ErrorDeNegocio({"cobro_detalles": f"La CxC {cxc.pk} es de otro cliente."})
-            if cxc.estatus == CuentaPorCobrar.EstatusCxC.CANCELADA:
-                raise ErrorDeNegocio(
-                    {"cobro_detalles": f"La CxC {cxc.pk} está cancelada y no admite cobros."}
-                )
-            factura_estatus = (
-                Factura.objects.filter(pk=cxc.factura_id).values_list("estatus", flat=True).first()
-                if cxc.factura_id
-                else None
-            )
+            # La regla de ``cobrable`` (lazzar-erp#353), un mensaje por causa (#1330) y
+            # sin consultas: la factura ya viene en ``select_related`` (#1329). El saldo
+            # se valida abajo contra el importe aplicado.
+            motivo = cxc.motivo_no_cobrable(considerar_saldo=False)
+            if motivo is not None:
+                raise ErrorDeNegocio({"cobro_detalles": _MENSAJE_NO_COBRABLE[motivo].format(id=cxc.pk)})
             if cxc.factura.moneda_id != moneda_cuenta:  # #587
                 raise ErrorDeNegocio(
                     {"cuenta_bancaria": f"La CxC {cxc.pk} está en otra moneda que la cuenta bancaria."}
                 )
-            if cxc.factura.cancelada_o_en_cancelacion or cxc.factura.cfdi_pendiente:  # lazzar-erp#353
-                raise ErrorDeNegocio(
-                    {"cobro_detalles": f"El CFDI de la factura de la CxC {cxc.pk} está cancelado, en cancelación o pendiente de timbrar: no admite cobros."}
-                )
-            if factura_estatus == Factura.FacturaStatus.CANCELADA:
-                raise ErrorDeNegocio(
-                    {"cobro_detalles": f"La factura de la CxC {cxc.pk} está cancelada y no admite cobros."}
-                )
-            # La factura ya viene cargada (``select_related``): sin consulta extra.
             if cxc.empresa_efectiva_id != cobro.empresa_id:
                 raise ErrorDeNegocio(
                     {"cobro_detalles": "CxC no pertenece a la misma empresa que el cobro."}

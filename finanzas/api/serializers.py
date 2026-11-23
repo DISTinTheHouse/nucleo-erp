@@ -204,14 +204,27 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
         source="factura.cfdi_cancelacion_solicitada", read_only=True, default=False)
     factura_cfdi_pendiente = serializers.BooleanField(source="factura.cfdi_pendiente", read_only=True, default=False)
     cobrable = serializers.SerializerMethodField()
+    # #1328: por qué no es cobrable (null si lo es), con su texto para mostrar.
+    motivo_no_cobrable = serializers.SerializerMethodField()
+    motivo_no_cobrable_display = serializers.SerializerMethodField()
+
+    def _motivo(self, obj):
+        # Una sola evaluación por fila, sin consultas: ``factura`` viene en ``select_related``.
+        if not hasattr(obj, "_motivo_no_cobrable"):
+            obj._motivo_no_cobrable = obj.motivo_no_cobrable()
+        return obj._motivo_no_cobrable
 
     def get_cobrable(self, obj):
-        """Saldo > 0, CxC no cancelada y factura vigente: lo mismo que exige aplicar un cobro."""
-        f = obj.factura
-        return bool(
-            (obj.saldo or 0) > 0 and obj.estatus != CuentaPorCobrar.EstatusCxC.CANCELADA
-            and f is not None and not f.cancelada_o_en_cancelacion and not f.cfdi_pendiente
-        )
+        """Lo mismo que exige aplicar un cobro (``CuentaPorCobrar.motivo_no_cobrable``)."""
+        return self._motivo(obj) is None
+
+    def get_motivo_no_cobrable(self, obj):
+        motivo = self._motivo(obj)
+        return motivo.value if motivo else None
+
+    def get_motivo_no_cobrable_display(self, obj):
+        motivo = self._motivo(obj)
+        return motivo.label if motivo else None
 
     class Meta:
         model = CuentaPorCobrar
@@ -238,6 +251,8 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
             "factura_cfdi_cancelacion_solicitada",
             "factura_cfdi_pendiente",
             "cobrable",
+            "motivo_no_cobrable",
+            "motivo_no_cobrable_display",
         ]
         # Saldo y estatus los mueve solo el servicio de cobros/notas de crédito:
         # editables aquí, una CxC podía quedar con un saldo que ninguna póliza respalda.
