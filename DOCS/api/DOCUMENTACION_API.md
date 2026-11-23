@@ -2173,14 +2173,16 @@ Cada documento que nació del pedido, para la pestaña "Documentos" del detalle.
   | Sección | Permiso (si no, `null`) | Por sucursal |
   |---|---|---|
   | `salidas_maquila` | `R-PRODUCCION-OP` (como `GET /produccion/salidas-maquila/`) | sucursal de la SM (EC-871) |
-  | `facturas` | `R-CONTABILIDAD` o `R-CONTABILIDAD-FACTURACION` | sucursal de la factura (#753) |
-  | `cobros` | `R-CONTABILIDAD` o `R-CONTABILIDAD-CXC` | un cobro con alguna línea de una factura de otra sucursal no sale (#1078) |
+  | `facturas` | `R-CONTABILIDAD` o `R-CONTABILIDAD-FACTURACION`, o un departamento que ve importes del pedido (`puede_ver_contabilidad`, #1310) | sucursal de la factura (#753) |
+  | `cobros` | `R-CONTABILIDAD` o `R-CONTABILIDAD-CXC`, o un departamento que ve importes del pedido (#1310) | un cobro con alguna línea de una factura de otra sucursal no sale (#1078) |
   | `movimientos_inventario` | — | sucursal del movimiento |
   | `pickings`, `despachos` | — | sucursal del picking; un despacho solo si su packing es visible (ni su `packing_id` ni su `packing_folio` salen si no) |
+  | `ordenes_produccion` | `R-PRODUCCION-OP` (#1311) | sucursal de la OP, también en `documentos[]` del detalle |
+  | `cotizaciones` | los del detalle de cotización (`CODIGOS_COTIZACIONES` + `CODIGOS_PEDIDO_NEUTRO`, #1311) | no; sin admin, solo las de las que es vendedor |
   | `ordenes_bordado`, `ordenes_reflejante`, `ordenes_corte_manga`, `packings` | — | regla #536 de `pedido.documentos` (EC-920) |
-  | `pre_ordenes`, `envios`, `cotizaciones`, `ordenes_compra`, `ordenes_produccion` | — | no (son de la empresa) |
+  | `pre_ordenes`, `envios`, `ordenes_compra` | — | no (son de la empresa; el módulo de OC no exige permiso) |
 
-  Una sola resolución de permisos por petición (`permisos_efectivos`): las claves de departamento (`puede_ver_contabilidad`) ya no deciden facturas ni cobros (#1259).
+  Una sola resolución de permisos por petición (`permisos_efectivos`); las claves de departamento solo se consultan si los códigos no abren facturas y cobros (#1259, #1310).
 - Número fijo de consultas, sin importar cuántos documentos tenga el pedido.
 - **Respuesta** (`200`), siempre con las 15 llaves; una lista vacía es "sin registros":
   ```json

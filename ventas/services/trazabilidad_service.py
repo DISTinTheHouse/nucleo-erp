@@ -573,20 +573,27 @@ BLOQUES_DE_PEDIDO_DOCUMENTOS = (
 )
 
 
-def _bloques_de_pedido_documentos(pedido, alcance):
+def _bloques_de_pedido_documentos(pedido, alcance, sin_permiso=(), vendedor_id=None):
     """Cotización, OC, OP/OB/OR/OCM y packings con la MISMA relación y reglas de
     visibilidad que ``pedido.documentos`` (``documentos_visibles``): qué cuenta
     como del pedido no se redefine aquí. Una consulta por tipo, solo con las
     columnas que se leen. Sin importes: la pestaña no los necesita y así no se
-    abre otra puerta a montos (EC-784)."""
+    abre otra puerta a montos (EC-784).
+
+    ``sin_permiso``: bloques sin el permiso de su módulo, en null y sin consultar
+    (#1311). ``vendedor_id``: solo las cotizaciones de ese vendedor, como
+    ``alcance_cotizaciones`` para quien no es admin."""
     from ventas.services.pedido_documentos_service import documentos_visibles, fila_de_documento
 
-    bloque_de = {tipo: bloque for bloque, tipo in BLOQUES_DE_PEDIDO_DOCUMENTOS}
-    bloques = {bloque: [] for bloque, _ in BLOQUES_DE_PEDIDO_DOCUMENTOS}
+    bloque_de = {tipo: bloque for bloque, tipo in BLOQUES_DE_PEDIDO_DOCUMENTOS if bloque not in sin_permiso}
+    bloques = {bloque: (None if bloque in sin_permiso else []) for bloque, _ in BLOQUES_DE_PEDIDO_DOCUMENTOS}
     for cfg, doc in documentos_visibles(pedido, tipos=bloque_de, alcance=alcance, solo_campos=True):
+        if cfg["tipo"] == "cotizacion" and vendedor_id is not None and doc.vendedor_id != vendedor_id:
+            continue
         bloques[bloque_de[cfg["tipo"]]].append(fila_de_documento(cfg, doc))
     for filas in bloques.values():
-        filas.sort(key=lambda fila: fila["id"])
+        if filas is not None:
+            filas.sort(key=lambda fila: fila["id"])
     return bloques
 
 
@@ -596,13 +603,18 @@ def documentos_pedido(pedido, *, user, permisos=None):
     para no hacerla más lenta: el frontend lo pide al abrir la pestaña.
 
     Cada sección con la regla de lectura de SU módulo (#1243), en null sin ella:
-    ``salidas_maquila`` con ``R-PRODUCCION-OP`` (``GET /produccion/salidas-maquila/``,
-    #1226) y su ``total`` además con ``R-PRODUCCION-COSTOS`` (si no, null; es el del
-    documento SM, no la parte del pedido); ``facturas`` con ``R-CONTABILIDAD`` o
+    ``salidas_maquila`` y ``ordenes_produccion`` con ``R-PRODUCCION-OP``
+    (``GET /produccion/salidas-maquila/``, #1226, #1311) y el ``total`` de la SM además
+    con ``R-PRODUCCION-COSTOS`` (si no, null; es el del documento SM, no la parte del
+    pedido); ``cotizaciones`` con los códigos del detalle de cotización
+    (``CODIGOS_COTIZACIONES`` + ``CODIGOS_PEDIDO_NEUTRO``) y, sin admin, solo las de
+    las que es vendedor (#1311); ``facturas`` con ``R-CONTABILIDAD`` o
     ``R-CONTABILIDAD-FACTURACION`` y ``cobros`` con ``R-CONTABILIDAD`` o
-    ``R-CONTABILIDAD-CXC`` (``PermisoFinanzas``, EC-746). ``permisos``: los de
-    ``permisos_de_la_peticion`` (si no, se resuelven aquí): una sola resolución de
-    permisos por petición, sin claves de departamento (#1259).
+    ``R-CONTABILIDAD-CXC`` (``PermisoFinanzas``, EC-746) o, en ambas, con un
+    departamento que ve importes del pedido (``puede_ver_contabilidad``, #1310): la
+    misma regla que los importes del resto del pedido. Las claves de departamento
+    solo se consultan si los códigos no bastan. ``permisos``: los de
+    ``permisos_de_la_peticion`` (si no, se resuelven aquí).
 
     ``user`` (obligatorio): para quien no es admin ni superusuario, cada bloque solo
     de sus sucursales, como en su módulo: los de ``pedido.documentos`` (#536),
@@ -612,7 +624,11 @@ def documentos_pedido(pedido, *, user, permisos=None):
     hay alcance que aplicar: falla cerrado."""
     from finanzas.api.views import CobroViewSet, FacturaViewSet, lee_seccion_finanzas
     from logistica.models import Envio
-    from nucleo.permisos import CODIGOS_PRODUCCION_OP, permisos_efectivos
+    from nucleo.permisos import (
+        CODIGOS_COTIZACIONES, CODIGOS_PEDIDO_NEUTRO, CODIGOS_PRODUCCION_OP, permisos_efectivos,
+    )
+    from ventas.scope import _ve_toda_la_empresa
+    from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
     from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
     from produccion.models import PreOrdenProduccion, SalidaMaquila
     from inventarios.models import MovimientoInventario
@@ -688,11 +704,16 @@ def documentos_pedido(pedido, *, user, permisos=None):
         "id", "guia", "envio_id", "packing_id", packing_folio=F("packing__folio"),
     )
     envios = _lista(Envio.objects.filter(pedido_id=pk, empresa_id=empresa_id).order_by("id"), "id", "transportista_id")
-    facturas, cobros = _facturas_y_cobros(
-        pedido, sucursales,
-        con_facturas=lee_seccion_finanzas(permisos, FacturaViewSet.codigo_lectura_seccion),
-        con_cobros=lee_seccion_finanzas(permisos, CobroViewSet.codigo_lectura_seccion),
-    )
+    con_facturas = lee_seccion_finanzas(permisos, FacturaViewSet.codigo_lectura_seccion)
+    con_cobros = lee_seccion_finanzas(permisos, CobroViewSet.codigo_lectura_seccion)
+    if not (con_facturas and con_cobros) and puede_ver_contabilidad(user):  # #1310
+        con_facturas = con_cobros = True
+    facturas, cobros = _facturas_y_cobros(pedido, sucursales, con_facturas=con_facturas, con_cobros=con_cobros)
+    sin_permiso = set()
+    if not permisos.alguno(CODIGOS_COTIZACIONES + CODIGOS_PEDIDO_NEUTRO):
+        sin_permiso.add("cotizaciones")
+    if not permisos.alguno(CODIGOS_PRODUCCION_OP):
+        sin_permiso.add("ordenes_produccion")
     return {
         "pre_ordenes": pre_ordenes,
         "salidas_maquila": salidas_maquila,
@@ -702,7 +723,9 @@ def documentos_pedido(pedido, *, user, permisos=None):
         "envios": envios,
         "facturas": facturas,
         "cobros": cobros,
-        **_bloques_de_pedido_documentos(pedido, alcance),
+        **_bloques_de_pedido_documentos(
+            pedido, alcance, sin_permiso, vendedor_id=None if _ve_toda_la_empresa(user) else user.pk,
+        ),
     }
 
 
