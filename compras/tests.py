@@ -3962,6 +3962,36 @@ class RecepcionSalidaMaquilaServicioTests(TestCase):
         if r.status_code == 200:  # lectura con R-PRODUCCION-OP
             self.assertEqual((r.data["piezas_recibidas"], r.data["piezas_faltantes"]), ("2", "1"))
 
+    def test_mas_de_2_decimales_es_400(self):
+        """#1308: la SM va a centavos; 4 decimales dejarían un residuo que la API
+        muestra como 0.00 y ya no se podría recibir."""
+        r = self._post(detalle=[{"salida_maquila_detalle": self.smd.pk, "cantidad_recibida": "1.995"}])
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("2 decimales", str(r.data))
+        self.assertFalse(Recepcion.objects.filter(salida_maquila=self.sm).exists())
+
+    def test_tope_y_cierre_con_el_pendiente_exacto(self):
+        """#1308: un residuo menor a un centavo (de antes de la validación) se ve
+        como 0.00 pero cuenta: la SM no se completa y sin renglones se recibe."""
+        from compras.services.maquila import pendiente_por_renglon_sm
+
+        rc = Recepcion.objects.create(
+            tipo_origen=Recepcion.TipoOrigen.SALIDA_MAQUILA, salida_maquila=self.sm, empresa=self.empresa,
+            sucursal=self.sucursal, almacen=self.almacen, usuario=self.usuario, fecha_recepcion=timezone.now(),
+            estatus=Recepcion.EstatusRecepcion.CERRADA, activo=True,
+        )
+        RecepcionDetalle.objects.create(recepcion=rc, salida_maquila_detalle=self.smd, cantidad_recibida=Decimal("1.995"))
+        self.assertEqual(pendiente_por_renglon_sm(self.sm.pk), {self.smd.pk: Decimal("0.005")})
+        r = self.client.get(RECEPCION_ONBOARDING_URL)
+        fila = next(s for s in r.data["busqueda"]["salidas_maquila"] if s["id"] == self.sm.pk)
+        self.assertEqual(fila["detalle"][0]["cantidad_pendiente"], "0.00")  # solo para mostrar
+        # 0.01 excede el residuo real; sin renglones se recibe exacto y se completa.
+        self.assertEqual(self._post(detalle=[{"salida_maquila_detalle": self.smd.pk, "cantidad_recibida": "0.01"}]).status_code, 400)
+        self.assertEqual(self._post().status_code, 200, "sin renglones recibe el residuo")
+        self.sm.refresh_from_db()
+        self.assertEqual(self.sm.estatus, "RECIBIDA")
+        self.assertEqual(pendiente_por_renglon_sm(self.sm.pk), {self.smd.pk: Decimal("0")})
+
     def test_transportista_de_otra_empresa_es_400(self):
         r = self._post(transportista=self.transportista_ajeno.pk)
         self.assertEqual(r.status_code, 400)

@@ -152,19 +152,41 @@ def recibido_por_renglon_sm(sm, detalles):
     return out
 
 
+def _recibido_renglon_sm():
+    """Piezas recibidas con el renglón de SM (``OuterRef("pk")``) de OB/OR, a 4
+    decimales, como subconsulta anotable."""
+    sub = (
+        RecepcionDetalle.objects.filter(salida_maquila_detalle_id=OuterRef("pk"), recepcion__activo=True)
+        .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        .order_by().values("salida_maquila_detalle_id").annotate(t=Sum("cantidad_recibida")).values("t")
+    )
+    return Coalesce(Subquery(sub, output_field=DecimalField(max_digits=18, decimal_places=4)),
+                    Value(CERO), output_field=DecimalField(max_digits=18, decimal_places=4))
+
+
+def pendiente_por_renglon_sm(sm_id):
+    """``{salida_maquila_detalle_id: piezas por recibir}`` de una SM de OB/OR, sin
+    redondear: es el tope al recibir y lo que decide si la SM se completa. El de
+    ``renglones_sm_servicio`` va a centavos y es solo para mostrar (#1308). Una
+    consulta."""
+    filas = (
+        SalidaMaquilaDetalle.objects.filter(salida_id=sm_id)
+        .annotate(recibido=_recibido_renglon_sm())
+        .order_by("id").values_list("id", "cantidad", "recibido")
+    )
+    return {pk: max(cantidad - recibido, CERO) for pk, cantidad, recibido in filas}
+
+
 def renglones_sm_servicio(sm_ids):
     """``{sm_id: [renglón]}`` de SM de OB/OR con SKU, talla, color y lo pendiente
-    (enviado − recibido con la SM). Una consulta, sin importar SM ni renglones."""
+    (enviado − recibido con la SM), a centavos para mostrar; para validar, el
+    exacto de ``pendiente_por_renglon_sm``. Una consulta, sin importar SM ni
+    renglones."""
     from catalogo.models import ProductoVariante
 
     sm_ids = list(sm_ids)
     if not sm_ids:
         return {}
-    recibido = (
-        RecepcionDetalle.objects.filter(salida_maquila_detalle_id=OuterRef("pk"), recepcion__activo=True)
-        .exclude(recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
-        .order_by().values("salida_maquila_detalle_id").annotate(t=Sum("cantidad_recibida")).values("t")
-    )
     sku = ProductoVariante.objects.filter(
         producto_id=OuterRef("_producto"), talla_id=OuterRef("_talla"), color_id=OuterRef("_color"),
     ).order_by("id").values("sku")[:1]
@@ -182,8 +204,7 @@ def renglones_sm_servicio(sm_ids):
             talla=Coalesce("ob_detalle__talla__nombre", "or_detalle__talla__nombre"),
             color=Coalesce("ob_detalle__color__nombre", "or_detalle__color__nombre"),
             sku=Subquery(sku),
-            recibido=Coalesce(Subquery(recibido, output_field=DecimalField(max_digits=18, decimal_places=4)),
-                              Value(CERO), output_field=DecimalField(max_digits=18, decimal_places=4)),
+            recibido=_recibido_renglon_sm(),
         )
         .order_by("salida_id", "id")
         .values("id", "salida_id", "ob_detalle_id", "or_detalle_id", "descripcion", "producto_nombre",

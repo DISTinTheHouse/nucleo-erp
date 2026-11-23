@@ -97,8 +97,8 @@ from nucleo.models import Moneda, SerieFolio, Sucursal
 from ventas.models import Pedido
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle, SalidaMaquila
 from compras.services.maquila import (
-    ESTATUS_OP_RECIBIBLES, apartado_en_maquila, facturar_maquila, marcar_recibida, origen_sm,
-    renglones_sm_servicio, pendiente_de_sm, recibido_sm_subquery,
+    CENTAVO, ESTATUS_OP_RECIBIBLES, apartado_en_maquila, facturar_maquila, marcar_recibida, origen_sm,
+    renglones_sm_servicio, pendiente_de_sm, pendiente_por_renglon_sm, recibido_sm_subquery,
 )
 from compras.services.recepcion_pedidos import RELACIONES_PEDIDO, origen_folio, pedidos_de_recepciones
 from terceros.models import Proveedor, Transportista
@@ -1797,8 +1797,13 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         Se cuentan las piezas que regresan por renglón de la SM (``detalle`` con
         ``salida_maquila_detalle``; vacío = todo lo pendiente) contra lo pendiente
         de cada renglón. La factura de maquila es por lo que regresó; la SM queda
-        Recibida al completarse o con ``cerrar_salida_maquila`` (el resto, faltante)."""
-        pendientes = {f["id"]: Decimal(f["cantidad_pendiente"]) for f in renglones_sm_servicio([sm.pk]).get(sm.pk, [])}
+        Recibida al completarse o con ``cerrar_salida_maquila`` (el resto, faltante).
+
+        Tope y cierre con el pendiente exacto, no el redondeado a centavos que se
+        muestra; y a lo más 2 decimales por renglón, como la SM, para no dejar un
+        residuo que se muestre como 0.00 (#1308)."""
+        pendientes = pendiente_por_renglon_sm(sm.pk)
+        explicito = bool(detalle_raw)
         if not detalle_raw:
             detalle_raw = [{"salida_maquila_detalle": k, "cantidad_recibida": v} for k, v in pendientes.items() if v > 0]
             if not detalle_raw:
@@ -1811,7 +1816,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 raise _error_detalle({"detalle": f"El renglón {ref} de una SM de OB/OR va con salida_maquila_detalle."})
             if smd_id not in pendientes:
                 raise _error_detalle({"detalle": f"El renglón {ref} no va en la SM {sm.folio}."})
-            acumulado[smd_id] = acumulado.get(smd_id, Decimal("0")) + Decimal(str(item["cantidad_recibida"]))
+            cantidad = Decimal(str(item["cantidad_recibida"]))
+            if explicito and cantidad != cantidad.quantize(CENTAVO):
+                raise _error_detalle({"detalle": f"El renglón {ref} admite hasta 2 decimales, como la SM {sm.folio}."})
+            acumulado[smd_id] = acumulado.get(smd_id, Decimal("0")) + cantidad
             if acumulado[smd_id] > pendientes[smd_id]:
                 raise _error_detalle({"detalle": (
                     f"El renglón {ref} excede lo pendiente de la SM {sm.folio} "
