@@ -996,6 +996,46 @@ class OrdenCompraCancelacionTests(TestCase):
         self.assertEqual(self._estado(oc), antes)
         self.assertFalse(AuditoriaEvento.objects.filter(modulo="compras").exists())
 
+    # --- cancelar una recepción (#1307) -----------------------------------------
+
+    def _cancelar_recepcion(self, rc, motivo="Captura duplicada", user=None):
+        return self._client(user).post(f"{RECEPCIONES_URL}{rc.pk}/cancelar/", {"motivo": motivo}, format="json")
+
+    def test_cancelar_recepcion_en_calidad_reabre_la_oc_y_deja_cancelarla(self):
+        admin = Usuario.objects.create(username="adm@acme-cx.test", email="adm@acme-cx.test",
+                                       empresa=self.a["empresa"], is_admin_empresa=True)
+        oc = self._oc(Estatus.PARCIALMENTE_RECIBIDA)
+        rc = self._recepcion(oc, estatus=Recepcion.EstatusRecepcion.EN_CALIDAD)
+        RecepcionDetalle.objects.create(recepcion=rc, orden_compra_detalle=oc.ordencompradetalle_set.get(),
+                                        producto=self.a["producto"], cantidad_recibida=4)
+        self.assertEqual(self._cancelar(oc).status_code, 400)  # con recepción viva
+        r = self._cancelar_recepcion(rc, user=admin)
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(Recepcion.objects.get(pk=rc.pk).estatus, Recepcion.EstatusRecepcion.CANCELADA)
+        self.assertEqual(OrdenCompra.objects.get(pk=oc.pk).estatus, Estatus.AUTORIZADA)
+        self.assertEqual(self._cancelar(oc).status_code, 200)
+
+    def test_cancelar_recepcion_despues_de_calidad_o_ajena_no_procede(self):
+        admin = Usuario.objects.create(username="adm2@acme-cx.test", email="adm2@acme-cx.test",
+                                       empresa=self.a["empresa"], is_admin_empresa=True)
+        oc = self._oc(Estatus.RECIBIDA)
+        for estatus in (Recepcion.EstatusRecepcion.CERRADA, Recepcion.EstatusRecepcion.RECIBIDA):
+            with self.subTest(estatus=estatus):
+                rc = self._recepcion(oc, estatus=estatus)
+                r = self._cancelar_recepcion(rc, user=admin)
+                self.assertEqual(r.status_code, 400, r.content)
+                self.assertIn("estatus", r.json())
+                self.assertEqual(Recepcion.objects.get(pk=rc.pk).estatus, estatus)
+        rc = self._recepcion(oc, estatus=Recepcion.EstatusRecepcion.EN_CALIDAD)
+        self._factura(oc, FacturaProveedor.FacturaProveedorStatus.BORRADOR, recepcion=rc)
+        r = self._cancelar_recepcion(rc, user=admin)
+        self.assertEqual(r.status_code, 400, r.content)  # factura de OC: no es de maquila
+        self.assertIn("facturas_proveedores", r.json())
+        ajeno = Usuario.objects.create(username="adm@globex-cx.test", email="adm@globex-cx.test",
+                                       empresa=self.b["empresa"], is_admin_empresa=True)
+        self.assertEqual(self._cancelar_recepcion(rc, user=ajeno).status_code, 404)
+        self.assertFalse(AuditoriaEvento.objects.filter(tabla="recepciones").exists())
+
     # --- cancelar: caminos permitidos ------------------------------------------
 
     def test_cancela_desde_cada_estatus_permitido(self):
@@ -3991,6 +4031,44 @@ class RecepcionSalidaMaquilaServicioTests(TestCase):
         self.sm.refresh_from_db()
         self.assertEqual(self.sm.estatus, "RECIBIDA")
         self.assertEqual(pendiente_por_renglon_sm(self.sm.pk), {self.smd.pk: Decimal("0")})
+
+    def _cancelar_rc(self, recepcion, motivo="Captura duplicada"):
+        return self.client.post(f"{RECEPCIONES_URL}{recepcion.pk}/cancelar/", {"motivo": motivo}, format="json")
+
+    def test_cancelar_recepcion_cancela_la_factura_y_reabre_la_sm(self):
+        """#1307: antes de calidad (la de OB/OR no pasa por calidad), la factura de
+        maquila en Borrador se cancela y lo recibido vuelve a estar pendiente."""
+        self.assertEqual(self._post().status_code, 200)
+        rc = Recepcion.objects.get(salida_maquila=self.sm)
+        r = self._cancelar_rc(rc)
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["estatus"], Recepcion.EstatusRecepcion.CANCELADA)
+        self.sm.refresh_from_db()
+        self.assertEqual((self.sm.estatus, self.sm.fecha_recepcion), ("ENVIADA", None))
+        self.assertEqual(FacturaProveedor.objects.get(recepcion=rc).estatus, "Cancelada")
+        evento = AuditoriaEvento.objects.get(modulo="compras", accion="CANCELAR", tabla="recepciones")
+        self.assertEqual(evento.despues_json["motivo"], "Captura duplicada")
+        # Se puede volver a recibir todo, con su factura nueva.
+        self.assertEqual(self._post().status_code, 200)
+        self.assertEqual(FacturaProveedor.objects.filter(salida_maquila=self.sm, estatus="Borrador").count(), 1)
+        # Ya cancelada: 400.
+        self.assertEqual(self._cancelar_rc(rc).status_code, 400)
+
+    def test_cancelar_recepcion_con_factura_registrada_o_sin_permiso(self):
+        self.assertEqual(self._post().status_code, 200)
+        rc = Recepcion.objects.get(salida_maquila=self.sm)
+        no_admin = Usuario.objects.create(username="n@smob.test", email="n@smob.test", empresa=self.empresa)
+        self.client.force_authenticate(user=no_admin)
+        self.assertEqual(self._cancelar_rc(rc).status_code, 403)
+        self.client.force_authenticate(user=self.usuario)
+        self.assertEqual(self._cancelar_rc(rc, motivo="  ").status_code, 400)
+        FacturaProveedor.objects.filter(recepcion=rc).update(estatus="Registrada")
+        r = self._cancelar_rc(rc)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("facturas_proveedores", r.data)
+        rc.refresh_from_db()
+        self.sm.refresh_from_db()
+        self.assertEqual((rc.estatus, self.sm.estatus), (Recepcion.EstatusRecepcion.CERRADA, "RECIBIDA"))
 
     def test_transportista_de_otra_empresa_es_400(self):
         r = self._post(transportista=self.transportista_ajeno.pk)
