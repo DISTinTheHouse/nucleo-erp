@@ -5473,8 +5473,8 @@ class PedidoDocumentosTests(TestCase):
     def test_cada_seccion_con_el_permiso_de_su_modulo(self):
         """#1243: facturas con ``R-CONTABILIDAD-FACTURACION``, cobros con
         ``R-CONTABILIDAD-CXC`` (o ``R-CONTABILIDAD`` para ambas) y SM con
-        ``R-PRODUCCION-OP``; sin el permiso, null. Las claves de departamento
-        (``puede_ver_contabilidad``) ya no deciden."""
+        ``R-PRODUCCION-OP``; sin el permiso, null (estos usuarios no tienen
+        departamento con importes; con él, ver #1310)."""
         pedido = self._pedido(lleva_bordado=True)
         cobro = self._cobro(self._factura(pedido))
         sm = self._sm(pedido)
@@ -5840,7 +5840,10 @@ class PedidoDocumentosTests(TestCase):
         }
 
     def _ids(self, data):
-        return {bloque: [fila["id"] for fila in data[bloque]] for bloque in self._BLOQUES_EC920}
+        return {
+            bloque: None if data[bloque] is None else [fila["id"] for fila in data[bloque]]
+            for bloque in self._BLOQUES_EC920
+        }
 
     def _detalle_documentos(self, pedido, user):
         """``{bloque: [ids]}`` de ``pedido.documentos`` en ``GET /pedidos/{id}/``."""
@@ -5910,11 +5913,16 @@ class PedidoDocumentosTests(TestCase):
             empresa=self.empresa, sucursal=self.sucursal, moneda=self.moneda, usuario=self.usuario,
             fecha_oc=timezone.localdate(), folio=self._siguiente("OC"),
         ).pedidos.add(pedido)
+        # Con el permiso de cotizaciones y OP, para comparar esos bloques (#1311).
+        for clave in ("R-CRM-COTIZACIONES", "R-PRODUCCION-OP"):
+            UsuarioPermiso.objects.create(
+                usuario=self.usuario, permiso=_permiso(clave), tipo=UsuarioPermiso.TIPO_GRANT, empresa=self.empresa,
+            )
         for user in (self.admin, self.usuario):
             self.assertEqual(self._ids(self._data(pedido, user)), self._detalle_documentos(pedido, user))
         sin_otra_sucursal = self._ids(self._data(pedido, self.usuario))
         con_todas = self._ids(self._data(pedido, self.admin))
-        for bloque in ("ordenes_bordado", "ordenes_reflejante", "ordenes_corte_manga", "packings"):
+        for bloque in ("ordenes_bordado", "ordenes_reflejante", "ordenes_corte_manga", "ordenes_produccion", "packings"):
             self.assertEqual(sin_otra_sucursal[bloque], propios[bloque], bloque)
             self.assertEqual(con_todas[bloque], sorted(propios[bloque] + ajenos[bloque]), bloque)
 
@@ -5986,6 +5994,42 @@ class PedidoDocumentosTests(TestCase):
             self.assertEqual(
                 [d["packing_id"] for d in data["despachos"]], [packing.pk, packing_ajeno.pk],
             )
+
+    def test_cotizaciones_y_op_con_el_permiso_de_su_modulo(self):
+        """#1311: sin el código de su módulo, null (como salidas de maquila);
+        cotizaciones, además, solo las del vendedor para quien no es admin."""
+        pedido = self._pedido()
+        propios = self._documentos_de_produccion_y_compras(pedido)
+        data = self._data(pedido, self.usuario)
+        self.assertIsNone(data["cotizaciones"])
+        self.assertIsNone(data["ordenes_produccion"])
+        self.assertEqual([o["id"] for o in data["ordenes_compra"]], propios["ordenes_compra"])
+
+        con_permiso = self._con_grants("crm@acme.test", "R-CRM-COTIZACIONES", "R-PRODUCCION-OP")
+        data = self._data(pedido, con_permiso)
+        self.assertEqual(data["cotizaciones"], [])  # la cotización es de otro vendedor
+        self.assertEqual(sorted(o["id"] for o in data["ordenes_produccion"]), propios["ordenes_produccion"])
+        Cotizacion.objects.filter(pk__in=propios["cotizaciones"]).update(vendedor=con_permiso)
+        self.assertEqual([c["id"] for c in self._data(pedido, con_permiso)["cotizaciones"]], propios["cotizaciones"])
+
+    def test_departamento_con_importes_ve_facturas_y_cobros(self):
+        """#1310: sin códigos ``R-CONTABILIDAD*``, un departamento que ve importes
+        del pedido (``puede_ver_contabilidad``) también ve facturas y cobros."""
+        pedido = self._pedido()
+        cobro = self._cobro(self._factura(pedido))
+        with patch("ventas.services.pedido_field_filter_service.puede_ver_contabilidad", return_value=True):
+            data = self._data(pedido, self.usuario)
+        self.assertEqual(len(data["facturas"]), 1)
+        self.assertEqual([c["cobro_id"] for c in data["cobros"]], [cobro.pk])
+
+    def test_error_de_un_tipo_no_se_traga(self):
+        """#1312: un error al leer un tipo de documento falla, no lo deja vacío."""
+        from ventas.services.pedido_documentos_service import documentos_visibles
+
+        pedido = self._pedido()
+        with patch("ventas.services.pedido_documentos_service._docs_relacionados", side_effect=RuntimeError("x")):
+            with self.assertRaises(RuntimeError):
+                list(documentos_visibles(pedido, alcance=(True, None)))
 
     def test_documentos_pedido_sin_usuario_falla_cerrado(self):
         """Sin usuario no hay alcance por sucursal que aplicar: no devuelve todo."""

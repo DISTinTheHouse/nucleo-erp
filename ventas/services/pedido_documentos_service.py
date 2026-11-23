@@ -225,8 +225,11 @@ def _docs_relacionados(pedido, cfg, solo_campos=False):
 
 
 # Documentos cuyo detalle se acota por sucursal: listarlos fuera del alcance
-# daba folio/estatus de algo que al abrirlo responde 404 (#536).
-TIPOS_POR_SUCURSAL = {"orden_bordado", "orden_reflejante", "orden_corte_manga", "picking", "packing"}
+# daba folio/estatus de algo que al abrirlo responde 404 (#536); la OP, como
+# ``ordenes_produccion_visibles`` (#1311).
+TIPOS_POR_SUCURSAL = {
+    "orden_bordado", "orden_reflejante", "orden_corte_manga", "orden_produccion", "picking", "packing",
+}
 
 
 def sucursales_de_documentos(user):
@@ -284,7 +287,7 @@ def campos_de_documento(cfg, modelo):
     existentes = {f.name for f in modelo._meta.concrete_fields}
     leidos = {
         modelo._meta.pk.name, cfg["folio_field"], cfg["estatus_field"], cfg["fecha_field"],
-        "activo", "empresa", "sucursal",
+        "activo", "empresa", "sucursal", "vendedor",  # vendedor: alcance de cotizaciones (#1311)
     }
     return sorted(c for c in leidos if c in existentes)
 
@@ -346,10 +349,9 @@ def documentos_visibles(pedido, user=None, tipos=None, alcance=None, solo_campos
             if doc is not None and _visible(doc, cfg, alcance, pedido):
                 yield cfg, doc
             continue
-        try:
-            qs = _docs_relacionados(pedido, cfg, solo_campos)
-        except Exception:
-            continue
+        # Sin ``try``: un error de relación o de BD debe fallar, no dejar el tipo
+        # vacío en silencio como si el pedido no tuviera documentos (#1312).
+        qs = _docs_relacionados(pedido, cfg, solo_campos)
         # Iteración directa, NO ``.iterator()``: ``PedidoViewSet.retrieve()``
         # prefetchea las 12 relaciones de ``documentos_related_prefetch_args()``,
         # y ``.iterator()`` nunca lee ``_result_cache`` — re-ejecutaba una
