@@ -2968,6 +2968,17 @@ Seguimiento **informativo** de la OC: la fecha en que compras supo que llegó la
 
 Ya NO trae `movimiento_id`/`movimiento_inventario_id` — no hubo movimiento de inventario en este paso.
 
+### 3) Cancelar una recepción registrada por error
+
+`POST /api/v1/compras/recepciones/{id}/cancelar/` con `{"motivo": "Captura duplicada"}` (#1307). Responde `200` con la recepción (forma de `RecepcionSerializer`, `estatus: 6`).
+
+- **Quién:** admin de la empresa o superusuario; otro usuario, `403`. Una recepción de otra empresa, `404`. Sin `motivo`, `400 {"motivo"}`.
+- **Solo antes de calidad:** `estatus` En calidad (`4`) sin inspección ni movimiento de inventario; la de una SM de OB/OR, que no pasa por calidad, Cerrada (`5`). Ya inspeccionada, de antes del flujo de calidad o ya cancelada: `400 {"estatus"}`.
+- **SM:** su factura de maquila en Borrador se cancela y la SM vuelve a Enviada (`fecha_recepcion` nula): lo recibido con esa recepción vuelve a estar pendiente. Si la recepción tiene otra factura de proveedor sin cancelar (la de maquila ya Registrada, o una de OC), `400 {"facturas_proveedores"}`: se cancela primero en Finanzas.
+- **OC:** se recalcula su estatus (Autorizada / Parcialmente recibida / Recibida); después la OC se puede cancelar con `ordenes/{id}/cancelar/`. El `DELETE` de la OC sigue rechazando cualquier recepción, aun cancelada.
+- **OP:** si ya está Completada, `400 {"op"}`.
+- Queda en auditoría (`modulo=compras`, `accion=CANCELAR`, `tabla=recepciones`) con el motivo, y en el historial de la recepción.
+
 ---
 
 ## 🧾 Compras - Calidad (Onboarding)

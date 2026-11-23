@@ -1752,6 +1752,106 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             return RecepcionListSerializer
         return RecepcionSerializer
 
+    @extend_schema(summary="Cancelar una recepción antes de calidad", responses=RecepcionSerializer)
+    @action(detail=True, methods=["post"], url_path="cancelar")
+    def cancelar(self, request, pk=None):
+        """Cancela una recepción registrada por error, solo antes de calidad (#1307).
+
+        - Solo admin de la empresa o superusuario, con ``motivo``.
+        - Antes de calidad: ``EN_CALIDAD`` sin inspección ni movimiento de
+          inventario; la de SM de OB/OR, que no pasa por calidad, ``CERRADA``.
+          Después, 400: lo aprobado ya es existencia.
+        - SM: su factura de maquila se cancela si sigue en Borrador y la SM vuelve
+          a Enviada. Una factura de proveedor viva que no sea esa, 400.
+        - OC: se recalcula su estatus y después se puede cancelar (el DELETE de la
+          OC sigue rechazando cualquier recepción, aun cancelada). OP ya
+          Completada, 400.
+        - Queda en auditoría (``CANCELAR``) y en el historial, con el motivo.
+        """
+        user = request.user
+        if not (user.is_superuser or getattr(user, "is_admin_empresa", False)):
+            raise PermissionDenied("Solo un administrador de la empresa puede cancelar recepciones.")
+        motivo = request.data.get("motivo")
+        if not isinstance(motivo, str) or not motivo.strip():
+            raise ValidationError({"motivo": "El motivo de cancelación es requerido."})
+        motivo = motivo.strip()
+        # ``get_object`` acota por la empresa del usuario: la de otra empresa es 404.
+        recepcion = self.get_object()
+        E = Recepcion.EstatusRecepcion
+        Factura = FacturaProveedor.FacturaProveedorStatus
+
+        with transaction.atomic():
+            # Mismo orden de bloqueo que el onboarding (SM, luego OC/OP) y al final la
+            # recepción, que es la que bloquea Calidad: o la inspección ya existe al
+            # releerla aquí, o Calidad espera y la ve CANCELADA.
+            sm = oc = op = None
+            if recepcion.salida_maquila_id:
+                sm = SalidaMaquila.objects.select_for_update().get(pk=recepcion.salida_maquila_id)
+            if recepcion.orden_compra_id:
+                oc = OrdenCompra.objects.select_for_update().get(pk=recepcion.orden_compra_id)
+            if recepcion.op_id:
+                op = OrdenProduccion.objects.select_for_update().get(pk=recepcion.op_id)
+            recepcion = Recepcion.objects.select_for_update().get(pk=recepcion.pk)
+
+            if recepcion.estatus == E.CANCELADA:
+                raise ValidationError({"estatus": "La recepción ya está cancelada."})
+            antes_de_calidad = recepcion.estatus == E.EN_CALIDAD or (
+                recepcion.tipo_origen == Recepcion.TipoOrigen.SALIDA_MAQUILA and recepcion.estatus == E.CERRADA
+            )
+            if (
+                not antes_de_calidad
+                or CalidadInspeccion.objects.filter(recepcion=recepcion).exists()
+                or MovimientoInventario.objects.filter(recepcion=recepcion).exists()
+            ):
+                raise ValidationError({"estatus": (
+                    "La recepción ya pasó por calidad y no puede cancelarse: lo aprobado ya es existencia."
+                )})
+            if op is not None and op.estatus_op == OrdenProduccion.EstatusOrdenProduccion.COMPLETADO:
+                raise ValidationError({"op": f"La OP {op.folio_op} ya está completada y la recepción no puede cancelarse."})
+            # Facturas sin cancelar, dadas de baja o no (como ``OrdenCompraViewSet.cancelar``).
+            facturas = list(
+                FacturaProveedor.objects.select_for_update().filter(recepcion=recepcion)
+                .exclude(estatus=Factura.CANCELADA).order_by("id")
+            )
+            for factura in facturas:
+                if not (factura.salida_maquila_id and factura.estatus == Factura.BORRADOR):
+                    raise ValidationError({"facturas_proveedores": (
+                        f"La factura de proveedor {factura.folio or factura.pk} de la recepción está "
+                        f"{factura.estatus.lower()}: cancélala primero en Finanzas."
+                    )})
+
+            antes = {"estatus": recepcion.estatus}
+            for factura in facturas:  # factura de maquila en Borrador: sin CxP ni póliza
+                factura.estatus = Factura.CANCELADA
+                factura.save(update_fields=["estatus", "updated_at"])
+            recepcion.estatus = E.CANCELADA
+            recepcion._change_reason = motivo[:100]  # ``history_change_reason`` (100 caracteres)
+            recepcion.save(update_fields=["estatus", "updated_at"])
+            despues = {"estatus": recepcion.estatus, "motivo": motivo}
+            if facturas:
+                despues["facturas_proveedor_canceladas"] = [f.pk for f in facturas]
+            if sm is not None and sm.estatus == SalidaMaquila.Estatus.RECIBIDA:
+                sm.estatus = SalidaMaquila.Estatus.ENVIADA
+                sm.fecha_recepcion = None
+                sm.save(update_fields=["estatus", "fecha_recepcion", "updated_at"])
+                despues["salida_maquila_estatus"] = sm.estatus
+            if oc is not None and oc.estatus in self.ESTATUS_OC_RECIBIBLES | {OrdenCompra.EstatusOrdenCompra.RECIBIDA}:
+                self._actualizar_estatus_oc(oc)
+                despues["orden_compra_estatus"] = oc.estatus
+            AuditoriaEvento.objects.create(
+                empresa_id=recepcion.empresa_id,
+                usuario=user if getattr(user, "pk", None) else None,
+                modulo="compras",
+                accion="CANCELAR",
+                tabla=Recepcion._meta.db_table,
+                id_registro=str(recepcion.pk),
+                antes_json=antes,
+                despues_json=despues,
+                ip=_ip_auditoria(request),
+                user_agent=request.META.get("HTTP_USER_AGENT"),
+            )
+        return Response(RecepcionSerializer(recepcion).data, status=status.HTTP_200_OK)
+
     def _serie_folio_recepcion(self, empresa, sucursal, serie_codigo):
         """Serie elegida (``serie_codigo``) en la sucursal, o ``None`` si no está activa:
         no se cambia por otra sin avisar (#1292). Sin ``serie_codigo``, RC y si no hay,
@@ -2010,15 +2110,18 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
         return renglones
 
     def _actualizar_estatus_oc(self, oc):
-        detalles = OrdenCompraDetalle.objects.filter(orden_compra=oc).only("id", "cantidad")
-        if not detalles.exists():
+        # Lo recibido neto de todos los renglones en bloque (``_recibido_por_detalle``,
+        # 2 consultas); antes eran 2 por renglón de la OC.
+        detalles = list(OrdenCompraDetalle.objects.filter(orden_compra=oc).values_list("id", "cantidad"))
+        if not detalles:
             return
+        recibidos = self._recibido_por_detalle("orden_compra_detalle_id", [pk for pk, _ in detalles])
 
         total_pendiente = Decimal("0")
         total_recibido = Decimal("0")
-        for detalle in detalles:
-            ordered = Decimal(str(detalle.cantidad or 0))
-            recibido = self._cantidad_recibida_oc(detalle.pk)
+        for detalle_id, cantidad in detalles:
+            ordered = Decimal(str(cantidad or 0))
+            recibido = recibidos.get(detalle_id, Decimal("0"))
             if recibido > 0:
                 total_recibido += recibido
             pendiente = ordered - recibido
