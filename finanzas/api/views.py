@@ -1999,11 +1999,21 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
         CuentaPorPagarService.ensure_account_deletable(instance)
         if instance.pago_detalles.exists():
             # Con pagos cancelados o en borrador hay histórico (FK PROTECT): la
-            # CxP se cancela en vez de borrarse.
-            instance.estatus = CuentaPorPagar.EstatusCxP.CANCELADA
-            instance.save(update_fields=["estatus", "updated_at"])
+            # CxP se cancela en vez de borrarse, con motivo y rastro.
+            if instance.estatus == CuentaPorPagar.EstatusCxP.CANCELADA:
+                raise ValidationError({"estatus": "La cuenta por pagar ya está cancelada."})
+            canc.exigir_permiso(user, canc.PERMISO_PAGOS)
+            motivo = canc.motivo_requerido(self.request)
+            antes = instance.estatus
+            with transaction.atomic():
+                instance.estatus = CuentaPorPagar.EstatusCxP.CANCELADA
+                instance.save(update_fields=["estatus", "updated_at"])
+                canc.auditar_evento(instance, self.request, "CANCELAR", {
+                    "estatus_anterior": antes, "estatus": instance.estatus, "motivo": motivo})
             return
-        instance.delete()
+        with transaction.atomic():
+            canc.auditar_baja(instance, self.request)
+            instance.delete()
 
 
 def _validar_transicion_estatus_cobro_pago(Estatus, anterior, nuevo, documento):

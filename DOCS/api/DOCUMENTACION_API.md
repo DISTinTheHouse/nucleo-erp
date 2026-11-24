@@ -4339,6 +4339,7 @@ Al cancelar quedan en el documento (solo lectura en el serializer) `motivo_cance
 | Factura proveedor | `POST facturas-proveedor/{id}/cancelar/` (**nuevo**) | `CANCELAR-FIN-PAGOS` |
 | Movimiento bancario | `POST movimientos-bancarios/{id}/cancelar/` o `DELETE` | `CANCELAR-FIN-BANCOS` |
 | Conciliación | `POST conciliaciones-bancarias/{id}/cancelar/` | `CANCELAR-FIN-BANCOS` |
+| Cuenta por pagar | `DELETE cuentas-por-pagar/{id}/` con pagos ligados (la cancela) | `CANCELAR-FIN-PAGOS` |
 
 Los cuatro `CANCELAR-FIN-*` se crearon con la migración `finanzas 0052` y se otorgaron a todo rol que ya tenía `E-FIN-FACTURAS` (hoy: Contabilidad): nadie pierde acceso; el admin los separa por rol. Superusuario y admin de empresa siempre pasan.
 
