@@ -1150,6 +1150,56 @@ class PickingGeneraTransferenciaTests(TestCase):
             self.assertEqual(packing, api.get(f"/api/v1/wms/packings/{packing['id']}/").json())
         self.assertEqual(consultas_packing[1], consultas_packing[0])
 
+    def _retener_en_bd(self):
+        from ventas.models import Pedido
+
+        Pedido.objects.filter(pk=self.pedido.pk).update(
+            retenido=True, motivo_retencion="Crédito", retenido_por=self.usuario,
+        )
+        return Pedido.objects.get(pk=self.pedido.pk)
+
+    def test_alta_rechaza_pedido_retenido(self):
+        """EC-953: el alta de picking (normal y por onboarding) rechaza un pedido retenido."""
+        from ventas.services.retencion_service import mensaje_retenido
+
+        retenido = self._retener_en_bd()
+        api = APIClient()
+        api.force_authenticate(self.usuario)
+        cuerpo = {
+            "pedido": self.pedido.pk, "operador": self.usuario.pk, "almacen": self.origen.pk,
+            "almacen_destino": self.destino.pk,
+            "picking_detalle": [{"pedido_detalle_talla": self.talla_row.pk, "cantidad_asignada": "1"}],
+        }
+        for url in ("/api/v1/wms/pickings/", "/api/v1/wms/pickings/onboarding/"):
+            resp = api.post(url, cuerpo, format="json")
+            self.assertEqual(resp.status_code, 400, resp.content)
+            self.assertEqual(resp.json(), {"pedido": mensaje_retenido(retenido)})
+        from wms.models import Picking
+        self.assertFalse(Picking.objects.filter(pedido=self.pedido).exists())
+
+    def test_retencion_se_revisa_con_la_fila_del_pedido_bloqueada(self):
+        """EC-953: como packing y despacho, la retención se lee de la fila bloqueada, no
+        del pedido ya cargado: un ``retener/`` entre la lectura y el alta (aquí, el
+        pedido en memoria sigue libre y la BD ya lo tiene retenido) no deja pasar el picking."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from rest_framework.exceptions import ValidationError
+
+        from wms.services.picking_service import PickingService
+
+        self._retener_en_bd()
+        self.assertFalse(self.pedido.retenido)  # copia en memoria, leída antes del ``retener/``
+        with CaptureQueriesContext(connection) as ctx:
+            with self.assertRaises(ValidationError) as err:
+                PickingService.handle_store(self._data(self.Decimal("1")), self.usuario)
+
+        self.assertIn("retenido", str(err.exception.detail["pedido"]))
+        self.assertTrue(any(
+            "FOR UPDATE" in q["sql"].upper() and 'FROM "pedidos"' in q["sql"] for q in ctx.captured_queries
+        ))
+        from wms.models import Picking
+        self.assertFalse(Picking.objects.filter(pedido=self.pedido).exists())
+
     def test_picking_crea_transferencia_con_folio_tr_y_mueve_stock(self):
         from wms.services.picking_service import PickingService
 
