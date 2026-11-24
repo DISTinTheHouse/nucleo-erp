@@ -3595,6 +3595,21 @@ class CancelacionesEC949Tests(TestCase):
             Transferencia.objects.get(pk=traslado.pk).status, Transferencia.TransferenciaStatus.COMPLETADA
         )
 
+    def test_picking_borrado_antes_del_lock_responde_400(self):
+        from wms.models import Picking, Transferencia
+        from wms.services import cancelacion_service
+
+        picking, _alta, traslado = self._cancelado_con_traslado()
+        inexistente = Picking.objects.order_by("-pk").values_list("pk", flat=True).first() + 1000
+        # Fuera del lock resuelve un picking que ya no existe cuando se bloquea.
+        with patch.object(cancelacion_service, "_picking_id_de", side_effect=[inexistente]):
+            resp = self._revertir(traslado)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"transferencia": "La TR cambió mientras se revertía. Intenta de nuevo."})
+        self.assertEqual(
+            Transferencia.objects.get(pk=traslado.pk).status, Transferencia.TransferenciaStatus.COMPLETADA
+        )
+
     def test_alta_sin_fk_de_picking_trasladado_no_se_revierte_como_manual(self):
         """Alta y traslado sin ``Transferencia.picking`` y ``Picking.transferencia`` = el
         traslado: el alta no resuelve picking, pero su texto dice que es de uno → 400."""

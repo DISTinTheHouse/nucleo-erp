@@ -279,15 +279,19 @@ def revertir_transferencia(transferencia, request, motivo):
     Picking -> TR. El picking se resuelve sin bloquear y todo se revalida bajo lock."""
     from wms.services.transferencia_service import TransferenciaService
 
+    tr_cambio = ValidationError({"transferencia": "La TR cambió mientras se revertía. Intenta de nuevo."})
     picking_id = _picking_id_de(transferencia)
     picking = None
     if picking_id:
         _bloquear_pedido(Picking.objects.filter(pk=picking_id).values_list("pedido_id", flat=True).first())
-        picking = Picking.objects.select_for_update(of=("self",)).get(pk=picking_id)
+        picking = Picking.objects.select_for_update(of=("self",)).filter(pk=picking_id).first()
+        if picking is None:
+            # El picking se borró (p. ej. en cascada con su pedido) después de leerlo.
+            raise tr_cambio
     tr = Transferencia.objects.select_for_update(of=("self",)).get(pk=transferencia.pk)
     if _picking_id_de(tr) != picking_id:
         # Otro proceso ligó la TR a un picking entre la lectura y el lock.
-        raise ValidationError({"transferencia": "La TR cambió mientras se revertía. Intenta de nuevo."})
+        raise tr_cambio
     if tr.status != Transferencia.TransferenciaStatus.COMPLETADA:
         raise ValidationError({"transferencia": f"Sólo se revierte una TR completada (esta está {tr.status})."})
     if tr.reversa_de_id:
