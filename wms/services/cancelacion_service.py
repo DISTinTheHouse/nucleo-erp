@@ -237,23 +237,71 @@ def _reintegrar_salida(despacho, salida, user):
     ]
 
 
+def _picking_id_de(tr):
+    """Picking de la TR: ``Transferencia.picking`` (EC-916) o, en una TR sin esa FK
+    (anterior al backfill o ambigua), el picking cuya ``transferencia`` es ella.
+    ``None``: TR manual."""
+    if tr.picking_id:
+        return tr.picking_id
+    return Picking.objects.filter(transferencia_id=tr.pk).order_by("pk").values_list("pk", flat=True).first()
+
+
+def _tr_posterior_viva(tr, picking):
+    """Folio de la última TR viva del picking posterior a ``tr`` (``None`` si ``tr`` es
+    la última). Viva = ``COMPLETADA`` y no reversa; las revertidas quedan CANCELADA.
+    Por ``pk``, no por fecha. ``Picking.transferencia`` (la última TR del picking)
+    cuenta aunque no tenga la FK ``picking``."""
+    return (
+        Transferencia.objects.filter(Q(picking_id=picking.pk) | Q(pk=picking.transferencia_id))
+        .filter(pk__gt=tr.pk, reversa_de__isnull=True, status=Transferencia.TransferenciaStatus.COMPLETADA)
+        .order_by("-pk")
+        .values_list("folio", flat=True)
+        .first()
+    )
+
+
 @transaction.atomic
 def revertir_transferencia(transferencia, request, motivo):
     """Una TR ejecutada no se edita: se crea la TR inversa (destino -> origen, mismas
     piezas, folio propio, ``reversa_de``) y la original queda CANCELADA con el motivo.
     Sólo TR manuales o de un picking ya cancelado: las de un picking vivo son el
-    surtido de ese picking y se deshacen cancelándolo primero."""
+    surtido de ese picking y se deshacen cancelándolo primero.
+
+    Cadena del picking (EC-949): sólo se revierte su última TR viva, de la más nueva
+    a la más vieja; revertir una vieja movería del destino piezas que ya no están
+    ahí (o ajenas del mismo SKU). Al revertir, el picking queda en el origen de la TR
+    revertida (``almacen``), que es donde quedan sus prendas. Las TR manuales no
+    tienen cadena.
+
+    Mismo orden de bloqueo que el alta y las cancelaciones (EC-574): Pedido ->
+    Picking -> TR. El picking se resuelve sin bloquear y todo se revalida bajo lock."""
     from wms.services.transferencia_service import TransferenciaService
 
+    picking_id = _picking_id_de(transferencia)
+    picking = None
+    if picking_id:
+        _bloquear_pedido(Picking.objects.filter(pk=picking_id).values_list("pedido_id", flat=True).first())
+        picking = Picking.objects.select_for_update(of=("self",)).get(pk=picking_id)
     tr = Transferencia.objects.select_for_update(of=("self",)).get(pk=transferencia.pk)
+    if _picking_id_de(tr) != picking_id:
+        # Otro proceso ligó la TR a un picking entre la lectura y el lock.
+        raise ValidationError({"transferencia": "La TR cambió mientras se revertía. Intenta de nuevo."})
     if tr.status != Transferencia.TransferenciaStatus.COMPLETADA:
         raise ValidationError({"transferencia": f"Sólo se revierte una TR completada (esta está {tr.status})."})
     if tr.reversa_de_id:
         raise ValidationError({"transferencia": "Esta TR ya es una reversa; no se revierte."})
     if Transferencia.objects.filter(reversa_de=tr).exists():
         raise ValidationError({"transferencia": "La TR ya fue revertida."})
-    if tr.picking_id and Picking.objects.filter(pk=tr.picking_id).exclude(estado=Picking.Estado.CANCELADO).exists():
-        raise ValidationError({"transferencia": "La TR es el surtido de un picking vivo. Cancela el picking primero."})
+    if picking is not None:
+        if picking.estado != Picking.Estado.CANCELADO:
+            raise ValidationError(
+                {"transferencia": "La TR es el surtido de un picking vivo. Cancela el picking primero."}
+            )
+        posterior = _tr_posterior_viva(tr, picking)
+        if posterior:
+            raise ValidationError({"transferencia": (
+                f"Sólo se revierte la última TR del picking {picking.folio}. Revierte primero {posterior}."
+            )})
 
     renglones = [
         {
@@ -276,11 +324,19 @@ def revertir_transferencia(transferencia, request, motivo):
         request.user, request=request, empresa=tr.empresa, sucursal=tr.sucursal,
     )
     reversa.reversa_de = tr
-    reversa.picking_id = tr.picking_id
+    reversa.picking_id = picking_id
     reversa.save(update_fields=["reversa_de", "picking"])
     _marcar(tr, "status", Transferencia.TransferenciaStatus.CANCELADA, request.user, motivo)
-    _auditar(request, tr.empresa_id, "transferencias", tr,
-             {"folio": tr.folio, "status": Transferencia.TransferenciaStatus.COMPLETADA},
-             {"folio": tr.folio, "status": tr.status, "motivo": motivo,
-              "reversa_id": reversa.pk, "reversa_folio": reversa.folio})
+    antes = {"folio": tr.folio, "status": Transferencia.TransferenciaStatus.COMPLETADA}
+    despues = {"folio": tr.folio, "status": tr.status, "motivo": motivo,
+               "reversa_id": reversa.pk, "reversa_folio": reversa.folio}
+    if picking is not None:
+        # Las prendas vuelven al origen de la TR: ahí queda el picking. ``almacen_destino``
+        # y ``transferencia`` no se tocan; la TR del picking ya no está COMPLETADA, así
+        # que ``Picking.almacen_actual`` (y el filtro del listado) dan ``almacen``.
+        antes["picking_almacen_id"] = picking.almacen_id
+        picking.almacen = tr.almacen_origen
+        picking.save(update_fields=["almacen", "updated_at"])
+        despues["picking_almacen_id"] = picking.almacen_id
+    _auditar(request, tr.empresa_id, "transferencias", tr, antes, despues)
     return tr, reversa

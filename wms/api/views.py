@@ -137,7 +137,9 @@ class TransferenciaViewSet(
     def revertir(self, request, pk=None):
         """Crea la TR inversa (folio propio, ``reversa_de``) y deja la original CANCELADA.
         Body ``{"motivo": "..."}`` (obligatorio). Admin de empresa, superuser o permiso
-        ``WMS-CANCELAR``. Otra empresa: 404. No borra: el documento queda cancelado con su folio."""
+        ``WMS-CANCELAR``. Otra empresa: 404. No borra: el documento queda cancelado con su folio.
+        TR de un picking (cancelado): sólo la última viva de su cadena, y el picking queda en
+        el origen de la TR revertida (EC-949)."""
         tr = self.get_object()
         cancelacion_service.exigir_permiso(request.user)
         motivo = cancelacion_service.motivo_de(request.data)
