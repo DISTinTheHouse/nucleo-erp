@@ -4314,6 +4314,36 @@ Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró
 
 ---
 
+## 🚫 Producción - Cancelaciones
+
+Toda cancelación pide `motivo` y guarda en la orden `motivo_cancelacion`, `fecha_cancelacion` y `cancelado_por`. Los tres son de solo lectura y vienen en el detalle (y en la respuesta de cancelar). La cancelación también queda en `AuditoriaEvento` y en la bitácora (`/api/v1/auditoria/documentos/?tipo=orden_produccion|orden_bordado|orden_reflejante|orden_corte_manga`, renglón `→ Cancelado`). Cancelado es terminal.
+
+### OP — `POST /api/v1/produccion/orden-produccion/{id}/estatus/` con `{"estatus_op": 7, "motivo": "..."}`
+
+- Permiso `D-PRODUCCION-OP`. Sin motivo → `400`.
+- **Devuelve al almacén el material que consumió la OP**, neto de recálculos, a la misma existencia (almacén/ubicación) y al costo con que salió:
+  - crea una ENTRADA ligada a la OP, que aparece en el kardex y en los reportes por periodo (`despues_json.cancelacion_op=true`);
+  - el consumo de la OP (`consumo/`) queda en cero;
+  - el evento `CAMBIO_ESTATUS` incluye `material_devuelto`.
+- `400` si la OP tiene una recepción de producto terminado viva (primero se cancela en WMS) o una salida a maquila Enviada (primero se cancela la SM).
+- La respuesta agrega `motivo_cancelacion`, `fecha_cancelacion` y `cancelado_por`.
+- **`DELETE /orden-produccion/{id}/` hace exactamente lo mismo**: motivo en el body o en `?motivo=` (sin motivo → `400`), con los mismos candados y la misma devolución. Ya no cancela una OP Completada (`409`).
+
+### OB / OR / OCM — `POST /api/v1/produccion/{orden-bordado|orden-reflejante|orden-corte-manga}/{id}/cancelar/`
+
+- Body `{"motivo": "Cliente quitó el bordado"}`. Permiso `D-PRODUCCION-OB` / `D-PRODUCCION-OR` / `D-PRODUCCION-CM`.
+- `200 {"id", "folio", "estatus", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por"}`. Estatus cancelado: bordado `8` (ahora con etiqueta "Cancelado"), reflejante y corte `7`.
+- `400` si:
+  - ya está cancelada;
+  - está terminada (Finalizado/Completado) o dada de baja;
+  - tiene una salida a maquila Enviada.
+- No mueven inventario.
+- **Cancelar por `PATCH` ya no se permite**: `estatus_bordado: 8` o `estatus_reflejante`/`estatus_corte: 7` responden `400 "Para cancelar usa POST {id}/cancelar/ con motivo."`. Una OB cancelada ya no se edita.
+
+### Bajas (`DELETE`) de OB/OR/OCM y de avances
+
+Siguen siendo baja lógica (`activo=false`), pensadas para errores de captura. Ahora dejan `AuditoriaEvento` `produccion/BAJA` con quién, qué (folio, o las piezas del avance) y el `?motivo=` opcional.
+
 ## 🏭 Producción - Lista de Materiales (BOM)
 
 **Base URL**: `/api/v1/produccion/`

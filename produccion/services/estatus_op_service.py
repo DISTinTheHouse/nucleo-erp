@@ -129,15 +129,30 @@ def cambiar_estatus(op_id, visibles, user, destino, motivo="", forzar=False, req
                 })
             forzado = True
 
+        if destino == E.CANCELADO:
+            from rest_framework.exceptions import ValidationError
+            from produccion.services.cancelacion_service import exigir_op_cancelable
+            try:
+                exigir_op_cancelable(op)
+            except ValidationError as exc:
+                raise EstatusOpError(400, exc.detail)
+
         ahora = timezone.now()
         op.estatus_op = int(destino)
         campos = ["estatus_op"]
+        devuelto = []
+        if destino == E.CANCELADO:
+            from produccion.services.cancelacion_service import devolver_consumo_op, sellar
+            campos += sellar(op, user, motivo)
         # El KPI de cumplimiento a tiempo mide por fecha_fin de las OPs
         # Completadas; sin esto una OP cerrada desde aquí quedaría "sin clasificar".
         if destino == E.COMPLETADO and op.fecha_fin is None:
             op.fecha_fin = ahora
             campos.append("fecha_fin")
         op.save(update_fields=campos)
+        if destino == E.CANCELADO:
+            # El material que consumió la OP regresa al almacén (mismo costo).
+            devuelto = devolver_consumo_op(op, user, motivo, request)
 
         ip = user_agent = None
         if request is not None:
@@ -158,6 +173,7 @@ def cambiar_estatus(op_id, visibles, user, destino, motivo="", forzar=False, req
                 "motivo": motivo or None,
                 "forzado": forzado,
                 "bloqueos_omitidos": bloqueos if forzado else [],
+                **({"material_devuelto": devuelto} if destino == E.CANCELADO else {}),
             },
             ip=ip,
             user_agent=user_agent,
