@@ -619,9 +619,9 @@ def confirmar_existencias(pre_id, user):
 
 
 @transaction.atomic
-def cancelar(pre_id, user):
+def cancelar(pre_id, user, motivo=""):
     """Cancela y libera necesidades: las pendientes se cancelan; las que ya
-    están en una OC quedan ``huerfana`` para que compras decida."""
+    están en una OC quedan ``huerfana`` para que compras decida. ``motivo`` va al evento."""
     from compras.models import NecesidadCompra as N
     pre = PreOrdenProduccion.objects.select_for_update().get(pk=pre_id)
     # Convertida cuya OP se canceló: se puede cancelar también (queda la liga a la OP).
@@ -633,7 +633,8 @@ def cancelar(pre_id, user):
     huerfanas = N.objects.filter(pre_orden=pre, estatus=N.Estatus.EN_OC).update(estatus=N.Estatus.HUERFANA, updated_at=timezone.now())
     campos = _cambiar_estatus(pre, E.CANCELADA)
     pre.save(update_fields=[*campos, "updated_at"])
-    evento(pre, EV.CANCELADA, user, f"{liberadas} necesidad(es) liberada(s), {huerfanas} huérfana(s) en OC.")
+    evento(pre, EV.CANCELADA, user, f"{liberadas} necesidad(es) liberada(s), {huerfanas} huérfana(s) en OC." + (f" Motivo: {motivo}" if motivo else ""))
+    pre._liberadas, pre._huerfanas = liberadas, huerfanas
     return pre
 
 

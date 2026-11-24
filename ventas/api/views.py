@@ -3616,6 +3616,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
             if pedido.estatus == Pedido.ESTATUS_CANCELADO:
                 raise ValidationError({"pedido": "El pedido ya está cancelado."})
             self._exigir_pedido_sin_documentos_vivos(pedido)
+            ocs_marcadas = self._ocs_del_pedido_cancelado(pedido)
+            pre_ordenes = self._cancelar_pre_ordenes_del_pedido(pedido, request.user, motivo)
             entradas = self._devolver_inventario_pedido(pedido)
             # Movimiento y auditoría de inventario: los mismos helpers de autorizar.
             inventario = CotizacionViewSet()
@@ -3646,12 +3648,45 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 tabla="pedidos", id_registro=str(pedido.pk), ip=ip, user_agent=user_agent,
                 antes_json={"estatus": estatus_anterior, "activo": True},
                 despues_json={"estatus": pedido.estatus, "activo": False, "motivo": motivo,
-                              "inventario_devuelto": devuelto, "reservas_liberadas": reservas},
+                              "inventario_devuelto": devuelto, "reservas_liberadas": reservas,
+                              "pre_ordenes_canceladas": pre_ordenes, "ordenes_compra_marcadas": ocs_marcadas},
             )
         return Response({
             "id": pedido.pk, "folio": pedido.folio, "estatus": pedido.estatus, "activo": False,
             "motivo": motivo, "inventario_devuelto": devuelto, "reservas_liberadas": reservas,
+            "pre_ordenes_canceladas": pre_ordenes, "ordenes_compra_marcadas": ocs_marcadas,
         })
+
+    def _ocs_del_pedido_cancelado(self, pedido):
+        """400 si alguna OC ligada sigue en borrador o por autorizar (compras la cancela
+        o la autoriza primero). Las autorizadas o en recepción no se cancelan solas:
+        quedan con ``pedido_cancelado`` para que compras decida. 2 consultas."""
+        from compras.models import OrdenCompra as OC
+        E = OC.EstatusOrdenCompra
+        ocs = list(
+            OC.objects.filter(Q(pedido=pedido) | Q(pedidos=pedido), activo=True)
+            .exclude(estatus__in=[E.CANCELADA, E.RECIBIDA]).distinct().values("pk", "folio", "estatus")
+        )
+        abiertas = [o["folio"] or f"#{o['pk']}" for o in ocs if o["estatus"] in (E.BORRADOR, E.POR_AUTORIZAR)]
+        if abiertas:
+            raise ValidationError({"ordenes_compra": (
+                f"Tiene OC en borrador o por autorizar: {', '.join(abiertas)}. Cancélalas o autorízalas primero.")})
+        if ocs:
+            OC.objects.filter(pk__in=[o["pk"] for o in ocs]).update(
+                pedido_cancelado=True, fecha_pedido_cancelado=timezone.now(), updated_at=timezone.now())
+        return [{"id": o["pk"], "folio": o["folio"]} for o in ocs]
+
+    def _cancelar_pre_ordenes_del_pedido(self, pedido, user, motivo):
+        """Cancela la pre-orden abierta del pedido y libera sus necesidades (las ya en OC
+        quedan huérfanas), con evento ``cancelada`` y el motivo."""
+        from produccion.models import PreOrdenProduccion as P
+        from produccion.services import pre_orden_service
+        canceladas = []
+        for pk in P.objects.filter(pedido=pedido, estatus__in=pre_orden_service.CANCELABLES).values_list("pk", flat=True):
+            pre = pre_orden_service.cancelar(pk, user, motivo=f"pedido cancelado: {motivo}")
+            canceladas.append({"id": pre.pk, "necesidades_liberadas": pre._liberadas,
+                               "necesidades_huerfanas": pre._huerfanas})
+        return canceladas
 
     @action(detail=True, methods=["post"], url_path="retener")
     def retener(self, request, pk=None):
