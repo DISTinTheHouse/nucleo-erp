@@ -5,6 +5,7 @@ from django.db.models import Sum, F
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesBordado, OrdenBordadoDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
+from ventas.services.retencion_service import bloquear_pedido_vivo
 from produccion.services.common import exigir_tope_programado, EPS_CANTIDAD, cantidades_asignadas
 from produccion.services.common import (
     config_como_dict,
@@ -343,7 +344,9 @@ class OrdenBordadoService:
         # renglón de ``Pedido`` antes de leer lo asignado.
         # En SQLite ``select_for_update`` es no-op (``has_select_for_update``
         # False) y la suite corre igual; en Postgres es el bloqueo real.
-        Pedido.objects.select_for_update().filter(pk=pedido.pk).first()
+        # Sobre la fila bloqueada se revisa además que el pedido siga vivo y sin
+        # retener (cancelado, dado de baja o retenido -> 400).
+        bloquear_pedido_vivo(pedido.pk)
 
         detalle_tallas_raw = list(
             tallas_para_alta(OrdenBordadoService._tallas_bordado_qs(pedido.id))

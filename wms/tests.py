@@ -2051,6 +2051,23 @@ class PackingDespachoEC574Tests(TestCase):
         self.assertIn(resp_packing.status_code, (400, 404))
         lock.assert_not_called()
 
+    def test_pedido_inexistente_o_cancelado_al_bloquear_responde_400(self):  # #1368
+        from ventas.models import Pedido
+        from wms.models import Despacho, Packing
+
+        packing = self._empacar_ok((self.linea_m, 2))
+        antes = (Packing.objects.count(), Despacho.objects.count())
+        with patch.object(Pedido.objects, "select_for_update", return_value=Pedido.objects.none()):
+            respuestas = [self._empacar((self.linea_m, 1)), self._despachar(packing)]
+        for resp in respuestas:
+            self.assertEqual(resp.status_code, 400, resp.content)
+            self.assertEqual(self._mensaje(resp, "pedido"), "Pedido no encontrado o sin acceso.")
+        Pedido.objects.filter(pk=self.picking.pedido_id).update(estatus=Pedido.ESTATUS_CANCELADO)
+        for resp in (self._empacar((self.linea_m, 1)), self._despachar(packing)):
+            self.assertEqual(resp.status_code, 400, resp.content)
+            self.assertIn("cancelado", self._mensaje(resp, "pedido"))
+        self.assertEqual((Packing.objects.count(), Despacho.objects.count()), antes)
+
     def test_onboarding_de_despacho_solo_avisa(self):
         def onboarding(packing):
             resp = self.api.get("/api/v1/wms/despachos/onboarding/", {"packing": packing["id"]})

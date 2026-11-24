@@ -6,6 +6,7 @@ from django.db.models import Sum, F
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesReflejante, OrdenReflejanteDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
+from ventas.services.retencion_service import bloquear_pedido_vivo
 from produccion.services.common import exigir_tope_programado, EPS_CANTIDAD, cantidades_asignadas, crear_orden_con_guardia_duplicado, exigir_producto_en_tallas, payload_duplicada, pendientes_por_linea, revisar_empresa, tallas_orden_trabajo_qs, tallas_para_alta
 from produccion.utils.folios import generate_or_folio
 
@@ -364,7 +365,9 @@ class OrdenReflejanteService:
         # En SQLite ``select_for_update`` es no-op (``has_select_for_update``
         # False) y la suite corre igual; en Postgres es el bloqueo real.
         # Mismo candado y misma colocación que ``OrdenBordadoService.save``.
-        Pedido.objects.select_for_update().filter(pk=pedido.pk).first()
+        # Sobre la fila bloqueada se revisa además que el pedido siga vivo y sin
+        # retener (cancelado, dado de baja o retenido -> 400).
+        bloquear_pedido_vivo(pedido.pk)
 
         detalle_tallas_raw = list(
             tallas_para_alta(OrdenReflejanteService._tallas_reflejante_qs(pedido.id))

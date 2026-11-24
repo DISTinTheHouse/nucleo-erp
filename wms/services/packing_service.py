@@ -5,7 +5,7 @@ from django.db import transaction
 from django.db.models import Sum
 from rest_framework.exceptions import ValidationError
 
-from ventas.services.retencion_service import exigir_no_retenido
+from ventas.services.retencion_service import bloquear_pedido_vivo
 from ventas.models import Pedido
 from wms.utils.decimales import normalizar_decimal
 from wms.utils.folios import generate_folio
@@ -393,8 +393,7 @@ class PackingService:
         # Packing -> Envio, siempre ``of=("self",)`` para no bloquear de paso
         # empresa, sucursal ni las demás filas del ``select_related``.
         PackingService._validate_context(picking_input, user)
-        pedido_bloqueado = Pedido.objects.select_for_update(of=("self",)).filter(pk=picking_input.pedido_id).first()
-        exigir_no_retenido(pedido_bloqueado)
+        bloquear_pedido_vivo(picking_input.pedido_id)
         picking = (
             Picking.objects.select_for_update(of=("self",))
             .select_related("empresa", "sucursal", "pedido", "operador", "almacen", "almacen_destino",
