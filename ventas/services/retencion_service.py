@@ -21,6 +21,16 @@ def mensaje_retenido(pedido):
     )
 
 
+def retenido_por_nombre(pedido):
+    """Quién retuvo el pedido (EC-953): nombre completo o, sin first/last name, su
+    correo (misma regla que ``cancelado_por_nombre``, EC-926/EC-949); ``None`` si no
+    está retenido. Sin consultas cuando ``retenido_por`` ya viene cargado."""
+    if not pedido.retenido_por_id:
+        return None
+    usuario = pedido.retenido_por
+    return usuario.get_full_name().strip() or usuario.email
+
+
 def registrar_bitacora(pedido, user, retenido):
     """Retener/liberar no cambia ``estatus``, así que la señal de la bitácora no lo ve:
     se registra aquí como cambio de estatus legible para que salga en

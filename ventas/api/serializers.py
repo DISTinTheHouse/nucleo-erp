@@ -865,6 +865,14 @@ class PedidoSerializer(serializers.ModelSerializer):
     def get_importe_iva(self, obj):
         return importes_iva(obj)[1]
 
+    # Quién retuvo el pedido (EC-953): nombre o correo, ``None`` si no está
+    # retenido. El detalle trae ``retenido_por`` en su ``select_related``.
+    retenido_por_nombre = serializers.SerializerMethodField()
+
+    def get_retenido_por_nombre(self, obj):
+        from ventas.services.retencion_service import retenido_por_nombre
+        return retenido_por_nombre(obj)
+
     def get_fecha_entrega_min(self, obj):
         from ventas.services.clasificacion_service import rango_fecha_entrega
         return rango_fecha_entrega(obj)[0]
