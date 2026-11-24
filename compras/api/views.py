@@ -607,6 +607,14 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
                 "saldo_cerrado", "motivo_cierre", "fecha_cierre", "cerrada_por", "estatus", "updated_at",
             ])
             liberadas = _liberar_saldo_necesidades(oc)
+            from auditoria.models import BitacoraDocumento
+            BitacoraDocumento.objects.create(
+                empresa_id=oc.empresa_id, sucursal_id=oc.sucursal_id, tipo_documento="orden_compra",
+                documento_id=str(oc.pk), folio=(oc.folio or "")[:60], accion=BitacoraDocumento.Accion.ESTATUS,
+                estatus_anterior="Parcialmente recibida", estatus_nuevo="Saldo cerrado",
+                estatus_codigo="SALDO_CERRADO", total=oc.gran_total, moneda_id=oc.moneda_id,
+                usuario=oc.cerrada_por,
+            )
             self._auditar_orden_compra(request, oc, "CERRAR_SALDO", antes, {
                 "estatus": oc.estatus, "saldo_cerrado": True, "motivo": motivo,
                 "necesidades_reabiertas": liberadas,
@@ -3350,6 +3358,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             )
             oc = OrdenCompra.objects.select_for_update().get(pk=recepcion.orden_compra_id) if recepcion.orden_compra_id else None
             inspeccion = CalidadInspeccion.objects.select_for_update().get(pk=inspeccion.pk)
+            inspeccion.recepcion = recepcion  # la bitácora lee empresa/sucursal de aquí
             if inspeccion.estado == CalidadInspeccion.ESTADO_ANULADA:
                 raise ValidationError({"estado": "La inspección ya está anulada."})
             if recepcion.estatus != Recepcion.EstatusRecepcion.CERRADA or not recepcion.activo:

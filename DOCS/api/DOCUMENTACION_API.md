@@ -3224,6 +3224,20 @@ Para cuando el proveedor surtió parcial y ya no mandará el resto.
 - Campos nuevos (solo lectura): `aceptado_por`, `fecha_aceptacion`, `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`.
 - `aceptar/` y `cancelar/` dejan `AuditoriaEvento` (`compras/ACEPTAR`, `compras/CANCELAR`, tabla `recepcion_rfid_encuadre`).
 
+### Rastreo en auditoría (bitácora)
+
+Todo se ve en `GET /api/v1/auditoria/documentos/?tipo=...&documento_id=...` y en `.../linea-tiempo/`:
+
+| Qué pasó | `tipo` | Renglón de la bitácora |
+|---|---|---|
+| Revertir calidad | `calidad_inspeccion` (nuevo) | `Aprobada → Anulada` |
+| | `recepcion` | `Cerrada → En calidad` |
+| | `movimiento_inventario` | la `Salida` de la reversa, colgada de la recepción |
+| Cerrar saldo | `orden_compra` | `Parcialmente recibida → Saldo cerrado` (`estatus_codigo: "SALDO_CERRADO"`) |
+| Encuadre | `encuadre_rfid` (nuevo) | `Pendiente → Aceptado` y `→ Cancelado` |
+
+La línea de tiempo de la OC o de la recepción ya incluye la inspección, sus movimientos (entrada y salida de la reversa) y los cambios de estatus. El motivo completo, quién y cuándo están en el documento (`motivo_anulacion`/`anulada_por`, `motivo_cierre`/`cerrada_por`, `motivo_cancelacion`/`cancelado_por`) y en `AuditoriaEvento`.
+
 ## 🧾 Compras - KPIs por pantalla (EC-432 / EC-434 / EC-436)
 
 Cada uno es la tarjeta de KPIs de **una pantalla específica**. `GET /compras/dashboard/` (el resumen general) se retiró en EC-784: responde `404`; el dashboard de Compras se sirve desde `ordenes/kpis/` (EC-782). Mismo patrón en los 3: `GET`, todo agregado en DB, cada bloque trae `"disponible": true/false` — cuando es `false` viene con `"motivo"` y el frontend debe mostrarlo como "próximamente", nunca calcularlo ni ocultarlo.

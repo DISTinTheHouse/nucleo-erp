@@ -62,6 +62,9 @@ DOCUMENTOS = {
          ("orden_produccion", "op_id"), ("factura", "factura_id")],
     ),
     "inventarios.AjusteInventario": Doc("ajuste_inventario"),
+    # Sin empresa propia: ``empresa_id``/``sucursal_id`` son propiedades de su recepción.
+    "compras.CalidadInspeccion": Doc("calidad_inspeccion", None, "estado", None, [("recepcion", "recepcion_id")]),
+    "compras.RecepcionRFIDEncuadre": Doc("encuadre_rfid", None, "estatus", None, [("orden_compra", "orden_compra_id")]),
 }
 
 #: tipo -> etiqueta del modelo, para validar ``?tipo=`` y buscar el documento.

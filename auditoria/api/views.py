@@ -195,8 +195,9 @@ class BitacoraDocumentoViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError({"documento_id": "Es obligatorio."})
         user = request.user
         modelo = apps.get_model(TIPOS[tipo])
-        # El despacho no guarda empresa ni sucursal: son las de su packing.
-        prefijo = "packing__" if tipo == "despacho" else ""
+        # Despacho e inspección de calidad no guardan empresa ni sucursal: son las
+        # de su packing / su recepción.
+        prefijo = {"despacho": "packing__", "calidad_inspeccion": "recepcion__"}.get(tipo, "")
         raiz = modelo.objects.filter(pk=doc_id, **{f"{prefijo}empresa_id": getattr(user, "empresa_id", None)})
         # #1073: la raíz con la misma regla que sus eventos; fuera de alcance → 404.
         if (

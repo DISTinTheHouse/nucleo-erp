@@ -607,6 +607,15 @@ class CalidadInspeccion(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
 
+    # La bitácora (``auditoria/bitacora.py``) acota por empresa/sucursal: las de su recepción.
+    @property
+    def empresa_id(self):
+        return self.recepcion.empresa_id
+
+    @property
+    def sucursal_id(self):
+        return self.recepcion.sucursal_id
+
     class Meta:
         db_table = 'calidad_inspecciones'
         verbose_name = 'Calidad Inspección'
