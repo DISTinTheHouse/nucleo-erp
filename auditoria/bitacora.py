@@ -56,6 +56,11 @@ DOCUMENTOS = {
     "finanzas.Cobro": Doc("cobro", "folio", "estatus", "total_cobrado"),
     "finanzas.Pago": Doc("pago", "referencia", "estatus", "total_pagado"),
     "finanzas.Poliza": Doc("poliza", "folio", "estatus"),
+    # Sin empresa propia: propiedades de su factura / su cuenta bancaria.
+    "finanzas.NotaCredito": Doc("nota_credito", "folio", "estatus", "total", [("factura", "factura_id")]),
+    "finanzas.MovimientoBancario": Doc("movimiento_bancario", "referencia", "estatus", "importe",
+                                       [("cobro", "cobro_id"), ("pago", "pago_id")]),
+    "finanzas.ConciliacionBancaria": Doc("conciliacion_bancaria", None, "estatus"),
     "inventarios.MovimientoInventario": Doc(
         "movimiento_inventario", None, "tipo_movimiento", None,
         [("pedido", "pedido_id"), ("recepcion", "recepcion_id"), ("transferencia", "transferencia_id"),

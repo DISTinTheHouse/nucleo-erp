@@ -4323,6 +4323,31 @@ Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró
 
 ---
 
+## 🚫 Finanzas - Cancelaciones (motivo, permiso y auditoría)
+
+Toda cancelación de finanzas exige **`motivo`** (body JSON o `?motivo=` en DELETE; máx. 500) → `400 {"motivo": ...}` si falta. Repetir una cancelación da `400` (no reescribe el rastro), salvo factura, cuyo reintento ante el SAT se acepta sin tocar el motivo original.
+
+Al cancelar quedan en el documento (solo lectura en el serializer) `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`, un `AuditoriaEvento` (`modulo="finanzas"`, `accion="CANCELAR"`, motivo en `despues_json`) y el cambio de estatus en la bitácora (`/api/v1/auditoria/documentos/`).
+
+| Documento | Endpoint | Permiso |
+|---|---|---|
+| Factura | `POST facturas/{id}/cancelar/` | `E-FIN-FACTURAS` |
+| Nota de crédito | `POST notas-credito/{id}/cancelar/` | `E-FIN-FACTURAS` |
+| Póliza | `POST polizas/{id}/cancelar/` | `CANCELAR-FIN-POLIZAS` |
+| Cobro | `POST cobros/{id}/cancelar/`, `cancelar-rep/`, `PATCH estatus=Cancelado`, `DELETE` de un Aplicado | `CANCELAR-FIN-COBROS` |
+| Pago | `POST pagos/{id}/cancelar/`, `PATCH estatus=Cancelado`, `DELETE` de un Aplicado | `CANCELAR-FIN-PAGOS` |
+| Factura proveedor | `POST facturas-proveedor/{id}/cancelar/` (**nuevo**) | `CANCELAR-FIN-PAGOS` |
+| Movimiento bancario | `POST movimientos-bancarios/{id}/cancelar/` o `DELETE` | `CANCELAR-FIN-BANCOS` |
+| Conciliación | `POST conciliaciones-bancarias/{id}/cancelar/` | `CANCELAR-FIN-BANCOS` |
+
+Los cuatro `CANCELAR-FIN-*` se crearon con la migración `finanzas 0052` y se otorgaron a todo rol que ya tenía `E-FIN-FACTURAS` (hoy: Contabilidad): nadie pierde acceso; el admin los separa por rol. Superusuario y admin de empresa siempre pasan.
+
+Cambios de comportamiento:
+- **Factura proveedor**: `DELETE` solo en Borrador; Registrada → `400` "usa POST cancelar/". `cancelar/` deja la CxP `Cancelada` y la póliza con contrapóliza.
+- **Movimiento bancario**: `DELETE` ya no borra la fila: revierte el saldo y lo deja `Cancelado` con motivo (`204`).
+- Borrados de borradores (factura, póliza, pago/cobro, NC, conciliación, factura proveedor) dejan `AuditoriaEvento` `accion="BAJA"`.
+- La bitácora ahora incluye `nota_credito`, `movimiento_bancario` y `conciliacion_bancaria` (también en `linea-tiempo`).
+
 ## 🚫 Producción - Cancelaciones
 
 Toda cancelación pide `motivo` y guarda en la orden `motivo_cancelacion`, `fecha_cancelacion` y `cancelado_por`. Los tres son de solo lectura y vienen en el detalle (y en la respuesta de cancelar). La cancelación también queda en `AuditoriaEvento` y en la bitácora (`/api/v1/auditoria/documentos/?tipo=orden_produccion|orden_bordado|orden_reflejante|orden_corte_manga`, renglón `→ Cancelado`). Cancelado es terminal.

@@ -66,6 +66,20 @@ def _empresa_id_del_registro(serializer, attrs):
     return getattr(getattr(user, "empresa", None), "pk", None)
 
 
+
+class CancelacionSoloLecturaMixin:
+    """``motivo_cancelacion``/``fecha_cancelacion``/``cancelado_por`` los pone
+    ``cancelar/`` (o el DELETE que cancela), nunca el cliente."""
+    CAMPOS_CANCELACION = ("motivo_cancelacion", "fecha_cancelacion", "cancelado_por")
+
+    def get_fields(self):
+        fields = super().get_fields()
+        for campo in self.CAMPOS_CANCELACION:
+            if campo in fields:
+                fields[campo].read_only = True
+        return fields
+
+
 class EmpresaResueltaEnServidorMixin:
     """``empresa`` la fija el servidor, no el cliente.
 
@@ -337,7 +351,7 @@ def nombre_producto_o_servicio(factura_detalle):
     return servicio.nombre if servicio else None
 
 
-class FacturaSerializer(serializers.ModelSerializer):
+class FacturaSerializer(CancelacionSoloLecturaMixin, serializers.ModelSerializer):
     factura_detalles = FacturaDetalleSerializer(many=True, required=False)
     # Alta: ids de ``PedidoServicioExtra`` del pedido a facturar completos (#744).
     servicios_extras = serializers.ListField(
@@ -855,7 +869,7 @@ class PolizaDetalleSerializer(serializers.ModelSerializer):
         }
 
 
-class PolizaSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+class PolizaSerializer(CancelacionSoloLecturaMixin, CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     nested_write_on_create_only = ("poliza_detalles",)
     poliza_detalles = PolizaDetalleSerializer(many=True, required=False)
     total_cargos = serializers.SerializerMethodField()
@@ -945,7 +959,7 @@ class FacturaProveedorDetalleSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class FacturaProveedorSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+class FacturaProveedorSerializer(CancelacionSoloLecturaMixin, CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     nested_write_on_create_only = ("factura_proveedor_detalles",)
     factura_proveedor_detalles = FacturaProveedorDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
@@ -1211,7 +1225,7 @@ class _CodigoONulo(serializers.CharField):
         return super().to_representation(value) or None
 
 
-class CobroSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+class CobroSerializer(CancelacionSoloLecturaMixin, CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     nested_write_on_create_only = ()  # EC-541: las líneas también se editan en Borrador (lo decide la vista)
     cobro_detalles = CobroDetalleSerializer(many=True, required=False)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
@@ -1307,7 +1321,7 @@ class PagoDetalleSerializer(serializers.ModelSerializer):
         }
 
 
-class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+class PagoSerializer(CancelacionSoloLecturaMixin, CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
     nested_write_on_create_only = ("pago_detalles",)
     pago_detalles = PagoDetalleSerializer(many=True, required=False)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
@@ -1373,7 +1387,7 @@ class PagoSerializer(CreateOnlyNestedLinesMixin, EmpresaResueltaEnServidorMixin,
         return attrs
 
 
-class MovimientoBancarioSerializer(serializers.ModelSerializer):
+class MovimientoBancarioSerializer(CancelacionSoloLecturaMixin, serializers.ModelSerializer):
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)
 
     class Meta:
@@ -1399,7 +1413,7 @@ class MovimientoBancarioSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class ConciliacionBancariaSerializer(serializers.ModelSerializer):
+class ConciliacionBancariaSerializer(CancelacionSoloLecturaMixin, serializers.ModelSerializer):
     diferencia = serializers.SerializerMethodField()
     cuenta_bancaria_alias = serializers.CharField(source="cuenta_bancaria.alias", read_only=True)
 
@@ -1440,7 +1454,7 @@ class NotaCreditoDetalleSerializer(serializers.ModelSerializer):
         }
 
 
-class NotaCreditoSerializer(CreateOnlyNestedLinesMixin, serializers.ModelSerializer):
+class NotaCreditoSerializer(CancelacionSoloLecturaMixin, CreateOnlyNestedLinesMixin, serializers.ModelSerializer):
     nested_write_on_create_only = ("nota_credito_detalles",)
     nota_credito_detalles = NotaCreditoDetalleSerializer(many=True, required=False)
     cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
