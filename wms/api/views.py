@@ -81,7 +81,7 @@ class TransferenciaViewSet(
         qs = (
             super()
             .get_queryset()
-            .select_related("almacen_origen", "almacen_destino", "usuario")
+            .select_related("almacen_origen", "almacen_destino", "usuario", "cancelado_por")
             .order_by("-fecha_creacion", "-id")
         )
 
@@ -213,6 +213,7 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
                 "oleada",
                 "zona_almacen",
                 "lote",
+                "cancelado_por",
             )
             .prefetch_related(
                 Prefetch(
@@ -390,7 +391,8 @@ class PackingViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveMod
             super()
             .get_queryset()
             .select_related(
-                "pedido", "pedido__cliente", "picking", "picking__almacen", "operador", "usuario"
+                "pedido", "pedido__cliente", "picking", "picking__almacen", "operador", "usuario",
+                "cancelado_por",
             )
             .prefetch_related(
                 Prefetch(
@@ -475,6 +477,7 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
                 "envio__transportista",
                 "chofer",
                 "usuario",
+                "cancelado_por",
             )
             .prefetch_related(
                 Prefetch(

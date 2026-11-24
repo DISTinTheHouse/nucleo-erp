@@ -22,6 +22,23 @@ from wms.models import (
 from ventas.services.pedido_vinculado import armar_pedido_vinculado
 from wms.services.rfid_label_service import zpl_rfid_vigente
 
+
+def _nombre_usuario(usuario):
+    """Nombre completo del usuario o, si no tiene first/last name, su correo."""
+    return (usuario.get_full_name().strip() or usuario.email) if usuario else None
+
+
+class _CanceladoPorNombreMixin(serializers.Serializer):
+    """``cancelado_por_nombre`` (EC-949): quién canceló, con el mismo fallback que
+    ``usuario_nombre``; ``null`` si el documento no está cancelado. Misma regla que
+    Compras (EC-926). ``cancelado_por`` viaja en el ``select_related`` del viewset."""
+
+    cancelado_por_nombre = serializers.SerializerMethodField()
+
+    def get_cancelado_por_nombre(self, obj):
+        return _nombre_usuario(obj.cancelado_por) if obj.cancelado_por_id else None
+
+
 class TransferenciaDetalleSerializer(serializers.ModelSerializer):
     class Meta:
         model = TransferenciaDetalle
@@ -218,7 +235,7 @@ class TransferenciaDetalleReadSerializer(_VarianteDeLineaWmsMixin, serializers.M
         return str(obj.ubicacion_destino) if obj.ubicacion_destino_id else None
 
 
-class TransferenciaListSerializer(serializers.ModelSerializer):
+class TransferenciaListSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
     """Listado de transferencias (acción ``list``).
 
     Forma ligera y plana: encabezado con las FK resueltas, sin anidar renglones
@@ -252,6 +269,8 @@ class TransferenciaListSerializer(serializers.ModelSerializer):
             "reversa_de",
             "motivo_cancelacion",
             "fecha_cancelacion",
+            "cancelado_por",
+            "cancelado_por_nombre",
         ]
 
     def get_usuario_nombre(self, obj):
@@ -370,7 +389,7 @@ class PickingOrdenTrabajoReadSerializer(serializers.ModelSerializer):
         ]
 
 
-class PickingSerializer(serializers.ModelSerializer):
+class PickingSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
     """Serializer compartido de picking (``list``, ``retrieve`` y respuesta del
     ``create``).
 
@@ -665,7 +684,7 @@ class PackingDetalleReadSerializer(_VarianteDeLineaWmsMixin, serializers.ModelSe
     def _linea_wms(self, obj):
         return obj.picking_detalle
 
-class PackingSerializer(serializers.ModelSerializer):
+class PackingSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
     """Serializer compartido de packing (``list``, ``retrieve`` y respuesta del alta).
 
     ``pedido_vinculado`` (EC-882): ``{id, folio, cliente}`` del pedido, misma forma
@@ -816,7 +835,7 @@ class DespachoDetalleReadSerializer(serializers.ModelSerializer):
         return str(ubicacion) if ubicacion else None
 
 
-class DespachoSerializer(serializers.ModelSerializer):
+class DespachoSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
     despacho_detalle = DespachoDetalleReadSerializer(many=True, read_only=True)
     packing_folio = serializers.CharField(source="packing.folio", read_only=True)
     packing_estado = serializers.CharField(source="packing.estado", read_only=True)
