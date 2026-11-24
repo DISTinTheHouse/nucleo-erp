@@ -9,7 +9,9 @@ del frontend y la acción no puedan divergir:
 - Antes de calidad: ``EN_CALIDAD`` (cualquier origen) o ``CERRADA`` si es de SM
   de OB/OR (``tipo_origen == "SM"``, se crea así), sin inspección ni movimiento
   de inventario.
-- OP ``COMPLETADO``: no.
+- OP ``COMPLETADO``: no, salvo que la haya cerrado el onboarding (``cerrar_orden``)
+  y ninguna recepción de la OP haya pasado por calidad (#1326): entonces la OP
+  se reabre a ``REVISION``.
 - Factura de proveedor sin cancelar (dada de baja o no): no, salvo la de
   maquila en Borrador, que la cancelación anula.
 """
@@ -30,6 +32,7 @@ MOTIVO_CANCELACION_MAX = 500
 ANOT_INSPECCION = "cancelacion_tiene_inspeccion"
 ANOT_MOVIMIENTO = "cancelacion_tiene_movimiento"
 ANOT_FACTURA_VIVA = "cancelacion_tiene_factura_viva"
+ANOT_OP_CON_CALIDAD = "cancelacion_op_con_calidad"
 
 
 def _inspecciones_vivas(recepcion_ref):
@@ -43,6 +46,20 @@ def _entradas_sin_reversa(recepcion_ref):
     return MovimientoInventario.objects.filter(recepcion=recepcion_ref).exclude(
         Exists(CalidadInspeccion.objects.filter(recepcion=OuterRef("recepcion_id"), estado=CalidadInspeccion.ESTADO_ANULADA))
     )
+
+
+def _recepciones_op_con_calidad(op_ref):
+    """Recepciones vivas de la OP que ya pasaron por calidad o movieron inventario."""
+    vivas = Recepcion.objects.filter(op=op_ref).exclude(estatus=Recepcion.EstatusRecepcion.CANCELADA)
+    return vivas.filter(Exists(_inspecciones_vivas(OuterRef("pk"))) | Exists(_entradas_sin_reversa(OuterRef("pk"))))
+
+
+def op_se_reabre(op, recepcion):
+    """#1326: OP completada por ``cerrar_orden`` sin nada pasado por calidad: la
+    cancelación la reabre en vez de bloquear."""
+    if op is None or op.estatus_op != OrdenProduccion.EstatusOrdenProduccion.COMPLETADO or not op.cerrar_orden:
+        return False
+    return not _anotado_o(recepcion, ANOT_OP_CON_CALIDAD, _recepciones_op_con_calidad(op).exists)
 
 
 def puede_cancelar_recepciones(user):
@@ -67,6 +84,7 @@ def anotar_bloqueos_cancelacion(qs):
     return qs.annotate(**{
         ANOT_INSPECCION: Exists(_inspecciones_vivas(OuterRef("pk"))),
         ANOT_MOVIMIENTO: Exists(_entradas_sin_reversa(OuterRef("pk"))),
+        ANOT_OP_CON_CALIDAD: Exists(_recepciones_op_con_calidad(OuterRef("op_id"))),
         # NOT (de maquila AND Borrador), igual que ``_bloquea``.
         ANOT_FACTURA_VIVA: Exists(
             _facturas_sin_cancelar(OuterRef("pk")).exclude(salida_maquila__isnull=False, estatus=Factura.BORRADOR)
@@ -110,7 +128,8 @@ def validar_cancelacion_recepcion(recepcion, op=None, *, bloquear=False):
         )})
     if op is None and recepcion.op_id:
         op = recepcion.op
-    if op is not None and op.estatus_op == OrdenProduccion.EstatusOrdenProduccion.COMPLETADO:
+    if (op is not None and op.estatus_op == OrdenProduccion.EstatusOrdenProduccion.COMPLETADO
+            and not op_se_reabre(op, recepcion)):
         raise ValidationError({"op": f"La OP {op.folio_op} ya está completada y la recepción no puede cancelarse."})
     # Facturas sin cancelar, dadas de baja o no (como ``OrdenCompraViewSet.cancelar``).
     factura_viva = None if bloquear else getattr(recepcion, ANOT_FACTURA_VIVA, None)

@@ -345,6 +345,12 @@ class Despacho(CancelacionMixin):
     chofer = models.ForeignKey(
         "hr.Empleado", on_delete=models.PROTECT, related_name="despachos", null=True, blank=True
     )
+    # #1361: señal de entrega (``POST despachos/{id}/entregar/``). Entregado ya no se cancela.
+    fecha_entrega = models.DateTimeField(null=True, blank=True)
+    entregado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name="+", null=True, blank=True,
+    )
+    recibio = models.CharField(max_length=150, blank=True, default="")
     # Alta del despacho; en los anteriores se tomó de su movimiento de salida (si lo tiene).
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
     usuario = models.ForeignKey(

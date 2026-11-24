@@ -163,6 +163,8 @@ def cancelar_despacho(despacho, request, motivo):
     despacho = Despacho.objects.select_for_update(of=("self",)).get(pk=despacho.pk)
     if despacho.estado == Despacho.Estado.CANCELADO:
         raise ValidationError({"despacho": "El despacho ya está cancelado."})
+    if despacho.fecha_entrega:  # #1361
+        raise ValidationError({"despacho": "El despacho ya se entregó; registra una devolución."})
 
     salida = (
         MovimientoInventario.objects.filter(
@@ -175,6 +177,31 @@ def cancelar_despacho(despacho, request, motivo):
              {"estado": Despacho.Estado.ACTIVO, "packing": packing.folio},
              {"estado": despacho.estado, "packing": packing.folio, "motivo": motivo,
               "salida_revertida": getattr(salida, "pk", None), "inventario_devuelto": reintegro})
+    return despacho
+
+
+@transaction.atomic
+def entregar_despacho(despacho, request, recibio="", fecha=None):
+    """#1361: señal de entrega. Marca el despacho entregado (fecha, quién lo registró y
+    quién recibió); desde ahí ya no se cancela. Una vez, sin cambiar inventario."""
+    despacho = Despacho.objects.select_for_update(of=("self",)).get(pk=despacho.pk)
+    if despacho.estado == Despacho.Estado.CANCELADO:
+        raise ValidationError({"despacho": "El despacho está cancelado."})
+    if despacho.fecha_entrega:
+        raise ValidationError({"despacho": "El despacho ya está marcado como entregado."})
+    ahora = timezone.now()
+    fecha = fecha or ahora
+    if fecha > ahora:
+        raise ValidationError({"fecha_entrega": "La fecha de entrega no puede ser futura."})
+    despacho.fecha_entrega, despacho.entregado_por, despacho.recibio = fecha, request.user, (recibio or "")[:150]
+    despacho.save(update_fields=["fecha_entrega", "entregado_por", "recibio"])
+    meta = getattr(request, "META", None) or {}
+    AuditoriaEvento.objects.create(
+        empresa_id=despacho.packing.empresa_id, usuario=request.user, modulo="wms", accion="ENTREGAR",
+        tabla="despachos", id_registro=str(despacho.pk), antes_json={"fecha_entrega": None},
+        despues_json={"fecha_entrega": fecha.isoformat(), "recibio": despacho.recibio},
+        ip=ip_auditoria(request), user_agent=meta.get("HTTP_USER_AGENT") or None,
+    )
     return despacho
 
 
@@ -262,6 +289,46 @@ def _tr_posterior_viva(tr, picking):
     )
 
 
+def _movimientos_ajenos_posteriores(tr, picking_id):
+    """#1362: la reversa saca del destino lo que haya del SKU, no lo que trajo esta TR.
+    Si después de ``tr`` algo ajeno (otra TR, picking, despacho, recepción, ajuste) movió
+    esos SKU en el almacén destino, regresa su descripción y la reversa se bloquea.
+    No cuentan las TR de la cadena del mismo picking ni sus reversas. 2 consultas."""
+    from wms.models import TransferenciaDetalle
+
+    claves = set(tr.transferencia_detalle.values_list("producto_id", "producto_variante_id", "variante_produccion_id"))
+    if not claves:
+        return None
+    q_sku = Q()
+    for p, pv, vp in claves:
+        q_sku |= Q(producto_id=p, producto_variante_id=pv, variante_produccion_id=vp)
+    destino = tr.almacen_destino_id
+    propias = Q(pk=tr.pk)
+    if picking_id:
+        propias |= Q(picking_id=picking_id) | Q(reversa_de__picking_id=picking_id)
+    tr_ajena = (
+        Transferencia.objects.filter(empresa_id=tr.empresa_id, pk__gt=tr.pk)
+        .filter(Q(almacen_origen_id=destino) | Q(almacen_destino_id=destino))
+        .exclude(propias)
+        .filter(pk__in=TransferenciaDetalle.objects.filter(q_sku).values("transferencia_id"))
+        .order_by("pk").values_list("folio", flat=True).first()
+    )
+    if tr_ajena:
+        return f"la TR {tr_ajena}"
+    desde = (
+        MovimientoInventario.objects.filter(transferencia=tr).order_by("pk").values_list("pk", flat=True).first()
+    )
+    if desde is None:
+        return None
+    ajeno = (
+        MovimientoInventarioDetalle.objects.filter(q_sku, movimiento_inventario_id__gt=desde)
+        .filter(Q(almacen_id=destino) | Q(ubicacion_origen__almacen_id=destino) | Q(ubicacion_destino__almacen_id=destino))
+        .filter(movimiento_inventario__transferencia__isnull=True, movimiento_inventario__activo=True)
+        .order_by("pk").values_list("movimiento_inventario_id", "movimiento_inventario__tipo_movimiento").first()
+    )
+    return f"el movimiento {ajeno[1].lower()} #{ajeno[0]}" if ajeno else None
+
+
 @transaction.atomic
 def revertir_transferencia(transferencia, request, motivo):
     """Una TR ejecutada no se edita: se crea la TR inversa (destino -> origen, mismas
@@ -316,6 +383,13 @@ def revertir_transferencia(transferencia, request, motivo):
             raise ValidationError({"transferencia": (
                 f"Sólo se revierte la última TR del picking {picking.folio}. Revierte primero {posterior}."
             )})
+
+    ajeno = _movimientos_ajenos_posteriores(tr, picking_id)
+    if ajeno:
+        raise ValidationError({"transferencia": (
+            f"Después de {tr.folio} hubo movimientos ajenos de esos artículos en el almacén destino "
+            f"({ajeno}). La reversa se llevaría piezas que no son de esta TR: haz una TR manual o un ajuste."
+        )})
 
     renglones = [
         {

@@ -1,5 +1,6 @@
 from django.db.models import Prefetch
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import mixins, status
@@ -558,6 +559,25 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
         cancelacion_service.exigir_permiso(request.user)
         motivo = cancelacion_service.motivo_de(request.data)
         cancelacion_service.cancelar_despacho(despacho, request, motivo)
+        return Response(DespachoSerializer(self.get_queryset().get(pk=despacho.pk)).data)
+
+    @action(detail=True, methods=["post"], url_path="entregar", url_name="entregar")
+    def entregar(self, request, pk=None):
+        """#1361: marca el despacho entregado. Body ``{"recibio": "...", "fecha_entrega": ISO}``
+        (ambos opcionales; sin fecha, ahora). Permiso ``C-WMS-ENVIO``. Ya entregado no se cancela."""
+        despacho = self.get_object()
+        if not request.user.tiene_permiso("C-WMS-ENVIO"):
+            raise PermissionDenied("No tienes permiso para esta acción (C-WMS-ENVIO).")
+        fecha = None
+        crudo = request.data.get("fecha_entrega") if hasattr(request.data, "get") else None
+        if crudo:
+            fecha = parse_datetime(str(crudo))
+            if fecha is None:
+                raise ValidationError({"fecha_entrega": "Fecha inválida (ISO 8601)."})
+            if timezone.is_naive(fecha):
+                fecha = timezone.make_aware(fecha)
+        recibio = request.data.get("recibio") if hasattr(request.data, "get") else ""
+        cancelacion_service.entregar_despacho(despacho, request, str(recibio or "").strip(), fecha)
         return Response(DespachoSerializer(self.get_queryset().get(pk=despacho.pk)).data)
 
 
