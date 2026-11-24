@@ -153,6 +153,14 @@ def cambiar_estatus(op_id, visibles, user, destino, motivo="", forzar=False, req
         if destino == E.CANCELADO:
             # El material que consumió la OP regresa al almacén (mismo costo).
             devuelto = devolver_consumo_op(op, user, motivo, request)
+            # La pre-orden convertida lo registra en su historial; se puede cancelar
+            # (``pre-ordenes/{id}/cancelar/``) para que el pedido genere otra.
+            from produccion.models import PreOrdenEvento, PreOrdenProduccion
+            for pre in PreOrdenProduccion.objects.filter(op=op):
+                PreOrdenEvento.objects.create(
+                    pre_orden=pre, evento=PreOrdenEvento.Evento.OP_CANCELADA, usuario=user if getattr(user, "pk", None) else None,
+                    descripcion=f"OP {op.folio_op}: {motivo}"[:500],
+                )
 
         ip = user_agent = None
         if request is not None:

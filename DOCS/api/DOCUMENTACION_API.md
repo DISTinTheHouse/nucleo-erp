@@ -4325,7 +4325,7 @@ Toda cancelación pide `motivo` y guarda en la orden `motivo_cancelacion`, `fech
   - crea una ENTRADA ligada a la OP, que aparece en el kardex y en los reportes por periodo (`despues_json.cancelacion_op=true`);
   - el consumo de la OP (`consumo/`) queda en cero;
   - el evento `CAMBIO_ESTATUS` incluye `material_devuelto`.
-- `400` si la OP tiene una recepción de producto terminado viva (primero se cancela en WMS) o una salida a maquila Enviada (primero se cancela la SM).
+- `400` si la OP tiene una recepción de producto terminado viva (primero se cancela en WMS) o una salida a maquila Enviada (primero se cancela la SM). El mensaje trae el folio que bloquea.
 - La respuesta agrega `motivo_cancelacion`, `fecha_cancelacion` y `cancelado_por`.
 - **`DELETE /orden-produccion/{id}/` hace exactamente lo mismo**: motivo en el body o en `?motivo=` (sin motivo → `400`), con los mismos candados y la misma devolución. Ya no cancela una OP Completada (`409`).
 
@@ -4339,6 +4339,22 @@ Toda cancelación pide `motivo` y guarda en la orden `motivo_cancelacion`, `fech
   - tiene una salida a maquila Enviada.
 - No mueven inventario.
 - **Cancelar por `PATCH` ya no se permite**: `estatus_bordado: 8` o `estatus_reflejante`/`estatus_corte: 7` responden `400 "Para cancelar usa POST {id}/cancelar/ con motivo."`. Una OB cancelada ya no se edita.
+
+### Pre-orden de una OP cancelada
+
+- Al cancelar la OP, su pre-orden (Convertida) registra el evento `op_cancelada` en `GET /pre-ordenes/{id}/historial/` (`evento_display: "OP cancelada"`, descripción con el folio y el motivo).
+- La pre-orden no cambia sola. Para que el pedido vuelva a generar producción, se cancela con `POST /pre-ordenes/{id}/cancelar/`, que ya lo permite cuando su OP está cancelada; después el pedido crea una pre-orden nueva.
+
+### Salida a maquila — `POST /api/v1/produccion/salidas-maquila/{id}/cancelar/`
+
+- **Ahora exige `{"motivo": "..."}`**: sin motivo → `400 {"motivo": "Indica el motivo de la cancelación."}`.
+- Guarda `motivo_cancelacion`, `fecha_cancelacion` y `cancelado_por` (en el detalle y en el listado de la SM) y deja `AuditoriaEvento` `produccion/CANCELAR`.
+- Las reglas de siempre no cambian: solo se cancela una SM Enviada y sin recepciones.
+
+### ⚠️ Cambios para el frontend
+
+- `DELETE /orden-produccion/{id}/` y `POST /salidas-maquila/{id}/cancelar/` **ahora requieren motivo**; antes no lo pedían.
+- Cancelar OB, OR y OCM por `PATCH` de estatus ya no se permite; se usa `POST {id}/cancelar/`.
 
 ### Bajas (`DELETE`) de OB/OR/OCM y de avances
 

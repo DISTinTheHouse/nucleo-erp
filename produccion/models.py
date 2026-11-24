@@ -248,6 +248,7 @@ class PreOrdenEvento(models.Model):
         REGRESO_CONSUMO = "regreso_consumo", "Regreso por consumo"
         LISTA = "lista", "Lista para producir"
         OP_CREADA = "op_creada", "OP creada"
+        OP_CANCELADA = "op_cancelada", "OP cancelada"
         CANCELADA = "cancelada", "Cancelada"
         ACEPTADA = "aceptada", "Aceptada por producción"
         RECHAZADA = "rechazada", "Rechazada por producción"
@@ -873,6 +874,13 @@ class SalidaMaquila(models.Model):
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # Solo los escribe ``POST salidas-maquila/{id}/cancelar/``.
+    motivo_cancelacion = models.TextField(blank=True, default="")
+    fecha_cancelacion = models.DateTimeField(null=True, blank=True)
+    cancelado_por = models.ForeignKey(
+        "usuarios.Usuario", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
 
     class Meta:
         db_table = "salidas_maquila"

@@ -178,9 +178,10 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
             "total_piezas", "piezas_recibidas", "piezas_faltantes",
             "total", "observaciones", "usuario", "usuario_nombre", "created_at", "detalles",
             "recepciones", "facturas_proveedor",
+            "motivo_cancelacion", "fecha_cancelacion", "cancelado_por",
         ]
         read_only_fields = ["folio", "estatus", "sucursal", "fecha_recepcion", "total_piezas", "total",
-                            "usuario", "created_at"]
+                            "usuario", "created_at", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por"]
         extra_kwargs = {"centro_confeccion": {"required": False}, "op": {"required": False},
                         "ob": {"required": False}, "orden_r": {"required": False}}
 
@@ -469,6 +470,10 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
 
     def _cambiar(self, request, nuevo, permitido_desde):
         _exigir_produccion(request.user)
+        motivo = None
+        if nuevo == SalidaMaquila.Estatus.CANCELADA:
+            from produccion.services.cancelacion_service import motivo_de
+            motivo = motivo_de(request.data)
         with transaction.atomic():
             sm = self.get_queryset().select_for_update(of=("self",)).get(pk=self.get_object().pk)
             if sm.estatus not in permitido_desde:
@@ -481,8 +486,22 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
                 raise ValidationError({"estatus": [
                     "La SM ya tiene recepciones; cierra el faltante desde la recepción."
                 ]})
+            antes = sm.estatus
             sm.estatus = nuevo
             campos = ["estatus", "updated_at"]
+            if motivo is not None:
+                from auditoria.models import AuditoriaEvento
+                from nucleo.middleware import ip_auditoria
+                from produccion.services.cancelacion_service import sellar
+                campos += sellar(sm, request.user, motivo)
+                AuditoriaEvento.objects.create(
+                    empresa_id=sm.empresa_id, usuario=request.user, modulo="produccion", accion="CANCELAR",
+                    tabla=SalidaMaquila._meta.db_table, id_registro=str(sm.pk),
+                    antes_json={"estatus": antes, "folio": sm.folio},
+                    despues_json={"estatus": nuevo, "folio": sm.folio, "motivo": motivo},
+                    ip=ip_auditoria(request),
+                    user_agent=request.META.get("HTTP_USER_AGENT"),
+                )
             if nuevo == SalidaMaquila.Estatus.RECIBIDA:
                 sm.fecha_recepcion = timezone.now()
                 campos.append("fecha_recepcion")
