@@ -60,7 +60,8 @@ class TransferenciaSerializer(serializers.ModelSerializer):
         model = Transferencia
         fields = "__all__"
         # ``picking`` lo fija el servidor (EC-916): una TR manual no se liga a un picking.
-        read_only_fields = ["empresa", "sucursal", "folio", "usuario", "status", "picking"]
+        read_only_fields = ["empresa", "sucursal", "folio", "usuario", "status", "picking", "reversa_de",
+                            "motivo_cancelacion", "fecha_cancelacion", "cancelado_por"]
 
     def validate(self, attrs):
         almacen_origen = attrs.get("almacen_origen")
@@ -248,6 +249,9 @@ class TransferenciaListSerializer(serializers.ModelSerializer):
             "almacen_destino_nombre",
             "usuario",
             "usuario_nombre",
+            "reversa_de",
+            "motivo_cancelacion",
+            "fecha_cancelacion",
         ]
 
     def get_usuario_nombre(self, obj):
@@ -478,6 +482,7 @@ class PickingSerializer(serializers.ModelSerializer):
             "updated_at",
             "empresa",
             "sucursal",
+            "motivo_cancelacion", "fecha_cancelacion", "cancelado_por",
         ]
 
     def _nombre_usuario(self, usuario):
@@ -691,6 +696,7 @@ class PackingSerializer(serializers.ModelSerializer):
             "usuario", 
             "created_at", 
             "updated_at",
+            "motivo_cancelacion", "fecha_cancelacion", "cancelado_por",
         ]
 
         

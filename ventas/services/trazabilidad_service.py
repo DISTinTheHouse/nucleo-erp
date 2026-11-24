@@ -266,7 +266,7 @@ def _empacado_y_embarcado(pedido_ids):
     )
     empacado = _suma_por_pedido(base, "packing__pedido_id", "cantidad_empacada")
     embarcado = _suma_por_pedido(
-        base.filter(Exists(DespachoDetalle.objects.filter(packing_detalle=OuterRef("pk")))),
+        base.filter(Exists(DespachoDetalle.objects.filter(packing_detalle=OuterRef("pk"), despacho__estado="ACTIVO"))),
         "packing__pedido_id",
         "cantidad_empacada",
     )

@@ -16,6 +16,21 @@ class Estado(models.TextChoices):
     COMPLETADO = "COMPLETADO", "Completado"
     CANCELADO = "CANCELADO", "Cancelado"
 
+
+class CancelacionMixin(models.Model):
+    """Quién, cuándo y por qué se canceló el documento (``wms/services/cancelacion_service``).
+    Cancelar no borra: el documento conserva su folio y queda en estado cancelado."""
+
+    motivo_cancelacion = models.CharField(max_length=500, blank=True, default="")
+    fecha_cancelacion = models.DateTimeField(null=True, blank=True)
+    cancelado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+", null=True, blank=True
+    )
+
+    class Meta:
+        abstract = True
+
+
 class LotePicking(models.Model):
     class Estado(models.TextChoices):
         PENDIENTE = "PENDIENTE", "Pendiente"
@@ -88,7 +103,7 @@ class Oleada(models.Model):
     def __str__(self):
         return f"Oleada #{str(self.id)} ({self.estado})"
 
-class Picking(models.Model):
+class Picking(CancelacionMixin):
     class Prioridad(models.TextChoices):
         BAJA = "BAJA", "Baja"
         MEDIA = "MEDIA", "Media"
@@ -238,7 +253,7 @@ class PickingDetalle(models.Model):
     def __str__(self):
         return str(self.id)
 
-class Packing(models.Model):
+class Packing(CancelacionMixin):
     folio = models.CharField(max_length=50)
     empresa = models.ForeignKey("nucleo.Empresa", on_delete=models.CASCADE, related_name="packings")
     sucursal = models.ForeignKey("nucleo.Sucursal", on_delete=models.CASCADE, related_name="packings")
@@ -298,10 +313,18 @@ class PackingDetalle(models.Model):
     def __str__(self):
         return str(self.id)
 
-class Despacho(models.Model):
+class Despacho(CancelacionMixin):
     packing = models.ForeignKey(Packing, on_delete=models.CASCADE, related_name="despachos")
     envio = models.ForeignKey("logistica.Envio", on_delete=models.CASCADE, related_name="despachos", null=True, blank=True)
     guia = models.CharField(max_length=100, blank=True, default="")
+
+    class Estado(models.TextChoices):
+        ACTIVO = "ACTIVO", "Activo"
+        CANCELADO = "CANCELADO", "Cancelado"
+
+    # Un despacho cancelado deja de contar como despachado y su salida se revierte
+    # con una ENTRADA ligada al mismo despacho.
+    estado = models.CharField(max_length=10, choices=Estado.choices, default=Estado.ACTIVO)
 
     class TipoEnvio(models.TextChoices):
         PAQUETERIA = "PAQUETERIA", "Paquetería"
@@ -406,7 +429,7 @@ class PickingOrdenTrabajo(models.Model):
         return f"Picking {self.picking_id} - {self.tipo_orden}"
 
 
-class Transferencia(models.Model):
+class Transferencia(CancelacionMixin):
     class TransferenciaStatus(models.TextChoices):
         PENDIENTE = "PENDIENTE", "Pendiente"
         EN_PROCESO = "EN_PROCESO", "En proceso"
@@ -442,6 +465,11 @@ class Transferencia(models.Model):
         related_name="transferencias",
         blank=True,
         null=True,
+    )
+
+    # TR que esta deshace (``revertir``): mismas piezas, almacenes invertidos.
+    reversa_de = models.OneToOneField(
+        "self", on_delete=models.PROTECT, related_name="reversa", null=True, blank=True
     )
 
     usuario = models.ForeignKey(
