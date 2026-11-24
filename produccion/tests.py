@@ -9561,17 +9561,30 @@ class PreOrdenCrearOpRetencionTests(TestCase):
             [self.libre.pk],
         )
 
-    def test_resurtido_bloquea_las_filas_de_sus_pedidos(self):
+    def _orden_de_candados(self, pre):
+        """Tablas que se bloquean (``FOR UPDATE OF``) en el orden en que se piden."""
+        with CaptureQueriesContext(connection) as ctx:
+            self._crear_op(pre)
+        orden = []
+        for q in ctx.captured_queries:
+            sql = q["sql"]
+            if 'FOR UPDATE OF "pedidos"' in sql:
+                orden.append("pedidos")
+            elif 'FOR UPDATE OF "pre_ordenes_produccion"' in sql:
+                orden.append("pre_ordenes_produccion")
+        return orden
+
+    def test_resurtido_bloquea_sus_pedidos_antes_que_la_pre_orden(self):
         from produccion.models import PreOrdenProduccion
 
         pre = self._pre(origen=PreOrdenProduccion.Origen.RESURTIDO)
         pre.pedidos.set([self.retenido])
-        with CaptureQueriesContext(connection) as ctx:
-            self._crear_op(pre)
-        self.assertTrue(any(
-            "FOR UPDATE" in q["sql"].upper() and '"pedidos"' in q["sql"] and "pre_ordenes_produccion_pedidos" in q["sql"]
-            for q in ctx.captured_queries
-        ))
+        self.assertEqual(self._orden_de_candados(pre)[:2], ["pedidos", "pre_ordenes_produccion"])
+
+    def test_pre_orden_de_pedido_bloquea_el_pedido_antes_que_la_pre_orden(self):
+        """Mismo orden que ``cancelar/`` (pedido -> sus pre-órdenes): sin ciclo de candados."""
+        pre = self._pre(pedido=self.libre)
+        self.assertEqual(self._orden_de_candados(pre)[:2], ["pedidos", "pre_ordenes_produccion"])
 
     def test_pre_orden_de_pedido_retenido_mismo_shape(self):
         """Referencia del shape: el ``pre.pedido`` retenido lo rechaza ``validate_pedido``."""
