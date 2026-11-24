@@ -121,7 +121,9 @@ def inspecciones_oc(alcance: AlcanceCompras):
         alcance.oc(_RUTA_CALIDAD),
         recepcion_detalle__recepcion__activo=True,
         recepcion_detalle__recepcion__tipo_origen=Recepcion.TipoOrigen.ORDEN_COMPRA,
-    ).exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+    ).exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA).exclude(
+        calidad_inspeccion__estado="anulada"
+    )
 
 
 def rechazos_oc(alcance: AlcanceCompras):

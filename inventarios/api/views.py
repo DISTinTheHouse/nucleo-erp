@@ -533,6 +533,7 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
                     recepcion_detalle__recepcion__activo=True,
                 )
                 .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+                .exclude(calidad_inspeccion__estado="anulada")
             )
             # ``values(campo)`` agrupa por el renglón; en ``rechazado`` el campo va con el prefijo.
             rechazado_sum = Coalesce(
