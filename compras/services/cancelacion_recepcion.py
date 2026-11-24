@@ -32,6 +32,19 @@ ANOT_MOVIMIENTO = "cancelacion_tiene_movimiento"
 ANOT_FACTURA_VIVA = "cancelacion_tiene_factura_viva"
 
 
+def _inspecciones_vivas(recepcion_ref):
+    """Inspecciones que cuentan: la anulada (``calidad-inspecciones/{id}/revertir/``) no."""
+    return CalidadInspeccion.objects.filter(recepcion=recepcion_ref).exclude(estado=CalidadInspeccion.ESTADO_ANULADA)
+
+
+def _entradas_sin_reversa(recepcion_ref):
+    """Movimientos de la recepción, salvo los de una calidad revertida: con calidad
+    anulada, su ENTRADA y la SALIDA de la reversa ya se compensaron."""
+    return MovimientoInventario.objects.filter(recepcion=recepcion_ref).exclude(
+        Exists(CalidadInspeccion.objects.filter(recepcion=OuterRef("recepcion_id"), estado=CalidadInspeccion.ESTADO_ANULADA))
+    )
+
+
 def puede_cancelar_recepciones(user):
     """Paso 1 de la regla: quién puede cancelar."""
     return bool(user.is_superuser or getattr(user, "is_admin_empresa", False))
@@ -52,8 +65,8 @@ def anotar_bloqueos_cancelacion(qs):
     (FK indexadas a ``recepcion``). La factura viva sigue ``_bloquea``."""
     Factura = FacturaProveedor.FacturaProveedorStatus
     return qs.annotate(**{
-        ANOT_INSPECCION: Exists(CalidadInspeccion.objects.filter(recepcion=OuterRef("pk"))),
-        ANOT_MOVIMIENTO: Exists(MovimientoInventario.objects.filter(recepcion=OuterRef("pk"))),
+        ANOT_INSPECCION: Exists(_inspecciones_vivas(OuterRef("pk"))),
+        ANOT_MOVIMIENTO: Exists(_entradas_sin_reversa(OuterRef("pk"))),
         # NOT (de maquila AND Borrador), igual que ``_bloquea``.
         ANOT_FACTURA_VIVA: Exists(
             _facturas_sin_cancelar(OuterRef("pk")).exclude(salida_maquila__isnull=False, estatus=Factura.BORRADOR)
@@ -89,8 +102,8 @@ def validar_cancelacion_recepcion(recepcion, op=None, *, bloquear=False):
     )
     if (
         not antes_de_calidad
-        or _anotado_o(recepcion, ANOT_INSPECCION, CalidadInspeccion.objects.filter(recepcion=recepcion).exists)
-        or _anotado_o(recepcion, ANOT_MOVIMIENTO, MovimientoInventario.objects.filter(recepcion=recepcion).exists)
+        or _anotado_o(recepcion, ANOT_INSPECCION, _inspecciones_vivas(recepcion).exists)
+        or _anotado_o(recepcion, ANOT_MOVIMIENTO, _entradas_sin_reversa(recepcion).exists)
     ):
         raise ValidationError({"estatus": (
             "La recepción ya pasó por calidad y no puede cancelarse: lo aprobado ya es existencia."

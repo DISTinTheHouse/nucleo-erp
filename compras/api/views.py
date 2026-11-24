@@ -115,6 +115,9 @@ PERMISO_EDITAR_RUTA_CRITICA_OC = "E-COMPRAS-OC"
 # Confirmar (aceptar/) y cancelar una OC: el código con el que el front muestra
 # los dos botones (#1320).
 PERMISO_AUTORIZAR_OC = "A-COMPRAS-OC"
+PERMISO_CREAR_OC = "C-COMPRAS-OC"
+PERMISO_EDITAR_OC = "E-COMPRAS-OC"
+PERMISO_ELIMINAR_OC = "D-COMPRAS-OC"
 # Onboarding de recepciones (#1295): los códigos de WMS que usa el front.
 PERMISO_LEER_RECEPCIONES = "R-WMS-RECEPCIONES"
 PERMISO_CREAR_RECEPCIONES = "C-WMS-RECEPCIONES"
@@ -187,6 +190,7 @@ def anotar_progreso_oc(qs):
             recepcion_detalle__recepcion__activo=True,
         )
         .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+        .exclude(calidad_inspeccion__estado=CalidadInspeccion.ESTADO_ANULADA)
         .annotate(oc_ref=F("recepcion_detalle__orden_compra_detalle__orden_compra_id"))
     )
     return qs.annotate(
@@ -225,11 +229,16 @@ PARAMETROS_KPIS_RECEPCIONES = [
 ]
 
 
+def _exigir_permiso_oc(request, clave):
+    """403 sin ``clave``. Superusuario y admin de empresa pasan sin consultas."""
+    if clave not in permisos_de_la_peticion(request):
+        raise PermissionDenied(f"No tienes permiso para esta acción ({clave}).")
+
+
 def _exigir_autorizar_oc(request):
     """403 sin ``A-COMPRAS-OC`` (#1320). Va después de ``get_object``: la OC de otra
-    empresa sigue siendo 404. Superusuario y admin de empresa pasan sin consultas."""
-    if PERMISO_AUTORIZAR_OC not in permisos_de_la_peticion(request):
-        raise PermissionDenied(f"No tienes permiso para esta acción ({PERMISO_AUTORIZAR_OC}).")
+    empresa sigue siendo 404."""
+    _exigir_permiso_oc(request, PERMISO_AUTORIZAR_OC)
 
 
 def _avisar_oc_autorizada_a_almacen(oc):
@@ -255,6 +264,32 @@ def _avisar_oc_autorizada_a_almacen(oc):
         },
         clave_departamento=CLAVE_DEPARTAMENTO_WMS,
     )
+
+
+def _liberar_saldo_necesidades(oc):
+    """Necesidades de la OC sin recibir completas: se quedan con lo recibido
+    (RECIBIDA) y lo que faltaba nace como necesidad Pendiente sin OC, si su
+    pre-orden sigue abierta. Regresa los ids nuevos; recalcula al confirmar."""
+    from compras.models import NecesidadCompra as N
+    from produccion.services.pre_orden_service import CANCELABLES, recalcular_ids
+
+    nuevas, afectadas = [], set()
+    for n in N.objects.select_for_update().filter(orden_compra=oc, estatus=N.Estatus.EN_OC).select_related("pre_orden"):
+        resto = (n.cantidad or 0) - (n.cantidad_recibida or 0) - (n.sobrante or 0)
+        n.cantidad = n.cantidad_recibida or 0
+        n.estatus = N.Estatus.RECIBIDA
+        n.save(update_fields=["cantidad", "estatus", "updated_at"])
+        afectadas.add(n.pre_orden_id)
+        if resto > 0 and n.pre_orden.estatus in CANCELABLES:
+            nuevas.append(N.objects.create(
+                empresa_id=n.empresa_id, sucursal_id=n.sucursal_id, producto_id=n.producto_id,
+                unidad_id=n.unidad_id, cantidad=resto, pre_orden_id=n.pre_orden_id, pedido_id=n.pedido_id,
+                producto_variante_id=n.producto_variante_id, pre_orden_detalle_id=n.pre_orden_detalle_id,
+                fecha_requerida=n.fecha_requerida, estatus=N.Estatus.PENDIENTE,
+            ).pk)
+    if afectadas:
+        transaction.on_commit(lambda ids=afectadas: recalcular_ids(ids))
+    return nuevas
 
 
 class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
@@ -535,6 +570,58 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         OrdenCompra.TipoCompra.MATERIA_PRIMA: (("ORDEN_COMPRA", "Orden de Compra"), "OC"),
         OrdenCompra.TipoCompra.PRODUCTO_TERMINADO: (("ORDEN_COMPRA_PT", "Orden de Compra PT"), "O"),
     }
+
+    @action(detail=True, methods=["post"], url_path="cerrar-saldo")
+    def cerrar_saldo(self, request, pk=None):
+        """Da por terminada una OC parcialmente recibida: el proveedor ya no surtirá
+        el resto. Queda RECIBIDA con ``saldo_cerrado``; lo que faltaba de sus
+        necesidades de pre-orden vuelve a Pendiente (otra OC puede cubrirlo).
+        ``A-COMPRAS-OC`` y ``motivo``. No se reabre."""
+        from compras.services.orden_compra_view_service import filtrar_campos_contabilidad_orden_compra
+
+        oc = self.get_object()
+        _exigir_autorizar_oc(request)
+        motivo = request.data.get("motivo") if hasattr(request.data, "get") else None
+        if not isinstance(motivo, str) or not motivo.strip():
+            raise ValidationError({"motivo": "Indica por qué se cierra el saldo."})
+        motivo = motivo.strip()[:500]
+        with transaction.atomic():
+            oc = OrdenCompra.objects.select_for_update().filter(pk=oc.pk, activo=True).first()
+            if oc is None:
+                raise NotFound("Orden de compra no encontrada.")
+            if oc.estatus != OrdenCompra.EstatusOrdenCompra.PARCIALMENTE_RECIBIDA:
+                raise ValidationError({"estatus": "Solo se cierra el saldo de una OC parcialmente recibida."})
+            if Recepcion.objects.filter(
+                orden_compra=oc, activo=True, estatus=Recepcion.EstatusRecepcion.EN_CALIDAD
+            ).exists():
+                raise ValidationError({"recepciones": (
+                    "La OC tiene recepciones esperando calidad: inspecciónalas o cancélalas antes de cerrar el saldo."
+                )})
+            antes = {"estatus": oc.estatus, "saldo_cerrado": False}
+            oc.saldo_cerrado, oc.motivo_cierre = True, motivo
+            oc.fecha_cierre = timezone.now()
+            oc.cerrada_por = request.user if getattr(request.user, "pk", None) else None
+            oc.estatus = OrdenCompra.EstatusOrdenCompra.RECIBIDA
+            oc._change_reason = motivo[:100]
+            oc.save(update_fields=[
+                "saldo_cerrado", "motivo_cierre", "fecha_cierre", "cerrada_por", "estatus", "updated_at",
+            ])
+            liberadas = _liberar_saldo_necesidades(oc)
+            from auditoria.models import BitacoraDocumento
+            BitacoraDocumento.objects.create(
+                empresa_id=oc.empresa_id, sucursal_id=oc.sucursal_id, tipo_documento="orden_compra",
+                documento_id=str(oc.pk), folio=(oc.folio or "")[:60], accion=BitacoraDocumento.Accion.ESTATUS,
+                estatus_anterior="Parcialmente recibida", estatus_nuevo="Saldo cerrado",
+                estatus_codigo="SALDO_CERRADO", total=oc.gran_total, moneda_id=oc.moneda_id,
+                usuario=oc.cerrada_por,
+            )
+            self._auditar_orden_compra(request, oc, "CERRAR_SALDO", antes, {
+                "estatus": oc.estatus, "saldo_cerrado": True, "motivo": motivo,
+                "necesidades_reabiertas": liberadas,
+            })
+        instance = self._con_prefetch_retrieve(self.get_queryset()).get(pk=oc.pk)
+        data = filtrar_campos_contabilidad_orden_compra(self.get_serializer(instance).data, request.user)
+        return Response(data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get", "patch"], url_path="ruta-critica")
     def ruta_critica(self, request, pk=None):
@@ -996,6 +1083,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         if request.method.lower() == "get":
             return Response(self.handle_get_onboarding(request))
 
+        _exigir_permiso_oc(request, PERMISO_CREAR_OC)
         raw = request.data or {}
         serializer = OrdenCompraOnboardingSerializer(data=raw)
         serializer.is_valid(raise_exception=True)
@@ -1136,6 +1224,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         ``{proveedor, necesidades: [ids]}``. Un renglón por material, redondeado
         al mínimo/múltiplo de compra del material si lo tiene."""
         from compras.api.necesidades import crear_oc_desde_necesidades
+        _exigir_permiso_oc(request, PERMISO_CREAR_OC)
         oc = crear_oc_desde_necesidades(
             request.user, request.data.get("proveedor"), request.data.get("necesidades"),
         )
@@ -1203,6 +1292,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         user = request.user
         empresa = getattr(user, "empresa", None)
 
+        _exigir_permiso_oc(request, PERMISO_EDITAR_OC)
         raw = request.data or {}
         serializer = OrdenCompraOnboardingSerializer(data=raw)
         serializer.is_valid(raise_exception=True)
@@ -1344,6 +1434,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         user = request.user
         empresa = getattr(user, "empresa", None)
 
+        _exigir_permiso_oc(request, PERMISO_ELIMINAR_OC)
         # Baja por error de captura, no cancelación (esa es ``cancelar``): solo
         # procede sobre una OC que nunca llegó a comprometer nada con el
         # proveedor. Cualquier recepción o factura, aun cancelada, prueba que la
@@ -1653,7 +1744,9 @@ def _anotar_listado_recepciones(qs):
     inspección)."""
     dec = DecimalField(max_digits=18, decimal_places=4)
     renglones = RecepcionDetalle.objects.filter(recepcion=OuterRef("pk")).order_by().values("recepcion")
-    ultima = CalidadInspeccion.objects.filter(recepcion=OuterRef("pk")).order_by("-id")
+    ultima = CalidadInspeccion.objects.filter(recepcion=OuterRef("pk")).exclude(
+        estado=CalidadInspeccion.ESTADO_ANULADA
+    ).order_by("-id")
     det = (
         CalidadInspeccionDetalle.objects.filter(calidad_inspeccion=OuterRef("inspeccion_id"))
         .order_by().values("calidad_inspeccion")
@@ -2032,6 +2125,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 **filtro_recepcion_detalle,
             )
             .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            .exclude(calidad_inspeccion__estado=CalidadInspeccion.ESTADO_ANULADA)
             .aggregate(total=Sum("cantidad_rechazada"))
             .get("total")
         )
@@ -2044,6 +2138,7 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 recepcion_detalle__recepcion__activo=True, **{f"{campo}__in": ids}
             )
             .exclude(recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+            .exclude(calidad_inspeccion__estado=CalidadInspeccion.ESTADO_ANULADA)
             .values(campo)
             .annotate(total=Sum("cantidad_rechazada"))
         )
@@ -2164,7 +2259,10 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
             if pendiente > 0:
                 total_pendiente += pendiente
 
-        if total_pendiente > 0 and total_recibido <= 0:
+        if oc.saldo_cerrado:
+            # Saldo cerrado (``cerrar-saldo/``): lo que falta ya no se espera.
+            oc.estatus = OrdenCompra.EstatusOrdenCompra.RECIBIDA
+        elif total_pendiente > 0 and total_recibido <= 0:
             # Recibido neto 0 (p. ej. Calidad rechazó todo): vuelve a Autorizada.
             oc.estatus = OrdenCompra.EstatusOrdenCompra.AUTORIZADA
         elif total_pendiente > 0:
@@ -3239,6 +3337,145 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             costos[m["recepcion_detalle_id"]] = unitario
         return costos
 
+    @action(detail=True, methods=["post"], url_path="revertir")
+    def revertir(self, request, pk=None):
+        """Anula una inspección liberada por error: saca del almacén lo que entró
+        (SALIDA ligada a la recepción, al costo con que entró), la inspección queda
+        ``anulada`` y la recepción vuelve a En calidad para inspeccionarla de nuevo
+        o cancelarla. Solo admin de empresa o superusuario, con ``motivo``."""
+        user = request.user
+        if not puede_cancelar_recepciones(user):
+            raise PermissionDenied("Solo un administrador de la empresa puede revertir calidad.")
+        motivo = request.data.get("motivo") if hasattr(request.data, "get") else None
+        if not isinstance(motivo, str) or not motivo.strip():
+            raise ValidationError({"motivo": "Indica el motivo de la reversa."})
+        motivo = motivo.strip()[:500]
+        inspeccion = self.get_object()  # otra empresa: 404
+
+        with transaction.atomic():
+            recepcion = Recepcion.objects.select_for_update().select_related("empresa", "sucursal", "almacen").get(
+                pk=inspeccion.recepcion_id
+            )
+            oc = OrdenCompra.objects.select_for_update().get(pk=recepcion.orden_compra_id) if recepcion.orden_compra_id else None
+            inspeccion = CalidadInspeccion.objects.select_for_update().get(pk=inspeccion.pk)
+            inspeccion.recepcion = recepcion  # la bitácora lee empresa/sucursal de aquí
+            if inspeccion.estado == CalidadInspeccion.ESTADO_ANULADA:
+                raise ValidationError({"estado": "La inspección ya está anulada."})
+            if recepcion.estatus != Recepcion.EstatusRecepcion.CERRADA or not recepcion.activo:
+                raise ValidationError({"recepcion": "La recepción no está cerrada por calidad."})
+            if oc is not None and oc.saldo_cerrado:
+                raise ValidationError({"orden_compra": "La OC ya tiene el saldo cerrado; no se puede revertir su calidad."})
+            if recepcion.op_id and recepcion.op.estatus_op == OrdenProduccion.EstatusOrdenProduccion.COMPLETADO:
+                raise ValidationError({"op": f"La OP {recepcion.op.folio_op} ya está completada."})
+            if FacturaProveedor.objects.filter(recepcion=recepcion).exclude(
+                estatus=FacturaProveedor.FacturaProveedorStatus.CANCELADA
+            ).exists():
+                raise ValidationError({"facturas_proveedores": (
+                    "La recepción tiene una factura de proveedor sin cancelar: cancélala primero en Finanzas."
+                )})
+
+            entrada = (
+                MovimientoInventario.objects.filter(recepcion=recepcion, tipo_movimiento="ENTRADA")
+                .order_by("-pk").first()
+            )
+            items, renglones = [], []
+            salida = None
+            if entrada is not None:
+                detalles = list(MovimientoInventarioDetalle.objects.filter(movimiento_inventario=entrada).order_by("pk"))
+                filas = {}
+                for d in detalles:
+                    llave = (d.producto_id, d.producto_variante_id, d.variante_produccion_id, d.ubicacion_destino_id)
+                    if llave not in filas:
+                        filas[llave] = (
+                            Existencia.objects.select_for_update().filter(
+                                producto_id=d.producto_id, producto_variante_id=d.producto_variante_id,
+                                variante_produccion_id=d.variante_produccion_id,
+                                almacen_id=recepcion.almacen_id, ubicacion_id=d.ubicacion_destino_id,
+                            ).order_by("id").first()
+                        )
+                    ex = filas[llave]
+                    antes = Decimal(str(getattr(ex, "cantidad", 0) or 0))
+                    if ex is None or antes < d.cantidad:
+                        raise ValidationError({"existencia": (
+                            f"Ya no hay existencia suficiente para revertir (artículo {d.producto_id}: "
+                            f"{antes.normalize():f} en almacén, entraron {d.cantidad.normalize():f}). "
+                            "Ya se surtió o consumió; haz un ajuste de inventario."
+                        )})
+                    ex.cantidad = antes - d.cantidad
+                    ex.stock = int(ex.cantidad)
+                    ex.save(update_fields=["cantidad", "stock", "fecha_actualizacion"])
+                    renglones.append((d, antes, ex.cantidad))
+                    items.append({
+                        "producto_id": d.producto_id, "producto_variante_id": d.producto_variante_id,
+                        "variante_produccion_id": d.variante_produccion_id, "ubicacion_id": d.ubicacion_destino_id,
+                        "almacen_id": recepcion.almacen_id,
+                        "cantidad_before": str(antes), "cantidad_after": str(ex.cantidad),
+                        "delta": str(-d.cantidad),
+                    })
+                salida = MovimientoInventario.objects.create(
+                    empresa=recepcion.empresa, sucursal=recepcion.sucursal, tipo_movimiento="SALIDA",
+                    usuario=user if getattr(user, "pk", None) else recepcion.usuario,
+                    observaciones=f"Reversa de calidad {inspeccion.pk}: {motivo}"[:150],
+                    recepcion=recepcion, op_id=recepcion.op_id,
+                )
+                nuevos = [
+                    MovimientoInventarioDetalle(
+                        movimiento_inventario=salida, producto_id=d.producto_id,
+                        producto_variante_id=d.producto_variante_id, variante_produccion_id=d.variante_produccion_id,
+                        ubicacion_origen_id=d.ubicacion_destino_id, cantidad=d.cantidad, costo_unitario=d.costo_unitario,
+                        cantidad_antes=antes, cantidad_despues=despues,
+                    )
+                    for d, antes, despues in renglones
+                ]
+                MovimientoInventarioDetalle.objects.bulk_create(nuevos)
+                # Sale al costo con que entró; el promedio no se mueve por una salida.
+                costeo.costear(recepcion.empresa_id, [(n, -n.cantidad, None) for n in nuevos], costeo.Origen.OPERACION)
+
+            inspeccion.estado = CalidadInspeccion.ESTADO_ANULADA
+            inspeccion.motivo_anulacion, inspeccion.fecha_anulacion = motivo, timezone.now()
+            inspeccion.anulada_por = user if getattr(user, "pk", None) else None
+            inspeccion.save(update_fields=["estado", "motivo_anulacion", "fecha_anulacion", "anulada_por"])
+            recepcion.estatus = Recepcion.EstatusRecepcion.EN_CALIDAD
+            recepcion._change_reason = f"Reversa de calidad: {motivo}"[:100]
+            recepcion.save(update_fields=["estatus", "updated_at"])
+            recepcion_vs = RecepcionViewSet()
+            if oc is not None:
+                recepcion_vs._actualizar_estatus_oc(oc)
+            elif recepcion.op_id:
+                recepcion_vs._actualizar_estatus_op(recepcion.op)
+            ev = None
+            if items:
+                ev = AuditoriaEvento.objects.create(
+                    empresa=recepcion.empresa, usuario=user if getattr(user, "pk", None) else None,
+                    modulo="inventarios", accion="SALIDA", tabla="existencias",
+                    id_registro=str(recepcion.almacen_id),
+                    antes_json={"items": items, "recepcion_id": recepcion.pk, "calidad_inspeccion_id": inspeccion.pk},
+                    despues_json={
+                        "almacen_id": recepcion.almacen_id, "sucursal_id": recepcion.sucursal_id,
+                        "empresa_id": recepcion.empresa_id, "recepcion_id": recepcion.pk,
+                        "calidad_inspeccion_id": inspeccion.pk, "reversa_calidad": True, "motivo": motivo,
+                        "items": items,
+                    },
+                    ip=_ip_auditoria(request), user_agent=request.META.get("HTTP_USER_AGENT"),
+                )
+            AuditoriaEvento.objects.create(
+                empresa=recepcion.empresa, usuario=user if getattr(user, "pk", None) else None,
+                modulo="compras", accion="REVERTIR", tabla=CalidadInspeccion._meta.db_table,
+                id_registro=str(inspeccion.pk),
+                antes_json={"estado": "liberada", "recepcion_estatus": Recepcion.EstatusRecepcion.CERRADA},
+                despues_json={"estado": inspeccion.estado, "motivo": motivo, "recepcion_id": recepcion.pk,
+                              "movimiento_inventario_id": getattr(salida, "pk", None)},
+                ip=_ip_auditoria(request), user_agent=request.META.get("HTTP_USER_AGENT"),
+            )
+
+        return Response({
+            "calidad_inspeccion": CalidadInspeccionSerializer(self.get_queryset().get(pk=inspeccion.pk)).data,
+            "recepcion_estatus": recepcion.estatus,
+            "orden_compra_estatus": getattr(oc, "estatus", None),
+            "movimiento_id": ev.id_evento if ev else None,
+            "movimiento_inventario_id": getattr(salida, "pk", None),
+        }, status=status.HTTP_200_OK)
+
     def _derivar_estado(self, resultados):
         aprobados = {"liberado", "concesion_cc", "concesion lazzar"}
         if all(r in aprobados for r in resultados):
@@ -3325,6 +3562,8 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
         # Sin empresa se saltaban la pertenencia de la recepción y del inspector (#875).
         if not empresa:
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
+        # Liberar calidad es lo que mete la mercancía al inventario.
+        _exigir_permiso_oc(request, PERMISO_CREAR_RECEPCIONES)
 
         serializer = CalidadInspeccionInputSerializer(data=request.data or {})
         serializer.is_valid(raise_exception=True)
@@ -3361,7 +3600,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
 
             ya_inspeccionados = CalidadInspeccionDetalle.objects.filter(
                 recepcion_detalle_id__in=renglones.keys()
-            ).exists()
+            ).exclude(calidad_inspeccion__estado=CalidadInspeccion.ESTADO_ANULADA).exists()
             if ya_inspeccionados:
                 raise ValidationError({"detalle": "Esta recepción ya tiene renglones inspeccionados."})
 
@@ -3707,6 +3946,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         # Superusuario incluido, igual que recepciones/onboarding (#875).
         if not empresa:
             raise ValidationError({"empresa": "El usuario no tiene empresa asignada."})
+        _exigir_permiso_oc(request, PERMISO_CREAR_RECEPCIONES)
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -3757,6 +3997,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             self.filter_queryset(self.get_queryset().prefetch_related(None)), pk=pk
         )
         self.check_object_permissions(request, encuadre)
+        _exigir_permiso_oc(request, PERMISO_CREAR_RECEPCIONES)
         if encuadre.estatus != RecepcionRFIDEncuadre.Estatus.PENDIENTE:
             raise ValidationError({"estatus": "Solo se puede escanear un encuadre pendiente."})
 
@@ -3784,11 +4025,55 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def aceptar(self, request, pk=None):
         encuadre = self.get_object()
+        _exigir_permiso_oc(request, PERMISO_CREAR_RECEPCIONES)
         if encuadre.estatus != RecepcionRFIDEncuadre.Estatus.PENDIENTE:
             raise ValidationError({"estatus": "Solo se puede aceptar un encuadre pendiente."})
-        encuadre.estatus = RecepcionRFIDEncuadre.Estatus.ACEPTADO
-        encuadre.save(update_fields=["estatus", "updated_at"])
+        with transaction.atomic():
+            encuadre.estatus = RecepcionRFIDEncuadre.Estatus.ACEPTADO
+            encuadre.aceptado_por = request.user
+            encuadre.fecha_aceptacion = timezone.now()
+            encuadre.save(update_fields=["estatus", "aceptado_por", "fecha_aceptacion", "updated_at"])
+            self._auditar(request, encuadre, "ACEPTAR", {"estatus": "PENDIENTE"},
+                          {"estatus": encuadre.estatus, "lecturas": len(encuadre.lecturas.all())})
         return Response(RecepcionRFIDEncuadreSerializer(encuadre).data)
+
+    @action(detail=True, methods=["post"])
+    def cancelar(self, request, pk=None):
+        """Cancela un encuadre pendiente, o aceptado que aún no generó recepción.
+        No toca inventario (el encuadre no lo mueve). ``motivo`` obligatorio."""
+        encuadre = self.get_object()
+        _exigir_permiso_oc(request, PERMISO_CREAR_RECEPCIONES)
+        motivo = request.data.get("motivo") if hasattr(request.data, "get") else None
+        if not isinstance(motivo, str) or not motivo.strip():
+            raise ValidationError({"motivo": "Indica el motivo de la cancelación."})
+        motivo = motivo.strip()[:500]
+        E = RecepcionRFIDEncuadre.Estatus
+        with transaction.atomic():
+            fila = RecepcionRFIDEncuadre.objects.select_for_update().get(pk=encuadre.pk)
+            if fila.estatus == E.CANCELADO:
+                raise ValidationError({"estatus": "El encuadre ya está cancelado."})
+            if fila.recepcion_id:
+                raise ValidationError({"recepcion": (
+                    "El encuadre ya generó una recepción: cancela la recepción (antes de calidad)."
+                )})
+            antes = {"estatus": fila.estatus}
+            encuadre.estatus = E.CANCELADO
+            encuadre.motivo_cancelacion, encuadre.fecha_cancelacion = motivo, timezone.now()
+            encuadre.cancelado_por = request.user
+            encuadre.save(update_fields=[
+                "estatus", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por", "updated_at",
+            ])
+            self._auditar(request, encuadre, "CANCELAR", antes, {"estatus": encuadre.estatus, "motivo": motivo})
+        return Response(RecepcionRFIDEncuadreSerializer(encuadre).data)
+
+    @staticmethod
+    def _auditar(request, encuadre, accion, antes, despues):
+        AuditoriaEvento.objects.create(
+            empresa_id=encuadre.empresa_id, usuario=request.user, modulo="compras", accion=accion,
+            tabla=RecepcionRFIDEncuadre._meta.db_table, id_registro=str(encuadre.pk),
+            antes_json=antes, despues_json=despues,
+            ip=_ip_auditoria(request), user_agent=request.META.get("HTTP_USER_AGENT"),
+        )
 
 
 

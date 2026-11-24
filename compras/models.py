@@ -170,6 +170,14 @@ class OrdenCompra(StatusLifecycleModel):
     # Solo lo escribe ``POST ordenes/{id}/cancelar/``. Nulo en las OC que ya
     # estaban en CANCELADA (puestas desde el admin) antes de existir la acción.
     motivo_cancelacion = models.TextField(blank=True, null=True)
+    # ``POST ordenes/{id}/cerrar-saldo/``: la OC parcial se da por terminada (el
+    # proveedor ya no surte el resto). Queda RECIBIDA aunque falten piezas.
+    saldo_cerrado = models.BooleanField(default=False)
+    motivo_cierre = models.TextField(blank=True, default='')
+    fecha_cierre = models.DateTimeField(null=True, blank=True)
+    cerrada_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
 
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -505,6 +513,15 @@ class RecepcionRFIDEncuadre(models.Model):
         choices=Estatus.choices,
         default=Estatus.PENDIENTE,
     )
+    aceptado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    fecha_aceptacion = models.DateTimeField(null=True, blank=True)
+    motivo_cancelacion = models.TextField(blank=True, default='')
+    fecha_cancelacion = models.DateTimeField(null=True, blank=True)
+    cancelado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -568,11 +585,15 @@ class RecepcionRFIDLectura(models.Model):
         return self.codigo_tag
 
 class CalidadInspeccion(models.Model):
+    ESTADO_ANULADA = 'anulada'
     ESTADO_CHOICES = [
         ('pendiente', 'Pendiente'),
         ('aprobada', 'Aprobada'),
         ('rechazada', 'Rechazada'),
         ('aprobada_condicion', 'Aprobada con condiciones'),
+        # ``POST calidad-inspecciones/{id}/revertir/``: se sacó del inventario lo que
+        # liberó; sus detalles ya no cuentan como inspeccionados.
+        ('anulada', 'Anulada'),
     ]
 
     recepcion = models.ForeignKey(Recepcion, on_delete=models.CASCADE, related_name='calidad_inspecciones')
@@ -580,6 +601,20 @@ class CalidadInspeccion(models.Model):
     fecha = models.DateField()
     estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='pendiente')
     observaciones = models.TextField(blank=True, null=True)
+    motivo_anulacion = models.TextField(blank=True, default='')
+    fecha_anulacion = models.DateTimeField(null=True, blank=True)
+    anulada_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    # La bitácora (``auditoria/bitacora.py``) acota por empresa/sucursal: las de su recepción.
+    @property
+    def empresa_id(self):
+        return self.recepcion.empresa_id
+
+    @property
+    def sucursal_id(self):
+        return self.recepcion.sucursal_id
 
     class Meta:
         db_table = 'calidad_inspecciones'

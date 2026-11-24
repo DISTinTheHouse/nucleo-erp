@@ -236,12 +236,16 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'a_cuenta',
             'observaciones',
             'motivo_cancelacion',
+            'saldo_cerrado',
+            'motivo_cierre',
+            'fecha_cierre',
+            'cerrada_por',
             'activo',
             'created_at',
             'updated_at',
         ]
-        # Solo lo escribe la acción ``cancelar``.
-        read_only_fields = ['motivo_cancelacion']
+        # Solo los escriben ``cancelar`` y ``cerrar-saldo``.
+        read_only_fields = ['motivo_cancelacion', 'saldo_cerrado', 'motivo_cierre', 'fecha_cierre', 'cerrada_por']
         extra_kwargs = {
             'folio': {'required': False, 'allow_null': True},
             'solicitud_compra': {'required': False, 'allow_null': True},
@@ -782,7 +786,11 @@ class CalidadInspeccionSerializer(serializers.ModelSerializer):
             "estado_label",
             "observaciones",
             "detalles",
+            "motivo_anulacion",
+            "fecha_anulacion",
+            "anulada_por",
         ]
+        read_only_fields = ["motivo_anulacion", "fecha_anulacion", "anulada_por"]
 
     def get_inspector_nombre(self, obj):
         if not obj.inspector_id:
@@ -845,8 +853,12 @@ class RecepcionRFIDEncuadreSerializer(serializers.ModelSerializer):
             "almacen", "almacen_nombre", "usuario", "serie_codigo", "fecha_recepcion",
             "remision", "factura_referencia", "observaciones", "estatus", "estatus_label",
             "activo", "created_at", "updated_at", "lecturas", "resumen",
+            "aceptado_por", "fecha_aceptacion", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por",
         ]
-        read_only_fields = ["empresa", "sucursal", "proveedor", "usuario", "recepcion", "estatus", "activo"]
+        read_only_fields = [
+            "empresa", "sucursal", "proveedor", "usuario", "recepcion", "estatus", "activo",
+            "aceptado_por", "fecha_aceptacion", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por",
+        ]
 
     def get_resumen(self, obj):
         from compras.api.views import resumen_encuadre_rfid
