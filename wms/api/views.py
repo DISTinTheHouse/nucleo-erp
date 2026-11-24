@@ -81,7 +81,9 @@ class TransferenciaViewSet(
         qs = (
             super()
             .get_queryset()
-            .select_related("almacen_origen", "almacen_destino", "usuario", "cancelado_por")
+            .select_related(
+                "almacen_origen", "almacen_destino", "usuario", "cancelado_por", "reversa", "reversa_de"
+            )
             .order_by("-fecha_creacion", "-id")
         )
 
