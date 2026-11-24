@@ -3459,11 +3459,29 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         from produccion.api.serializers import ligar_pedidos_op
         from produccion.services.pre_orden_service import marcar_convertida, materiales, recalcular
         pre = self.get_object()
+        from ventas.services.retencion_service import mensaje_retenido
         with transaction.atomic():
+            # Retención (EC-953) sobre filas bloqueadas, como en ``retener/``: el
+            # ``pre.pedido`` y los del resurtido (``pre.pedidos``, que no pasan por
+            # ``validate_pedido``). Pedidos ANTES que la pre-orden: el mismo orden que
+            # ``cancelar/`` (pedido -> sus pre-órdenes) y EC-574; al revés, un
+            # ``cancelar/`` simultáneo se interbloquea con este alta. Los ids se leen
+            # sin candado: ``pre.pedido`` y ``pre.pedidos`` solo se fijan al crear la
+            # pre-orden (``crear_resurtido`` para el resurtido).
+            ligados_ids = list(pre.pedidos.values_list("pk", flat=True))
+            bloqueados = list(
+                Pedido.objects.select_for_update(of=("self",))
+                .filter(pk__in=[pre.pedido_id, *ligados_ids]).order_by("pk")
+            )
             pre = PreOrdenProduccion.objects.select_for_update(of=("self",)).select_related("pedido").get(pk=pre.pk)
             recalcular(pre, materiales(pre), usuario=request.user)
             if pre.estatus != PreOrdenProduccion.Estatus.LISTA:
                 raise ValidationError({"estatus": f"Solo se convierte en OP una pre-orden Lista para producir (está {pre.get_estatus_display().lower()})."})
+            retenido = next((p for p in bloqueados if p.retenido), None)
+            if retenido is not None:
+                raise ValidationError({"pedido": [mensaje_retenido(retenido)]})
+            ligados = set(ligados_ids)
+            pedidos_ligados = [p for p in bloqueados if p.pk in ligados]
             pieza = UnidadMedida.objects.filter(clave__iexact="pz").first()
             if pieza is None:
                 raise ValidationError({"unidad": "No existe la unidad de medida 'pz'."})
@@ -3488,7 +3506,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 # Los pedidos del resurtido van directo a la OP: ya se validaron al
                 # ligarlos a la pre-orden (no son pedidos de muestra).
                 post_crear=lambda op: (marcar_convertida(pre, op, request.user),
-                                       ligar_pedidos_op(op, list(pre.pedidos.all()))),
+                                       ligar_pedidos_op(op, pedidos_ligados)),
             )
         if respuesta.status_code != status.HTTP_201_CREATED:
             return respuesta

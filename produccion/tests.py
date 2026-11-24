@@ -9472,3 +9472,128 @@ class PreOrdenRecalculoTests(TestCase):
         with CaptureQueriesContext(connection) as ctx:
             recalcular_ids([])
         self.assertEqual(len(ctx.captured_queries), 0)
+
+
+class PreOrdenCrearOpRetencionTests(TestCase):
+    """EC-953: ``pre-ordenes/{id}/crear-op/`` rechaza la conversión si CUALQUIER pedido
+    ligado está retenido: el ``pre.pedido`` (vía ``validate_pedido``) y también los
+    ``pre.pedidos`` del resurtido, con el mismo shape ``{"pedido": [mensaje]}``."""
+
+    URL = "/api/v1/produccion/pre-ordenes/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from nucleo.models import Empresa, Moneda, Sucursal, UnidadMedida
+        from terceros.models import Cliente
+        from usuarios.models import Usuario
+        from ventas.models import Pedido
+
+        cls.empresa = Empresa.objects.create(codigo="ec953-op", razon_social="EC953 OP SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Matriz")
+        cls.usuario = Usuario.objects.create(
+            username="op953", email="op953@ec953.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        UnidadMedida.objects.get_or_create(clave="pz", defaults={"nombre": "Pieza"})
+        # Con serie de OP la conversión llega hasta el alta: sin el candado, la OP nacería.
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="Orden de Produccion", serie="OP",
+        )
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+
+        def pedido(folio, retenido=False):
+            return Pedido.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=moneda, folio=folio,
+                estatus=3, persona_pagos="Pagos", correo_facturas="p@ec953.test",
+                telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+                retenido=retenido, motivo_retencion="Crédito" if retenido else "",
+                retenido_por=cls.usuario if retenido else None,
+            )
+
+        cls.libre = pedido("P-953-1")
+        cls.retenido = pedido("P-953-2", retenido=True)
+
+    def _pre(self, **kwargs):
+        from produccion.models import PreOrdenProduccion
+        # Sin renglones: ``recalcular`` no tiene materiales y la deja Lista.
+        return PreOrdenProduccion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, estatus=PreOrdenProduccion.Estatus.LISTA, **kwargs,
+        )
+
+    def _crear_op(self, pre):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client.post(f"{self.URL}{pre.pk}/crear-op/", {}, format="json")
+
+    def _sin_op(self, pre):
+        from produccion.models import OrdenProduccion, PreOrdenProduccion
+        pre.refresh_from_db()
+        self.assertEqual((pre.estatus, pre.op_id), (PreOrdenProduccion.Estatus.LISTA, None))
+        self.assertFalse(OrdenProduccion.objects.filter(empresa=self.empresa).exists())
+
+    def test_resurtido_con_pedido_ligado_retenido_se_rechaza(self):
+        from produccion.models import PreOrdenProduccion
+        from ventas.services.retencion_service import mensaje_retenido
+
+        pre = self._pre(origen=PreOrdenProduccion.Origen.RESURTIDO)
+        pre.pedidos.set([self.libre, self.retenido])
+
+        resp = self._crear_op(pre)
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"pedido": [mensaje_retenido(self.retenido)]})
+        self._sin_op(pre)
+
+    def test_resurtido_con_pedidos_libres_crea_la_op_y_los_liga(self):
+        from produccion.models import OrdenProduccionPedido, PreOrdenProduccion
+
+        pre = self._pre(origen=PreOrdenProduccion.Origen.RESURTIDO)
+        pre.pedidos.set([self.libre])
+
+        resp = self._crear_op(pre)
+
+        self.assertEqual(resp.status_code, 201, resp.content)
+        pre.refresh_from_db()
+        self.assertEqual(pre.estatus, PreOrdenProduccion.Estatus.CONVERTIDA)
+        self.assertEqual(
+            list(OrdenProduccionPedido.objects.filter(op_id=pre.op_id).values_list("pedido_id", flat=True)),
+            [self.libre.pk],
+        )
+
+    def _orden_de_candados(self, pre):
+        """Tablas que se bloquean (``FOR UPDATE OF``) en el orden en que se piden."""
+        with CaptureQueriesContext(connection) as ctx:
+            self._crear_op(pre)
+        orden = []
+        for q in ctx.captured_queries:
+            sql = q["sql"]
+            if 'FOR UPDATE OF "pedidos"' in sql:
+                orden.append("pedidos")
+            elif 'FOR UPDATE OF "pre_ordenes_produccion"' in sql:
+                orden.append("pre_ordenes_produccion")
+        return orden
+
+    def test_resurtido_bloquea_sus_pedidos_antes_que_la_pre_orden(self):
+        from produccion.models import PreOrdenProduccion
+
+        pre = self._pre(origen=PreOrdenProduccion.Origen.RESURTIDO)
+        pre.pedidos.set([self.retenido])
+        self.assertEqual(self._orden_de_candados(pre)[:2], ["pedidos", "pre_ordenes_produccion"])
+
+    def test_pre_orden_de_pedido_bloquea_el_pedido_antes_que_la_pre_orden(self):
+        """Mismo orden que ``cancelar/`` (pedido -> sus pre-órdenes): sin ciclo de candados."""
+        pre = self._pre(pedido=self.libre)
+        self.assertEqual(self._orden_de_candados(pre)[:2], ["pedidos", "pre_ordenes_produccion"])
+
+    def test_pre_orden_de_pedido_retenido_mismo_shape(self):
+        """Referencia del shape: el ``pre.pedido`` retenido lo rechaza ``validate_pedido``."""
+        from ventas.services.retencion_service import mensaje_retenido
+
+        pre = self._pre(pedido=self.retenido)
+
+        resp = self._crear_op(pre)
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json()["pedido"], [mensaje_retenido(self.retenido)])
+        self._sin_op(pre)

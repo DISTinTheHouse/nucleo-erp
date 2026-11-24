@@ -72,7 +72,7 @@ from ventas.api.serializers import (
 from nucleo.kpis import entero_param, rango_fechas, validar_parametros
 from nucleo.listados import PaginacionOpcionalLimitOffset, estatus_param
 from ventas.services import subtotales
-from ventas.services.retencion_service import registrar_bitacora
+from ventas.services.retencion_service import registrar_bitacora, retenido_por_nombre
 from nucleo.models import SerieFolio, Empresa
 from ventas.api import cotizaciones_listado
 from notificaciones.services.notificacion_service import crear_notificacion_usuario
@@ -2949,7 +2949,8 @@ class PedidoViewSet(viewsets.ModelViewSet):
         from produccion.api.views import _pre_orden_json
         qs = (
             self.get_queryset()
-            .select_related("cotizacion")
+            # ``retenido_por``: ``retenido_por_nombre`` (EC-953) sin consulta extra.
+            .select_related("cotizacion", "retenido_por")
             .prefetch_related(*documentos_related_prefetch_args())
             .annotate(pre_orden_json=_pre_orden_json(OuterRef("pk")))
         )
@@ -3740,6 +3741,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             "id": pedido.pk, "folio": pedido.folio, "retenido": pedido.retenido,
             "motivo_retencion": pedido.motivo_retencion, "fecha_retencion": pedido.fecha_retencion,
             "retenido_por": pedido.retenido_por_id,
+            "retenido_por_nombre": retenido_por_nombre(pedido),
         }
 
     def _auditar_retencion(self, request, pedido, accion, antes, despues):

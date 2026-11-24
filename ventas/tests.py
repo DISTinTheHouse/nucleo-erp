@@ -4829,6 +4829,92 @@ class PedidoKpisTests(TestCase):
         self.assertFalse(resp.data["pedidos_activos"]["disponible"])
 
 
+class PedidoRetenidoPorNombreTests(TestCase):
+    """EC-953: ``retenido_por_nombre`` en el detalle y en ``retener/``/``liberar/``:
+    nombre completo (o correo sin nombre) de quien retuvo, ``null`` si no está retenido,
+    sin consultas extra en el detalle."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="ec953", razon_social="EC953 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="MTY")
+        cls.cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
+        cls.mesa = Usuario.objects.create(
+            username="mesa953", email="mesa@ec953.test", first_name="Ana", last_name="Mesa",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.mesa_sin_nombre = Usuario.objects.create(
+            username="mesa953b", email="sin-nombre@ec953.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+
+    def setUp(self):
+        self.pedido = Pedido.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, cliente=self.cliente, moneda=self.moneda,
+            persona_pagos="Pagos", correo_facturas="p@ec953.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03", estatus=3,
+        )
+        self.url = f"{PEDIDOS_URL}{self.pedido.pk}/"
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _detalle(self, user):
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self._client(user).get(self.url)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.data, len(ctx.captured_queries)
+
+    def test_detalle_null_sin_retener(self):
+        data, _ = self._detalle(self.mesa)
+        self.assertIn("retenido_por_nombre", data)
+        self.assertIsNone(data["retenido_por_nombre"])
+
+    def test_retener_y_liberar_exponen_el_nombre(self):
+        _, consultas_libre = self._detalle(self.mesa)
+
+        resp = self._client(self.mesa).post(f"{self.url}retener/", {"motivo": "Crédito"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.data["retenido_por"], self.mesa.pk)
+        self.assertEqual(resp.data["retenido_por_nombre"], "Ana Mesa")
+        # Solo se agrega la llave; el resto del contrato queda igual.
+        self.assertEqual(set(resp.data), {
+            "id", "folio", "retenido", "motivo_retencion", "fecha_retencion", "retenido_por",
+            "retenido_por_nombre",
+        })
+
+        data, consultas_retenido = self._detalle(self.mesa)
+        self.assertEqual((data["retenido"], data["retenido_por_nombre"]), (True, "Ana Mesa"))
+        # ``retenido_por`` viaja en el ``select_related`` del detalle: sin consulta extra.
+        self.assertEqual(consultas_retenido, consultas_libre)
+
+        resp = self._client(self.mesa).post(f"{self.url}liberar/", {}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual((resp.data["retenido_por"], resp.data["retenido_por_nombre"]), (None, None))
+        data, _ = self._detalle(self.mesa)
+        self.assertEqual((data["retenido"], data["retenido_por_nombre"]), (False, None))
+
+    def test_null_si_no_esta_retenido_aunque_quede_retenido_por(self):
+        """Fila inconsistente (admin, ``update()``): sin ``retenido`` no hay nombre."""
+        from ventas.services.retencion_service import retenido_por_nombre
+
+        Pedido.objects.filter(pk=self.pedido.pk).update(retenido=False, retenido_por=self.mesa)
+        data, _ = self._detalle(self.mesa)
+        self.assertEqual((data["retenido"], data["retenido_por_nombre"]), (False, None))
+        self.pedido.refresh_from_db()
+        self.assertIsNone(retenido_por_nombre(self.pedido))
+
+    def test_sin_nombre_cae_al_correo(self):
+        resp = self._client(self.mesa_sin_nombre).post(f"{self.url}retener/", {"motivo": "Esperar"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.data["retenido_por_nombre"], "sin-nombre@ec953.test")
+        data, _ = self._detalle(self.mesa)
+        self.assertEqual(data["retenido_por_nombre"], "sin-nombre@ec953.test")
+
+
 class PedidoReglasEstatusTests(TestCase):
     """#250: CANCELADO es terminal, solo mesa de control cancela (``/cancelar/``), no se
     cancela con picking/factura/órdenes vivas, y bloquea picking y facturación."""

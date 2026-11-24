@@ -6,7 +6,8 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from auditoria.models import AuditoriaEvento
-from ventas.models import PedidoDetalleTalla
+from ventas.models import Pedido, PedidoDetalleTalla
+from ventas.services.retencion_service import exigir_no_retenido
 from ventas.services.sku_produccion_service import es_muestra
 from wms.models import Estado as PackingEstado, Picking, PickingDetalle, Transferencia
 from wms.services.existencia_service import ExistenciaService
@@ -333,6 +334,21 @@ class PickingService:
 
         # 1. Contexto (scope empresa / sucursal / permisos / origendestino)
         validar_contexto_picking(pedido, almacen, almacen_destino, operador, user)
+        # Tenencia antes de bloquear nada; después, el Pedido primero (mismo orden
+        # que packing y despacho, EC-574) y la retención revisada sobre la fila
+        # bloqueada: un ``retener/`` concurrente ya no se cuela entre la lectura
+        # del pedido y el alta (EC-953).
+        # Las reglas del pedido de ``validar_contexto_picking`` se repiten sobre la
+        # fila bloqueada (un ``cancelar/`` concurrente tampoco se cuela), con sus
+        # mismos mensajes; si ya no existe, el 400 del pedido no encontrado.
+        pedido_bloqueado = Pedido.objects.select_for_update(of=("self",)).filter(pk=pedido.pk).first()
+        if pedido_bloqueado is None:
+            raise ValidationError({"pedido": "Pedido no encontrado o sin acceso."})
+        if pedido_bloqueado.estatus == Pedido.ESTATUS_CANCELADO:
+            raise ValidationError({"pedido": "El pedido está CANCELADO; no se puede surtir."})
+        exigir_no_retenido(pedido_bloqueado)
+        if not pedido_bloqueado.activo or pedido_bloqueado.estatus not in (3, 4):
+            raise ValidationError({"pedido": "El pedido no está autorizado ni en proceso; no se puede surtir."})
 
         # 2. Resolución y validación de líneas (individual + agregada)
         requested_items = resolve_requested_items(
