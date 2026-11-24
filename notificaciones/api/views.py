@@ -1,9 +1,10 @@
 from django.db.models import Max
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from nucleo.listados import PaginacionOpcionalLimitOffset
+from nucleo.listados import BusquedaSoloListadoFilter, OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset
 
 from ..models import Notificacion
 from ..services.notificacion_service import (
@@ -21,6 +22,14 @@ class NotificacionViewSet(
     http_method_names = ["get", "post"]
     # Sin ?limit= regresa la lista completa; ?limit= inválido → 400 y tope de 500 (#950).
     pagination_class = PaginacionOpcionalLimitOffset
+    # ``?search=`` busca en título y mensaje (#1346); antes se aceptaba y se ignoraba
+    # porque no había ``search_fields``. ``?ordering=`` acepta los mismos campos que
+    # antes, pero con ``id`` de desempate: solo, un campo de pocos valores (``leido``,
+    # ``modulo``) dejaba páginas que se enciman o se saltan filas (#1345). Sin
+    # ``?ordering=`` válido se queda el ``-created_at`` de ``get_queryset``.
+    filter_backends = [DjangoFilterBackend, BusquedaSoloListadoFilter, OrdenamientoEstableFilter]
+    search_fields = ["titulo", "mensaje"]
+    ordering_fields = ["id", "titulo", "mensaje", "modulo", "tipo", "leido", "leido_at", "data", "created_at"]
 
     def get_queryset(self):
         user = self.request.user
