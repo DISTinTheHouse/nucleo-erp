@@ -919,7 +919,7 @@ class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSeri
     class Meta:
         model = OrdenProduccion
         fields = '__all__'
-        read_only_fields = ['folio_op', 'activo', 'usuario_asignado', 'empresa', 'sucursal', 'estatus_op']
+        read_only_fields = ['folio_op', 'activo', 'usuario_asignado', 'empresa', 'sucursal', 'estatus_op', 'motivo_cancelacion', 'fecha_cancelacion', 'cancelado_por']
         extra_kwargs = {"costo_maquila_unitario": {"min_value": 0}}  # MXN por pieza (#809)
 
 
@@ -1177,6 +1177,7 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
         model = OrdenesBordado
         fields = '__all__'
         read_only_fields = [
+            'motivo_cancelacion', 'fecha_cancelacion', 'cancelado_por',
             'activo',
             'folio_bordado',
             'empresa',
@@ -1211,6 +1212,8 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         """Valida cross-tenant de ``proveedor`` y ``detalles_override``.
 
+        Cancelar (estatus 8) no va por aquí: pide motivo en ``POST {id}/cancelar/``.
+
         Si el body selecciona un proveedor, su ``empresa`` debe ser NULL
         (catálogo global) o coincidir con la empresa asignada a la OB. ``Proveedor.empresa``
         es nullable en el modelo por compatibilidad histórica, así que permitimos
@@ -1218,6 +1221,11 @@ class OrdenBordadoSerializer(serializers.ModelSerializer):
         ``PATCH``/update se compara con ``self.instance.empresa_id`` (cuando
         attrs no redefine ``empresa``, que es read_only).
         """
+        cancelado = OrdenesBordado.EstatusBordado.CANCELADO_LEGACY
+        if self.instance is not None and self.instance.estatus_bordado == cancelado:
+            raise serializers.ValidationError({"estatus_bordado": "La orden está cancelada: ya no se edita."})
+        if attrs.get("estatus_bordado") == cancelado:
+            raise serializers.ValidationError({"estatus_bordado": "Para cancelar usa POST {id}/cancelar/ con motivo."})
         # --- Cross-tenant: proveedor vs empresa de la OB ---------------------
         proveedor = attrs.get("proveedor", None)
         if proveedor is not None:
@@ -2283,6 +2291,7 @@ class OrdenReflejanteSerializer(serializers.ModelSerializer):
         model = OrdenesReflejante
         fields = '__all__'
         read_only_fields = [
+            'motivo_cancelacion', 'fecha_cancelacion', 'cancelado_por',
             'empresa',
             'sucursal',
             'folio_reflejante',
@@ -2758,6 +2767,7 @@ class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
         model = OrdenesCorteManga
         fields = '__all__'
         read_only_fields = [
+            'motivo_cancelacion', 'fecha_cancelacion', 'cancelado_por',
             'empresa', 
             'sucursal', 
             'folio_ocm', 
@@ -3309,6 +3319,9 @@ class _EditarOrdenServicioSerializer(serializers.ModelSerializer):
         if getattr(self.instance, self.estatus_field) == 7:
             raise serializers.ValidationError({self.estatus_field: "La orden está cancelada: ya no se edita."})
         nuevo = attrs.get(self.estatus_field)
+        if nuevo == 7:
+            # Cancelar pide motivo y deja rastro: solo por ``POST {id}/cancelar/``.
+            raise serializers.ValidationError({self.estatus_field: "Para cancelar usa POST {id}/cancelar/ con motivo."})
         if nuevo == 5 and getattr(self.instance, self.estatus_field) != 5:
             # #1138: Completado solo si los avances cubren lo programado (mismo
             # criterio que el ajuste por avances). Dos agregados.

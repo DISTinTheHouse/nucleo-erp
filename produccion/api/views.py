@@ -650,9 +650,18 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("No tienes permiso para dar de baja órdenes de producción (D-PRODUCCION-OP).")
         op = self.get_object()
         cancelado = OrdenProduccion.EstatusOrdenProduccion.CANCELADO
-        if op.estatus_op != cancelado:
-            op.estatus_op = cancelado
-            op.save(update_fields=["estatus_op"])
+        if op.estatus_op == cancelado:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        # Misma cancelación que ``POST estatus/``: motivo, candados, devolución de
+        # material y auditoría. El motivo va en el body o en ``?motivo=``.
+        motivo = (request.data.get("motivo") if hasattr(request.data, "get") else None) or request.query_params.get("motivo")
+        try:
+            estatus_op_service.cambiar_estatus(
+                op.pk, OrdenProduccion.objects.filter(pk=op.pk), request.user, cancelado,
+                motivo=motivo or "", request=request,
+            )
+        except estatus_op_service.EstatusOpError as exc:
+            return Response(exc.detalle, status=exc.codigo)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def get_queryset(self):
@@ -1114,6 +1123,9 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             'estatus_op': op.estatus_op,
             'estatus_op_display': op.get_estatus_op_display(),
             'fecha_fin': op.fecha_fin,
+            'motivo_cancelacion': op.motivo_cancelacion,
+            'fecha_cancelacion': op.fecha_cancelacion,
+            'cancelado_por': op.cancelado_por_id,
         })
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-412): el
@@ -1364,7 +1376,26 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
         serializer.context.update(pdt_bordado_config_map=config_map, sku_por_linea=sku_map)
 
     def perform_destroy(self, instance):
+        from produccion.services.cancelacion_service import auditar_baja
+        auditar_baja(self.request, instance._meta.db_table, instance.empresa_id, instance.pk,
+                     {"folio": instance.folio_bordado, "activo": True})
         instance.soft_delete()
+
+    @action(detail=True, methods=["post"], url_path="cancelar")
+    def cancelar(self, request, pk=None):
+        """Cancela la orden con ``motivo`` (obligatorio). Permiso de borrado de la
+        sección. No se cancela terminada ni con salida a maquila enviada. Deja
+        ``motivo_cancelacion``/``fecha_cancelacion``/``cancelado_por`` y auditoría."""
+        from produccion.services.cancelacion_service import cancelar_orden_servicio, motivo_de
+        orden = self.get_object()  # otra empresa: 404
+        motivo = motivo_de(request.data)
+        orden = cancelar_orden_servicio("bordado", orden, request.user, motivo, request)
+        return Response({
+            "id": orden.pk, "folio": orden.folio_bordado,
+            "estatus": orden.estatus_bordado,
+            "motivo_cancelacion": orden.motivo_cancelacion, "fecha_cancelacion": orden.fecha_cancelacion,
+            "cancelado_por": orden.cancelado_por_id,
+        })
 
     def get_queryset(self):
         """Aislamiento multi-tenant: empresa + sucursal.
@@ -1777,7 +1808,10 @@ class BordadoAvancesViewSet(_EscrituraConCodigoMixin, _OrdenPadreTenantScopedMix
 
     def perform_destroy(self, instance):
         with transaction.atomic():
-            OrdenesBordado.objects.select_for_update().filter(pk=instance.ob_id).first()
+            ob = OrdenesBordado.objects.select_for_update().filter(pk=instance.ob_id).first()
+            from produccion.services.cancelacion_service import auditar_baja
+            auditar_baja(self.request, instance._meta.db_table, ob.empresa_id, instance.pk,
+                         {"ob_id": instance.ob_id, "cantidad_bordada": str(instance.cantidad_bordada)})
             instance.soft_delete()
             self._ajustar_estatus(instance.ob_id)
 
@@ -1987,7 +2021,26 @@ class OrdenReflejanteViewSet(
         )
 
     def perform_destroy(self, instance):
+        from produccion.services.cancelacion_service import auditar_baja
+        auditar_baja(self.request, instance._meta.db_table, instance.empresa_id, instance.pk,
+                     {"folio": instance.folio_reflejante, "activo": True})
         instance.soft_delete()
+
+    @action(detail=True, methods=["post"], url_path="cancelar")
+    def cancelar(self, request, pk=None):
+        """Cancela la orden con ``motivo`` (obligatorio). Permiso de borrado de la
+        sección. No se cancela terminada ni con salida a maquila enviada. Deja
+        ``motivo_cancelacion``/``fecha_cancelacion``/``cancelado_por`` y auditoría."""
+        from produccion.services.cancelacion_service import cancelar_orden_servicio, motivo_de
+        orden = self.get_object()  # otra empresa: 404
+        motivo = motivo_de(request.data)
+        orden = cancelar_orden_servicio("reflejante", orden, request.user, motivo, request)
+        return Response({
+            "id": orden.pk, "folio": orden.folio_reflejante,
+            "estatus": orden.estatus_reflejante,
+            "motivo_cancelacion": orden.motivo_cancelacion, "fecha_cancelacion": orden.fecha_cancelacion,
+            "cancelado_por": orden.cancelado_por_id,
+        })
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
     def onboarding(self, request):
@@ -2159,6 +2212,10 @@ class _AvancePiezasViewSetMixin:
         with transaction.atomic():
             orden = self._orden_bloqueada(getattr(instance, f"{self.orden_padre_field}_id"))
             self._exigir_abierta(orden)
+            from produccion.services.cancelacion_service import auditar_baja
+            auditar_baja(self.request, instance._meta.db_table, orden.empresa_id, instance.pk,
+                         {f"{self.orden_padre_field}_id": orden.pk,
+                          self.campo_cantidad: str(getattr(instance, self.campo_cantidad))})
             instance.soft_delete()
             self._ajustar_estatus(orden)
 
@@ -2354,7 +2411,26 @@ class OrdenesCorteMangaViewSet(
         )
 
     def perform_destroy(self, instance):
+        from produccion.services.cancelacion_service import auditar_baja
+        auditar_baja(self.request, instance._meta.db_table, instance.empresa_id, instance.pk,
+                     {"folio": instance.folio_ocm, "activo": True})
         instance.soft_delete()
+
+    @action(detail=True, methods=["post"], url_path="cancelar")
+    def cancelar(self, request, pk=None):
+        """Cancela la orden con ``motivo`` (obligatorio). Permiso de borrado de la
+        sección. No se cancela terminada ni con salida a maquila enviada. Deja
+        ``motivo_cancelacion``/``fecha_cancelacion``/``cancelado_por`` y auditoría."""
+        from produccion.services.cancelacion_service import cancelar_orden_servicio, motivo_de
+        orden = self.get_object()  # otra empresa: 404
+        motivo = motivo_de(request.data)
+        orden = cancelar_orden_servicio("corte_manga", orden, request.user, motivo, request)
+        return Response({
+            "id": orden.pk, "folio": orden.folio_ocm,
+            "estatus": orden.estatus_corte,
+            "motivo_cancelacion": orden.motivo_cancelacion, "fecha_cancelacion": orden.fecha_cancelacion,
+            "cancelado_por": orden.cancelado_por_id,
+        })
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
     def onboarding(self, request):

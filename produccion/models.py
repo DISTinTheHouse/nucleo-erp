@@ -100,6 +100,13 @@ class OrdenProduccion(models.Model):
 
     history = HistoricalRecords()
 
+    # Solo los escribe la cancelación (``estatus``/``DELETE`` en OP, ``cancelar/`` en OB/OR/OCM).
+    motivo_cancelacion = models.TextField(blank=True, default='')
+    fecha_cancelacion = models.DateTimeField(null=True, blank=True)
+    cancelado_por = models.ForeignKey(
+        'usuarios.Usuario', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
     class Meta:
         db_table = 'ordenes_produccion'
         verbose_name = 'Orden Produccion'
@@ -241,6 +248,7 @@ class PreOrdenEvento(models.Model):
         REGRESO_CONSUMO = "regreso_consumo", "Regreso por consumo"
         LISTA = "lista", "Lista para producir"
         OP_CREADA = "op_creada", "OP creada"
+        OP_CANCELADA = "op_cancelada", "OP cancelada"
         CANCELADA = "cancelada", "Cancelada"
         ACEPTADA = "aceptada", "Aceptada por producción"
         RECHAZADA = "rechazada", "Rechazada por producción"
@@ -475,7 +483,7 @@ class OrdenesBordado(_EstatusPrevioMixin, StatusLifecycleModel):
         BORDANDO = 5, "Bordando"
         DETENIDO = 6, "Detenido"
         FINALIZADO = 7, "Finalizado"
-        CANCELADO_LEGACY = 8, "Cancelado (legacy)"
+        CANCELADO_LEGACY = 8, "Cancelado"  # el que pone ``cancelar/``
             
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
     sucursal = models.ForeignKey(Sucursal, on_delete=models.CASCADE)
@@ -497,6 +505,13 @@ class OrdenesBordado(_EstatusPrevioMixin, StatusLifecycleModel):
         null=True,
         blank=True,
         related_name="ordenes_bordado_proveedor",
+    )
+
+    # Solo los escribe la cancelación (``estatus``/``DELETE`` en OP, ``cancelar/`` en OB/OR/OCM).
+    motivo_cancelacion = models.TextField(blank=True, default='')
+    fecha_cancelacion = models.DateTimeField(null=True, blank=True)
+    cancelado_por = models.ForeignKey(
+        'usuarios.Usuario', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
 
     class Meta:
@@ -647,6 +662,13 @@ class OrdenesReflejante(_EstatusPrevioMixin, StatusLifecycleModel):
     observaciones = models.TextField(blank=True, null=True)
     activo = models.BooleanField(default=True)
 
+    # Solo los escribe la cancelación (``estatus``/``DELETE`` en OP, ``cancelar/`` en OB/OR/OCM).
+    motivo_cancelacion = models.TextField(blank=True, default='')
+    fecha_cancelacion = models.DateTimeField(null=True, blank=True)
+    cancelado_por = models.ForeignKey(
+        'usuarios.Usuario', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
     class Meta:
         db_table = 'orden_reflejante'
         verbose_name = 'Orden Reflejante'
@@ -751,6 +773,13 @@ class OrdenesCorteManga(_EstatusPrevioMixin, StatusLifecycleModel):
     observaciones = models.TextField(blank=True, null=True)
     activo = models.BooleanField(default=True)
 
+    # Solo los escribe la cancelación (``estatus``/``DELETE`` en OP, ``cancelar/`` en OB/OR/OCM).
+    motivo_cancelacion = models.TextField(blank=True, default='')
+    fecha_cancelacion = models.DateTimeField(null=True, blank=True)
+    cancelado_por = models.ForeignKey(
+        'usuarios.Usuario', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
     class Meta:
         db_table = 'orden_corte_manga'
         verbose_name = 'Orden Corte Manga'
@@ -845,6 +874,13 @@ class SalidaMaquila(models.Model):
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # Solo los escribe ``POST salidas-maquila/{id}/cancelar/``.
+    motivo_cancelacion = models.TextField(blank=True, default="")
+    fecha_cancelacion = models.DateTimeField(null=True, blank=True)
+    cancelado_por = models.ForeignKey(
+        "usuarios.Usuario", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
 
     class Meta:
         db_table = "salidas_maquila"
