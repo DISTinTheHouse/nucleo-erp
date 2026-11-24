@@ -3125,7 +3125,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
 
         No se revisan entregas ni devoluciones (``EntregaDetalle`` y
         ``DevolucionDetalle`` son CASCADE sobre el renglón): quitar un renglón con
-        ellas las borra sin bloqueo. Tampoco las reservas canceladas o liberadas.
+        ellas las borra sin bloqueo. Tampoco las reservas canceladas o liberadas, ni
+        los renglones de un picking cancelado: cancelarlo es justo la acción que se
+        pide; sus líneas (y las de su packing y despacho, ya cancelados) se borran en
+        cascada con el renglón que se quita.
 
         Mismo shape que antes: los tipos en el mismo orden, los documentos de cada
         tipo por ``id`` y ``estatus`` con el tipo de su columna (texto en factura y
@@ -3228,7 +3231,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             ),
             (
                 "picking_detalle_ligado",
-                [PickingDetalle.objects.filter(**en_el_pedido)],
+                [PickingDetalle.objects.filter(**en_el_pedido).exclude(picking__estado=Picking.Estado.CANCELADO)],
                 ACCIONES_BLOQUEO_MESA_CONTROL["picking_detalle_ligado"],
             ),
             (
