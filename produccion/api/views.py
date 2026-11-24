@@ -3464,6 +3464,15 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             recalcular(pre, materiales(pre), usuario=request.user)
             if pre.estatus != PreOrdenProduccion.Estatus.LISTA:
                 raise ValidationError({"estatus": f"Solo se convierte en OP una pre-orden Lista para producir (está {pre.get_estatus_display().lower()})."})
+            # Los pedidos del resurtido (``pre.pedidos``) no pasan por
+            # ``validate_pedido`` (que revisa ``pre.pedido``): la retención se
+            # revisa aquí, con sus filas bloqueadas como en ``retener/``, y con el
+            # mismo shape que el serializer (EC-953).
+            from ventas.services.retencion_service import mensaje_retenido
+            pedidos_ligados = list(pre.pedidos.select_for_update(of=("self",)).order_by("pk"))
+            retenido = next((p for p in pedidos_ligados if p.retenido), None)
+            if retenido is not None:
+                raise ValidationError({"pedido": [mensaje_retenido(retenido)]})
             pieza = UnidadMedida.objects.filter(clave__iexact="pz").first()
             if pieza is None:
                 raise ValidationError({"unidad": "No existe la unidad de medida 'pz'."})
@@ -3488,7 +3497,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 # Los pedidos del resurtido van directo a la OP: ya se validaron al
                 # ligarlos a la pre-orden (no son pedidos de muestra).
                 post_crear=lambda op: (marcar_convertida(pre, op, request.user),
-                                       ligar_pedidos_op(op, list(pre.pedidos.all()))),
+                                       ligar_pedidos_op(op, pedidos_ligados)),
             )
         if respuesta.status_code != status.HTTP_201_CREATED:
             return respuesta
