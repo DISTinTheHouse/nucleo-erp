@@ -174,6 +174,15 @@ Todo el ERP lee y escribe solo en la empresa activa (`user.empresa`). **Solo el 
 - **Errores**: `403` si no es superusuario; `400 {"empresa": ["Empresa no válida."]}` en cualquier otro caso: no existe, está inactiva, el id no es válido, viene `null` o falta `empresa` (mismo cuerpo en todos).
 - **Único camino**: ni `/api/auth/user/`, ni `/api/v1/usuarios/`, ni el Web Core (`/core/usuarios/<id>/editar/`), ni el admin de Django dejan cambiar la empresa propia.
 
+### Bandera `es_mesa_control` (EC-944)
+
+`GET /api/auth/user/`, el objeto `user` de la respuesta de login (`POST /api/auth/login/`, también tras el segundo paso de MFA) y la respuesta de `cambiar-empresa` traen `es_mesa_control: bool`, de solo lectura. Es la misma decisión que aplican las acciones de Mesa de Control (`seguridad.role_identity.es_mesa_control`), así que el frontend debe mostrar esos controles solo cuando vale `true`:
+
+- **Acciones que la usan**: cotizaciones `autorizar`, `rechazar`, `aceptar-cambios`, `rechazar-cambios`; pedidos `cancelar`, `retener`, `liberar`, `editar-mesa-control` y `editar-mesa-control-contexto`, `programar`, `vincular-sku-muestra`, y `clasificacion`/`fecha_confirmacion` en el alta o el `PATCH`. Sin ella responden `400 {"permiso": "Acción disponible solo para mesa de control."}`. La cancelación de documentos WMS acepta además el permiso `WMS-CANCELAR`.
+- **Vale `true`** para el superusuario y el admin de empresa, y para un usuario activo con un rol activo de su empresa activa cuyo departamento sea Mesa de Control (`clave_departamento` `MESACONTROL`, o inferido del código/nombre del rol).
+- **No cuentan** los códigos `R-MESACONTROL*` en `permisos` (por rol u override): dan lectura de pantallas, no las acciones.
+- Un `PATCH /api/auth/user/` que la mande responde `400` y no cambia nada.
+
 ### Mis Sucursales
 
 Lista las sucursales permitidas para el usuario dentro de una empresa específica.

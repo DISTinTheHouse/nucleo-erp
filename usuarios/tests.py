@@ -8,14 +8,16 @@ from django.contrib.admin.sites import site
 from django.db import connection, transaction
 from django.test import RequestFactory, TestCase
 from django.test.utils import CaptureQueriesContext
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from nucleo.models import Departamento, Empresa, Sucursal
-from seguridad.models import Rol, UsuarioRol
+from seguridad.models import Permiso, Rol, UsuarioPermiso, UsuarioRol
 from usuarios.api.serializers import UsuarioSerializer
 from usuarios.models import Usuario
 from wms.models import RfidScan
+from wms.services.cancelacion_service import exigir_permiso as exigir_permiso_cancelar_wms
 
 
 class BanderasPrivilegioTests(TestCase):
@@ -139,6 +141,8 @@ class PerfilAuthUserTests(_DosEmpresasMixin, TestCase):
         "empresa", "sucursal_default", "sucursales", "departamentos", "telefono",
         "avatar_url", "is_admin_empresa", "is_superuser", "is_staff", "empresa_id",
         "nombre_completo", "es_admin", "permisos", "roles_ids", "date_joined", "last_login",
+        # EC-944: de solo lectura, la decisión de ``seguridad.role_identity.es_mesa_control``.
+        "es_mesa_control",
     ]
 
     @classmethod
@@ -838,3 +842,185 @@ class EmpresaPropiaWebCoreYAdminTests(_DosEmpresasMixin, TestCase):
         self.assertNotIn('name="empresa"', resp.content.decode())
         resp_otro = self.web.get(f"/admin/usuarios/usuario/{self.otro.pk}/change/")
         self.assertIn('name="empresa"', resp_otro.content.decode())
+
+
+class EsMesaControlTests(_DosEmpresasMixin, TestCase):
+    """EC-944: la bandera ``es_mesa_control`` de ``/api/auth/user/`` y del login es
+    exactamente lo que deciden las acciones de Mesa de Control.
+
+    Cada usuario se compara contra las acciones reales con un id que no existe: el
+    gate corre antes de ``get_object()``, así que quien pasa recibe ``404`` y quien
+    no, el ``400 {"permiso": ...}`` de siempre. La cancelación de WMS se compara
+    llamando a su ``exigir_permiso`` (nadie aquí tiene ``WMS-CANCELAR``).
+    """
+
+    PERFIL = "/api/auth/user/"
+    LOGIN = "/api/auth/login/"
+    PK_INEXISTENTE = 987654321
+    ACCIONES = (
+        ("post", "/api/v1/ventas/cotizaciones/{pk}/autorizar/"),
+        ("post", "/api/v1/ventas/cotizaciones/{pk}/rechazar/"),
+        ("post", "/api/v1/ventas/cotizaciones/{pk}/aceptar-cambios/"),
+        ("post", "/api/v1/ventas/cotizaciones/{pk}/rechazar-cambios/"),
+        ("post", "/api/v1/ventas/pedidos/{pk}/cancelar/"),
+        ("post", "/api/v1/ventas/pedidos/{pk}/retener/"),
+        ("post", "/api/v1/ventas/pedidos/{pk}/liberar/"),
+        ("get", "/api/v1/ventas/pedidos/{pk}/editar-mesa-control-contexto/"),
+        ("post", "/api/v1/ventas/pedidos/{pk}/editar-mesa-control/"),
+        ("get", "/api/v1/ventas/pedidos/{pk}/programar/"),
+        ("patch", "/api/v1/ventas/pedidos/{pk}/programar/"),
+        ("post", "/api/v1/ventas/pedidos/{pk}/vincular-sku-muestra/"),
+    )
+    SIN_PERMISO = {"permiso": "Acción disponible solo para mesa de control."}
+
+    @classmethod
+    def setUpTestData(cls):
+        cls._crear_empresas()
+        cls.rol_mesa = Rol.objects.create(
+            empresa=cls.empresa, codigo="MESACONTROL-0002", nombre="Mesa-de-control",
+            estatus=Rol.Estatus.ACTIVO,
+        )
+        cls.rol_mesa_inactivo = Rol.objects.create(
+            empresa=cls.empresa, codigo="MESACONTROL-0009", nombre="Mesa-de-control vieja",
+            estatus=Rol.Estatus.INACTIVO,
+        )
+        cls.rol_ventas = Rol.objects.create(
+            empresa=cls.empresa, codigo="ventas-0001", nombre="Ventas", estatus=Rol.Estatus.ACTIVO,
+        )
+        cls.rol_mesa_ajeno = Rol.objects.create(
+            empresa=cls.ajena, codigo="MESACONTROL-0002", nombre="Mesa-de-control",
+            estatus=Rol.Estatus.ACTIVO,
+        )
+
+        def usuario(nombre, **extra):
+            return Usuario.objects.create(
+                username=nombre, email=f"{nombre}@acme.test", empresa=cls.empresa,
+                sucursal_default=cls.sucursal, **extra,
+            )
+
+        def asignar(user, rol):
+            UsuarioRol.objects.create(usuario=user, rol=rol, empresa=rol.empresa)
+
+        cls.superusuario = usuario("root", is_superuser=True, is_staff=True)
+        cls.admin = usuario("admin", is_admin_empresa=True)
+        cls.mesa = usuario("mesa")
+        asignar(cls.mesa, cls.rol_mesa)
+        cls.inactivo = usuario("inactivo", estatus=Usuario.Estatus.BLOQUEADO)
+        asignar(cls.inactivo, cls.rol_mesa)
+        cls.ventas = usuario("ventas")
+        asignar(cls.ventas, cls.rol_ventas)
+        cls.rol_inactivo = usuario("rolinactivo")
+        asignar(cls.rol_inactivo, cls.rol_mesa_inactivo)
+        cls.rol_ajeno = usuario("rolajeno")
+        asignar(cls.rol_ajeno, cls.rol_mesa_ajeno)
+        # Los códigos de lectura de Mesa de Control por GRANT directo, sin el rol.
+        cls.solo_grant = usuario("sologrant")
+        for clave in ("R-MESACONTROL", "R-MESACONTROL-COTI", "R-MESACONTROL-PEDIDOS", "R-MESACONTROL-CLIENTES"):
+            permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+            UsuarioPermiso.objects.create(usuario=cls.solo_grant, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT)
+
+        cls.esperado = {
+            "superusuario": True,
+            "admin": True,
+            "mesa": True,
+            "inactivo": False,
+            "ventas": False,
+            "rol_inactivo": False,
+            "rol_ajeno": False,
+            "solo_grant": False,
+        }
+
+    def _cliente(self, user):
+        client = APIClient()
+        client.force_authenticate(user=Usuario.objects.get(pk=user.pk))
+        return client
+
+    def _bandera(self, user):
+        response = self._cliente(user).get(self.PERFIL)
+        self.assertEqual(response.status_code, 200, response.data)
+        return response.data["es_mesa_control"]
+
+    def _assert_acciones_coinciden(self, user, bandera):
+        for metodo, url in self.ACCIONES:
+            with self.subTest(usuario=user.username, accion=f"{metodo.upper()} {url}"):
+                response = getattr(self._cliente(user), metodo)(
+                    url.format(pk=self.PK_INEXISTENTE), {"motivo": "prueba"}, format="json",
+                )
+                if bandera:
+                    self.assertEqual(response.status_code, 404, response.data)
+                else:
+                    self.assertEqual(response.status_code, 400, response.data)
+                    self.assertEqual(response.data, self.SIN_PERMISO)
+        with self.subTest(usuario=user.username, accion="wms.exigir_permiso"):
+            fresco = Usuario.objects.get(pk=user.pk)
+            if bandera:
+                exigir_permiso_cancelar_wms(fresco)
+            else:
+                with self.assertRaises(PermissionDenied):
+                    exigir_permiso_cancelar_wms(fresco)
+
+    def test_bandera_y_acciones_coinciden(self):
+        for atributo, esperado in self.esperado.items():
+            user = getattr(self, atributo)
+            with self.subTest(usuario=atributo):
+                bandera = self._bandera(user)
+                self.assertIs(bandera, esperado)
+                self._assert_acciones_coinciden(user, bandera)
+
+    def test_superusuario_tras_cambiar_de_empresa(self):
+        response = self._cliente(self.superusuario).post(
+            "/api/v1/nucleo/cambiar-empresa/", {"empresa": self.ajena.pk}, format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["empresa_id"], self.ajena.pk)
+        self.assertIs(response.data["es_mesa_control"], True)
+        self.assertIs(self._bandera(self.superusuario), True)
+        self._assert_acciones_coinciden(self.superusuario, True)
+
+    def test_login_trae_la_bandera(self):
+        for atributo in ("mesa", "ventas", "admin"):
+            user = getattr(self, atributo)
+            user.set_password(PASSWORD)
+            user.save()
+            with self.subTest(usuario=atributo):
+                response = APIClient().post(
+                    self.LOGIN, {"email": user.email, "password": PASSWORD}, format="json",
+                )
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assertIs(response.data["user"]["es_mesa_control"], self.esperado[atributo])
+                self.assertIs(response.data["user"]["es_mesa_control"], self._bandera(user))
+
+    def test_login_con_mfa_trae_la_bandera_en_el_segundo_paso(self):
+        for atributo in ("mesa", "ventas"):
+            user = getattr(self, atributo)
+            user.set_password(PASSWORD)
+            user.save()
+            metodo = MFAMethod.objects.create(
+                user=user, name="app", secret=pyotp.random_base32(), is_primary=True, is_active=True,
+            )
+            with self.subTest(usuario=atributo):
+                client = APIClient()
+                paso1 = client.post(self.LOGIN, {"email": user.email, "password": PASSWORD}, format="json")
+                self.assertEqual(paso1.status_code, 200, paso1.data)
+                self.assertIs(paso1.data["mfa_enabled"], True)
+                self.assertNotIn("user", paso1.data)
+                paso2 = client.post(
+                    f"{self.LOGIN}verify/",
+                    {
+                        "ephemeral_token": paso1.data["ephemeral_token"],
+                        "code": MFAHandlerRegistry.get_handler(metodo).get_otp_code(),
+                    },
+                    format="json",
+                )
+                self.assertEqual(paso2.status_code, 200, paso2.data)
+                self.assertIs(paso2.data["user"]["es_mesa_control"], self.esperado[atributo])
+
+    def test_patch_no_cambia_la_bandera(self):
+        for user, valor in ((self.ventas, True), (self.mesa, False)):
+            with self.subTest(usuario=user.username):
+                antes = self._bandera(user)
+                response = self._cliente(user).patch(self.PERFIL, {"es_mesa_control": valor}, format="json")
+                self.assertEqual(response.status_code, 400, response.data)
+                self.assertIn("es_mesa_control", response.data)
+                self.assertIs(self._bandera(user), antes)
+                self._assert_acciones_coinciden(user, antes)

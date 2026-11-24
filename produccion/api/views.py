@@ -1047,7 +1047,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             return Response(OrdenProduccionRutaCriticaSerializer(instance).data)
 
         # PATCH: solo produccion (o superuser/admin_empresa) puede escribir
-        # ruta crítica -- mismo patrón que ``_require_mesa_control`` en
+        # ruta crítica -- mismo patrón que ``exigir_mesa_control`` en
         # ``ventas.api.views`` para ``Pedido.clasificacion``/``fecha_confirmacion``.
         self._require_produccion(request.user)
         if op.estatus_op in (

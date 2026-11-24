@@ -42,8 +42,9 @@ def exigir_permiso(user):
     if user.is_superuser or user.is_admin_empresa or user.tiene_permiso(PERMISO_CANCELAR):
         return
     # Mesa de control dirige el flujo del pedido: puede deshacer el trabajo de almacén.
-    from seguridad.role_identity import CLAVE_DEPARTAMENTO_MESA_CONTROL, usuario_tiene_clave_departamento
-    if usuario_tiene_clave_departamento(user, CLAVE_DEPARTAMENTO_MESA_CONTROL, empresa=user.empresa):
+    # Misma regla que las acciones de mesa de control de ventas (EC-944).
+    from seguridad.role_identity import es_mesa_control
+    if es_mesa_control(user):
         return
     raise PermissionDenied("No tienes permiso para cancelar documentos de almacén.")
 
