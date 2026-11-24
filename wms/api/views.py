@@ -41,6 +41,7 @@ from wms.models import (
 from nucleo.listados import PaginacionOpcionalLimitOffset
 from wms.api import pickings_listado
 from wms.scope import documentos_wms_visibles
+from wms.services import cancelacion_service
 from wms.services.despacho_service import DespachoService
 from wms.services.rfid_scan_service import (
     lector_desde_request,
@@ -129,6 +130,20 @@ class TransferenciaViewSet(
         serializer.is_valid(raise_exception=True)
         res = TransferenciaService.handle_store(serializer.validated_data, request.user, request=request)
         return Response(TransferenciaSerializer(res).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="revertir", url_name="revertir")
+    def revertir(self, request, pk=None):
+        """Crea la TR inversa (folio propio, ``reversa_de``) y deja la original CANCELADA.
+        Body ``{"motivo": "..."}`` (obligatorio). Admin de empresa, superuser o permiso
+        ``WMS-CANCELAR``. Otra empresa: 404. No borra: el documento queda cancelado con su folio."""
+        tr = self.get_object()
+        cancelacion_service.exigir_permiso(request.user)
+        motivo = cancelacion_service.motivo_de(request.data)
+        original, reversa = cancelacion_service.revertir_transferencia(tr, request, motivo)
+        return Response({
+            "original": TransferenciaListSerializer(self.get_queryset().get(pk=original.pk)).data,
+            "reversa": TransferenciaListSerializer(self.get_queryset().get(pk=reversa.pk)).data,
+        }, status=status.HTTP_201_CREATED)
 
 @extend_schema_view(
     list=extend_schema(parameters=[
@@ -346,6 +361,17 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
         picking = self.get_queryset().get(pk=picking.pk)
         return Response(PickingSerializer(picking).data)
 
+    @action(detail=True, methods=["post"], url_path="cancelar", url_name="cancelar")
+    def cancelar(self, request, pk=None):
+        """Cancela un picking sin packing vivo ni órdenes de trabajo vivas; no mueve inventario.
+        Body ``{"motivo": "..."}`` (obligatorio). Admin de empresa, superuser o permiso
+        ``WMS-CANCELAR``. Otra empresa: 404. No borra: el documento queda cancelado con su folio."""
+        picking = self.get_object()
+        cancelacion_service.exigir_permiso(request.user)
+        motivo = cancelacion_service.motivo_de(request.data)
+        cancelacion_service.cancelar_picking(picking, request, motivo)
+        return Response(PickingSerializer(self.get_queryset().get(pk=picking.pk)).data)
+
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -419,6 +445,17 @@ class PackingViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveMod
         packing_instance = PackingService.handle_store(serializer.validated_data, request.user)
         return Response(PackingSerializer(self._releer(packing_instance)).data, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=["post"], url_path="cancelar", url_name="cancelar")
+    def cancelar(self, request, pk=None):
+        """Cancela un packing sin despacho activo; no mueve inventario.
+        Body ``{"motivo": "..."}`` (obligatorio). Admin de empresa, superuser o permiso
+        ``WMS-CANCELAR``. Otra empresa: 404. No borra: el documento queda cancelado con su folio."""
+        packing = self.get_object()
+        cancelacion_service.exigir_permiso(request.user)
+        motivo = cancelacion_service.motivo_de(request.data)
+        cancelacion_service.cancelar_packing(packing, request, motivo)
+        return Response(PackingSerializer(self.get_queryset().get(pk=packing.pk)).data)
+
 
 class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
     queryset = Despacho.objects.all()
@@ -468,6 +505,10 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
         if not empresa:
             return qs.none()
         qs = qs.filter(packing__empresa=empresa)
+        # ``?estado=ACTIVO|CANCELADO``; sin parámetro, todos (cada uno trae su ``estado``).
+        estado = (self.request.query_params.get("estado") or "").upper()
+        if self.action == "list" and estado in Despacho.Estado.values:
+            qs = qs.filter(estado=estado)
         if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(packing__sucursal_id__in=user.sucursales_permitidas())
@@ -499,6 +540,18 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
         serializer.is_valid(raise_exception=True)
         despacho_instance = DespachoService.handle_store(serializer.validated_data, request.user)
         return Response(DespachoSerializer(despacho_instance).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="cancelar", url_name="cancelar")
+    def cancelar(self, request, pk=None):
+        """Cancela el despacho y regresa sus prendas al almacén con una ENTRADA que espeja
+        su SALIDA (mismo costo). El packing vuelve a quedar por despachar. Body
+        ``{"motivo": "..."}`` (obligatorio). Admin de empresa, superuser o permiso
+        ``WMS-CANCELAR``. Otra empresa: 404."""
+        despacho = self.get_object()
+        cancelacion_service.exigir_permiso(request.user)
+        motivo = cancelacion_service.motivo_de(request.data)
+        cancelacion_service.cancelar_despacho(despacho, request, motivo)
+        return Response(DespachoSerializer(self.get_queryset().get(pk=despacho.pk)).data)
 
 
 class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):

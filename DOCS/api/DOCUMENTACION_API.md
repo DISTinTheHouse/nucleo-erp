@@ -2194,7 +2194,7 @@ Cada documento que nació del pedido, para la pestaña "Documentos" del detalle.
     "pickings": [{ "id": 93, "folio": "PICK-000029", "estado": "Completado", "almacen_actual": "APARTADOS" }],
     "movimientos_inventario": [{ "id": 501, "tipo_movimiento": "TRANSFERENCIA", "fecha_movimiento": "...", "observaciones": "...",
                                  "transferencia_folio": "TR-00014", "origen": "PT", "destino": "APARTADOS" }],
-    "despachos": [{ "id": 12, "guia": "GUIA-1", "envio_id": null, "packing_id": 12, "packing_folio": "PACK-00012" }],
+    "despachos": [{ "id": 12, "guia": "GUIA-1", "envio_id": null, "packing_id": 12, "estado": "ACTIVO", "motivo_cancelacion": "", "packing_folio": "PACK-00012" }],
     "envios": [{ "id": 4, "transportista_id": 2 }],
     "facturas": [{ "id": 34, "folio": "FAC-00028", "estatus": "Emitida", "fecha_emision": "2026-11-12", "total": "1160.00", "moneda_codigo": "MXN" }],
     "cobros": [{ "cobro_id": 9, "importe_aplicado": "500.00", "folio": "COB-00009", "estatus": "Aplicado", "fecha": "2026-11-15",
@@ -6307,6 +6307,45 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
 - **Descripción**: devuelve encabezado y `despacho_detalle` del despacho registrado.
 
 ---
+
+## 🚫 WMS - Cancelaciones (picking, packing, despacho y reversa de TR)
+
+Cancelar **no borra**: el documento conserva su folio, queda en estado cancelado y guarda `motivo_cancelacion`, `fecha_cancelacion` y `cancelado_por` (también un `AuditoriaEvento` con `accion="CANCELAR"` y su renglón en la bitácora de documentos). Lo que ya tocó el inventario se revierte con un movimiento contrario; el kardex nunca se edita.
+
+**Comunes a los cuatro endpoints**
+
+- Método `POST`, body `{"motivo": "texto"}` (obligatorio, máx. 500). Sin motivo → `400 {"motivo": "Indica el motivo de la cancelación."}`.
+- Permiso: superuser, admin de empresa o la clave `WMS-CANCELAR` (rol o GRANT). Sin permiso → `403`.
+- Documento de otra empresa o sucursal no visible → `404`.
+- **Orden obligatorio, de atrás hacia adelante:** despacho → packing → picking. Si hay un documento posterior vivo, `400` con su folio (p. ej. `{"packing": "Tiene despachos activos: 54. Cancélalos primero."}`).
+- Repetir la cancelación → `400` ("ya está cancelado").
+- El pedido (`POST /api/v1/ventas/pedidos/{id}/cancelar/`) sigue exigiendo que sus pickings y packings estén cancelados; con estos endpoints ya se puede.
+
+| Endpoint | Cuándo se puede | Qué pasa | Respuesta |
+|---|---|---|---|
+| `POST /api/v1/wms/despachos/{id}/cancelar/` | `estado = ACTIVO` | `estado → CANCELADO`. Las prendas regresan al almacén con una **ENTRADA** ligada al despacho que espeja su SALIDA renglón por renglón, al mismo costo. Sus líneas vuelven a estar disponibles en `despachos/onboarding/` y el packing deja de contar como despachado. Despachos antiguos sin SALIDA se cancelan sin movimiento. | `200` despacho (`DespachoSerializer`) |
+| `POST /api/v1/wms/packings/{id}/cancelar/` | Sin despachos `ACTIVO` | `estado → CANCELADO` y sus líneas también. No mueve inventario. El picking vuelve a quedar por empacar. | `200` packing (`PackingSerializer`) |
+| `POST /api/v1/wms/pickings/{id}/cancelar/` | Sin packing vivo y sin órdenes de bordado/reflejante/corte de manga vivas ligadas al picking | `estado → "Cancelado"`, líneas `CANCELADA`, reservas activas `LIBERADA`. No mueve inventario: las piezas vuelven a estar pendientes de surtir. Si el picking se trasladó con una TR, las prendas se quedan en ese almacén (para regresarlas, revertir la TR). | `200` picking (`PickingSerializer`) |
+| `POST /api/v1/wms/transferencias/{id}/revertir/` | TR `COMPLETADA`, que no sea reversa ni esté revertida, y que sea manual o de un picking **ya cancelado** | Crea la TR inversa (destino → origen, mismas piezas, **folio propio**, `reversa_de` = la original) y la original queda `CANCELADA`. Si el almacén destino ya no tiene las piezas → `400` de inventario insuficiente. | `201 {"original": {...}, "reversa": {...}}` (forma del listado de TR) |
+
+**Campos nuevos en las respuestas**
+
+- Picking, packing, despacho y TR: `motivo_cancelacion` (`""` si no), `fecha_cancelacion` (`null`), `cancelado_por` (id o `null`).
+- Despacho: `estado` (`ACTIVO` | `CANCELADO`). `GET /api/v1/wms/despachos/?estado=ACTIVO` filtra el listado; sin parámetro, todos.
+- TR (listado y detalle): `reversa_de` (id de la TR que deshace, o `null`).
+- Trazabilidad del pedido: `despachos[].estado` y `despachos[].motivo_cancelacion`.
+- Valores de estado cancelado: picking `"Cancelado"`; packing y despacho `"CANCELADO"`; TR `"CANCELADA"`.
+
+**Ejemplo**
+
+```http
+POST /api/v1/wms/despachos/54/cancelar/
+{"motivo": "El cliente cambió la dirección de entrega"}
+```
+```json
+{"id": 54, "estado": "CANCELADO", "motivo_cancelacion": "El cliente cambió la dirección de entrega",
+ "fecha_cancelacion": "2026-11-24T19:02:11Z", "cancelado_por": 7, "packing": 62, "packing_folio": "PACK-000018", "...": "..."}
+```
 
 ## 🏷️ WMS - Etiquetas RFID
 

@@ -297,7 +297,7 @@ def _agregado(expr, output_field):
 # Misma regla que ``estado_empaque()`` (fila) en SQL, para filtrar, ordenar y resumir.
 _PACKINGS_VIVOS = Packing.objects.filter(picking=OuterRef("pk")).exclude(estado="CANCELADO")
 ESTADO_EMPAQUE_SQL = Case(
-    When(Exists(Despacho.objects.filter(packing__picking=OuterRef("pk")).exclude(packing__estado="CANCELADO")),
+    When(Exists(Despacho.objects.filter(packing__picking=OuterRef("pk"), estado="ACTIVO").exclude(packing__estado="CANCELADO")),
          then=Value(ESTADO_ENVIADO)),
     When(Exists(_PACKINGS_VIVOS), then=Value(ESTADO_EMPACADO)),
     default=Value(ESTADO_POR_EMPACAR),
@@ -404,7 +404,7 @@ def contexto_filas(pickings):
         filas = (
             Packing.objects.filter(picking_id__in=empaque.keys())
             .exclude(estado="CANCELADO")
-            .annotate(despachado=Exists(Despacho.objects.filter(packing=OuterRef("pk"))))
+            .annotate(despachado=Exists(Despacho.objects.filter(packing=OuterRef("pk"), estado="ACTIVO")))
             .order_by("id")
             .values("id", "picking_id", "folio", "estado", "despachado")
         )

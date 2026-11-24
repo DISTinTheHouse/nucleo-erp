@@ -266,7 +266,7 @@ def _empacado_y_embarcado(pedido_ids):
     )
     empacado = _suma_por_pedido(base, "packing__pedido_id", "cantidad_empacada")
     embarcado = _suma_por_pedido(
-        base.filter(Exists(DespachoDetalle.objects.filter(packing_detalle=OuterRef("pk")))),
+        base.filter(Exists(DespachoDetalle.objects.filter(packing_detalle=OuterRef("pk"), despacho__estado="ACTIVO"))),
         "packing__pedido_id",
         "cantidad_empacada",
     )
@@ -701,7 +701,8 @@ def documentos_pedido(pedido, *, user, permisos=None):
     )
     despachos = _lista(
         despachos_qs.order_by("id"),
-        "id", "guia", "envio_id", "packing_id", packing_folio=F("packing__folio"),
+        "id", "guia", "envio_id", "packing_id", "estado", "motivo_cancelacion",
+        packing_folio=F("packing__folio"),
     )
     envios = _lista(Envio.objects.filter(pedido_id=pk, empresa_id=empresa_id).order_by("id"), "id", "transportista_id")
     con_facturas = lee_seccion_finanzas(permisos, FacturaViewSet.codigo_lectura_seccion)

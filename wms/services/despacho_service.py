@@ -28,7 +28,7 @@ def _piezas(cantidad):
 class DespachoService:
     @classmethod
     def _despachado_map(cls, packing, packing_detalle_ids=None):
-        qs = DespachoDetalle.objects.filter(despacho__packing=packing)
+        qs = DespachoDetalle.objects.filter(despacho__packing=packing, despacho__estado=Despacho.Estado.ACTIVO)
         if packing_detalle_ids is not None:
             qs = qs.filter(packing_detalle_id__in=packing_detalle_ids)
 
@@ -55,7 +55,7 @@ class DespachoService:
 
         despachados_ids = set(
             DespachoDetalle.objects.filter(
-                packing_detalle__packing__in=base_qs
+                packing_detalle__packing__in=base_qs, despacho__estado=Despacho.Estado.ACTIVO
             ).values_list("packing_detalle_id", flat=True)
         )
 

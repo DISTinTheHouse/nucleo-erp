@@ -110,7 +110,7 @@ def _salidas_manuales():
 
 
 def _despachado(qs):
-    return qs.filter(Exists(DespachoDetalle.objects.filter(packing_detalle_id=OuterRef("pk"))))
+    return qs.filter(Exists(DespachoDetalle.objects.filter(packing_detalle_id=OuterRef("pk"), despacho__estado="ACTIVO")))
 
 
 def anotar_avance(qs, nivel):

@@ -207,12 +207,14 @@ def _iter_ledger_sin_bitacora(desde, empresa_ids, allowed_almacen_ids, producto_
       o, si no tiene, el de la TR, como en el costo.
     - Salidas por despacho (``MovimientoInventario.despacho``): el despacho no escribe
       evento de existencias. Almacén: el de la ubicación de origen o ``detalle.almacen``.
+      Su cancelación es una ENTRADA ligada al mismo despacho, que suma de regreso.
 
     Cada fila trae su ``fecha`` para repartirla entre el periodo y lo posterior al
     corte. Una consulta, sin importar cuántos movimientos haya."""
     qs = MovimientoInventarioDetalle.objects.filter(
         models.Q(movimiento_inventario__transferencia__isnull=False)
-        | models.Q(movimiento_inventario__despacho__isnull=False, movimiento_inventario__tipo_movimiento="SALIDA"),
+        | models.Q(movimiento_inventario__despacho__isnull=False,
+                   movimiento_inventario__tipo_movimiento__in=("SALIDA", "ENTRADA")),
         movimiento_inventario__activo=True,
         movimiento_inventario__empresa_id__in=empresa_ids,
         movimiento_inventario__fecha_movimiento__gte=desde,
@@ -227,15 +229,18 @@ def _iter_ledger_sin_bitacora(desde, empresa_ids, allowed_almacen_ids, producto_
         "movimiento_inventario__transferencia_id", "almacen_id",
         "ubicacion_origen__almacen_id", "movimiento_inventario__transferencia__almacen_origen_id",
         "ubicacion_destino__almacen_id", "movimiento_inventario__transferencia__almacen_destino_id",
+        "movimiento_inventario__tipo_movimiento",
     )
     for fila in filas.iterator():
         fecha, prod_id, variante_id, variante_prod_id, cantidad, transferencia_id, almacen_detalle = fila[:7]
-        ubic_origen, tr_origen, ubic_destino, tr_destino = fila[7:]
+        ubic_origen, tr_origen, ubic_destino, tr_destino, tipo = fila[7:]
         cantidad = to_decimal(cantidad)
         # Misma llave que ``Existencia``: el producto de la variante si no trae producto.
         producto_key = prod_id or variante_prod_id
         if transferencia_id:
             lados = ((_primero((ubic_origen, tr_origen)), -cantidad), (_primero((ubic_destino, tr_destino)), cantidad))
+        elif tipo == "ENTRADA":  # cancelación de un despacho: regresa al almacén
+            lados = ((_primero((ubic_destino, almacen_detalle)), cantidad),)
         else:  # salida por despacho
             lados = ((_primero((ubic_origen, almacen_detalle)), -cantidad),)
         for almacen_id, delta in lados:
