@@ -2564,6 +2564,8 @@ Congela el pedido **sin cancelarlo** (crédito vencido, el cliente pidió espera
 - Body opcional `{"comentario": "Pagó"}`. No retenido → `400 {"pedido": "El pedido no está retenido."}`.
 - `200` con `retenido: false` y `motivo_retencion: ""`, `fecha_retencion: null`, `retenido_por: null`. El pedido sigue su flujo donde iba.
 - Retener y liberar dejan un `AuditoriaEvento` (`modulo="ventas"`, `accion="RETENER"`/`"LIBERAR"`, con motivo, quién y cuándo).
+- **Rastreo:** además, cada retener/liberar deja un renglón en la bitácora de documentos del pedido, visible en `GET /api/v1/auditoria/documentos/?tipo=pedido&documento_id={id}` y en `linea-tiempo/`: `accion: "estatus"`, `estatus_anterior`/`estatus_nuevo` `"Activo"` ↔ `"Retenido"`, `estatus_codigo` `"RETENIDO"`/`"LIBERADO"`, con el usuario. El `estatus` del pedido no cambia.
+- **Onboardings:** un pedido retenido **no aparece** como candidato en `wms/pickings/onboarding/`, `wms/packings/onboarding/` (sus pickings), `wms/despachos/onboarding/` (sus packings) ni en los onboardings de bordado, reflejante y corte de manga. Al liberarlo vuelve a aparecer.
 
 Campos: `retenido`, `motivo_retencion`, `fecha_retencion`, `retenido_por` en el detalle `GET /pedidos/{id}/`; `retenido` y `motivo_retencion` en el listado `GET /pedidos/`. Son de **solo lectura** en `PATCH /pedidos/{id}/` y en `editar-mesa-control/`: solo cambian con `retener/` y `liberar/`.
 

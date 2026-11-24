@@ -110,6 +110,8 @@ class PackingService:
         pickings_qs = (
             Picking.objects.filter(empresa=empresa)
             .exclude(estado=Picking.Estado.CANCELADO)
+            # Pedido retenido por mesa de control: no se ofrece (el alta lo rechazaría).
+            .exclude(pedido__retenido=True)
         )
         if not es_staff:
             pickings_qs = pickings_qs.filter(sucursal_id__in=sucursal_ids)

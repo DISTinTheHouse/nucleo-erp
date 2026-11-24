@@ -86,6 +86,8 @@ class DespachoService:
         packings_qs = (
             Packing.objects.filter(empresa=empresa)
             .exclude(estado="CANCELADO")
+            # Pedido retenido por mesa de control: no se ofrece (el alta lo rechazaría).
+            .exclude(pedido__retenido=True)
         )
         if not es_staff:
             packings_qs = packings_qs.filter(sucursal_id__in=sucursal_ids)

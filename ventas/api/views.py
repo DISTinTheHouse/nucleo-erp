@@ -72,6 +72,7 @@ from ventas.api.serializers import (
 from nucleo.kpis import entero_param, rango_fechas, validar_parametros
 from nucleo.listados import PaginacionOpcionalLimitOffset, estatus_param
 from ventas.services import subtotales
+from ventas.services.retencion_service import registrar_bitacora
 from nucleo.models import SerieFolio, Empresa
 from ventas.api import cotizaciones_listado
 from notificaciones.services.notificacion_service import crear_notificacion_usuario
@@ -3686,6 +3687,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             pedido.fecha_retencion, pedido.retenido_por = timezone.now(), request.user
             pedido.save(update_fields=["retenido", "motivo_retencion", "fecha_retencion", "retenido_por", "updated_at"])
             self._auditar_retencion(request, pedido, "RETENER", {"retenido": False}, {"retenido": True, "motivo": motivo})
+            registrar_bitacora(pedido, request.user, retenido=True)
         return Response(self._respuesta_retencion(pedido))
 
     @action(detail=True, methods=["post"], url_path="liberar")
@@ -3705,6 +3707,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             pedido.fecha_retencion, pedido.retenido_por = None, None
             pedido.save(update_fields=["retenido", "motivo_retencion", "fecha_retencion", "retenido_por", "updated_at"])
             self._auditar_retencion(request, pedido, "LIBERAR", antes, {"retenido": False, "comentario": comentario})
+            registrar_bitacora(pedido, request.user, retenido=False)
         return Response(self._respuesta_retencion(pedido))
 
     @staticmethod

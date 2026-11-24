@@ -192,7 +192,8 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
     cambiaría el shape de las respuestas de Bordado y Corte de Manga, que hoy
     ya son correctas. Se activa sólo donde falta el dato.
     """
-    pedidos_lista = list(pedidos_qs)
+    # Retenido por mesa de control: no se ofrece (el alta lo rechazaría).
+    pedidos_lista = list(pedidos_qs.filter(retenido=False))
     por_linea, sin_talla = cantidades_asignadas_fn([p.id for p in pedidos_lista])
 
     existencias = {}
