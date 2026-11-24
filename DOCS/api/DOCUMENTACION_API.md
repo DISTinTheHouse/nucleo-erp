@@ -6517,13 +6517,19 @@ Cancelar **no borra**: el documento conserva su folio, queda en estado cancelado
 | `POST /api/v1/wms/despachos/{id}/cancelar/` | `estado = ACTIVO` | `estado → CANCELADO`. Las prendas regresan al almacén con una **ENTRADA** ligada al despacho que espeja su SALIDA renglón por renglón, al mismo costo. Sus líneas vuelven a estar disponibles en `despachos/onboarding/` y el packing deja de contar como despachado. Despachos antiguos sin SALIDA se cancelan sin movimiento. | `200` despacho (`DespachoSerializer`) |
 | `POST /api/v1/wms/packings/{id}/cancelar/` | Sin despachos `ACTIVO` | `estado → CANCELADO` y sus líneas también. No mueve inventario. El picking vuelve a quedar por empacar. | `200` packing (`PackingSerializer`) |
 | `POST /api/v1/wms/pickings/{id}/cancelar/` | Sin packing vivo y sin órdenes de bordado/reflejante/corte de manga vivas ligadas al picking | `estado → "Cancelado"`, líneas `CANCELADA`, reservas activas `LIBERADA`. No mueve inventario: las piezas vuelven a estar pendientes de surtir. Si el picking se trasladó con una TR, las prendas se quedan en ese almacén (para regresarlas, revertir la TR). | `200` picking (`PickingSerializer`) |
-| `POST /api/v1/wms/transferencias/{id}/revertir/` | TR `COMPLETADA`, que no sea reversa ni esté revertida, y que sea manual o de un picking **ya cancelado** | Crea la TR inversa (destino → origen, mismas piezas, **folio propio**, `reversa_de` = la original) y la original queda `CANCELADA`. Si el almacén destino ya no tiene las piezas → `400` de inventario insuficiente. | `201 {"original": {...}, "reversa": {...}}` (forma del listado de TR) |
+| `POST /api/v1/wms/transferencias/{id}/revertir/` | TR `COMPLETADA`, que no sea reversa ni esté revertida, y que sea manual o de un picking **ya cancelado**; si es de un picking, que sea **la última TR viva de su cadena** (ver abajo) | Crea la TR inversa (destino → origen, mismas piezas, **folio propio**, `reversa_de` = la original) y la original queda `CANCELADA`. Si es de un picking, el picking queda en el origen de la TR revertida (ver abajo). Si el almacén destino ya no tiene las piezas → `400` de inventario insuficiente. | `201 {"original": {...}, "reversa": {...}}` (forma del listado de TR) |
+
+**Reversa de las TR de un picking (EC-949)**
+
+- Un picking acumula TR: la del alta y una por cada `trasladar/`. Se revierten **de la más nueva a la más vieja**: una TR se revierte sólo si no existe otra TR del mismo picking con `id` mayor, `COMPLETADA` y que no sea reversa (las revertidas quedan `CANCELADA` y sus reversas no cuentan). Si no → `400 {"transferencia": "Sólo se revierte la última TR del picking PK-A-000012. Revierte primero TR-A-000031."}`. Revertir una TR vieja movería del destino piezas que ya no están ahí, o piezas ajenas del mismo SKU.
+- El picking de la TR es `Transferencia.picking` o, en TR anteriores sin esa liga, el picking cuyo `transferencia` es ella (también le aplica la regla de "picking vivo"). Una TR sin picking es manual y no tiene cadena.
+- Al revertir, `almacen` del picking pasa al **origen de la TR revertida**, que es donde quedan sus prendas; `almacen_destino` y `transferencia` no cambian. Con eso `almacen_actual` (detalle y listado), el filtro `GET /pickings/?almacen_actual=`, `picking_almacen` del packing y el almacén del que saldría un despacho dicen dónde están las prendas: tras revertir el traslado, en el almacén de antes del traslado; tras revertir también el alta, en el origen del alta. El `AuditoriaEvento` de la reversa guarda `picking_almacen_id` antes y después.
 
 **Campos nuevos en las respuestas**
 
-- Picking, packing, despacho y TR: `motivo_cancelacion` (`""` si no), `fecha_cancelacion` (`null`), `cancelado_por` (id o `null`).
+- Picking, packing, despacho y TR (listado y detalle): `motivo_cancelacion` (`""` si no), `fecha_cancelacion` (`null`), `cancelado_por` (id o `null`) y `cancelado_por_nombre` (nombre completo o, si no tiene, su correo; `null` si no está cancelado).
 - Despacho: `estado` (`ACTIVO` | `CANCELADO`). `GET /api/v1/wms/despachos/?estado=ACTIVO` filtra el listado; sin parámetro, todos.
-- TR (listado y detalle): `reversa_de` (id de la TR que deshace, o `null`).
+- TR (listado, detalle y respuesta de `revertir/`): `reversa_de` + `reversa_de_folio` (la TR que esta deshace) y `reversa` + `reversa_folio` (la TR que deshizo a esta); `null` si no hay.
 - Trazabilidad del pedido: `despachos[].estado` y `despachos[].motivo_cancelacion`.
 - Valores de estado cancelado: picking `"Cancelado"`; packing y despacho `"CANCELADO"`; TR `"CANCELADA"`.
 
@@ -6535,7 +6541,8 @@ POST /api/v1/wms/despachos/54/cancelar/
 ```
 ```json
 {"id": 54, "estado": "CANCELADO", "motivo_cancelacion": "El cliente cambió la dirección de entrega",
- "fecha_cancelacion": "2026-11-24T19:02:11Z", "cancelado_por": 7, "packing": 62, "packing_folio": "PACK-000018", "...": "..."}
+ "fecha_cancelacion": "2026-11-24T19:02:11Z", "cancelado_por": 7, "cancelado_por_nombre": "Ana López",
+ "packing": 62, "packing_folio": "PACK-000018", "...": "..."}
 ```
 
 ## 🏷️ WMS - Etiquetas RFID
