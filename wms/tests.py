@@ -3559,6 +3559,28 @@ class CancelacionesEC949Tests(TestCase):
         self.assertEqual(self._revertir(alta).status_code, 201)
         self.assertEqual(self._almacen_actual(picking), (self.terminado.pk, {self.terminado.pk}))
 
+    def test_alta_sin_fk_de_picking_trasladado_no_se_revierte_como_manual(self):
+        """Alta y traslado sin ``Transferencia.picking`` y ``Picking.transferencia`` = el
+        traslado: el alta no resuelve picking, pero su texto dice que es de uno → 400."""
+        from wms.models import Transferencia
+
+        picking = self._alta()
+        alta = picking.transferencia
+        self._trasladar(picking, self.apartados)
+        picking.refresh_from_db()
+        traslado = picking.transferencia
+        Transferencia.objects.filter(pk__in=[alta.pk, traslado.pk]).update(picking=None)
+        self.assertEqual(self._cancelar(self.URL_PICKINGS, picking.pk).status_code, 200)
+        antes = self._existencias()
+        resp = self._revertir(alta)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"transferencia": (
+            f"La TR {alta.folio} es de un picking pero no está ligada a él. "
+            "No se puede revertir hasta ligarla a su picking."
+        )})
+        self.assertEqual(self._existencias(), antes)
+        self.assertEqual(Transferencia.objects.get(pk=alta.pk).status, Transferencia.TransferenciaStatus.COMPLETADA)
+
     def test_tr_manual_no_tiene_regla_de_cadena(self):
         vieja = self._tr_manual(self.terminado, self.bordados)
         self._tr_manual(self.terminado, self.bordados)

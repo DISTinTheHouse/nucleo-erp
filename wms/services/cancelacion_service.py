@@ -32,6 +32,8 @@ from produccion.models import OrdenesBordado, OrdenesCorteManga, OrdenesReflejan
 from ventas.models import Pedido
 from wms.models import Despacho, Estado, Packing, Picking, PickingDetalle, Transferencia
 from wms.services.existencia_service import ExistenciaService
+# Texto con que el código crea las TR de un picking (alta y traslados, EC-916).
+from wms.services.transferencia_picking_service import PATRON as PATRON_TR_DE_PICKING
 
 PERMISO_CANCELAR = "WMS-CANCELAR"
 
@@ -240,7 +242,7 @@ def _reintegrar_salida(despacho, salida, user):
 def _picking_id_de(tr):
     """Picking de la TR: ``Transferencia.picking`` (EC-916) o, en una TR sin esa FK
     (anterior al backfill o ambigua), el picking cuya ``transferencia`` es ella.
-    ``None``: TR manual."""
+    ``None``: TR manual (o de picking sin ligar: ``revertir_transferencia`` la rechaza)."""
     if tr.picking_id:
         return tr.picking_id
     return Picking.objects.filter(transferencia_id=tr.pk).order_by("pk").values_list("pk", flat=True).first()
@@ -292,6 +294,14 @@ def revertir_transferencia(transferencia, request, motivo):
         raise ValidationError({"transferencia": "Esta TR ya es una reversa; no se revierte."})
     if Transferencia.objects.filter(reversa_de=tr).exists():
         raise ValidationError({"transferencia": "La TR ya fue revertida."})
+    if picking is None and PATRON_TR_DE_PICKING.match(tr.observaciones or ""):
+        # TR de picking sin ligar (``ligar_transferencias_picking`` la dejó en null por
+        # ambigua): sin su picking no se puede revisar la cadena, el picking vivo ni su
+        # almacén. No se revierte como manual.
+        raise ValidationError({"transferencia": (
+            f"La TR {tr.folio} es de un picking pero no está ligada a él. "
+            "No se puede revertir hasta ligarla a su picking."
+        )})
     if picking is not None:
         if picking.estado != Picking.Estado.CANCELADO:
             raise ValidationError(
