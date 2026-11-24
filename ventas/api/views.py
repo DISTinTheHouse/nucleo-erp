@@ -88,6 +88,7 @@ from produccion.models import (
 )
 from seguridad.role_identity import (
     CLAVE_DEPARTAMENTO_MESA_CONTROL,
+    es_mesa_control,
     usuario_tiene_clave_departamento,
 )
 
@@ -438,6 +439,19 @@ def _texto_comentario(data):
     if not isinstance(valor, str):
         raise ValidationError({"comentario": "El comentario debe ser texto."})
     return valor.strip()
+
+
+def exigir_mesa_control(user):
+    """400 ``{"permiso": ...}`` si ``user`` no es Mesa de Control.
+
+    Lo usan ``CotizacionViewSet`` y ``PedidoViewSet`` como ``_require_mesa_control``
+    (antes eran dos copias idénticas). La decisión es ``es_mesa_control``, la misma
+    función que alimenta la bandera ``es_mesa_control`` del perfil (EC-944).
+    """
+    if not es_mesa_control(user):
+        raise ValidationError(
+            {"permiso": "Acción disponible solo para mesa de control."}
+        )
 
 
 # Los backends globales menos el ``OrderingFilter`` de DRF (EC-619): sin
@@ -1795,21 +1809,7 @@ class CotizacionViewSet(viewsets.ModelViewSet):
             ):
                 raise ValidationError({"cotizacion_id": "No tienes acceso a esta cotización."})
 
-    def _require_mesa_control(self, user):
-        if getattr(user, "is_superuser", False):
-            return
-        if getattr(user, "is_admin_empresa", False):
-            return
-        empresa = getattr(user, "empresa", None)
-        if usuario_tiene_clave_departamento(
-            user,
-            CLAVE_DEPARTAMENTO_MESA_CONTROL,
-            empresa=empresa,
-        ):
-            return
-        raise ValidationError(
-            {"permiso": "Acción disponible solo para mesa de control."}
-        )
+    _require_mesa_control = staticmethod(exigir_mesa_control)
 
     @staticmethod
     def _exigir_sucursal(cotizacion):
@@ -3088,21 +3088,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
         pedido.folio_consecutivo = nuevo_consecutivo
         pedido.save(update_fields=["serie_folio", "folio", "folio_consecutivo"])
 
-    def _require_mesa_control(self, user):
-        if getattr(user, "is_superuser", False):
-            return
-        if getattr(user, "is_admin_empresa", False):
-            return
-        empresa = getattr(user, "empresa", None)
-        if usuario_tiene_clave_departamento(
-            user,
-            CLAVE_DEPARTAMENTO_MESA_CONTROL,
-            empresa=empresa,
-        ):
-            return
-        raise ValidationError(
-            {"permiso": "Acción disponible solo para mesa de control."}
-        )
+    _require_mesa_control = staticmethod(exigir_mesa_control)
 
     def _aplicar_pedido_a_cotizacion(
         self, pedido, cotizacion, detalle_data, servicios_extras_data

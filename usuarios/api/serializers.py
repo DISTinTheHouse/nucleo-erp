@@ -3,6 +3,7 @@ from rest_framework.exceptions import PermissionDenied
 from nucleo.permisos import permisos_efectivos_precargados
 from nucleo.scope import empresas_activas
 from seguridad.models import Rol, UsuarioRol
+from seguridad.role_identity import es_mesa_control
 from ..alcance import errores_de_alcance
 from ..models import Usuario
 
@@ -214,13 +215,24 @@ class PerfilUsuarioSerializer(UsuarioSerializer):
 
     password = None
     roles = None
+    # EC-944: la misma decisión que aplican las acciones de Mesa de Control
+    # (``seguridad.role_identity.es_mesa_control``), para que el frontend muestre
+    # los controles exactamente a quien el backend se los deja ejecutar. Solo en el
+    # perfil propio (``/api/auth/user/``, el ``user`` del login y ``cambiar-empresa``):
+    # en ``/api/v1/usuarios/`` costaría una consulta por renglón.
+    es_mesa_control = serializers.SerializerMethodField(read_only=True)
 
     class Meta(UsuarioSerializer.Meta):
-        fields = [f for f in UsuarioSerializer.Meta.fields if f not in ("password", "roles")]
+        fields = [
+            f for f in UsuarioSerializer.Meta.fields if f not in ("password", "roles")
+        ] + ["es_mesa_control"]
         read_only_fields = [
             f for f in fields if f not in ("first_name", "last_name", "telefono", "avatar_url")
         ]
         extra_kwargs = {}
+
+    def get_es_mesa_control(self, obj):
+        return es_mesa_control(obj)
 
     def validate(self, data):
         errores = {}

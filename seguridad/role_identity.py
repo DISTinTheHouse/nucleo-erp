@@ -172,6 +172,30 @@ def usuario_tiene_clave_departamento(user, clave_departamento, empresa=None) -> 
     return clave in claves_departamento_usuario(user, empresa=empresa)
 
 
+def es_mesa_control(user) -> bool:
+    """¿Puede ``user`` ejecutar las acciones de Mesa de Control? (EC-944)
+
+    Única regla para las acciones (``_require_mesa_control`` de cotizaciones y
+    pedidos, la cancelación de WMS) y para la bandera ``es_mesa_control`` que el
+    perfil (``/api/auth/user/`` y el login) entrega al frontend: así no pueden
+    divergir. Superusuario y admin de empresa pasan sin consultar la BD; el resto
+    necesita un rol activo de su empresa activa cuyo departamento sea
+    ``MESACONTROL`` (``usuario_tiene_clave_departamento``: usuario activo, clave
+    canonicalizada o inferida del código/nombre del rol). No cuentan los códigos
+    de permiso ``R-MESACONTROL*`` concedidos por rol u override.
+    """
+    if getattr(user, "is_superuser", False):
+        return True
+    if getattr(user, "is_admin_empresa", False):
+        return True
+    # ``empresa_id`` y no ``empresa``: mismo id, sin cargar la fila de la empresa.
+    return usuario_tiene_clave_departamento(
+        user,
+        CLAVE_DEPARTAMENTO_MESA_CONTROL,
+        empresa=getattr(user, "empresa_id", None),
+    )
+
+
 def usuarios_ids_por_clave_departamento(
     empresa, clave_departamento, solo_usuarios_activos=True
 ) -> list[int]:

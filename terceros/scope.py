@@ -79,7 +79,7 @@ def clientes_visibles(qs, user):
     Sólo la empresa activa, superusuario incluido (EC-798); dentro de la empresa, superusuario, ``is_admin_empresa``, Mesa de
     Control y Contabilidad ven TODOS los clientes de la empresa (Mesa de Control atiende pedidos
     de cualquier vendedor, no solo los suyos — mismo criterio de rol que
-    ``ventas.api.views.PedidoViewSet._require_mesa_control``); el resto sólo ve
+    ``seguridad.role_identity.es_mesa_control``); el resto sólo ve
     los clientes que tiene asignados por el M2M ``vendedores``; sin empresa no se
     ve nada.
     """
