@@ -6416,6 +6416,7 @@ class OportunidadesTests(OportunidadesBase):
     # -- cotizar y estado calculado -----------------------------------------
 
     def test_cotizar_crea_cotizacion_borrador_ligada(self):
+        self.cliente.vendedores.add(self.ana)
         op = self._op(cliente=self.cliente)
 
         resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
@@ -6427,6 +6428,18 @@ class OportunidadesTests(OportunidadesBase):
             (op.pk, self.ana.pk, self.cliente.pk, 1),
         )
         self.assertEqual(self._client(self.ana).get(f"{OPORTUNIDADES_URL}{op.pk}/").data["estado"], "Cotizada")
+
+    def test_no_se_cotiza_con_un_cliente_que_el_usuario_no_ve(self):  # #1347
+        # La cotización no enmascara al cliente: mostraría sus datos. Mismo 400 que ``validate_cliente``.
+        op = self._op(self.ana, cliente=self.cliente)
+
+        resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(str(resp.data["cliente"]), "Cliente no encontrado.")
+        self.assertFalse(Cotizacion.objects.filter(oportunidad=op).exists())
+        # El admin de empresa sí ve al cliente y cotiza para el dueño.
+        self.assertEqual(self._client(self.jefe).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/").status_code, 201)
 
     def test_no_se_cotiza_una_perdida(self):
         op = self._op(etapa="Perdida", motivo_perdida="Precio")
@@ -7394,6 +7407,7 @@ class OportunidadesValidacionesTests(OportunidadesBase):
         self._revisar_ve_todos_por_departamento("MESACONTROL")
 
     def test_transferir_pasa_las_cotizaciones_al_nuevo_dueno(self):
+        self.cliente.vendedores.add(self.ana)
         op = self._op(self.ana, cliente=self.cliente)
         resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
         cot = resp.data["cotizacion_id"]
@@ -7414,11 +7428,13 @@ class OportunidadesValidacionesTests(OportunidadesBase):
         otra_sucursal = Sucursal.objects.create(empresa=self.otra, codigo="GDL", nombre="GDL")
         self.ana.sucursal_default = otra_sucursal
         self.ana.save()
+        self.cliente.vendedores.add(self.ana)
         op = self._op(self.ana, cliente=self.cliente)
 
         resp = self._client(self.ana).post(f"{OPORTUNIDADES_URL}{op.pk}/cotizar/")
 
         self.assertEqual(resp.status_code, 400)
+        self.assertIn("sucursal", resp.data)
         self.assertFalse(Cotizacion.objects.filter(oportunidad=op).exists())
 
     def test_parametros_no_numericos_responden_400(self):
