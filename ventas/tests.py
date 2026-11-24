@@ -4762,6 +4762,25 @@ class PedidoKpisTests(TestCase):
         self.assertFalse(resp.data["lead_time_promedio"]["disponible"])
         self.assertTrue(resp.data["pedidos_en_riesgo"]["disponible"])
 
+    def test_pedidos_en_riesgo_el_dia_compromiso_no_cuenta_como_vencido(self):  # #1344
+        # El front manda la fecha compromiso como la medianoche de México de ese día.
+        hoy = timezone.localdate()
+        dias = {"ayer": -1, "hoy": 0, "en_7": 7, "en_8": 8}
+        pedidos = {}
+        for i, (nombre, delta) in enumerate(dias.items()):
+            pedido = self._pedido(f"PED-R{i}", self._cotizacion(self.vendedor_a), estatus=3)
+            medianoche = timezone.make_aware(datetime.combine(hoy + timedelta(days=delta), datetime.min.time()))
+            Pedido.objects.filter(pk=pedido.pk).update(fecha_confirmacion=medianoche)
+            pedidos[nombre] = pedido.pk
+
+        riesgo = self._get(self.vendedor_a).data["pedidos_en_riesgo"]
+
+        self.assertEqual((riesgo["vencidos"], riesgo["por_vencer"], riesgo["total"]), (1, 2, 3))
+        self.assertEqual(
+            {d["id"]: d["vencido"] for d in riesgo["drill_down"]},
+            {pedidos["ayer"]: True, pedidos["hoy"]: False, pedidos["en_7"]: False},
+        )
+
     def test_otro_vendedor_no_ve_nada_del_vendedor_a(self):
         resp = self._get(self.vendedor_b)
 

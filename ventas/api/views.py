@@ -11,7 +11,7 @@ from django.db.models.deletion import Collector, ProtectedError, RestrictedError
 from django.db.models import BooleanField, Count, Exists, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum
 from django.db.models.functions import Coalesce, JSONObject
 from django.contrib.postgres.expressions import ArraySubquery
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -4556,15 +4556,22 @@ class PedidoViewSet(viewsets.ModelViewSet):
         """Pedidos en firme (AUTORIZADA/EN PROCESO) con fecha compromiso vencida o que
         vence en los próximos ``DIAS_POR_VENCER`` días. Una consulta para los conteos y
         otra para el drill-down. El pedido no registra la entrega: uno ya entregado
-        sigue contando mientras siga EN PROCESO."""
-        ahora = timezone.now()
-        limite = ahora + timedelta(days=self.DIAS_POR_VENCER)
+        sigue contando mientras siga EN PROCESO.
+
+        La fecha compromiso es un día calendario (el front manda la medianoche de
+        México): el pedido vence cuando termina ese día, no a las 00:00 (#1344). Misma
+        regla que las OC vencidas y las OP atrasadas (``fecha_entrega_estimada < hoy``).
+        Por vencer = de hoy a hoy + ``DIAS_POR_VENCER``. Límites en hora local sobre la
+        columna, sin ``__date``, para no convertir zona por fila."""
+        hoy = timezone.localdate()
+        inicio_hoy = timezone.make_aware(datetime.combine(hoy, time.min))
+        limite = timezone.make_aware(datetime.combine(hoy + timedelta(days=self.DIAS_POR_VENCER + 1), time.min))
         criticos = base.filter(
             estatus__in=self.ESTATUS_PEDIDO_ACTIVOS, fecha_confirmacion__isnull=False, fecha_confirmacion__lt=limite,
         )
         conteos = criticos.aggregate(
-            vencidos=Count("id", filter=Q(fecha_confirmacion__lt=ahora)),
-            por_vencer=Count("id", filter=Q(fecha_confirmacion__gte=ahora)),
+            vencidos=Count("id", filter=Q(fecha_confirmacion__lt=inicio_hoy)),
+            por_vencer=Count("id", filter=Q(fecha_confirmacion__gte=inicio_hoy)),
         )
         total = conteos["vencidos"] + conteos["por_vencer"]
         drill_down = list(
@@ -4575,12 +4582,12 @@ class PedidoViewSet(viewsets.ModelViewSet):
         estatus_labels = dict(Pedido.CHOICES_ESTATUS)
         for fila in drill_down:
             fila["estatus_label"] = estatus_labels.get(fila["estatus"], str(fila["estatus"]))
-            fila["vencido"] = fila["fecha_confirmacion"] < ahora
+            fila["vencido"] = fila["fecha_confirmacion"] < inicio_hoy
         return {
             "disponible": True,
             "criterio": (
-                f"Pedido autorizado o en proceso con fecha compromiso vencida o que vence en "
-                f"los próximos {self.DIAS_POR_VENCER} días."
+                f"Pedido autorizado o en proceso con fecha compromiso anterior a hoy (vencido) "
+                f"o de hoy a los próximos {self.DIAS_POR_VENCER} días (por vencer)."
             ),
             "total": total,
             "vencidos": conteos["vencidos"],
