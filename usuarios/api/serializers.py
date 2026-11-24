@@ -231,7 +231,7 @@ class PerfilUsuarioSerializer(UsuarioSerializer):
         ]
         extra_kwargs = {}
 
-    def get_es_mesa_control(self, obj):
+    def get_es_mesa_control(self, obj) -> bool:
         return es_mesa_control(obj)
 
     def validate(self, data):

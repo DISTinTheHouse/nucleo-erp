@@ -990,6 +990,31 @@ class EsMesaControlTests(_DosEmpresasMixin, TestCase):
                 self.assertIs(response.data["user"]["es_mesa_control"], self.esperado[atributo])
                 self.assertIs(response.data["user"]["es_mesa_control"], self._bandera(user))
 
+    def test_login_con_mfa_trae_la_bandera_en_el_segundo_paso(self):
+        for atributo in ("mesa", "ventas"):
+            user = getattr(self, atributo)
+            user.set_password(PASSWORD)
+            user.save()
+            metodo = MFAMethod.objects.create(
+                user=user, name="app", secret=pyotp.random_base32(), is_primary=True, is_active=True,
+            )
+            with self.subTest(usuario=atributo):
+                client = APIClient()
+                paso1 = client.post(self.LOGIN, {"email": user.email, "password": PASSWORD}, format="json")
+                self.assertEqual(paso1.status_code, 200, paso1.data)
+                self.assertIs(paso1.data["mfa_enabled"], True)
+                self.assertNotIn("user", paso1.data)
+                paso2 = client.post(
+                    f"{self.LOGIN}verify/",
+                    {
+                        "ephemeral_token": paso1.data["ephemeral_token"],
+                        "code": MFAHandlerRegistry.get_handler(metodo).get_otp_code(),
+                    },
+                    format="json",
+                )
+                self.assertEqual(paso2.status_code, 200, paso2.data)
+                self.assertIs(paso2.data["user"]["es_mesa_control"], self.esperado[atributo])
+
     def test_patch_no_cambia_la_bandera(self):
         for user, valor in ((self.ventas, True), (self.mesa, False)):
             with self.subTest(usuario=user.username):

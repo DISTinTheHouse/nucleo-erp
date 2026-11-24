@@ -4746,7 +4746,7 @@ class MesaControlViewSet(CotizacionViewSet):
         # un superusuario o un admin de empresa su resultado no se usa —ambos
         # entran por su propia rama y salen por ``cotizaciones_visibles``—, así
         # que ni siquiera se ejecutan.
-        es_mesa_control = (
+        es_mesa_operativo = (
             not es_superuser
             and not es_admin_empresa
             and bool(empresa)
@@ -4756,7 +4756,7 @@ class MesaControlViewSet(CotizacionViewSet):
                 empresa=empresa,
             )
         )
-        if not es_superuser and not es_admin_empresa and not es_mesa_control:
+        if not es_superuser and not es_admin_empresa and not es_mesa_operativo:
             return Cotizacion.objects.none()
 
         base = cotizaciones_base().filter(estatus__in=[2, 5])  # EN REVISION o CAMBIOS SOLICITADOS
