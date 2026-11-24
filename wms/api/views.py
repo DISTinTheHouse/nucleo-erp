@@ -505,6 +505,10 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
         if not empresa:
             return qs.none()
         qs = qs.filter(packing__empresa=empresa)
+        # ``?estado=ACTIVO|CANCELADO``; sin parámetro, todos (cada uno trae su ``estado``).
+        estado = (self.request.query_params.get("estado") or "").upper()
+        if self.action == "list" and estado in Despacho.Estado.values:
+            qs = qs.filter(estado=estado)
         if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(packing__sucursal_id__in=user.sucursales_permitidas())

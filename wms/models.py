@@ -360,6 +360,16 @@ class Despacho(CancelacionMixin):
     def __str__(self):
         return str(self.id)
 
+    # El despacho no guarda empresa ni sucursal: son las de su packing. La bitácora de
+    # documentos (``auditoria.bitacora``) las lee por estos nombres.
+    @property
+    def empresa_id(self):
+        return self.packing.empresa_id if self.packing_id else None
+
+    @property
+    def sucursal_id(self):
+        return self.packing.sucursal_id if self.packing_id else None
+
 class DespachoDetalle(models.Model):
     despacho = models.ForeignKey(
         Despacho, on_delete=models.CASCADE, related_name="despacho_detalle"

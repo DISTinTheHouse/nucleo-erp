@@ -49,6 +49,7 @@ DOCUMENTOS = {
     "wms.Picking": Doc("picking", "folio", "estado", None, [("pedido", "pedido_id")]),
     "wms.Packing": Doc("packing", "folio", "estado", None, [("pedido", "pedido_id")]),
     "wms.Transferencia": Doc("transferencia", "folio", "status"),
+    "wms.Despacho": Doc("despacho", None, "estado", None, [("packing", "packing_id")]),
     "finanzas.Factura": Doc("factura", "folio", "estatus", "total", [("pedido", "pedido_id")]),
     "finanzas.FacturaProveedor": Doc("factura_proveedor", "folio", "estatus", "total",
                                      [("recepcion", "recepcion_id"), ("orden_compra", "oc_id")]),
