@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from catalogo.models import Producto, ProductoVariante
@@ -35,6 +36,7 @@ class _CanceladoPorNombreMixin(serializers.Serializer):
 
     cancelado_por_nombre = serializers.SerializerMethodField()
 
+    @extend_schema_field({"type": "string", "nullable": True})
     def get_cancelado_por_nombre(self, obj):
         return _nombre_usuario(obj.cancelado_por) if obj.cancelado_por_id else None
 
@@ -253,10 +255,13 @@ class TransferenciaListSerializer(_CanceladoPorNombreMixin, serializers.ModelSer
     usuario_nombre = serializers.SerializerMethodField()
     # Enlace original ↔ reversa (EC-949): la reversa apunta a la original con
     # ``reversa_de``; la original, a su reversa con ``reversa`` (``related_name``).
-    # Ambas viajan en el ``select_related`` del viewset. ``null`` si no hay.
-    reversa_de_folio = serializers.CharField(source="reversa_de.folio", read_only=True, default=None)
-    reversa = serializers.SerializerMethodField()
-    reversa_folio = serializers.SerializerMethodField()
+    # Ambas viajan en el ``select_related`` del viewset. ``null`` si no hay: sin
+    # reversa, el acceso inverso lanza ``ObjectDoesNotExist`` y DRF lo vuelve ``None``.
+    reversa_de_folio = serializers.CharField(
+        source="reversa_de.folio", read_only=True, default=None, allow_null=True
+    )
+    reversa = serializers.IntegerField(source="reversa.id", read_only=True, default=None, allow_null=True)
+    reversa_folio = serializers.CharField(source="reversa.folio", read_only=True, default=None, allow_null=True)
 
     class Meta:
         model = Transferencia
@@ -289,19 +294,6 @@ class TransferenciaListSerializer(_CanceladoPorNombreMixin, serializers.ModelSer
         # Mismo fallback que ``reporte-movimientos-periodo``: nombre completo y,
         # si el usuario no tiene first/last name, el email.
         return usuario.get_full_name().strip() or usuario.email
-
-    def _reversa(self, obj):
-        # El acceso inverso de un OneToOne sin fila lanza ``RelatedObjectDoesNotExist``
-        # (subclase de ``AttributeError``): ``getattr`` con default lo vuelve ``None``.
-        return getattr(obj, "reversa", None)
-
-    def get_reversa(self, obj):
-        reversa = self._reversa(obj)
-        return reversa.pk if reversa else None
-
-    def get_reversa_folio(self, obj):
-        reversa = self._reversa(obj)
-        return reversa.folio if reversa else None
 
 
 class TransferenciaRetrieveSerializer(TransferenciaListSerializer):
