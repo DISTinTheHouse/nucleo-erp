@@ -498,6 +498,10 @@ class OportunidadViewSet(viewsets.ModelViewSet):
         """Crea una cotización en Borrador ligada a la oportunidad. Desde ahí sigue el flujo de siempre."""
         oportunidad = self.get_object()
         _se_puede_cotizar(oportunidad)
+        # La cotización no enmascara al cliente: con uno oculto mostraría sus datos (#1347).
+        # Misma regla y mismo mensaje que ``OportunidadSerializer.validate_cliente``.
+        if not clientes_visibles(clientes_base(), request.user).filter(pk=oportunidad.cliente_id).exists():
+            raise ValidationError({"cliente": "Cliente no encontrado."})
         sucursal = getattr(request.user, "sucursal_default", None)
         if sucursal is not None and sucursal.empresa_id != oportunidad.empresa_id:
             raise ValidationError({"sucursal": "Tu sucursal no pertenece a la empresa de la oportunidad."})
