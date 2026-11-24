@@ -2515,6 +2515,14 @@ Mismo `PATCH /api/v1/ventas/pedidos/{id}/` y mismo `DELETE` de siempre; solo cam
 - `activo` ya no se escribe por PATCH (se ignora). La baja es `DELETE`, solo mesa de control → `400 {"permiso"}` para el resto.
 - Totales y snapshot fiscal siguen editables por PATCH: el backend aún no los recalcula desde los renglones.
 
+#### Cancelar: pre-orden y OC ligadas — `POST /api/v1/ventas/pedidos/{id}/cancelar/`
+
+Body `{"motivo": "..."}` (obligatorio → `400 {"motivo"}`). Además de devolver inventario y liberar reservas, en la misma transacción:
+
+- **OC ligadas** (`pedido` o `pedidos`): si alguna está en `1` Borrador o `2` Por autorizar → `400 {"ordenes_compra": "Tiene OC en borrador o por autorizar: ..."}`; compras la cancela o autoriza primero. Las autorizadas / parcialmente recibidas **no se cancelan solas**: quedan con `pedido_cancelado: true` y `fecha_pedido_cancelado` (visibles en `GET /api/v1/compras/ordenes/`) para que compras decida.
+- **Pre-orden abierta** del pedido: se cancela (evento `cancelada` con el motivo). Necesidades `pendiente` → `cancelada`; las ya en una OC → `huerfana`.
+- Respuesta `200` agrega `pre_ordenes_canceladas: [{id, necesidades_liberadas, necesidades_huerfanas}]` y `ordenes_compra_marcadas: [{id, folio}]`; lo mismo queda en el `AuditoriaEvento` `CANCELAR` del pedido.
+
 ### Clasificar pedido (widget liviano en el detalle)
 
 Los **dos únicos campos manuales** que llena mesa de control directamente sobre el documento maestro del pedido: `clasificacion` y `fecha_confirmacion` (compromiso de entrega). **No es un endpoint nuevo** — viajan en el mismo `PATCH /api/v1/ventas/pedidos/{id}/` que ya usa el resto de la edición del pedido; el backend solo exige mesa de control cuando el body incluye alguno de esos dos campos.
@@ -3138,6 +3146,19 @@ Ya NO trae `movimiento_id`/`movimiento_inventario_id` — no hubo movimiento de 
 `movimiento_id`/`movimiento_inventario_id` salen `null` cuando nada se aprobó (como en este ejemplo); si algo se aprueba, traen los ids reales igual que antes traía `recepciones/onboarding/`.
 
 ---
+
+## 🧾 Compras - Devolución a proveedor (rechazo / cuarentena de calidad)
+
+Base: `/api/v1/compras/devoluciones-proveedor/`. Permisos: leer `R-WMS-RECEPCIONES`, crear/cancelar `C-WMS-RECEPCIONES` (`403`). Acotado a la empresa del usuario (otra empresa: `404`).
+
+- `GET .../pendientes/?calidad_inspeccion={id}` → renglones `rechazo`/`cuarentena` con `cantidad_pendiente` (rechazada, o inspeccionada − aprobada, menos lo ya devuelto).
+- `POST .../` body `{"calidad_inspeccion": id, "motivo": "...", "detalles": [{"calidad_detalle": id, "cantidad": "1"}]}` (`detalles` opcional = todo lo pendiente) → `201` con el documento. Errores `400`: sin `motivo`, inspección anulada, nada pendiente, cantidad mayor a la pendiente.
+- `POST .../{id}/cancelar/` body `{"motivo"}` → `200`; llena `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`. Ya cancelada → `400`.
+- `GET .../` (filtros `recepcion`, `calidad_inspeccion`, `orden_compra`, `proveedor`, `estatus`) y `GET .../{id}/`.
+
+Campos: `folio` (serie `DEVOLUCION_PROVEEDOR` de la sucursal si existe; si no `DVP-AAMMDDhhmmss…`), `estatus` (`aplicada`/`cancelada`), `motivo`, `fecha`, `usuario`, `total` (cantidad × costo MXN del renglón de la OC), `movimiento_inventario`, `detalles[]` (`cantidad`, `costo_unitario`, `importe`).
+
+Inventario: lo rechazado nunca entró a `Existencia`, así que la **SALIDA** (y la ENTRADA al cancelar) es de delta 0: queda el movimiento ligado a la recepción, costeado con `inventarios.services.costeo` al promedio vigente, sin descontar stock. Cada alta/cancelación deja un `AuditoriaEvento` (`devoluciones_proveedor`) y entra en la bitácora de documentos (`tipo=devolucion_proveedor`, origen la recepción).
 
 ## 🧾 Compras - Encuadre RFID de Recepción
 

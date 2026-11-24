@@ -69,6 +69,8 @@ DOCUMENTOS = {
     "inventarios.AjusteInventario": Doc("ajuste_inventario"),
     # Sin empresa propia: ``empresa_id``/``sucursal_id`` son propiedades de su recepción.
     "compras.CalidadInspeccion": Doc("calidad_inspeccion", None, "estado", None, [("recepcion", "recepcion_id")]),
+    "compras.DevolucionProveedor": Doc("devolucion_proveedor", "folio", "estatus", "total",
+                                       [("recepcion", "recepcion_id"), ("orden_compra", "orden_compra_id")]),
     "compras.RecepcionRFIDEncuadre": Doc("encuadre_rfid", None, "estatus", None, [("orden_compra", "orden_compra_id")]),
 }
 

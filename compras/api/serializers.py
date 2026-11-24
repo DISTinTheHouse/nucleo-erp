@@ -240,12 +240,14 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'motivo_cierre',
             'fecha_cierre',
             'cerrada_por',
+            'pedido_cancelado',
+            'fecha_pedido_cancelado',
             'activo',
             'created_at',
             'updated_at',
         ]
         # Solo los escriben ``cancelar`` y ``cerrar-saldo``.
-        read_only_fields = ['motivo_cancelacion', 'saldo_cerrado', 'motivo_cierre', 'fecha_cierre', 'cerrada_por']
+        read_only_fields = ['motivo_cancelacion', 'pedido_cancelado', 'fecha_pedido_cancelado', 'saldo_cerrado', 'motivo_cierre', 'fecha_cierre', 'cerrada_por']
         extra_kwargs = {
             'folio': {'required': False, 'allow_null': True},
             'solicitud_compra': {'required': False, 'allow_null': True},

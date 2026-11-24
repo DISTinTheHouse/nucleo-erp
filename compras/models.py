@@ -178,6 +178,10 @@ class OrdenCompra(StatusLifecycleModel):
     cerrada_por = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
     )
+    # ``POST pedidos/{id}/cancelar/`` con la OC ya autorizada: no se cancela sola,
+    # queda marcada para que compras decida (cancelarla o quedarse el material).
+    pedido_cancelado = models.BooleanField(default=False)
+    fecha_pedido_cancelado = models.DateTimeField(null=True, blank=True)
 
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -676,3 +680,67 @@ class EnvioProveedor(models.Model):
 
     def __str__(self):
         return str(self.id)
+
+class DevolucionProveedor(models.Model):
+    """Devolución a proveedor de lo que calidad rechazó o puso en cuarentena.
+
+    Lo rechazado nunca entró a ``Existencia`` (calidad solo abona lo aprobado), así
+    que la SALIDA de inventario que genera es de delta 0: deja el movimiento formal y
+    costeado (``inventarios.services.costeo``) sin descontar un stock que no existe.
+    ``total`` = cantidad × costo de la OC (lo que se reclama al proveedor).
+    """
+
+    class Estatus(models.TextChoices):
+        APLICADA = "aplicada", "Aplicada"
+        CANCELADA = "cancelada", "Cancelada"
+
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE)
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT)
+    folio = models.CharField(max_length=30, unique=True, null=True, blank=True)
+    calidad_inspeccion = models.ForeignKey(CalidadInspeccion, on_delete=models.PROTECT, related_name='devoluciones_proveedor')
+    recepcion = models.ForeignKey(Recepcion, on_delete=models.PROTECT, related_name='devoluciones_proveedor')
+    orden_compra = models.ForeignKey(OrdenCompra, on_delete=models.SET_NULL, null=True, blank=True, related_name='devoluciones_proveedor')
+    proveedor = models.ForeignKey(Proveedor, on_delete=models.SET_NULL, null=True, blank=True, related_name='devoluciones')
+    almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT, related_name='+')
+    estatus = models.CharField(max_length=10, choices=Estatus.choices, default=Estatus.APLICADA, db_index=True)
+    motivo = models.TextField()
+    fecha = models.DateTimeField(auto_now_add=True)
+    usuario = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
+    total = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    movimiento_inventario = models.ForeignKey(
+        'inventarios.MovimientoInventario', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    motivo_cancelacion = models.TextField(blank=True, default='')
+    fecha_cancelacion = models.DateTimeField(null=True, blank=True)
+    cancelado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    activo = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'devoluciones_proveedor'
+        verbose_name = 'Devolución a proveedor'
+        verbose_name_plural = 'Devoluciones a proveedor'
+        indexes = [models.Index(fields=['empresa', '-fecha'], name='ix_devprov_emp_fecha')]
+
+    def __str__(self):
+        return self.folio or str(self.pk)
+
+
+class DevolucionProveedorDetalle(models.Model):
+    devolucion = models.ForeignKey(DevolucionProveedor, on_delete=models.CASCADE, related_name='detalles')
+    calidad_detalle = models.ForeignKey(CalidadInspeccionDetalle, on_delete=models.PROTECT, related_name='devoluciones')
+    recepcion_detalle = models.ForeignKey(RecepcionDetalle, on_delete=models.PROTECT, related_name='+')
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, null=True, blank=True, related_name='+')
+    producto_variante = models.ForeignKey(ProductoVariante, on_delete=models.PROTECT, null=True, blank=True, related_name='+')
+    variante_produccion = models.ForeignKey(VarianteProductoProduccion, on_delete=models.PROTECT, null=True, blank=True, related_name='+')
+    cantidad = models.DecimalField(max_digits=14, decimal_places=4)
+    costo_unitario = models.DecimalField(max_digits=18, decimal_places=8, default=0)
+    importe = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+
+    class Meta:
+        db_table = 'devoluciones_proveedor_detalle'
+        verbose_name = 'Devolución a proveedor detalle'
+        verbose_name_plural = 'Devoluciones a proveedor detalle'
