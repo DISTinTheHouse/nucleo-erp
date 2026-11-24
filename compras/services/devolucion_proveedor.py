@@ -36,8 +36,8 @@ def _folio(empresa_id, sucursal_id):
     if serie is not None:
         try:
             folio, consecutivo, anio = serie.get_siguiente_folio()
-        except ValueError as exc:
-            raise ValidationError({"folio": f"Serie {serie.serie}: {exc}."})
+        except ValueError:
+            raise ValidationError({"folio": f"Serie {serie.serie}: no fue posible generar el folio."})
         serie.folio_actual, serie.ultimo_anio = consecutivo, anio
         serie.save(update_fields=["folio_actual", "ultimo_anio"])
         return folio
