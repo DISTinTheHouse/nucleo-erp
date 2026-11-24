@@ -32,7 +32,7 @@ una sola consulta agregada: nada por fila.
 from decimal import Decimal
 
 from django.contrib.postgres.aggregates import ArrayAgg
-from django.db.models import Count, DateField, F, Func, IntegerField, OuterRef, Q, Subquery, Sum, Value
+from django.db.models import Count, DateField, Exists, F, Func, IntegerField, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.functions import Coalesce, JSONObject, NullIf, Trim, Trunc
 from rest_framework.exceptions import ValidationError
 
@@ -165,6 +165,15 @@ def filtrar(request, qs, ver_importes):
     if confirmado is not None:
         qs = qs.filter(fecha_confirmacion__isnull=not confirmado)
 
+    retenido = booleano_param(request, "retenido", None)
+    if retenido is not None:
+        qs = qs.filter(retenido=retenido)
+
+    # Detenidos antes de almacén: programados, vigentes, sin ningún picking vivo.
+    sin_surtir = booleano_param(request, "sin_surtir", None)
+    if sin_surtir is not None:
+        qs = qs.filter(SIN_SURTIR_Q if sin_surtir else ~SIN_SURTIR_Q)
+
     mes = mes_param(request, "mes")
     if mes:
         qs = qs.filter(created_at__year=mes[0], created_at__month=mes[1])
@@ -270,6 +279,15 @@ def filas_exportacion(qs, ver_importes):
 # --- KPIs de mesa de control ------------------------------------------------------
 
 
+# Programado, vigente y sin un solo picking vivo: trabajo que mesa liberó y almacén
+# aún no toma. Subconsulta por FK indexada (``picking.pedido_id``).
+SIN_SURTIR_Q = (
+    ~Q(estatus=Pedido.ESTATUS_CANCELADO)
+    & Q(programacion_conf__programaciones__0__isnull=False)
+    & ~Exists(Picking.objects.filter(pedido_id=OuterRef("pk")).exclude(estado=Picking.Estado.CANCELADO))
+)
+
+
 def kpis_mesa(qs, ver_importes):
     """Conteos y valor por moneda del conjunto filtrado, en UNA consulta agrupada por
     moneda. ``total``, ``confirmados``, ``por_confirmar`` y ``por_moneda`` excluyen
@@ -285,6 +303,8 @@ def kpis_mesa(qs, ver_importes):
             total=Count("id", filter=vigente),
             confirmados=Count("id", filter=vigente & Q(fecha_confirmacion__isnull=False)),
             cancelados=Count("id", filter=~vigente),
+            retenidos=Count("id", filter=vigente & Q(retenido=True)),
+            sin_surtir=Count("id", filter=SIN_SURTIR_Q),
             valor=Sum("gran_total", filter=vigente),
         )
         .order_by("moneda__codigo_iso", "moneda_id")
@@ -304,6 +324,8 @@ def kpis_mesa(qs, ver_importes):
         "confirmados": confirmados,
         "por_confirmar": total - confirmados,
         "cancelados": sum(f["cancelados"] for f in filas),
+        "retenidos": sum(f["retenidos"] for f in filas),
+        "sin_surtir": sum(f["sin_surtir"] for f in filas),
         "por_moneda": por_moneda,
         "puede_ver_importes": ver_importes,
     }

@@ -197,6 +197,10 @@ def _pedido_en_alcance(serializer, pedido, etiqueta_orden, destino):
         raise serializers.ValidationError(
             f"No tiene acceso a la sucursal del pedido para generar la orden de {etiqueta_orden}."
         )
+    # Mesa de control congeló el pedido: no nace trabajo nuevo sobre él.
+    if pedido.retenido:
+        from ventas.services.retencion_service import mensaje_retenido
+        raise serializers.ValidationError(mensaje_retenido(pedido))
     # Mismo criterio que el GET de onboarding: solo pedidos que Mesa de Control
     # programó hacia este destino.
     from produccion.api.views import _programado_para_destino
@@ -753,6 +757,9 @@ class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSeri
             raise serializers.ValidationError(f'El pedido {pedido.folio or pedido.pk} está dado de baja.')
         if pedido.estatus == Pedido.ESTATUS_CANCELADO:
             raise serializers.ValidationError(f'El pedido {pedido.folio or pedido.pk} está cancelado.')
+        if pedido.retenido:
+            from ventas.services.retencion_service import mensaje_retenido
+            raise serializers.ValidationError(mensaje_retenido(pedido))
         sucursal_op = self._sucursal_op_id()
         if sucursal_op is not None and pedido.sucursal_id != sucursal_op:
             raise serializers.ValidationError(

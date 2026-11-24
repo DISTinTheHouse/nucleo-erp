@@ -195,13 +195,15 @@ class BitacoraDocumentoViewSet(viewsets.ReadOnlyModelViewSet):
             raise ValidationError({"documento_id": "Es obligatorio."})
         user = request.user
         modelo = apps.get_model(TIPOS[tipo])
-        raiz = modelo.objects.filter(pk=doc_id, empresa_id=getattr(user, "empresa_id", None))
+        # El despacho no guarda empresa ni sucursal: son las de su packing.
+        prefijo = "packing__" if tipo == "despacho" else ""
+        raiz = modelo.objects.filter(pk=doc_id, **{f"{prefijo}empresa_id": getattr(user, "empresa_id", None)})
         # #1073: la raíz con la misma regla que sus eventos; fuera de alcance → 404.
         if (
             _acotado_por_sucursal(user) and tipo not in TIPOS_POR_EMPRESA
-            and any(f.name == "sucursal" for f in modelo._meta.get_fields())
+            and (prefijo or any(f.name == "sucursal" for f in modelo._meta.get_fields()))
         ):
-            raiz = raiz.filter(sucursal_id__in=user.sucursales_permitidas())
+            raiz = raiz.filter(**{f"{prefijo}sucursal_id__in": user.sucursales_permitidas()})
         if not raiz.exists():
             raise NotFound("Documento no encontrado.")
 

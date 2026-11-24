@@ -235,6 +235,8 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids, limite_pedidos=LIMIT
             estatus__in=[3, 4],
             # Solo se surte lo que mesa de control ya programó (``PATCH /pedidos/{id}/programar/``).
             programacion_conf__programaciones__0__isnull=False,
+            # Retenido por mesa de control: no se ofrece (el alta lo rechazaría).
+            retenido=False,
         )
         # Sin nada pendiente por surtir no se ofrece: el alta lo rechazaría (#823).
         # Va antes del tope, para que el corte cuente solo pedidos surtibles.

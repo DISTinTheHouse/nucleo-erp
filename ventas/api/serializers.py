@@ -814,6 +814,8 @@ class PedidoListSerializer(serializers.ModelSerializer):
             "piezas_surtidas",
             "piezas_programadas",
             "vendedor_nombre",
+            "retenido",
+            "motivo_retencion",
         ]
 
 class PedidoSerializer(serializers.ModelSerializer):
@@ -1008,6 +1010,8 @@ class PedidoSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'empresa',
             'motivo_cancelacion',  # solo vía cancelar/ (#1118)
+            # Solo vía retener/ y liberar/ (mesa de control).
+            'retenido', 'motivo_retencion', 'fecha_retencion', 'retenido_por',
             # Sólo se escribe vía ``PATCH /pedidos/{id}/programar/``, que valida
             # destino/cantidades y sella fecha/usuario en el servidor. Aquí de
             # solo lectura para que un PATCH genérico no se salte ese flujo.
@@ -1193,6 +1197,11 @@ class PedidoMesaControlHeaderSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "fecha_confirmacion",
+            # Solo vía retener/ y liberar/.
+            "retenido",
+            "motivo_retencion",
+            "fecha_retencion",
+            "retenido_por",
         ]
         # Sólo se escribe vía ``PATCH /pedidos/{id}/programar/``: aceptarlo aquí
         # dejaba que un formulario abierto antes revirtiera la programación nueva.

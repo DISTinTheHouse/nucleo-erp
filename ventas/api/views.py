@@ -72,6 +72,7 @@ from ventas.api.serializers import (
 from nucleo.kpis import entero_param, rango_fechas, validar_parametros
 from nucleo.listados import PaginacionOpcionalLimitOffset, estatus_param
 from ventas.services import subtotales
+from ventas.services.retencion_service import registrar_bitacora
 from nucleo.models import SerieFolio, Empresa
 from ventas.api import cotizaciones_listado
 from notificaciones.services.notificacion_service import crear_notificacion_usuario
@@ -3556,6 +3557,33 @@ class PedidoViewSet(viewsets.ModelViewSet):
         serializer.context.update(self._contexto_detalle(serializer.instance))
 
     @staticmethod
+    def _exigir_programacion_cubre_surtido(pedido, programaciones):
+        """Lo que almacén ya surtió hacia un destino (pickings y líneas vivos) no puede
+        quedar sin programación: reprogramar por debajo dejaría piezas surtidas sin
+        destino. Para bajar más, primero se cancela el picking. Una consulta agrupada."""
+        surtido = dict(
+            PickingDetalle.objects.filter(picking__pedido=pedido, picking__programacion_destino__isnull=False)
+            .exclude(picking__estado=Picking.Estado.CANCELADO)
+            .exclude(estado=PickingDetalle.EstadoLinea.CANCELADA)
+            .order_by()
+            .values_list("picking__programacion_destino")
+            .annotate(total=Sum("cantidad_solicitada"))
+        )
+        programado = {}
+        for p in programaciones:
+            programado[p["destino"]] = programado.get(p["destino"], 0) + int(p["cantidad"] or 0)
+        faltan = [
+            f"{destino}: {int(total)} pzs ya surtidas, {programado.get(destino, 0)} programadas"
+            for destino, total in sorted(surtido.items())
+            if total and programado.get(destino, 0) < total
+        ]
+        if faltan:
+            raise ValidationError({"programaciones": (
+                "No puedes programar menos de lo que almacén ya surtió (" + "; ".join(faltan)
+                + "). Cancela primero el picking."
+            )})
+
+    @staticmethod
     def _exigir_programable(pedido):
         """Solo se programa un pedido confirmado y no cancelado (EC-750). Sin consultas:
         ambos campos vienen en la fila ya cargada (con lock en el PATCH)."""
@@ -3638,6 +3666,65 @@ class PedidoViewSet(viewsets.ModelViewSet):
             "id": pedido.pk, "folio": pedido.folio, "estatus": pedido.estatus, "activo": False,
             "motivo": motivo, "inventario_devuelto": devuelto, "reservas_liberadas": reservas,
         })
+
+    @action(detail=True, methods=["post"], url_path="retener")
+    def retener(self, request, pk=None):
+        """Congela el pedido sin cancelarlo: mientras esté retenido no se surte, empaca
+        ni despacha, ni se crean OP/OB/OR/OCM sobre él. Solo mesa de control; ``motivo``
+        obligatorio. Lo que ya está abierto sigue; se cancela con su propio endpoint."""
+        self._require_mesa_control(request.user)
+        motivo = str(request.data.get("motivo") or "").strip()[:500] if hasattr(request.data, "get") else ""
+        if not motivo:
+            raise ValidationError({"motivo": "Indica el motivo de la retención."})
+        base = self.get_object()
+        with transaction.atomic():
+            pedido = Pedido.objects.select_for_update(of=("self",)).get(pk=base.pk)
+            if pedido.estatus == Pedido.ESTATUS_CANCELADO:
+                raise ValidationError({"pedido": "El pedido está cancelado."})
+            if pedido.retenido:
+                raise ValidationError({"pedido": "El pedido ya está retenido."})
+            pedido.retenido, pedido.motivo_retencion = True, motivo
+            pedido.fecha_retencion, pedido.retenido_por = timezone.now(), request.user
+            pedido.save(update_fields=["retenido", "motivo_retencion", "fecha_retencion", "retenido_por", "updated_at"])
+            self._auditar_retencion(request, pedido, "RETENER", {"retenido": False}, {"retenido": True, "motivo": motivo})
+            registrar_bitacora(pedido, request.user, retenido=True)
+        return Response(self._respuesta_retencion(pedido))
+
+    @action(detail=True, methods=["post"], url_path="liberar")
+    def liberar(self, request, pk=None):
+        """Quita la retención; el pedido sigue su flujo donde iba. ``comentario`` opcional."""
+        self._require_mesa_control(request.user)
+        comentario = str(request.data.get("comentario") or "").strip()[:500] if hasattr(request.data, "get") else ""
+        base = self.get_object()
+        with transaction.atomic():
+            pedido = Pedido.objects.select_for_update(of=("self",)).get(pk=base.pk)
+            if not pedido.retenido:
+                raise ValidationError({"pedido": "El pedido no está retenido."})
+            antes = {"retenido": True, "motivo": pedido.motivo_retencion,
+                     "fecha_retencion": pedido.fecha_retencion.isoformat() if pedido.fecha_retencion else None,
+                     "retenido_por": pedido.retenido_por_id}
+            pedido.retenido, pedido.motivo_retencion = False, ""
+            pedido.fecha_retencion, pedido.retenido_por = None, None
+            pedido.save(update_fields=["retenido", "motivo_retencion", "fecha_retencion", "retenido_por", "updated_at"])
+            self._auditar_retencion(request, pedido, "LIBERAR", antes, {"retenido": False, "comentario": comentario})
+            registrar_bitacora(pedido, request.user, retenido=False)
+        return Response(self._respuesta_retencion(pedido))
+
+    @staticmethod
+    def _respuesta_retencion(pedido):
+        return {
+            "id": pedido.pk, "folio": pedido.folio, "retenido": pedido.retenido,
+            "motivo_retencion": pedido.motivo_retencion, "fecha_retencion": pedido.fecha_retencion,
+            "retenido_por": pedido.retenido_por_id,
+        }
+
+    def _auditar_retencion(self, request, pedido, accion, antes, despues):
+        ip, user_agent = CotizacionViewSet()._get_request_meta(request)
+        AuditoriaEvento.objects.create(
+            empresa_id=pedido.empresa_id, usuario=request.user, modulo="ventas", accion=accion,
+            tabla="pedidos", id_registro=str(pedido.pk), ip=ip, user_agent=user_agent,
+            antes_json=antes, despues_json=despues,
+        )
 
     def _devolver_inventario_pedido(self, pedido):
         """Devuelve a cada existencia lo que este pedido le sigue debiendo: el neto de su
@@ -3919,6 +4006,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                     "fecha": sello.get("fecha"), "usuario_id": sello.get("usuario_id"),
                     "usuario_nombre": sello.get("usuario_nombre"),
                 })
+            self._exigir_programacion_cubre_surtido(pedido, programaciones)
             pedido.programacion_conf = {"programaciones": programaciones}
             pedido.save(update_fields=["programacion_conf", "updated_at"])
 

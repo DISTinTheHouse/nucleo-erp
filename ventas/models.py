@@ -494,6 +494,14 @@ class Pedido(StatusLifecycleModel):
     )
     # Lo llena ``POST /pedidos/{id}/cancelar/`` (#1118).
     motivo_cancelacion = models.CharField(max_length=500, null=True, blank=True)
+    # Retención de mesa de control (``POST /pedidos/{id}/retener/`` y ``liberar/``):
+    # congela el pedido sin cancelarlo; ``ventas/services/retencion_service.py``.
+    retenido = models.BooleanField(default=False)
+    motivo_retencion = models.CharField(max_length=500, blank=True, default="")
+    fecha_retencion = models.DateTimeField(null=True, blank=True)
+    retenido_por = models.ForeignKey(
+        "usuarios.Usuario", on_delete=models.PROTECT, related_name="+", null=True, blank=True
+    )
 
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)

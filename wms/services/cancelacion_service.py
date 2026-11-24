@@ -37,9 +37,13 @@ PERMISO_CANCELAR = "WMS-CANCELAR"
 
 
 def exigir_permiso(user):
-    """Cancelar deshace trabajo de almacén: admin de empresa, superuser o el permiso
-    ``WMS-CANCELAR`` (que se da por rol o como GRANT individual)."""
+    """Cancelar deshace trabajo de almacén: admin de empresa, superuser, departamento de
+    mesa de control o el permiso ``WMS-CANCELAR`` (por rol o como GRANT individual)."""
     if user.is_superuser or user.is_admin_empresa or user.tiene_permiso(PERMISO_CANCELAR):
+        return
+    # Mesa de control dirige el flujo del pedido: puede deshacer el trabajo de almacén.
+    from seguridad.role_identity import CLAVE_DEPARTAMENTO_MESA_CONTROL, usuario_tiene_clave_departamento
+    if usuario_tiene_clave_departamento(user, CLAVE_DEPARTAMENTO_MESA_CONTROL, empresa=user.empresa):
         return
     raise PermissionDenied("No tienes permiso para cancelar documentos de almacén.")
 

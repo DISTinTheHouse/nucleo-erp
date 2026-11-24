@@ -1,4 +1,5 @@
 from rest_framework.exceptions import ValidationError
+from ventas.services.retencion_service import exigir_no_retenido
 
 
 def parse_pk(raw):
@@ -45,6 +46,7 @@ def validar_contexto_picking(pedido, almacen, almacen_destino, operador, user):
         raise ValidationError({"pedido": "El pedido no pertenece a la empresa del usuario."})
     if pedido.estatus == pedido.ESTATUS_CANCELADO:
         raise ValidationError({"pedido": "El pedido está CANCELADO; no se puede surtir."})
+    exigir_no_retenido(pedido)
     # Mismas reglas que el listado del onboarding (#822).
     if not pedido.activo or pedido.estatus not in (3, 4):
         raise ValidationError({"pedido": "El pedido no está autorizado ni en proceso; no se puede surtir."})
