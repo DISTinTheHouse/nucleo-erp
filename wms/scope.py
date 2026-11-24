@@ -7,9 +7,9 @@ superusuario veía pickings, packings y transferencias de todas las empresas, y
 el PDF de un documento ajeno salía con el encabezado de su empresa activa.
 
 Lo usan ``TransferenciaViewSet``, ``PickingViewSet`` y ``PackingViewSet``
-(list, retrieve y, vía ``get_object``, ``trasladar``). Sólo
-``DespachoViewSet.get_queryset`` y ``EtiquetaRFIDViewSet.get_queryset`` conservan
-la rama global del superusuario (#1148). Las lecturas RFID (``scans/``,
+(list, retrieve y, vía ``get_object``, ``trasladar``). ``DespachoViewSet`` y
+``EtiquetaRFIDViewSet`` tienen su propio ``get_queryset`` con la misma regla
+(empresa activa, superusuario incluido, #1148). Las lecturas RFID (``scans/``,
 ``scanner-stats/`` y el purge) siguen la empresa activa desde EC-884, en
 ``RfidScanQuerySet.visibles_para``: ``RfidScan`` no tiene ``sucursal`` y no pasan
 por aquí.

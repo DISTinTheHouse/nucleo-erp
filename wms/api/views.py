@@ -81,7 +81,9 @@ class TransferenciaViewSet(
         qs = (
             super()
             .get_queryset()
-            .select_related("almacen_origen", "almacen_destino", "usuario")
+            .select_related(
+                "almacen_origen", "almacen_destino", "usuario", "cancelado_por", "reversa", "reversa_de"
+            )
             .order_by("-fecha_creacion", "-id")
         )
 
@@ -135,7 +137,9 @@ class TransferenciaViewSet(
     def revertir(self, request, pk=None):
         """Crea la TR inversa (folio propio, ``reversa_de``) y deja la original CANCELADA.
         Body ``{"motivo": "..."}`` (obligatorio). Admin de empresa, superuser o permiso
-        ``WMS-CANCELAR``. Otra empresa: 404. No borra: el documento queda cancelado con su folio."""
+        ``WMS-CANCELAR``. Otra empresa: 404. No borra: el documento queda cancelado con su folio.
+        TR de un picking (cancelado): sólo la última viva de su cadena, y el picking queda en
+        el origen de la TR revertida (EC-949)."""
         tr = self.get_object()
         cancelacion_service.exigir_permiso(request.user)
         motivo = cancelacion_service.motivo_de(request.data)
@@ -213,6 +217,7 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
                 "oleada",
                 "zona_almacen",
                 "lote",
+                "cancelado_por",
             )
             .prefetch_related(
                 Prefetch(
@@ -390,7 +395,8 @@ class PackingViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveMod
             super()
             .get_queryset()
             .select_related(
-                "pedido", "pedido__cliente", "picking", "picking__almacen", "operador", "usuario"
+                "pedido", "pedido__cliente", "picking", "picking__almacen", "operador", "usuario",
+                "cancelado_por",
             )
             .prefetch_related(
                 Prefetch(
@@ -475,6 +481,7 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
                 "envio__transportista",
                 "chofer",
                 "usuario",
+                "cancelado_por",
             )
             .prefetch_related(
                 Prefetch(

@@ -3230,3 +3230,424 @@ class PickingListadoServidorTests(TestCase):
                 resp = self.api.post(f"{url}?{params}", cuerpo, format="json")
                 self.assertEqual(resp.status_code, 400, resp.content)
                 self.assertEqual(resp.json(), limpio.json())
+
+
+class CancelacionesEC949Tests(TestCase):
+    """EC-949: quién canceló (``cancelado_por_nombre``), enlace original ↔ reversa de
+    TR y la cadena de TR de un picking en ``revertir/`` (sólo la última, y el picking
+    queda en el almacén donde quedan las prendas)."""
+
+    URL_TR = "/api/v1/wms/transferencias/"
+    URL_PICKINGS = "/api/v1/wms/pickings/"
+    URL_PACKINGS = "/api/v1/wms/packings/"
+    URL_DESPACHOS = "/api/v1/wms/despachos/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import Talla
+        from inventarios.models import Almacen, Existencia
+        from nucleo.models import Moneda, SerieFolio
+        from terceros.models import Cliente
+        from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+
+        cls.empresa = Empresa.objects.create(codigo="ec949", razon_social="EC949 SA")
+        cls.otra_empresa = Empresa.objects.create(codigo="ec949-x", razon_social="Otra SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTZ", nombre="Matriz")
+        cls.admin = Usuario.objects.create(
+            username="ec949-admin", email="ec949-admin@example.com", first_name="Ana", last_name="López",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        # Sin nombre: ``cancelado_por_nombre`` cae al correo.
+        cls.sin_nombre = Usuario.objects.create(
+            username="ec949-sn", email="ec949-sn@example.com",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.intruso = Usuario.objects.create(
+            username="ec949-x", email="ec949-x@example.com", empresa=cls.otra_empresa, is_admin_empresa=True,
+        )
+        for tipo, prefijo in (("Picking", "PK"), ("Transferencia", "TR")):
+            SerieFolio.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento=tipo, serie="A", prefijo=prefijo,
+            )
+        kw = dict(empresa=cls.empresa, sucursal=cls.sucursal, permite_salida=True, permite_entrada=True)
+        cls.terminado = Almacen.objects.create(codigo="PT", nombre="Terminado", **kw)
+        cls.bordados = Almacen.objects.create(codigo="BOR", nombre="Bordados", **kw)
+        cls.apartados = Almacen.objects.create(codigo="APA", nombre="Apartados", **kw)
+        cls.producto = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera", codigo="EC949"
+        )
+        # Bordados ya tiene piezas del mismo SKU que no son del picking: sin la regla de
+        # la cadena, revertir el alta se las llevaría en vez de fallar por inventario.
+        Existencia.objects.create(producto=cls.producto, almacen=cls.terminado, stock=10, cantidad=Decimal("10"))
+        Existencia.objects.create(producto=cls.producto, almacen=cls.bordados, stock=10, cantidad=Decimal("10"))
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente")
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=moneda, folio="P-949",
+            estatus=3, programacion_conf={"programaciones": [{"destino": "APARTADO", "cantidad": 4}]},
+            persona_pagos="Pagos", correo_facturas="ec949@example.com", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        detalle = PedidoDetalle.objects.create(pedido=cls.pedido, producto=cls.producto)
+        cls.talla_row = PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=Talla.objects.create(nombre="EC949-M"), cantidad=4
+        )
+
+    def _api(self, user=None):
+        api = APIClient()
+        api.force_authenticate(user or self.admin)
+        return api
+
+    def _filas(self, resp):
+        self.assertEqual(resp.status_code, 200, resp.content)
+        datos = resp.json()
+        return datos.get("results", datos) if isinstance(datos, dict) else datos
+
+    def _existencias(self):
+        from inventarios.models import Existencia
+        return {
+            almacen.pk: sum(
+                (e.cantidad for e in Existencia.objects.filter(producto=self.producto, almacen=almacen)),
+                Decimal("0"),
+            )
+            for almacen in (self.terminado, self.bordados, self.apartados)
+        }
+
+    def _alta(self):
+        """Picking real: el alta crea la TR terminado → bordados (4 piezas)."""
+        from wms.models import Picking
+        resp = self._api().post(self.URL_PICKINGS, {
+            "pedido": self.pedido.pk, "operador": self.admin.pk,
+            "almacen": self.terminado.pk, "almacen_destino": self.bordados.pk,
+            "picking_detalle": [{"pedido_detalle_talla": self.talla_row.pk, "cantidad_asignada": "4"}],
+        }, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return Picking.objects.get(pk=resp.json()["id"])
+
+    def _trasladar(self, picking, almacen):
+        resp = self._api().post(
+            f"{self.URL_PICKINGS}{picking.pk}/trasladar/", {"almacen": almacen.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def _cancelar(self, url, doc_id, user=None):
+        return self._api(user).post(f"{url}{doc_id}/cancelar/", {"motivo": "Prueba EC-949"}, format="json")
+
+    def _revertir(self, tr, user=None):
+        return self._api(user).post(f"{self.URL_TR}{tr.pk}/revertir/", {"motivo": "Prueba EC-949"}, format="json")
+
+    def _almacen_actual(self, picking):
+        """``(almacen_actual del detalle, almacenes cuyo ?almacen_actual= lo lista)``."""
+        detalle = self._api().get(f"{self.URL_PICKINGS}{picking.pk}/").json()
+        en_filtro = {
+            almacen.pk for almacen in (self.terminado, self.bordados, self.apartados)
+            if picking.pk in {f["id"] for f in self._filas(
+                self._api().get(f"{self.URL_PICKINGS}?resumen=1&almacen_actual={almacen.pk}")
+            )}
+        }
+        return detalle["almacen_actual"], en_filtro
+
+    def _tr_manual(self, origen, destino, cantidad="1"):
+        from wms.services.transferencia_service import TransferenciaService
+        return TransferenciaService.handle_store(
+            {"almacen_origen": origen, "almacen_destino": destino, "observaciones": "Manual EC-949",
+             "transferencia_detalle": [{"producto": self.producto, "cantidad": Decimal(cantidad)}]},
+            self.admin,
+        )
+
+    def _picking_orm(self, folio, cancelado_por=None):
+        from django.utils import timezone
+
+        from wms.models import Picking
+        cancelacion = {
+            "estado": Picking.Estado.CANCELADO, "cancelado_por": cancelado_por,
+            "fecha_cancelacion": timezone.now(), "motivo_cancelacion": "x",
+        } if cancelado_por else {}
+        return Picking.objects.create(
+            folio=folio, empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido, operador=self.admin,
+            almacen=self.terminado, usuario=self.admin, **cancelacion,
+        )
+
+    def _packing_orm(self, folio, picking, cancelado_por=None):
+        from wms.models import Estado, Packing
+        cancelacion = {"estado": Estado.CANCELADO, "cancelado_por": cancelado_por} if cancelado_por else {}
+        return Packing.objects.create(
+            folio=folio, empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido, picking=picking,
+            operador=self.admin, usuario=self.admin, **cancelacion,
+        )
+
+    def _despacho_orm(self, packing, cancelado_por=None):
+        from wms.models import Despacho
+        cancelacion = {"estado": Despacho.Estado.CANCELADO, "cancelado_por": cancelado_por} if cancelado_por else {}
+        return Despacho.objects.create(packing=packing, usuario=self.admin, **cancelacion)
+
+    # --- cancelado_por / cancelado_por_nombre ------------------------------------
+
+    def test_cancelado_por_nombre_en_listado_y_detalle_de_los_cuatro(self):
+        picking = self._picking_orm("PK-949-A")
+        vivo = self._picking_orm("PK-949-B")
+        packing = self._packing_orm("PACK-949-A", picking)
+        packing_vivo = self._packing_orm("PACK-949-B", vivo)
+        despacho = self._despacho_orm(packing)
+        despacho_vivo = self._despacho_orm(packing_vivo)
+        tr = self._tr_manual(self.terminado, self.bordados)
+        tr_viva = self._tr_manual(self.terminado, self.bordados)
+
+        # De atrás hacia adelante, por la API: un admin con nombre y otro sin nombre.
+        self.assertEqual(self._cancelar(self.URL_DESPACHOS, despacho.pk).status_code, 200)
+        self.assertEqual(self._cancelar(self.URL_PACKINGS, packing.pk, self.sin_nombre).status_code, 200)
+        resp = self._cancelar(self.URL_PICKINGS, picking.pk)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["cancelado_por_nombre"], "Ana López")
+        resp = self._revertir(tr, self.sin_nombre)
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()["original"]["cancelado_por_nombre"], "ec949-sn@example.com")
+
+        casos = (
+            (self.URL_DESPACHOS, despacho.pk, despacho_vivo.pk, self.admin, "Ana López", ""),
+            (self.URL_PACKINGS, packing.pk, packing_vivo.pk, self.sin_nombre, "ec949-sn@example.com", ""),
+            (self.URL_PICKINGS, picking.pk, vivo.pk, self.admin, "Ana López", ""),
+            (self.URL_PICKINGS, picking.pk, vivo.pk, self.admin, "Ana López", "?resumen=1"),
+            (self.URL_TR, tr.pk, tr_viva.pk, self.sin_nombre, "ec949-sn@example.com", ""),
+        )
+        for url, cancelado, vivo_id, usuario, nombre, params in casos:
+            with self.subTest(url=url, params=params):
+                filas = {f["id"]: f for f in self._filas(self._api().get(f"{url}{params}"))}
+                detalle = self._api().get(f"{url}{cancelado}/").json()
+                for fila in (filas[cancelado], detalle):
+                    self.assertEqual((fila["cancelado_por"], fila["cancelado_por_nombre"]), (usuario.pk, nombre))
+                self.assertEqual(
+                    (filas[vivo_id]["cancelado_por"], filas[vivo_id]["cancelado_por_nombre"]), (None, None)
+                )
+
+    def test_listados_no_suman_consultas_por_documento_cancelado(self):
+        """Cada documento lo canceló otro usuario: si ``cancelado_por``/``reversa``/
+        ``reversa_de`` no viajaran en el ``select_related``, cada fila sumaría consultas."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from wms.models import Transferencia
+
+        def sembrar(n):
+            quien = Usuario.objects.create(
+                username=f"ec949-u{n}", email=f"ec949-u{n}@example.com", first_name=f"U{n}",
+                empresa=self.empresa, sucursal_default=self.sucursal,
+            )
+            picking = self._picking_orm(f"PK-949-Q{n}", cancelado_por=quien)
+            packing = self._packing_orm(f"PACK-949-Q{n}", picking, cancelado_por=quien)
+            self._despacho_orm(packing, cancelado_por=quien)
+            original = self._tr_manual(self.terminado, self.bordados)
+            reversa = self._tr_manual(self.bordados, self.terminado)
+            Transferencia.objects.filter(pk=original.pk).update(
+                status=Transferencia.TransferenciaStatus.CANCELADA, cancelado_por=quien
+            )
+            Transferencia.objects.filter(pk=reversa.pk).update(reversa_de=original)
+
+        urls = (self.URL_TR, self.URL_PICKINGS, f"{self.URL_PICKINGS}?resumen=1", self.URL_PACKINGS,
+                self.URL_DESPACHOS)
+
+        def contar():
+            cuentas = {}
+            for url in urls:
+                with CaptureQueriesContext(connection) as consultas:
+                    self._filas(self._api().get(url))
+                cuentas[url] = len(consultas)
+            return cuentas
+
+        sembrar(1)
+        pocas = contar()
+        for n in range(2, 5):
+            sembrar(n)
+        muchas = contar()
+        self.assertEqual(muchas, pocas)
+
+    # --- enlace original ↔ reversa -------------------------------------------------
+
+    def test_reversa_y_reversa_de_con_folio(self):
+        original = self._tr_manual(self.terminado, self.bordados)
+        intacta = self._tr_manual(self.terminado, self.bordados)
+        resp = self._revertir(original)
+        self.assertEqual(resp.status_code, 201, resp.content)
+        reversa_id, reversa_folio = resp.json()["reversa"]["id"], resp.json()["reversa"]["folio"]
+        self.assertEqual(
+            (resp.json()["original"]["reversa"], resp.json()["original"]["reversa_folio"]),
+            (reversa_id, reversa_folio),
+        )
+        self.assertEqual(
+            (resp.json()["reversa"]["reversa_de"], resp.json()["reversa"]["reversa_de_folio"]),
+            (original.pk, original.folio),
+        )
+        filas = {f["id"]: f for f in self._filas(self._api().get(self.URL_TR))}
+        campos = ("reversa", "reversa_folio", "reversa_de", "reversa_de_folio")
+        esperado = {
+            original.pk: (reversa_id, reversa_folio, None, None),
+            reversa_id: (None, None, original.pk, original.folio),
+            intacta.pk: (None, None, None, None),
+        }
+        for tr_id, valores in esperado.items():
+            with self.subTest(tr=tr_id):
+                detalle = self._api().get(f"{self.URL_TR}{tr_id}/").json()
+                for fila in (filas[tr_id], detalle):
+                    self.assertEqual(tuple(fila[c] for c in campos), valores)
+
+    # --- cadena de TR del picking y almacen_actual ---------------------------------
+
+    def test_cadena_solo_revierte_la_ultima_y_el_picking_queda_donde_quedan_las_prendas(self):
+        from auditoria.models import AuditoriaEvento
+        from wms.models import Transferencia
+
+        picking = self._alta()
+        alta = picking.transferencia
+        self.assertEqual(self._almacen_actual(picking), (self.bordados.pk, {self.bordados.pk}))
+        self._trasladar(picking, self.apartados)
+        picking.refresh_from_db()
+        traslado = picking.transferencia
+        self.assertEqual((alta.picking_id, traslado.picking_id), (picking.pk, picking.pk))
+        self.assertEqual(self._almacen_actual(picking), (self.apartados.pk, {self.apartados.pk}))
+        self.assertEqual(self._cancelar(self.URL_PICKINGS, picking.pk).status_code, 200)
+
+        # La TR vieja no se revierte: hay un traslado posterior vivo. Bordados tiene
+        # piezas ajenas del mismo SKU, así que el 400 es de la regla, no de inventario.
+        antes = self._existencias()
+        resp = self._revertir(alta)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"transferencia": (
+            f"Sólo se revierte la última TR del picking {picking.folio}. Revierte primero {traslado.folio}."
+        )})
+        self.assertEqual(self._existencias(), antes)
+        self.assertEqual(Transferencia.objects.get(pk=alta.pk).status, Transferencia.TransferenciaStatus.COMPLETADA)
+
+        # El traslado sí: las prendas vuelven a bordados y el picking con ellas.
+        self.assertEqual(self._revertir(traslado).status_code, 201)
+        self.assertEqual(self._almacen_actual(picking), (self.bordados.pk, {self.bordados.pk}))
+        evento = AuditoriaEvento.objects.get(tabla="transferencias", id_registro=str(traslado.pk), accion="CANCELAR")
+        self.assertEqual(
+            (evento.antes_json["picking_almacen_id"], evento.despues_json["picking_almacen_id"]),
+            (self.apartados.pk, self.bordados.pk),
+        )
+
+        # Ya es la última viva (la reversa no cuenta): ahora sí el alta.
+        self.assertEqual(self._revertir(alta).status_code, 201)
+        self.assertEqual(self._almacen_actual(picking), (self.terminado.pk, {self.terminado.pk}))
+        picking.refresh_from_db()
+        # ``almacen_destino`` y ``transferencia`` se conservan.
+        self.assertEqual((picking.almacen_destino_id, picking.transferencia_id), (None, traslado.pk))
+        self.assertEqual(self._existencias(), {
+            self.terminado.pk: Decimal("10"), self.bordados.pk: Decimal("10"), self.apartados.pk: Decimal("0"),
+        })
+
+    def test_alta_sin_traslado_revierte_y_vuelve_al_origen(self):
+        picking = self._alta()
+        self.assertEqual(self._cancelar(self.URL_PICKINGS, picking.pk).status_code, 200)
+        self.assertEqual(self._revertir(picking.transferencia).status_code, 201)
+        self.assertEqual(self._almacen_actual(picking), (self.terminado.pk, {self.terminado.pk}))
+        picking.refresh_from_db()
+        self.assertEqual(picking.almacen_destino_id, self.bordados.pk)
+
+    def test_tr_sin_fk_al_picking_se_resuelve_por_picking_transferencia(self):
+        """TR sin ``Transferencia.picking`` (anteriores a EC-916): el picking sale de
+        ``Picking.transferencia`` y aplican sus reglas (vivo → 400; cancelado → revierte)."""
+        from wms.models import Transferencia
+
+        picking = self._alta()
+        alta = picking.transferencia
+        Transferencia.objects.filter(pk=alta.pk).update(picking=None)
+        resp = self._revertir(alta)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("picking vivo", resp.json()["transferencia"])
+        self.assertEqual(self._cancelar(self.URL_PICKINGS, picking.pk).status_code, 200)
+        self.assertEqual(self._revertir(alta).status_code, 201)
+        self.assertEqual(self._almacen_actual(picking), (self.terminado.pk, {self.terminado.pk}))
+
+    def _cancelado_con_traslado(self):
+        """``(picking cancelado, TR del alta, TR del traslado)``."""
+        picking = self._alta()
+        alta = picking.transferencia
+        self._trasladar(picking, self.apartados)
+        picking.refresh_from_db()
+        self.assertEqual(self._cancelar(self.URL_PICKINGS, picking.pk).status_code, 200)
+        return picking, alta, picking.transferencia
+
+    def test_cadena_cuenta_el_traslado_sin_fk_al_picking(self):
+        """El traslado sin ``Transferencia.picking`` sigue siendo la última TR (es la
+        ``Picking.transferencia``): el alta no se revierte antes."""
+        from wms.models import Transferencia
+
+        picking, alta, traslado = self._cancelado_con_traslado()
+        Transferencia.objects.filter(pk=traslado.pk).update(picking=None)
+        resp = self._revertir(alta)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"transferencia": (
+            f"Sólo se revierte la última TR del picking {picking.folio}. Revierte primero {traslado.folio}."
+        )})
+
+    def test_tr_ligada_entre_la_lectura_y_el_lock_responde_400(self):
+        from wms.models import Transferencia
+        from wms.services import cancelacion_service
+
+        picking, _alta, traslado = self._cancelado_con_traslado()
+        # Fuera del lock resuelve el picking; bajo lock, otro (otro proceso la cambió).
+        with patch.object(cancelacion_service, "_picking_id_de", side_effect=[picking.pk, None]):
+            resp = self._revertir(traslado)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"transferencia": "La TR cambió mientras se revertía. Intenta de nuevo."})
+        self.assertEqual(
+            Transferencia.objects.get(pk=traslado.pk).status, Transferencia.TransferenciaStatus.COMPLETADA
+        )
+
+    def test_picking_borrado_antes_del_lock_responde_400(self):
+        from wms.models import Picking, Transferencia
+        from wms.services import cancelacion_service
+
+        picking, _alta, traslado = self._cancelado_con_traslado()
+        inexistente = Picking.objects.order_by("-pk").values_list("pk", flat=True).first() + 1000
+        # Fuera del lock resuelve un picking que ya no existe cuando se bloquea.
+        with patch.object(cancelacion_service, "_picking_id_de", side_effect=[inexistente]):
+            resp = self._revertir(traslado)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"transferencia": "La TR cambió mientras se revertía. Intenta de nuevo."})
+        self.assertEqual(
+            Transferencia.objects.get(pk=traslado.pk).status, Transferencia.TransferenciaStatus.COMPLETADA
+        )
+
+    def test_alta_sin_fk_de_picking_trasladado_no_se_revierte_como_manual(self):
+        """Alta y traslado sin ``Transferencia.picking`` y ``Picking.transferencia`` = el
+        traslado: el alta no resuelve picking, pero su texto dice que es de uno → 400."""
+        from wms.models import Transferencia
+
+        picking = self._alta()
+        alta = picking.transferencia
+        self._trasladar(picking, self.apartados)
+        picking.refresh_from_db()
+        traslado = picking.transferencia
+        Transferencia.objects.filter(pk__in=[alta.pk, traslado.pk]).update(picking=None)
+        self.assertEqual(self._cancelar(self.URL_PICKINGS, picking.pk).status_code, 200)
+        antes = self._existencias()
+        resp = self._revertir(alta)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"transferencia": (
+            f"La TR {alta.folio} es de un picking pero no está ligada a él. "
+            "No se puede revertir hasta ligarla a su picking."
+        )})
+        self.assertEqual(self._existencias(), antes)
+        self.assertEqual(Transferencia.objects.get(pk=alta.pk).status, Transferencia.TransferenciaStatus.COMPLETADA)
+
+    def test_tr_manual_no_tiene_regla_de_cadena(self):
+        vieja = self._tr_manual(self.terminado, self.bordados)
+        self._tr_manual(self.terminado, self.bordados)
+        resp = self._revertir(vieja)
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()["original"]["status"], "CANCELADA")
+
+    def test_otra_empresa_recibe_404_en_los_cuatro(self):
+        picking = self._picking_orm("PK-949-Z")
+        packing = self._packing_orm("PACK-949-Z", picking)
+        despacho = self._despacho_orm(packing)
+        tr = self._tr_manual(self.terminado, self.bordados)
+        for url, doc_id in ((self.URL_DESPACHOS, despacho.pk), (self.URL_PACKINGS, packing.pk),
+                            (self.URL_PICKINGS, picking.pk)):
+            with self.subTest(url=url):
+                self.assertEqual(self._cancelar(url, doc_id, self.intruso).status_code, 404)
+                self.assertEqual(self._api(self.intruso).get(f"{url}{doc_id}/").status_code, 404)
+        self.assertEqual(self._revertir(tr, self.intruso).status_code, 404)
+        self.assertEqual(self._api(self.intruso).get(f"{self.URL_TR}{tr.pk}/").status_code, 404)
