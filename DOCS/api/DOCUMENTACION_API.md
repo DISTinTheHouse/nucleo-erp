@@ -2542,6 +2542,51 @@ Los **dos únicos campos manuales** que llena mesa de control directamente sobre
   - Si el pedido todavía no tiene `clasificacion`, ambos campos vienen `null`.
 - Uso recomendado en Next.js: el widget de mesa de control en el detalle del pedido (un `<select>` de clasificación + un date picker de confirmación) hace un `PATCH` normal al mismo pedido que ya está cargado en pantalla; al llegar la respuesta, lee `fecha_entrega_min`/`fecha_entrega_max` para mostrar el rango sin ninguna llamada adicional.
 
+### Controles de mesa de control sobre el flujo (retención, candado de programación, detenidos)
+
+Mesa de control (departamento `MESACONTROL`, admin de empresa o superuser) decide **qué y cuándo arranca** el trabajo de los operadores. Además de autorizar, clasificar, confirmar y programar, tiene estos controles:
+
+#### Retener un pedido — `POST /api/v1/ventas/pedidos/{id}/retener/`
+
+Congela el pedido **sin cancelarlo** (crédito vencido, el cliente pidió esperar, cambio por confirmar).
+
+- Body `{"motivo": "Crédito vencido"}` (obligatorio, máx. 500). Sin motivo → `400 {"motivo": "Indica el motivo de la retención."}`.
+- Ya retenido → `400 {"pedido": "El pedido ya está retenido."}`; cancelado → `400`. Sin ser mesa de control → `403`. Otra empresa → `404`.
+- `200 {"id", "folio", "retenido": true, "motivo_retencion", "fecha_retencion", "retenido_por"}`.
+- **Mientras está retenido nadie inicia trabajo nuevo sobre él** y cada intento responde `400` con el mismo texto (`"El pedido P-00178-2026 está retenido por mesa de control: Crédito vencido. Pide a mesa de control que lo libere."`):
+  - almacén: crear picking (`pickings/onboarding/` y alta), crear packing, crear despacho;
+  - producción: crear OB, OR, OCM y OP (incluido `pre-ordenes/{id}/crear-op/`).
+- Lo que ya estaba abierto **no se detiene** (avances de órdenes, pickings ya creados). Si hay que deshacerlo, se cancela con su endpoint (ver *WMS - Cancelaciones*).
+- Programar, clasificar y confirmar siguen permitidos (es planeación, no trabajo).
+
+#### Liberar — `POST /api/v1/ventas/pedidos/{id}/liberar/`
+
+- Body opcional `{"comentario": "Pagó"}`. No retenido → `400 {"pedido": "El pedido no está retenido."}`.
+- `200` con `retenido: false` y `motivo_retencion: ""`, `fecha_retencion: null`, `retenido_por: null`. El pedido sigue su flujo donde iba.
+- Retener y liberar dejan un `AuditoriaEvento` (`modulo="ventas"`, `accion="RETENER"`/`"LIBERAR"`, con motivo, quién y cuándo).
+
+Campos: `retenido`, `motivo_retencion`, `fecha_retencion`, `retenido_por` en el detalle `GET /pedidos/{id}/`; `retenido` y `motivo_retencion` en el listado `GET /pedidos/`. Son de **solo lectura** en `PATCH /pedidos/{id}/` y en `editar-mesa-control/`: solo cambian con `retener/` y `liberar/`.
+
+#### Candado al reprogramar — `PATCH /api/v1/ventas/pedidos/{id}/programar/`
+
+Lo que almacén **ya surtió** hacia un destino (pickings y líneas no cancelados, por `programacion_destino`) no puede quedar sin programación. Programar menos piezas que lo surtido en un destino (o quitar ese destino) responde:
+
+```json
+400 {"programaciones": "No puedes programar menos de lo que almacén ya surtió (APARTADO: 1 pzs ya surtidas, 0 programadas). Cancela primero el picking."}
+```
+
+Subir cantidades, agregar destinos o cambiar comentarios no cambia. Para bajar por debajo de lo surtido: primero `POST /api/v1/wms/pickings/{id}/cancelar/`.
+
+#### Detenidos: filtros y KPIs
+
+- `GET /api/v1/ventas/pedidos/?retenido=true|false` — pedidos retenidos (o no).
+- `GET /api/v1/ventas/pedidos/?sin_surtir=true|false` — **programados, no cancelados y sin un solo picking vivo**: trabajo que mesa ya liberó y almacén todavía no toma.
+- `GET /api/v1/ventas/pedidos/kpis-mesa/` agrega `retenidos` (vigentes retenidos) y `sin_surtir` (mismo criterio que el filtro), en la misma consulta agrupada de siempre. Ambos filtros también aplican a `kpis-mesa/` y `exportar/`.
+
+#### Cancelar trabajo de operadores
+
+Mesa de control puede cancelar picking, packing y despacho, y revertir TR (`POST /api/v1/wms/.../cancelar/`, `.../revertir/`) sin ser admin. Ver *WMS - Cancelaciones*. Las órdenes de producción se cancelan desde producción, con su propio permiso.
+
 ### Programación de pedidos (tab de mesa de control)
 
 Pantalla de cola para mesa de control: una tabla con todos los pedidos y su estado de clasificación/programación, para saber de un vistazo cuáles faltan por atender. **No es un endpoint nuevo** — es el mismo `GET /api/v1/ventas/pedidos/` de siempre (el listado que ya usa Ventas), con columnas y filtros agregados. Ventas sigue viendo su tabla igual; esto es la misma llamada, otra pestaña en el frontend con otras columnas/filtros.
@@ -6315,7 +6360,7 @@ Cancelar **no borra**: el documento conserva su folio, queda en estado cancelado
 **Comunes a los cuatro endpoints**
 
 - Método `POST`, body `{"motivo": "texto"}` (obligatorio, máx. 500). Sin motivo → `400 {"motivo": "Indica el motivo de la cancelación."}`.
-- Permiso: superuser, admin de empresa o la clave `WMS-CANCELAR` (rol o GRANT). Sin permiso → `403`.
+- Permiso: superuser, admin de empresa, departamento de **mesa de control** (`MESACONTROL`) o la clave `WMS-CANCELAR` (rol o GRANT). Sin permiso → `403`.
 - Documento de otra empresa o sucursal no visible → `404`.
 - **Orden obligatorio, de atrás hacia adelante:** despacho → packing → picking. Si hay un documento posterior vivo, `400` con su folio (p. ej. `{"packing": "Tiene despachos activos: 54. Cancélalos primero."}`).
 - Repetir la cancelación → `400` ("ya está cancelado").

@@ -7,6 +7,7 @@ from rest_framework.exceptions import ValidationError
 
 from logistica.models import Envio
 from hr.models import Empleado
+from ventas.services.retencion_service import exigir_no_retenido
 from ventas.models import Pedido, PedidoDetalleTalla
 from ventas.services.sku_produccion_service import TALLAS_DE_LINEA_NO_MUESTRA_Q, linea_no_muestra_q
 from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle, PickingDetalle
@@ -426,7 +427,8 @@ class DespachoService:
         # Packing -> Envio (el despacho no toca el picking), siempre
         # ``of=("self",)`` para no bloquear de paso empresa ni sucursal.
         DespachoService._validate_context(packing_input, envio_input, user)
-        Pedido.objects.select_for_update(of=("self",)).filter(pk=packing_input.pedido_id).first()
+        pedido_bloqueado = Pedido.objects.select_for_update(of=("self",)).filter(pk=packing_input.pedido_id).first()
+        exigir_no_retenido(pedido_bloqueado)
         packing = (
             Packing.objects.select_for_update(of=("self",))
             .select_related("empresa", "sucursal", "pedido", "picking", "picking__almacen",
