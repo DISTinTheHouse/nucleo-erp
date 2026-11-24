@@ -243,6 +243,46 @@ class NotificacionScopeTests(TestCase):
         self.assertEqual(len(resto["results"]), 2)
         self.assertIsNone(resto["next"])
 
+    # --- búsqueda y orden (#1345, #1346) -------------------------------------
+
+    def test_search_busca_en_titulo_y_mensaje_sin_salir_del_scope(self):
+        especial = Notificacion.objects.create(
+            empresa=self.empresa, usuario=self.admin_empresa, titulo="OC-77 aceptada",
+            mensaje="Proveedor Telas del Norte", modulo="compras", tipo="oc_aceptada",
+        )
+        client = self._client(self.admin_empresa)
+        for termino in ("oc-77", "telas del norte"):
+            with self.subTest(termino=termino):
+                ids = {row["id"] for row in client.get(NOTIFICACIONES_URL, {"search": termino}).json()}
+                self.assertEqual(ids, {especial.pk})
+        self.assertEqual(client.get(NOTIFICACIONES_URL, {"search": "zzzz"}).json(), [])
+        # Otro usuario con el mismo texto no la ve.
+        self.assertEqual(self._client(self.usuario).get(NOTIFICACIONES_URL, {"search": "oc-77"}).json(), [])
+
+    def test_search_no_afecta_al_detalle(self):
+        resp = self._client(self.usuario).get(notificacion_detail_url(self.notif_usuario.pk), {"search": "zzzz"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_ordering_por_campo_con_empates_desempata_por_id(self):
+        for i in range(4):
+            self._notificacion(self.empresa, self.admin_empresa, f"Extra {i}")
+        client = self._client(self.admin_empresa)
+        esperado = list(
+            Notificacion.objects.filter(usuario=self.admin_empresa).order_by("leido", "id").values_list("id", flat=True)
+        )
+        paginas = [
+            client.get(NOTIFICACIONES_URL, {"ordering": "leido", "limit": 2, "offset": offset}).json()["results"]
+            for offset in (0, 2, 4)
+        ]
+        self.assertEqual([row["id"] for pagina in paginas for row in pagina], esperado)
+        desc = [row["id"] for row in client.get(NOTIFICACIONES_URL, {"ordering": "-leido"}).json()]
+        self.assertEqual(desc, sorted(esperado, reverse=True))
+
+    def test_ordering_desconocido_conserva_el_orden_por_defecto(self):
+        primero = self._notificacion(self.empresa, self.admin_empresa, "Nueva")
+        ids = [row["id"] for row in self._client(self.admin_empresa).get(NOTIFICACIONES_URL, {"ordering": "usuario"}).json()]
+        self.assertEqual(ids[0], primero.pk)
+
     # --- crear no se expone por API ------------------------------------------
 
     def test_post_a_la_coleccion_responde_405(self):

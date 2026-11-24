@@ -7081,7 +7081,7 @@ Notas:
 | Método | Ruta                                                | Para qué                                                                                   |
 | ------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | `GET`  | `/api/v1/notificaciones/sin-leer/count/`            | Badge rojo (contador ligero). Respuesta: `{count, ultima_notificacion_id}`                 |
-| `GET`  | `/api/v1/notificaciones/`                           | Dropdown lista — soporta `?leido=false&modulo=ventas&limit=20&offset=0`. Sin `limit` regresa un arreglo plano; con `limit` regresa `{count, next, previous, results}` (tope 500; `limit`/`offset` inválidos → `400`, #950) |
+| `GET`  | `/api/v1/notificaciones/`                           | Dropdown lista — soporta `?leido=false&modulo=ventas&limit=20&offset=0`. Sin `limit` regresa un arreglo plano; con `limit` regresa `{count, next, previous, results}` (tope 500; `limit`/`offset` inválidos → `400`, #950). `?search=` busca en título y mensaje (#1346); `?ordering=` (`id`, `titulo`, `mensaje`, `modulo`, `tipo`, `leido`, `leido_at`, `data`, `created_at`) desempata por `id` (#1345); sin él, `-created_at` |
 | `POST` | `/api/v1/notificaciones/{id}/marcar-leida/`         | Marcar 1 notificación como leída                                                           |
 | `POST` | `/api/v1/notificaciones/marcar-todas-leidas/`       | Marcar TODO como leído                                                                     |
 
