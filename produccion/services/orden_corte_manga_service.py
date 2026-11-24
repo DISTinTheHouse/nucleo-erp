@@ -19,6 +19,7 @@ from produccion.services.common import (
 )
 from produccion.utils.folios import generate_ocm_folio
 from ventas.models import Pedido, PedidoDetalleTalla
+from ventas.services.retencion_service import bloquear_pedido_vivo
 
 
 class OrdenCorteMangaDuplicada409(APIException):
@@ -256,7 +257,9 @@ class OrdenCorteMangaService:
         # ``uq_orden_corte_manga_activa_por_pedido`` (migración ``0025``) dos POST
         # simultáneos leían el mismo asignado y ambos insertaban. En SQLite
         # ``select_for_update`` es no-op; en Postgres es el bloqueo real.
-        Pedido.objects.select_for_update().filter(pk=pedido.pk).first()
+        # Sobre la fila bloqueada se revisa además que el pedido siga vivo y sin
+        # retener (cancelado, dado de baja o retenido -> 400).
+        bloquear_pedido_vivo(pedido.pk)
 
         detalle_tallas_raw = list(
             tallas_para_alta(OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id))

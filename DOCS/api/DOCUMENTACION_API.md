@@ -2572,7 +2572,8 @@ Congela el pedido **sin cancelarlo** (crédito vencido, el cliente pidió espera
 - `200 {"id", "folio", "retenido": true, "motivo_retencion", "fecha_retencion", "retenido_por"}`.
 - **Mientras está retenido nadie inicia trabajo nuevo sobre él** y cada intento responde `400` con el mismo texto (`"El pedido P-00178-2026 está retenido por mesa de control: Crédito vencido. Pide a mesa de control que lo libere."`):
   - almacén: crear picking (`pickings/onboarding/` y alta), crear packing, crear despacho;
-  - producción: crear OB, OR, OCM y OP (incluido `pre-ordenes/{id}/crear-op/`).
+  - producción: crear OB, OR, OCM y OP (incluido `pre-ordenes/{id}/crear-op/`, también si el retenido es uno de los pedidos ligados a un resurtido). En `crear-op/` un pedido del resurtido **cancelado, dado de baja o de otra sucursal** no bloquea: la OP se crea sin ligarlo y la respuesta lo lista en `pedidos_omitidos: [{"id", "folio", "motivo"}]` (`[]` si no hubo).
+- Las altas de packing, despacho, OB, OR y OCM revisan el pedido **sobre su fila bloqueada** (un `cancelar/` o `retener/` simultáneo no se cuela): retenido → el `400` de arriba; cancelado o dado de baja → `400 {"pedido": "El pedido P-… está cancelado o dado de baja."}`; si ya no existe → `400 {"pedido": "Pedido no encontrado o sin acceso."}` (antes `500`, #1368). Lo mismo al cancelar picking, packing o despacho de un pedido que ya no existe. El alta de resurtido (`POST pre-ordenes/` con `pedidos`) solo acepta pedidos activos, no cancelados y de la sucursal del resurtido (`400 {"pedidos": ...}`).
 - Lo que ya estaba abierto **no se detiene** (avances de órdenes, pickings ya creados). Si hay que deshacerlo, se cancela con su endpoint (ver *WMS - Cancelaciones*).
 - Programar, clasificar y confirmar siguen permitidos (es planeación, no trabajo).
 

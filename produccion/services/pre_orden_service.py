@@ -416,8 +416,11 @@ def sincronizar_pre_orden(pedido_id, usuario=None):
     que ya tienen BOM. No crea una nueva si el pedido ya tiene una convertida
     en OP (para no duplicar producción). Si ya estaba validada, recalcula y
     ajusta sus necesidades de compra. Devuelve la pre-orden o ``None``."""
-    pedido = Pedido.objects.select_for_update().filter(pk=pedido_id).only("id", "empresa_id", "sucursal_id").first()
-    if pedido is None:
+    pedido = (Pedido.objects.select_for_update().filter(pk=pedido_id)
+              .only("id", "empresa_id", "sucursal_id", "estatus", "activo").first())
+    # Un pedido cancelado o dado de baja ya no planea producción: cancelarlo cancela su
+    # pre-orden (#1357) y un BOM o SKU de muestra posterior no debe crear otra.
+    if pedido is None or pedido.estatus == Pedido.ESTATUS_CANCELADO or not pedido.activo:
         return None
     deseadas = _tallas_con_bom(pedido.pk)
     pre = pre_orden_abierta(pedido.pk, lock=True)

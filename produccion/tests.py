@@ -5073,7 +5073,7 @@ class OrdenCorteMangaParcialidadesTests(TestCase):
         ) as candado:
             self._save([(self.pdt_ch, 1)])
 
-        candado.assert_called_once_with()
+        candado.assert_called_once_with(of=("self",))
 
 
 class RutaCriticaOPTests(TestCase):

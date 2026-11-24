@@ -77,7 +77,12 @@ def _auditar(request, empresa_id, tabla, doc, antes, despues):
 
 
 def _bloquear_pedido(pedido_id):
-    Pedido.objects.select_for_update(of=("self",)).filter(pk=pedido_id).first()
+    """Sin ``pedido_id`` (el picking de una TR ya no existe) no bloquea: el llamador
+    lo resuelve. Si el pedido ya no existe, 400 en vez de seguir hasta un 500 (#1368)."""
+    if pedido_id is None:
+        return
+    if Pedido.objects.select_for_update(of=("self",)).filter(pk=pedido_id).first() is None:
+        raise ValidationError({"pedido": "Pedido no encontrado o sin acceso."})
 
 
 def _ordenes_trabajo_vivas(picking):

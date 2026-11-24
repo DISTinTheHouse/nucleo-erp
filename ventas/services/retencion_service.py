@@ -53,3 +53,21 @@ def exigir_no_retenido(pedido, campo="pedido"):
     """Sin consultas: ``retenido`` viene en la fila del pedido ya cargada."""
     if pedido is not None and pedido.retenido:
         raise ValidationError({campo: mensaje_retenido(pedido)})
+
+
+def bloquear_pedido_vivo(pedido_id):
+    """Alta de trabajo nuevo sobre el pedido (packing, despacho, OB, OR, OCM): bloquea
+    su fila (primer paso del orden EC-574) y revisa sobre ella lo que antes se leía
+    sin candado, para que un ``cancelar/`` o ``retener/`` simultáneo no se cuele.
+    Inexistente -> 400 (antes seguía y reventaba con ``IntegrityError``, #1368);
+    cancelado o dado de baja -> 400; retenido -> 400. Picking repite estas reglas
+    con sus propios mensajes (EC-953). Una consulta."""
+    from ventas.models import Pedido
+
+    pedido = Pedido.objects.select_for_update(of=("self",)).filter(pk=pedido_id).first()
+    if pedido is None:
+        raise ValidationError({"pedido": "Pedido no encontrado o sin acceso."})
+    if pedido.estatus == Pedido.ESTATUS_CANCELADO or not pedido.activo:
+        raise ValidationError({"pedido": f"El pedido {pedido.folio or pedido.pk} está cancelado o dado de baja."})
+    exigir_no_retenido(pedido)
+    return pedido

@@ -3454,7 +3454,8 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
     @action(detail=True, methods=["post"], url_path="crear-op")
     def crear_op(self, request, pk=None):
         """Convierte la pre-orden en OP: body ``{centro_confeccion?, prioridad?}``.
-        Solo en "Lista para producir" (se revalida con la existencia de hoy)."""
+        Solo en "Lista para producir" (se revalida con la existencia de hoy). La
+        respuesta trae ``pedidos_omitidos``: pedidos del resurtido que no se ligaron (#1367)."""
         from nucleo.models import UnidadMedida
         from produccion.api.serializers import ligar_pedidos_op
         from produccion.services.pre_orden_service import marcar_convertida, materiales, recalcular
@@ -3477,10 +3478,25 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             recalcular(pre, materiales(pre), usuario=request.user)
             if pre.estatus != PreOrdenProduccion.Estatus.LISTA:
                 raise ValidationError({"estatus": f"Solo se convierte en OP una pre-orden Lista para producir (está {pre.get_estatus_display().lower()})."})
+            ligados = set(ligados_ids)
+            # #1367: un pedido del resurtido cancelado, dado de baja o de otra sucursal no se
+            # liga (el resurtido no edita sus pedidos: rechazarlo lo dejaría sin poder
+            # convertirse) y la respuesta lo lista en ``pedidos_omitidos``; tampoco cuenta
+            # para la retención. ``pre.pedido`` sigue pasando por ``validate_pedido``.
+            pedidos_omitidos = []
+            for p in bloqueados:
+                if p.pk not in ligados or p.pk == pre.pedido_id:
+                    continue
+                motivo = ("cancelado" if p.estatus == Pedido.ESTATUS_CANCELADO else
+                          "dado de baja" if not p.activo else
+                          "de otra sucursal" if p.sucursal_id != pre.sucursal_id else None)
+                if motivo:
+                    pedidos_omitidos.append({"id": p.pk, "folio": p.folio, "motivo": motivo})
+            omitidos = {o["id"] for o in pedidos_omitidos}
+            bloqueados = [p for p in bloqueados if p.pk not in omitidos]
             retenido = next((p for p in bloqueados if p.retenido), None)
             if retenido is not None:
                 raise ValidationError({"pedido": [mensaje_retenido(retenido)]})
-            ligados = set(ligados_ids)
             pedidos_ligados = [p for p in bloqueados if p.pk in ligados]
             pieza = UnidadMedida.objects.filter(clave__iexact="pz").first()
             if pieza is None:
@@ -3503,14 +3519,15 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             vista = OrdenProduccionViewSet(request=request, format_kwarg=None, action="create")
             respuesta = vista._crear_op_desde_request(
                 request, data=data, sucursal=pre.sucursal,
-                # Los pedidos del resurtido van directo a la OP: ya se validaron al
-                # ligarlos a la pre-orden (no son pedidos de muestra).
+                # Los pedidos del resurtido van directo a la OP, revisados arriba (no son
+                # pedidos de muestra: no pasan por ``_validar_pedido``).
                 post_crear=lambda op: (marcar_convertida(pre, op, request.user),
                                        ligar_pedidos_op(op, pedidos_ligados)),
             )
         if respuesta.status_code != status.HTTP_201_CREATED:
             return respuesta
-        return Response({**respuesta.data, "pre_orden": pre.pk, "estatus": pre.estatus}, status=status.HTTP_201_CREATED)
+        return Response({**respuesta.data, "pre_orden": pre.pk, "estatus": pre.estatus,
+                         "pedidos_omitidos": pedidos_omitidos}, status=status.HTTP_201_CREATED)
 
     def _resolver_variantes(self, empresa, lineas_in):
         """Cada renglón trae ``variante`` (id), ``sku`` o ``producto`` (id, para
@@ -3695,10 +3712,16 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 pids = {int(x) for x in pedidos_in}
             except (TypeError, ValueError):
                 raise ValidationError({"pedidos": "Lista de ids de pedidos."})
-            pedidos = list(Pedido.objects.filter(pk__in=pids, empresa=empresa).exclude(estatus=Pedido.ESTATUS_CANCELADO))
+            # Misma regla que ``crear-op`` al ligarlos a la OP (#1367): de la sucursal del
+            # resurtido, activos y no cancelados.
+            pedidos = list(Pedido.objects.filter(pk__in=pids, empresa=empresa, sucursal=sucursal, activo=True)
+                           .exclude(estatus=Pedido.ESTATUS_CANCELADO))
             if len(pedidos) != len(pids):
                 faltan = sorted(pids - {p.pk for p in pedidos})
-                raise ValidationError({"pedidos": f"Pedido(s) no encontrado(s) o cancelado(s): {', '.join(map(str, faltan))}."})
+                raise ValidationError({"pedidos": (
+                    "Pedido(s) no encontrado(s), cancelado(s), dado(s) de baja o de otra sucursal: "
+                    f"{', '.join(map(str, faltan))}."
+                )})
         pre = crear_resurtido(user, sucursal, lineas, fecha, d.get("notas") or "", pedidos)
         return self._respuesta(pre, status_code=status.HTTP_201_CREATED)
 
