@@ -4861,6 +4861,16 @@ class PedidoRetenidoPorNombreTests(TestCase):
         data, _ = self._detalle(self.mesa)
         self.assertEqual((data["retenido"], data["retenido_por_nombre"]), (False, None))
 
+    def test_null_si_no_esta_retenido_aunque_quede_retenido_por(self):
+        """Fila inconsistente (admin, ``update()``): sin ``retenido`` no hay nombre."""
+        from ventas.services.retencion_service import retenido_por_nombre
+
+        Pedido.objects.filter(pk=self.pedido.pk).update(retenido=False, retenido_por=self.mesa)
+        data, _ = self._detalle(self.mesa)
+        self.assertEqual((data["retenido"], data["retenido_por_nombre"]), (False, None))
+        self.pedido.refresh_from_db()
+        self.assertIsNone(retenido_por_nombre(self.pedido))
+
     def test_sin_nombre_cae_al_correo(self):
         resp = self._client(self.mesa_sin_nombre).post(f"{self.url}retener/", {"motivo": "Esperar"}, format="json")
         self.assertEqual(resp.status_code, 200, resp.content)

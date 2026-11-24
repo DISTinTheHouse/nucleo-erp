@@ -1,6 +1,7 @@
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from ventas.models import (
     Cotizacion,
@@ -869,6 +870,7 @@ class PedidoSerializer(serializers.ModelSerializer):
     # retenido. El detalle trae ``retenido_por`` en su ``select_related``.
     retenido_por_nombre = serializers.SerializerMethodField()
 
+    @extend_schema_field({"type": "string", "nullable": True})
     def get_retenido_por_nombre(self, obj):
         from ventas.services.retencion_service import retenido_por_nombre
         return retenido_por_nombre(obj)

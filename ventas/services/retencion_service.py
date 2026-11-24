@@ -25,7 +25,7 @@ def retenido_por_nombre(pedido):
     """Quién retuvo el pedido (EC-953): nombre completo o, sin first/last name, su
     correo (misma regla que ``cancelado_por_nombre``, EC-926/EC-949); ``None`` si no
     está retenido. Sin consultas cuando ``retenido_por`` ya viene cargado."""
-    if not pedido.retenido_por_id:
+    if not pedido.retenido or not pedido.retenido_por_id:
         return None
     usuario = pedido.retenido_por
     return usuario.get_full_name().strip() or usuario.email
