@@ -16,6 +16,7 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.permissions import SAFE_METHODS, BasePermission, IsAuthenticated
 from finanzas.api.permisos import permisos_de_la_peticion
+from finanzas.services import cancelacion_auditoria as canc
 from finanzas.services.facturama.acceso import empresa_usa_facturama, puede_consultar_cfdis, puede_usar_facturama
 from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
@@ -685,6 +686,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
         with transaction.atomic():
             instance.soft_delete()
             FacturaInventarioService.reintegrar(instance, self.request.user, solo_redescontado=True)
+            canc.auditar_baja(instance, self.request)
 
     def _get_default_sucursal(self, user, empresa):
         sucursal = getattr(user, "sucursal_default", None)
@@ -928,11 +930,18 @@ class FacturaViewSet(FinanzasBaseViewSet):
         factura = self.get_object()  # otra empresa -> 404 antes que 403
         if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
             raise PermissionDenied('No tienes permiso para cancelar facturas.')
-        motivo = (request.data.get('motivo') or '').strip()[:200]
+        motivo = canc.motivo_requerido(request)
+        antes = factura.estatus
         # ``motivo`` es la nota interna; ``motivo_sat`` (02/03) el que va al SAT (EC-806).
-        contrapoliza = FacturaCancelacionService.cancelar(
-            factura, request.user, motivo, motivo_sat=request.data.get('motivo_sat')
-        )
+        with transaction.atomic():
+            contrapoliza = FacturaCancelacionService.cancelar(
+                factura, request.user, motivo[:200], motivo_sat=request.data.get('motivo_sat')
+            )
+            if antes != Factura.FacturaStatus.CANCELADA:  # reintento ante el SAT: no reescribe el rastro
+                canc.registrar_cancelacion(factura, request, motivo, antes, {
+                    'contrapoliza_id': contrapoliza.pk if contrapoliza else None,
+                    'motivo_sat': request.data.get('motivo_sat'),
+                })
         data = dict(FacturaSerializer(factura).data)
         data['contrapoliza_id'] = contrapoliza.pk if contrapoliza else None
         return Response(data)
@@ -1419,7 +1428,9 @@ class PolizaViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         if instance.estatus == Poliza.PolizaStatus.CONTABILIZADA:
             raise ValidationError("No se puede eliminar una póliza contabilizada. Cancelela primero.")
-        instance.delete()
+        with transaction.atomic():
+            canc.auditar_baja(instance, self.request)
+            instance.delete()
 
     @action(detail=True, methods=["post"], url_path="contabilizar")
     def contabilizar(self, request, pk=None):
@@ -1430,8 +1441,15 @@ class PolizaViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         poliza = self.get_object()
-        contrapoliza = PolizaService.cancelar(poliza, request.user)
-        poliza.refresh_from_db()
+        canc.exigir_permiso(request.user, canc.PERMISO_POLIZAS)
+        canc.exigir_no_cancelado(poliza)
+        motivo = canc.motivo_requerido(request)
+        antes = poliza.estatus
+        with transaction.atomic():
+            contrapoliza = PolizaService.cancelar(poliza, request.user)
+            poliza.refresh_from_db()
+            canc.registrar_cancelacion(poliza, request, motivo, antes, {
+                "contrapoliza_id": contrapoliza.pk if contrapoliza else None})
         data = PolizaSerializer(poliza).data
         data["contrapoliza_id"] = contrapoliza.pk if contrapoliza else None
         return Response(data)
@@ -1619,18 +1637,40 @@ class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         locked = FacturaProveedor.objects.select_for_update().filter(pk=instance.pk).first()
         if locked is None:
             raise NotFound("La factura de proveedor ya no existe.")
+        # Registrada ya movió CxP y póliza: se cancela (queda la evidencia), no se borra.
+        if locked.estatus != FacturaProveedor.FacturaProveedorStatus.BORRADOR:
+            raise ValidationError({"estatus": (
+                f"Solo se elimina una factura en Borrador (esta está {locked.estatus}): "
+                "usa POST cancelar/ con motivo.")})
         CuentaPorPagarService.ensure_invoice_deletable(locked)
-        FacturaProveedorPolizaService.cancelar(locked, user)
         cuentas = CuentaPorPagar.objects.filter(factura_proveedor=locked)
         if PagoDetalle.objects.filter(cxp__in=cuentas).exists():
-            # Con pagos cancelados o en borrador hay histórico (FK PROTECT): no se
-            # borra nada, la factura y su CxP quedan canceladas.
-            cuentas.update(estatus=CuentaPorPagar.EstatusCxP.CANCELADA, updated_at=timezone.now())
-            locked.estatus = FacturaProveedor.FacturaProveedorStatus.CANCELADA
-            locked.save(update_fields=["estatus", "updated_at"])
-            return
+            raise ValidationError({"estatus": "La factura tiene pagos ligados: usa POST cancelar/ con motivo."})
+        FacturaProveedorPolizaService.cancelar(locked, user)
+        canc.auditar_baja(locked, self.request)
         cuentas.delete()
         locked.delete()
+
+    @action(detail=True, methods=["post"], url_path="cancelar")
+    @transaction.atomic
+    def cancelar(self, request, pk=None):
+        """Cancela la factura del proveedor: su CxP queda CANCELADA y su póliza con
+        contrapóliza. Bloquea si tiene pagos aplicados (se cancelan primero)."""
+        factura = self.get_object()  # otra empresa -> 404
+        canc.exigir_permiso(request.user, canc.PERMISO_PAGOS)
+        motivo = canc.motivo_requerido(request)
+        locked = FacturaProveedor.objects.select_for_update().get(pk=factura.pk)
+        antes = locked.estatus
+        if antes == FacturaProveedor.FacturaProveedorStatus.CANCELADA:
+            raise ValidationError({"estatus": "La factura ya está cancelada."})
+        CuentaPorPagarService.ensure_invoice_deletable(locked)
+        FacturaProveedorPolizaService.cancelar(locked, request.user)
+        CuentaPorPagar.objects.filter(factura_proveedor=locked).update(
+            estatus=CuentaPorPagar.EstatusCxP.CANCELADA, updated_at=timezone.now())
+        locked.estatus = FacturaProveedor.FacturaProveedorStatus.CANCELADA
+        locked.save(update_fields=["estatus", "updated_at"])
+        canc.registrar_cancelacion(locked, request, motivo, antes)
+        return Response(FacturaProveedorLecturaSerializer(locked, context=self.get_serializer_context()).data)
 
     @action(detail=True, methods=["post"], url_path="adjuntar-pdf", parser_classes=[MultiPartParser])
     def adjuntar_pdf(self, request, pk=None):
@@ -1959,11 +1999,21 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
         CuentaPorPagarService.ensure_account_deletable(instance)
         if instance.pago_detalles.exists():
             # Con pagos cancelados o en borrador hay histórico (FK PROTECT): la
-            # CxP se cancela en vez de borrarse.
-            instance.estatus = CuentaPorPagar.EstatusCxP.CANCELADA
-            instance.save(update_fields=["estatus", "updated_at"])
+            # CxP se cancela en vez de borrarse, con motivo y rastro.
+            if instance.estatus == CuentaPorPagar.EstatusCxP.CANCELADA:
+                raise ValidationError({"estatus": "La cuenta por pagar ya está cancelada."})
+            canc.exigir_permiso(user, canc.PERMISO_PAGOS)
+            motivo = canc.motivo_requerido(self.request)
+            antes = instance.estatus
+            with transaction.atomic():
+                instance.estatus = CuentaPorPagar.EstatusCxP.CANCELADA
+                instance.save(update_fields=["estatus", "updated_at"])
+                canc.auditar_evento(instance, self.request, "CANCELAR", {
+                    "estatus_anterior": antes, "estatus": instance.estatus, "motivo": motivo})
             return
-        instance.delete()
+        with transaction.atomic():
+            canc.auditar_baja(instance, self.request)
+            instance.delete()
 
 
 def _validar_transicion_estatus_cobro_pago(Estatus, anterior, nuevo, documento):
@@ -2165,6 +2215,8 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         nuevo_estatus = serializer.validated_data.get("estatus", anterior_estatus)
         _validar_transicion_estatus_cobro_pago(Cobro.Estatus, anterior_estatus, nuevo_estatus, "cobro")
         if nuevo_estatus == Cobro.Estatus.CANCELADO:
+            canc.exigir_permiso(user, canc.PERMISO_COBROS)
+            motivo = canc.motivo_requerido(self.request)
             # El servicio decide qué revertir según el estatus PREVIO: si el
             # ``save()`` ya lo hubiera cambiado, ``cancelar_cobro`` saldría por su
             # guard de idempotencia sin devolver saldos ni banco.
@@ -2181,6 +2233,7 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             self._guardar_detalles(cobro, detalles_data)
         if nuevo_estatus == Cobro.Estatus.CANCELADO:
             CobroService.cancelar_cobro(cobro, self.request.user)
+            canc.registrar_cancelacion(cobro, self.request, motivo, anterior_estatus)
         elif nuevo_estatus == Cobro.Estatus.APLICADO and anterior_estatus != Cobro.Estatus.APLICADO:
             CobroService.aplicar_cobro(cobro, self.request.user)
 
@@ -2188,8 +2241,14 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         user = self.request.user
         _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         with transaction.atomic():
-            if instance.estatus == Cobro.Estatus.APLICADO:
+            antes = instance.estatus
+            if antes == Cobro.Estatus.APLICADO:
+                canc.exigir_permiso(user, canc.PERMISO_COBROS)
+                motivo = canc.motivo_requerido(self.request)
                 CobroService.cancelar_cobro(instance, self.request.user)
+                canc.registrar_cancelacion(instance, self.request, motivo, antes, {"via": "DELETE"})
+            else:
+                canc.auditar_baja(instance, self.request)
             if instance.movimientos_bancarios.exists():
                 # El movimiento bancario es la huella del documento (FK PROTECT):
                 # borrar de verdad daba 500. Queda cancelado y fuera del listado.
@@ -2201,8 +2260,13 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         cobro = self.get_object()
+        canc.exigir_permiso(request.user, canc.PERMISO_COBROS)
+        canc.exigir_no_cancelado(cobro)
+        motivo = canc.motivo_requerido(request)
+        antes = cobro.estatus
         with transaction.atomic():
             CobroService.cancelar_cobro(cobro, request.user)
+            canc.registrar_cancelacion(cobro, request, motivo, antes)
         return Response(CobroSerializer(cobro).data)
 
     @action(detail=True, methods=["post"], url_path="timbrar-rep", url_name="timbrar-rep")
@@ -2232,7 +2296,12 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
     def cancelar_rep(self, request, pk=None):
         """Cancela el REP del cobro ante el SAT (Facturama) con ``motivo_sat`` 02 o 03 (EC-806)."""
         cobro = self.get_object()  # otra empresa -> 404; sin E-FIN-FACTURAS ya es 403 (check_permissions)
+        canc.exigir_permiso(request.user, canc.PERMISO_COBROS)
+        motivo = canc.motivo_requerido(request)
         FacturaTimbradoService.cancelar_rep(cobro, request.data.get("motivo_sat"))
+        canc.auditar_evento(cobro, request, "CANCELAR_REP", {
+            "rep_uuid": getattr(cobro, "rep_uuid", None),
+            "motivo_sat": request.data.get("motivo_sat"), "motivo": motivo})
         return Response(CobroSerializer(cobro).data)
 
 
@@ -2311,11 +2380,14 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         nuevo_estatus = serializer.validated_data.get("estatus", anterior_estatus)
         _validar_transicion_estatus_cobro_pago(Pago.Estatus, anterior_estatus, nuevo_estatus, "pago")
         if nuevo_estatus == Pago.Estatus.CANCELADO:
+            canc.exigir_permiso(user, canc.PERMISO_PAGOS)
+            motivo = canc.motivo_requerido(self.request)
             # Ver ``CobroViewSet.perform_update``: el servicio necesita el estatus previo.
             serializer.validated_data["estatus"] = anterior_estatus
         pago = serializer.save()
         if nuevo_estatus == Pago.Estatus.CANCELADO:
             PagoService.cancelar_pago(pago, self.request.user)
+            canc.registrar_cancelacion(pago, self.request, motivo, anterior_estatus)
         elif nuevo_estatus == Pago.Estatus.APLICADO and anterior_estatus != Pago.Estatus.APLICADO:
             PagoService.aplicar_pago(pago, self.request.user)
 
@@ -2323,8 +2395,14 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         user = self.request.user
         _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         with transaction.atomic():
-            if instance.estatus == Pago.Estatus.APLICADO:
+            antes = instance.estatus
+            if antes == Pago.Estatus.APLICADO:
+                canc.exigir_permiso(user, canc.PERMISO_PAGOS)
+                motivo = canc.motivo_requerido(self.request)
                 PagoService.cancelar_pago(instance, self.request.user)
+                canc.registrar_cancelacion(instance, self.request, motivo, antes, {"via": "DELETE"})
+            else:
+                canc.auditar_baja(instance, self.request)
             if instance.movimientos_bancarios.exists():
                 # El movimiento bancario es la huella del documento (FK PROTECT):
                 # borrar de verdad daba 500. Queda cancelado y fuera del listado.
@@ -2336,8 +2414,13 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         pago = self.get_object()
+        canc.exigir_permiso(request.user, canc.PERMISO_PAGOS)
+        canc.exigir_no_cancelado(pago)
+        motivo = canc.motivo_requerido(request)
+        antes = pago.estatus
         with transaction.atomic():
             PagoService.cancelar_pago(pago, request.user)
+            canc.registrar_cancelacion(pago, request, motivo, antes)
         return Response(PagoSerializer(pago).data)
 
 
@@ -2350,7 +2433,7 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
         empresa = getattr(user, "empresa", None)
         if empresa is None:
             return MovimientoBancario.objects.none()
-        qs = MovimientoBancario.objects.filter(cuenta_bancaria__empresa=empresa)
+        qs = MovimientoBancario.objects.filter(cuenta_bancaria__empresa=empresa).select_related("cuenta_bancaria")
         qp = self.request.query_params
         cuenta_bancaria = qp.get("cuenta_bancaria") or qp.get("cuenta_bancaria_id")
         tipo_movimiento = (qp.get("tipo_movimiento") or "").strip()
@@ -2408,14 +2491,26 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
     def perform_destroy(self, instance):
         user = self.request.user
         _exigir_de_la_empresa_del_usuario(user, _attr_chain(instance, "cuenta_bancaria", "empresa_id"))
+        # Ya no se borra: queda CANCELADO con motivo (el saldo se revierte igual).
+        if instance.estatus == MovimientoBancario.Estatus.CANCELADO:
+            raise ValidationError({"estatus": "El movimiento ya está cancelado."})
+        canc.exigir_permiso(user, canc.PERMISO_BANCOS)
+        motivo = canc.motivo_requerido(self.request)
+        antes = instance.estatus
         MovimientoBancarioService.revertir_movimiento(instance, user)
-        instance.delete()
+        canc.registrar_cancelacion(instance, self.request, motivo, antes, {"via": "DELETE"})
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         mb = self.get_object()
+        canc.exigir_permiso(request.user, canc.PERMISO_BANCOS)
+        if mb.estatus == MovimientoBancario.Estatus.CANCELADO:
+            raise ValidationError({"estatus": "El movimiento ya está cancelado."})
+        motivo = canc.motivo_requerido(request)
+        antes = mb.estatus
         with transaction.atomic():
             MovimientoBancarioService.revertir_movimiento(mb, request.user)
+            canc.registrar_cancelacion(mb, request, motivo, antes)
         return Response(MovimientoBancarioSerializer(mb).data)
 
 
@@ -2472,7 +2567,9 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
         _exigir_de_la_empresa_del_usuario(user, _attr_chain(instance, "cuenta_bancaria", "empresa_id"))
         if instance.estatus == ConciliacionBancaria.Estatus.CERRADA:
             raise ValidationError("No se puede eliminar una conciliación cerrada. Cancelela primero.")
-        instance.delete()
+        with transaction.atomic():
+            canc.auditar_baja(instance, self.request)
+            instance.delete()
 
     @action(detail=False, methods=["post"], url_path="preparar")
     def preparar(self, request):
@@ -2506,7 +2603,15 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
-        conciliacion = ConciliacionService.cancelar_conciliacion(self.get_object())
+        conciliacion = self.get_object()
+        canc.exigir_permiso(request.user, canc.PERMISO_BANCOS)
+        if conciliacion.estatus == ConciliacionBancaria.Estatus.CANCELADA:
+            raise ValidationError({"estatus": "La conciliación ya está cancelada."})
+        motivo = canc.motivo_requerido(request)
+        antes = conciliacion.estatus
+        with transaction.atomic():
+            conciliacion = ConciliacionService.cancelar_conciliacion(conciliacion)
+            canc.registrar_cancelacion(conciliacion, request, motivo, antes)
         return Response(ConciliacionBancariaSerializer(conciliacion).data)
 
 
@@ -2767,14 +2872,22 @@ class NotaCreditoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             raise NotFound("La nota de crédito ya no existe.")
         if bloqueada.estatus == NotaCredito.Estatus.EMITIDA:
             raise ValidationError("No se puede eliminar una nota de crédito emitida. Cancelela primero.")
+        canc.auditar_baja(bloqueada, self.request)
         bloqueada.delete()
 
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         nota = self.get_object()
+        if not request.user.tiene_permiso(PERMISO_CANCELAR_FACTURA):
+            raise PermissionDenied("No tienes permiso para cancelar notas de crédito.")
+        canc.exigir_no_cancelado(nota)
+        motivo = canc.motivo_requerido(request)
+        antes = nota.estatus
         try:
             with transaction.atomic():
                 NotaCreditoService.cancelar_nota_credito(nota, request.user)
+                nota.refresh_from_db()
+                canc.registrar_cancelacion(nota, request, motivo, antes)
         except NotaCredito.DoesNotExist:
             # Borrada entre get_object() y el lock del servicio.
             raise NotFound("La nota de crédito ya no existe.")

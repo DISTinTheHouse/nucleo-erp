@@ -10,6 +10,21 @@ from nucleo.models import StatusLifecycleModel
 from simple_history.models import HistoricalRecords
 import uuid
 
+
+class CancelacionFinanzasMixin(models.Model):
+    """Quién, cuándo y por qué se canceló el documento. Solo los escribe
+    ``finanzas.services.cancelacion_auditoria.registrar_cancelacion``."""
+
+    motivo_cancelacion = models.TextField(blank=True, default='')
+    fecha_cancelacion = models.DateTimeField(null=True, blank=True)
+    cancelado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+
+    class Meta:
+        abstract = True
+
+
 class MetodoPago(models.TextChoices):
     EFECTIVO = 'Efectivo', 'Efectivo'
     TRANSFERENCIA = 'Transferencia', 'Transferencia'
@@ -201,7 +216,7 @@ class ParametrosContabilidad(models.Model):
         return f"Contabilización {estado} (empresa {self.empresa_id})"
 
 
-class Poliza(models.Model):
+class Poliza(CancelacionFinanzasMixin, models.Model):
     class PolizaTipo(models.TextChoices):
         DIARIO = 'Diario', 'Diario'
         INGRESO = 'Ingreso', 'Ingreso'
@@ -269,7 +284,7 @@ class Poliza(models.Model):
         # devolverlo a secas reventaba con TypeError en el admin y en los logs.
         return self.folio or f"Póliza {self.pk}"
 
-class Factura(StatusLifecycleModel):
+class Factura(CancelacionFinanzasMixin, StatusLifecycleModel):
     class FacturaStatus(models.TextChoices):
         BORRADOR = 'Borrador', 'Borrador'
         EMITIDA = 'Emitida', 'Emitida'
@@ -402,7 +417,7 @@ class FacturaDetalle(models.Model):
     def __str__(self):
         return str(self.id)
 
-class FacturaProveedor(models.Model):
+class FacturaProveedor(CancelacionFinanzasMixin, models.Model):
     class FacturaProveedorStatus(models.TextChoices):
         BORRADOR = 'Borrador', 'Borrador'
         REGISTRADA = 'Registrada', 'Registrada'
@@ -668,7 +683,7 @@ class CuentaPorPagar(models.Model):
     def __str__(self):
         return str(self.id)
 
-class Cobro(models.Model):
+class Cobro(CancelacionFinanzasMixin, models.Model):
     class OpcionesReferencia(models.TextChoices):
         SPEI = 'SPEI', 'SPEI'
         CHEQUE = 'Cheque', 'Cheque'
@@ -746,7 +761,7 @@ class CobroDetalle(models.Model):
     def __str__(self):
         return str(self.id)
 
-class Pago(models.Model):
+class Pago(CancelacionFinanzasMixin, models.Model):
     class Estatus(models.TextChoices):
         BORRADOR = 'Borrador', 'Borrador'
         APLICADO = 'Aplicado', 'Aplicado'
@@ -793,7 +808,7 @@ class PagoDetalle(models.Model):
     def __str__(self):
         return str(self.id)
 
-class MovimientoBancario(models.Model):
+class MovimientoBancario(CancelacionFinanzasMixin, models.Model):
     class OrigenOpciones(models.TextChoices):
             MANUAL = 'Manual', 'Manual'
             SPEI = 'SPEI', 'SPEI'
@@ -834,6 +849,16 @@ class MovimientoBancario(models.Model):
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
     activo = models.BooleanField(default=True)
+
+
+    # La bitácora (``auditoria/bitacora.py``) acota por empresa: la de su cuenta bancaria.
+    @property
+    def empresa_id(self):
+        return self.cuenta_bancaria.empresa_id if self.cuenta_bancaria_id else None
+
+    @property
+    def sucursal_id(self):
+        return None
 
     class Meta:
         db_table = "movimientos_bancarios"
@@ -879,7 +904,7 @@ class PolizaDetalle(models.Model):
     def __str__(self):
         return str(self.id)
 
-class ConciliacionBancaria(models.Model):
+class ConciliacionBancaria(CancelacionFinanzasMixin, models.Model):
     class Estatus(models.TextChoices):
         BORRADOR = 'Borrador', 'Borrador'
         CERRADA = 'Cerrada', 'Cerrada'
@@ -894,6 +919,16 @@ class ConciliacionBancaria(models.Model):
     observaciones = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+
+    # La bitácora (``auditoria/bitacora.py``) acota por empresa: la de su cuenta bancaria.
+    @property
+    def empresa_id(self):
+        return self.cuenta_bancaria.empresa_id if self.cuenta_bancaria_id else None
+
+    @property
+    def sucursal_id(self):
+        return None
 
     class Meta:
         db_table = "conciliaciones_bancarias"
@@ -921,7 +956,7 @@ class ConciliacionDetalle(models.Model):
     def __str__(self):
         return str(self.id)
 
-class NotaCredito(models.Model):
+class NotaCredito(CancelacionFinanzasMixin, models.Model):
     class Estatus(models.TextChoices):
         BORRADOR = 'Borrador', 'Borrador'
         EMITIDA = 'Emitida', 'Emitida'
@@ -948,6 +983,16 @@ class NotaCredito(models.Model):
     cfdi_pendiente_desde = models.DateTimeField(null=True, blank=True)  # #901
     created_at = models.DateTimeField(default=timezone.now, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
+
+
+    # La bitácora (``auditoria/bitacora.py``) acota por empresa/sucursal: las de su factura.
+    @property
+    def empresa_id(self):
+        return self.factura.empresa_id if self.factura_id else None
+
+    @property
+    def sucursal_id(self):
+        return self.factura.sucursal_id if self.factura_id else None
 
     class Meta:
         db_table = "notas_creditos"

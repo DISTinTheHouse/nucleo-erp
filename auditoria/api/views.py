@@ -197,7 +197,8 @@ class BitacoraDocumentoViewSet(viewsets.ReadOnlyModelViewSet):
         modelo = apps.get_model(TIPOS[tipo])
         # Despacho e inspección de calidad no guardan empresa ni sucursal: son las
         # de su packing / su recepción.
-        prefijo = {"despacho": "packing__", "calidad_inspeccion": "recepcion__"}.get(tipo, "")
+        prefijo = {"despacho": "packing__", "calidad_inspeccion": "recepcion__", "nota_credito": "factura__",
+                   "movimiento_bancario": "cuenta_bancaria__", "conciliacion_bancaria": "cuenta_bancaria__"}.get(tipo, "")
         raiz = modelo.objects.filter(pk=doc_id, **{f"{prefijo}empresa_id": getattr(user, "empresa_id", None)})
         # #1073: la raíz con la misma regla que sus eventos; fuera de alcance → 404.
         if (
