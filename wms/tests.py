@@ -3559,6 +3559,42 @@ class CancelacionesEC949Tests(TestCase):
         self.assertEqual(self._revertir(alta).status_code, 201)
         self.assertEqual(self._almacen_actual(picking), (self.terminado.pk, {self.terminado.pk}))
 
+    def _cancelado_con_traslado(self):
+        """``(picking cancelado, TR del alta, TR del traslado)``."""
+        picking = self._alta()
+        alta = picking.transferencia
+        self._trasladar(picking, self.apartados)
+        picking.refresh_from_db()
+        self.assertEqual(self._cancelar(self.URL_PICKINGS, picking.pk).status_code, 200)
+        return picking, alta, picking.transferencia
+
+    def test_cadena_cuenta_el_traslado_sin_fk_al_picking(self):
+        """El traslado sin ``Transferencia.picking`` sigue siendo la última TR (es la
+        ``Picking.transferencia``): el alta no se revierte antes."""
+        from wms.models import Transferencia
+
+        picking, alta, traslado = self._cancelado_con_traslado()
+        Transferencia.objects.filter(pk=traslado.pk).update(picking=None)
+        resp = self._revertir(alta)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"transferencia": (
+            f"Sólo se revierte la última TR del picking {picking.folio}. Revierte primero {traslado.folio}."
+        )})
+
+    def test_tr_ligada_entre_la_lectura_y_el_lock_responde_400(self):
+        from wms.models import Transferencia
+        from wms.services import cancelacion_service
+
+        picking, _alta, traslado = self._cancelado_con_traslado()
+        # Fuera del lock resuelve el picking; bajo lock, otro (otro proceso la cambió).
+        with patch.object(cancelacion_service, "_picking_id_de", side_effect=[picking.pk, None]):
+            resp = self._revertir(traslado)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"transferencia": "La TR cambió mientras se revertía. Intenta de nuevo."})
+        self.assertEqual(
+            Transferencia.objects.get(pk=traslado.pk).status, Transferencia.TransferenciaStatus.COMPLETADA
+        )
+
     def test_alta_sin_fk_de_picking_trasladado_no_se_revierte_como_manual(self):
         """Alta y traslado sin ``Transferencia.picking`` y ``Picking.transferencia`` = el
         traslado: el alta no resuelve picking, pero su texto dice que es de uno → 400."""
