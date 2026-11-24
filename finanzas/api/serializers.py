@@ -2,6 +2,8 @@ from decimal import Decimal
 
 from django.db.models import Q, Sum
 from rest_framework import serializers
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
 from rest_framework.exceptions import ValidationError
 
 from nucleo.models import Sucursal
@@ -228,14 +230,17 @@ class CuentaPorCobrarSerializer(serializers.ModelSerializer):
             obj._motivo_no_cobrable = obj.motivo_no_cobrable()
         return obj._motivo_no_cobrable
 
+    @extend_schema_field(OpenApiTypes.BOOL)  # #1341
     def get_cobrable(self, obj):
         """Lo mismo que exige aplicar un cobro (``CuentaPorCobrar.motivo_no_cobrable``)."""
         return self._motivo(obj) is None
 
+    @extend_schema_field(serializers.ChoiceField(choices=CuentaPorCobrar.MotivoNoCobrable.choices, allow_null=True))
     def get_motivo_no_cobrable(self, obj):
         motivo = self._motivo(obj)
         return motivo.value if motivo else None
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_motivo_no_cobrable_display(self, obj):
         motivo = self._motivo(obj)
         return motivo.label if motivo else None
