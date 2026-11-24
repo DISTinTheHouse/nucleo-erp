@@ -104,6 +104,7 @@ from compras.services.recepcion_pedidos import RELACIONES_PEDIDO, origen_folio, 
 from compras.services.cancelacion_recepcion import (
     MOTIVO_CANCELACION_MAX,
     anotar_bloqueos_cancelacion,
+    op_se_reabre,
     puede_cancelar_recepciones,
     validar_cancelacion_recepcion,
 )
@@ -1964,6 +1965,12 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 sm.fecha_recepcion = None
                 sm.save(update_fields=["estatus", "fecha_recepcion", "updated_at"])
                 despues["salida_maquila_estatus"] = sm.estatus
+            if op is not None and op_se_reabre(op, recepcion):
+                # #1326: la cerró esta recepción (``cerrar_orden``) y nada pasó por calidad.
+                op.estatus_op = OrdenProduccion.EstatusOrdenProduccion.REVISION
+                op.fecha_fin = None
+                op.save(update_fields=["estatus_op", "fecha_fin"])
+                despues["op_reabierta"] = {"op_id": op.pk, "estatus_op": op.estatus_op}
             if oc is not None and oc.estatus in self.ESTATUS_OC_RECIBIBLES | {OrdenCompra.EstatusOrdenCompra.RECIBIDA}:
                 self._actualizar_estatus_oc(oc)
                 despues["orden_compra_estatus"] = oc.estatus
