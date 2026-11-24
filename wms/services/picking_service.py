@@ -338,8 +338,17 @@ class PickingService:
         # que packing y despacho, EC-574) y la retención revisada sobre la fila
         # bloqueada: un ``retener/`` concurrente ya no se cuela entre la lectura
         # del pedido y el alta (EC-953).
+        # Las reglas del pedido de ``validar_contexto_picking`` se repiten sobre la
+        # fila bloqueada (un ``cancelar/`` concurrente tampoco se cuela), con sus
+        # mismos mensajes; si ya no existe, el 400 del pedido no encontrado.
         pedido_bloqueado = Pedido.objects.select_for_update(of=("self",)).filter(pk=pedido.pk).first()
+        if pedido_bloqueado is None:
+            raise ValidationError({"pedido": "Pedido no encontrado o sin acceso."})
+        if pedido_bloqueado.estatus == Pedido.ESTATUS_CANCELADO:
+            raise ValidationError({"pedido": "El pedido está CANCELADO; no se puede surtir."})
         exigir_no_retenido(pedido_bloqueado)
+        if not pedido_bloqueado.activo or pedido_bloqueado.estatus not in (3, 4):
+            raise ValidationError({"pedido": "El pedido no está autorizado ni en proceso; no se puede surtir."})
 
         # 2. Resolución y validación de líneas (individual + agregada)
         requested_items = resolve_requested_items(

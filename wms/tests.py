@@ -1200,6 +1200,45 @@ class PickingGeneraTransferenciaTests(TestCase):
         from wms.models import Picking
         self.assertFalse(Picking.objects.filter(pedido=self.pedido).exists())
 
+    def test_cancelacion_se_revisa_con_la_fila_del_pedido_bloqueada(self):
+        """EC-953: un ``cancelar/`` entre la lectura del pedido y el alta tampoco se cuela:
+        el pedido en memoria sigue autorizado, la fila bloqueada ya está cancelada."""
+        from rest_framework.exceptions import ValidationError
+
+        from ventas.models import Pedido
+        from wms.models import Picking
+        from wms.services.picking_service import PickingService
+
+        Pedido.objects.filter(pk=self.pedido.pk).update(estatus=Pedido.ESTATUS_CANCELADO, activo=False)
+        self.assertEqual(self.pedido.estatus, 3)
+        with self.assertRaises(ValidationError) as err:
+            PickingService.handle_store(self._data(self.Decimal("1")), self.usuario)
+        self.assertEqual(err.exception.detail, {"pedido": "El pedido está CANCELADO; no se puede surtir."})
+
+        Pedido.objects.filter(pk=self.pedido.pk).update(estatus=3, activo=False)
+        with self.assertRaises(ValidationError) as err:
+            PickingService.handle_store(self._data(self.Decimal("1")), self.usuario)
+        self.assertEqual(
+            err.exception.detail, {"pedido": "El pedido no está autorizado ni en proceso; no se puede surtir."},
+        )
+        self.assertFalse(Picking.objects.filter(pedido=self.pedido).exists())
+
+    def test_pedido_que_ya_no_existe_responde_400(self):
+        """EC-953: si el pedido desaparece antes del candado, 400 de pedido no encontrado
+        (antes pasaba la revisión con ``None`` y reventaba con ``IntegrityError``)."""
+        from unittest import mock
+
+        from rest_framework.exceptions import ValidationError
+
+        from ventas.models import Pedido
+        from wms.services.picking_service import PickingService
+
+        vacio = Pedido.objects.none()
+        with mock.patch.object(Pedido.objects, "select_for_update", return_value=vacio):
+            with self.assertRaises(ValidationError) as err:
+                PickingService.handle_store(self._data(self.Decimal("1")), self.usuario)
+        self.assertEqual(err.exception.detail, {"pedido": "Pedido no encontrado o sin acceso."})
+
     def test_picking_crea_transferencia_con_folio_tr_y_mueve_stock(self):
         from wms.services.picking_service import PickingService
 
