@@ -17,19 +17,9 @@ from finanzas.models import (
 from terceros.models import Cliente
 
 _MotivoNoCobrable = CuentaPorCobrar.MotivoNoCobrable
-# Un mensaje por causa (#1330), en el orden de ``CuentaPorCobrar.motivo_no_cobrable``.
-_MENSAJE_NO_COBRABLE = {
-    _MotivoNoCobrable.CXC_CANCELADA: "La CxC {id} está cancelada y no admite cobros.",
-    _MotivoNoCobrable.FACTURA_CANCELADA: "La factura de la CxC {id} está cancelada y no admite cobros.",
-    _MotivoNoCobrable.CFDI_CANCELADO: "El CFDI de la factura de la CxC {id} está cancelado ante el SAT y no admite cobros.",
-    _MotivoNoCobrable.CANCELACION_SOLICITADA: (
-        "La factura de la CxC {id} tiene la cancelación del CFDI solicitada ante el SAT y no admite cobros."
-    ),
-    _MotivoNoCobrable.CANCELACION_EN_CURSO: (
-        "La cancelación del CFDI de la factura de la CxC {id} está en curso y no admite cobros."
-    ),
-    _MotivoNoCobrable.CFDI_PENDIENTE: "El CFDI de la factura de la CxC {id} está pendiente de timbrar y no admite cobros.",
-}
+# #1342: el 400 usa el mismo texto que ``motivo_no_cobrable_display`` (el label).
+def _mensaje_no_cobrable(motivo, cxc_id):
+    return f"CxC {cxc_id}: {_MotivoNoCobrable(motivo).label}. No admite cobros."
 
 
 class CobroService:
@@ -79,7 +69,7 @@ class CobroService:
             # se valida abajo contra el importe aplicado.
             motivo = cxc.motivo_no_cobrable(considerar_saldo=False)
             if motivo is not None:
-                raise ErrorDeNegocio({"cobro_detalles": _MENSAJE_NO_COBRABLE[motivo].format(id=cxc.pk)})
+                raise ErrorDeNegocio({"cobro_detalles": _mensaje_no_cobrable(motivo, cxc.pk)})
             if cxc.factura.moneda_id != moneda_cuenta:  # #587
                 raise ErrorDeNegocio(
                     {"cuenta_bancaria": f"La CxC {cxc.pk} está en otra moneda que la cuenta bancaria."}

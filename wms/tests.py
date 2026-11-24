@@ -1422,6 +1422,7 @@ class OnboardingAlmacenSugeridoTests(TestCase):
         for estatus, activo in ((1, True), (2, True), (3, False)):
             pedido = SimpleNamespace(
                 empresa_id=self.empresa.pk, estatus=estatus, activo=activo, ESTATUS_CANCELADO=5,
+                retenido=False, motivo_retencion="",  # #1359
                 programacion_conf={"programaciones": [{"destino": "APARTADO"}]},
             )
             with self.assertRaises(ValidationError) as ctx:

@@ -329,14 +329,20 @@ def revertir_transferencia(transferencia, request, motivo):
             "ubicacion_destino", "lote", "serie",
         ).order_by("pk")
     ]
-    reversa = TransferenciaService.handle_store(
-        {
-            "almacen_origen": tr.almacen_destino, "almacen_destino": tr.almacen_origen,
-            "observaciones": f"Reversa de {tr.folio}: {motivo}"[:500],
-            "transferencia_detalle": renglones,
-        },
-        request.user, request=request, empresa=tr.empresa, sucursal=tr.sucursal,
-    )
+    try:
+        reversa = TransferenciaService.handle_store(
+            {
+                "almacen_origen": tr.almacen_destino, "almacen_destino": tr.almacen_origen,
+                "observaciones": f"Reversa de {tr.folio}: {motivo}"[:500],
+                "transferencia_detalle": renglones,
+            },
+            request.user, request=request, empresa=tr.empresa, sucursal=tr.sucursal,
+        )
+    except ValidationError as exc:
+        # #1360: ``handle_store`` lanza textos sueltos (lista plana); aquí, dict como el resto.
+        if isinstance(exc.detail, dict):
+            raise
+        raise ValidationError({"transferencia": " ".join(str(m) for m in exc.detail)})
     reversa.reversa_de = tr
     reversa.picking_id = picking_id
     reversa.save(update_fields=["reversa_de", "picking"])

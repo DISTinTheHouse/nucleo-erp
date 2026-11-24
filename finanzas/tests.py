@@ -6894,7 +6894,7 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
     def test_motivo_por_causa_en_cxc_y_al_cobrar(self):
         """#1328-#1330: cada causa con su motivo en la CxC, su mensaje al cobrar
         (factura cancelada incluida) y el filtro ``cobrable`` con la misma regla."""
-        from finanzas.services.cobro_service import _MENSAJE_NO_COBRABLE
+        from finanzas.services.cobro_service import _mensaje_no_cobrable
 
         M = CuentaPorCobrar.MotivoNoCobrable
         casos = [
@@ -6925,7 +6925,7 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
                 if motivo != M.SALDO_CERO:
                     resp = self._cobrar(cxc)
                     self.assertEqual(resp.status_code, 400, resp.data)
-                    self.assertIn(_MENSAJE_NO_COBRABLE[motivo].format(id=cxc.pk), str(resp.data["cobro_detalles"]))
+                    self.assertIn(_mensaje_no_cobrable(motivo, cxc.pk), str(resp.data["cobro_detalles"]))
         fila = cliente.get(f"{CXC_URL}{cobrable.pk}/").data
         self.assertEqual((fila["cobrable"], fila["motivo_no_cobrable"]), (True, None))
 
