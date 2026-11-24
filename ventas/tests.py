@@ -1370,6 +1370,42 @@ class PedidoMesaControlUpdateTests(TestCase):
         tipos = {item["tipo"] for item in response.json()["bloqueos"]}
         self.assertIn("picking_activo", tipos)
 
+    def test_picking_cancelado_no_bloquea_edicion(self):
+        """Cancelar el picking (#1348) es la acción que pide el bloqueo: sus líneas ya
+        no bloquean, y un renglón que se conserva conserva también sus líneas."""
+        picking = Picking.objects.create(
+            folio="PK-CAN",
+            empresa=self.empresa,
+            sucursal=self.sucursal,
+            pedido=self.pedido,
+            operador=self.admin_mesa,
+            almacen=self.almacen,
+            prioridad=Picking.Prioridad.MEDIA,
+            tipo=Picking.TipoPicking.ORDER_PICKING,
+            estado=Picking.Estado.CANCELADO,
+            usuario=self.admin_mesa,
+        )
+        detalle = self.pedido.detalles.get()
+        linea = PickingDetalle.objects.create(
+            picking=picking,
+            pedido_detalle=detalle,
+            pedido_detalle_talla=detalle.tallas.get(),
+            producto=self.producto_a,
+            cantidad_solicitada="2.0000",
+            cantidad_asignada="1.0000",
+            cantidad_surtida="0.0000",
+            estado=PickingDetalle.EstadoLinea.CANCELADA,
+        )
+        client = self._client(self.admin_mesa)
+        contexto = client.get(pedido_editar_mesa_control_contexto_url(self.pedido.pk)).json()
+        self.assertTrue(contexto["editable"])
+        self.assertEqual(contexto["bloqueos"], [])
+        response = client.post(
+            pedido_editar_mesa_control_url(self.pedido.pk), self._payload(), format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(PickingDetalle.objects.filter(pk=linea.pk).exists())
+
     # --- EC-776: bloqueos en una consulta y acotados a la empresa del pedido ---
 
     def _factura_emitida_ligada(self, empresa, sucursal, folio):
