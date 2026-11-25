@@ -183,6 +183,7 @@ def renglones_sm_servicio(sm_ids):
     exacto de ``pendiente_por_renglon_sm``. Una consulta, sin importar SM ni
     renglones."""
     from catalogo.models import ProductoVariante
+    from ventas.models import PedidoDetalleTalla
 
     sm_ids = list(sm_ids)
     if not sm_ids:
@@ -190,20 +191,31 @@ def renglones_sm_servicio(sm_ids):
     sku = ProductoVariante.objects.filter(
         producto_id=OuterRef("_producto"), talla_id=OuterRef("_talla"), color_id=OuterRef("_color"),
     ).order_by("id").values("sku")[:1]
+    # Muestra (renglón sin ``producto``, EC-964): su ``sku_muestra`` de la talla del pedido.
+    sku_muestra = PedidoDetalleTalla.objects.filter(
+        pedido_detalle_id=OuterRef("_pedido_detalle"), talla_id=OuterRef("_talla"),
+        pedido_detalle__producto__isnull=True,
+    ).exclude(sku_muestra__isnull=True).exclude(sku_muestra="").order_by("id").values("sku_muestra")[:1]
     filas = (
         SalidaMaquilaDetalle.objects.filter(salida_id__in=sm_ids)
         .annotate(
             _producto=Coalesce("ob_detalle__producto_id", "or_detalle__producto_id"),
             _talla=Coalesce("ob_detalle__talla_id", "or_detalle__talla_id"),
             _color=Coalesce("ob_detalle__color_id", "or_detalle__color_id"),
+            _pedido_detalle=Coalesce("ob_detalle__pedido_detalle_id", "or_detalle__pedido_detalle_id"),
         )
         .annotate(
-            producto_nombre=Coalesce("ob_detalle__producto__nombre", "or_detalle__producto__nombre"),
+            # Muestra: sin producto, el nombre externo de su línea del pedido.
+            producto_nombre=Coalesce(
+                "ob_detalle__producto__nombre", "or_detalle__producto__nombre",
+                "ob_detalle__pedido_detalle__producto_nombre_externo",
+                "or_detalle__pedido_detalle__producto_nombre_externo",
+            ),
             producto_codigo=Coalesce("ob_detalle__producto__codigo", "or_detalle__producto__codigo"),
             producto_cod_proscai=Coalesce("ob_detalle__producto__cod_proscai", "or_detalle__producto__cod_proscai"),
             talla=Coalesce("ob_detalle__talla__nombre", "or_detalle__talla__nombre"),
             color=Coalesce("ob_detalle__color__nombre", "or_detalle__color__nombre"),
-            sku=Subquery(sku),
+            sku=Coalesce(Subquery(sku), Subquery(sku_muestra)),
             recibido=_recibido_renglon_sm(),
         )
         .order_by("salida_id", "id")
