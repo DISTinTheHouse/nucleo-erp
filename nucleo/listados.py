@@ -32,6 +32,13 @@ def nombre_para_mostrar_sql(relacion):
     )
 
 
+def nombre_para_mostrar_usuario(usuario):
+    """Gemela Python de ``nombre_para_mostrar_sql`` (#1380): nombre completo del
+    usuario o, si no tiene first/last name, su correo; ``None`` sin usuario.
+    Única copia de la regla para los serializers de producción, WMS y compras."""
+    return (usuario.get_full_name().strip() or usuario.email) if usuario else None
+
+
 class BusquedaSoloListadoFilter(SearchFilter):
     """``SearchFilter`` que sólo busca en acciones sin ``{id}`` (``list``, ``kpis``,
     ``exportar``...). ``get_object()`` también pasa por los filter backends: con el

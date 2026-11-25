@@ -41,6 +41,7 @@ from rest_framework.viewsets import GenericViewSet
 
 from compras.models import Recepcion
 from finanzas.models import FacturaProveedor
+from nucleo.listados import nombre_para_mostrar_usuario
 from nucleo.models import SerieFolio
 from nucleo.permisos import CODIGOS_PRODUCCION_OP, LecturaPorCodigo, permisos_de_la_peticion
 from produccion.models import (
@@ -105,10 +106,7 @@ class SalidaMaquilaSerializer(CanceladoPorNombreMixin, serializers.ModelSerializ
     usuario_nombre = serializers.SerializerMethodField()
 
     def get_usuario_nombre(self, obj):
-        u = obj.usuario
-        if u is None:
-            return None
-        return u.get_full_name().strip() or u.email
+        return nombre_para_mostrar_usuario(obj.usuario)
 
     recepciones = serializers.SerializerMethodField()
     facturas_proveedor = serializers.SerializerMethodField()

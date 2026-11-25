@@ -25,6 +25,7 @@ from seguridad.role_identity import (
 )
 
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, rango_fechas, validar_parametros
+from nucleo.listados import nombre_para_mostrar_usuario
 from nucleo.permisos import (
     CODIGOS_PRODUCCION_CM,
     CODIGOS_PRODUCCION_OB,
@@ -1677,7 +1678,7 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
             return Response({
                 "pedidos": pedidos_payload,
                 "operadores": [
-                    {"id": u.id, "nombre": u.get_full_name().strip() or u.email}
+                    {"id": u.id, "nombre": nombre_para_mostrar_usuario(u)}
                     for u in operadores_qs
                 ],
                 "preview": {"folio_ob_sugerido": preview_folio},
@@ -2144,7 +2145,7 @@ class OrdenReflejanteViewSet(
             return Response({
                 "pedidos": pedidos_payload,
                 "operadores": [
-                    {"id": u.id, "nombre": u.get_full_name().strip() or u.email}
+                    {"id": u.id, "nombre": nombre_para_mostrar_usuario(u)}
                     for u in operadores_qs
                 ],
                 "preview": {"folio_or_sugerido": preview_folio},
@@ -2534,7 +2535,7 @@ class OrdenesCorteMangaViewSet(
             return Response({
                 "pedidos": pedidos_payload,
                 "operadores": [
-                    {"id": u.id, "nombre": u.get_full_name().strip() or u.email}
+                    {"id": u.id, "nombre": nombre_para_mostrar_usuario(u)}
                     for u in operadores_qs
                 ],
                 "preview": {"folio_ocm_sugerido": preview_folio},

@@ -3,6 +3,7 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from inventarios.models import Almacen
+from nucleo.listados import nombre_para_mostrar_usuario
 from nucleo.models import SerieFolio
 from ventas.models import Pedido
 from wms.services.picking_pipeline.pendientes import tiene_pendiente_surtible
@@ -286,7 +287,7 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids, limite_pedidos=LIMIT
     operadores_payload = [
         {
             "id": operador.id,
-            "nombre": operador.get_full_name().strip() or operador.email,
+            "nombre": nombre_para_mostrar_usuario(operador),
         }
         for operador in operadores_qs[:100]
     ]

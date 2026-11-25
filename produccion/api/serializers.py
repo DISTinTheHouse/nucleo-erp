@@ -37,13 +37,13 @@ from catalogo.api.serializers import ProductoVarianteSerializer
 from catalogo.models import Color, ProductoVariante, VarianteProductoProduccion
 from inventarios.models import Ubicacion
 from produccion.services.common import config_como_dict, revisar_empresa
+from nucleo.listados import nombre_para_mostrar_usuario
 
 
 def nombre_cancelado_por(orden):
     """Quién canceló (EC-966): nombre completo o, si no tiene, su correo; ``None``
     si no está cancelada. Misma regla que WMS (EC-949) y Compras (EC-926)."""
-    usuario = orden.cancelado_por if orden.cancelado_por_id else None
-    return (usuario.get_full_name().strip() or usuario.email) if usuario else None
+    return nombre_para_mostrar_usuario(orden.cancelado_por) if orden.cancelado_por_id else None
 
 
 class CanceladoPorNombreMixin(serializers.Serializer):
@@ -143,10 +143,7 @@ class AvancePiezasReadSerializer(serializers.Serializer):
     usuario_nombre = serializers.SerializerMethodField()
 
     def get_usuario_nombre(self, obj):
-        usuario = getattr(obj, "usuario", None)
-        if not usuario:
-            return None
-        return usuario.get_full_name().strip() or getattr(usuario, "email", None)
+        return nombre_para_mostrar_usuario(getattr(obj, "usuario", None))
 
 
 def resumen_avance_piezas(detalles, avances):
@@ -177,10 +174,7 @@ class _AvancePiezasWriteSerializer(serializers.ModelSerializer):
     usuario_nombre = serializers.SerializerMethodField()
 
     def get_usuario_nombre(self, obj):
-        usuario = getattr(obj, "usuario", None)
-        if not usuario:
-            return None
-        return usuario.get_full_name().strip() or getattr(usuario, "email", None)
+        return nombre_para_mostrar_usuario(getattr(obj, "usuario", None))
 
     def validate_cantidad(self, value):
         if value is None or value <= 0:
@@ -705,9 +699,7 @@ class OrdenProduccionSerializer(_FechasPedidoListadoMixin, CanceladoPorNombreMix
         return armar_pedido_vinculado(obj)
 
     def get_usuario_nombre(self, obj):
-        usuario = obj.usuario_asignado
-        if not usuario: return None
-        return usuario.get_full_name().strip() or usuario.email
+        return nombre_para_mostrar_usuario(obj.usuario_asignado)
 
     # Varios pedidos en una OP: ids de entrada; ``pedidos`` es la lectura.
     pedidos_ids = serializers.ListField(
@@ -1208,9 +1200,7 @@ class OrdenBordadoSerializer(CanceladoPorNombreMixin, serializers.ModelSerialize
         ]
 
     def get_usuario_nombre(self, obj):
-        usuario = obj.usuario_asignado
-        if not usuario: return None
-        return usuario.get_full_name().strip() or usuario.email
+        return nombre_para_mostrar_usuario(obj.usuario_asignado)
 
     def get_proveedor_display(self, obj):
         """Label compacto del proveedor (para chip UI)."""
@@ -1602,10 +1592,7 @@ class _OrdenBordadoAvanceReadSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_usuario_nombre(self, obj):
-        usuario = getattr(obj, "usuario", None)
-        if not usuario:
-            return None
-        return usuario.get_full_name().strip() or getattr(usuario, "email", None)
+        return nombre_para_mostrar_usuario(getattr(obj, "usuario", None))
 
     def get_orden_bordado_detalle_display(self, obj):
         det = getattr(obj, "orden_bordado_detalle", None)
@@ -2331,9 +2318,7 @@ class OrdenReflejanteSerializer(CanceladoPorNombreMixin, serializers.ModelSerial
         ]
 
     def get_usuario_nombre(self, obj):
-        usuario = obj.usuario_asignado
-        if not usuario: return None
-        return usuario.get_full_name().strip() or usuario.email
+        return nombre_para_mostrar_usuario(obj.usuario_asignado)
 
     def validate_pedido(self, pedido):
         return _pedido_en_alcance(self, pedido, "reflejante", "REFLEJANTE")
@@ -2816,9 +2801,7 @@ class OrdenesCorteMangaSerializer(CanceladoPorNombreMixin, serializers.ModelSeri
         ]
 
     def get_usuario_nombre(self, obj):
-        usuario = obj.usuario_asignado
-        if not usuario: return None
-        return usuario.get_full_name().strip() or usuario.email
+        return nombre_para_mostrar_usuario(obj.usuario_asignado)
 
     def validate_pedido(self, pedido):
         return _pedido_en_alcance(self, pedido, "corte de manga", "CORTE_MANGA")
@@ -3582,8 +3565,7 @@ class PreOrdenProduccionDetailSerializer(PreOrdenProduccionListSerializer):
         ]
 
     def get_usuario_confirma_nombre(self, obj):
-        u = obj.usuario_confirma
-        return (u.get_full_name().strip() or u.email) if u else None
+        return nombre_para_mostrar_usuario(obj.usuario_confirma)
 
 
 class PreOrdenEventoSerializer(serializers.ModelSerializer):
@@ -3596,4 +3578,4 @@ class PreOrdenEventoSerializer(serializers.ModelSerializer):
 
     def get_usuario(self, obj):
         u = obj.usuario
-        return {"id": u.pk, "nombre": u.get_full_name().strip() or u.email} if u else None
+        return {"id": u.pk, "nombre": nombre_para_mostrar_usuario(u)} if u else None
