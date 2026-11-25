@@ -1038,6 +1038,10 @@ class ProductoTerminadoEntradasSerializer(serializers.ModelSerializer):
 
 class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    # Nombre de la muestra con SKU (``producto`` null); vive en la línea del pedido (EC-963).
+    producto_nombre_externo = serializers.CharField(
+        source='pedido_detalle.producto_nombre_externo', read_only=True, allow_null=True, default=None,
+    )
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
     tipo_servicio_bordado_display = serializers.CharField(
@@ -1366,6 +1370,10 @@ class OrdenBordadoDetalleListSerializer(serializers.ModelSerializer):
     # el listado deja de crecer con el número de renglones.
 
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    # Nombre de la muestra con SKU (``producto`` null); vive en la línea del pedido (EC-963).
+    producto_nombre_externo = serializers.CharField(
+        source='pedido_detalle.producto_nombre_externo', read_only=True, allow_null=True, default=None,
+    )
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
 
@@ -2161,6 +2169,10 @@ class BordadoIncidenciasSerializer(_OrdenPadreWriteOnceMixin, serializers.ModelS
 
 class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    # Nombre de la muestra con SKU (``producto`` null); vive en la línea del pedido (EC-963).
+    producto_nombre_externo = serializers.CharField(
+        source='pedido_detalle.producto_nombre_externo', read_only=True, allow_null=True, default=None,
+    )
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
     reflejante_config = serializers.SerializerMethodField()
@@ -2414,6 +2426,10 @@ class OrdenReflejanteDetalleListSerializer(serializers.ModelSerializer):
     # el listado tampoco ejecuta la extracción que los resuelve.
 
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    # Nombre de la muestra con SKU (``producto`` null); vive en la línea del pedido (EC-963).
+    producto_nombre_externo = serializers.CharField(
+        source='pedido_detalle.producto_nombre_externo', read_only=True, allow_null=True, default=None,
+    )
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
 
@@ -2658,6 +2674,10 @@ class ReflejanteIncidenciasSerializer(_OrdenPadreWriteOnceMixin, serializers.Mod
 
 class OrdenCorteMangaDetalleSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    # Nombre de la muestra con SKU (``producto`` null); vive en la línea del pedido (EC-963).
+    producto_nombre_externo = serializers.CharField(
+        source='pedido_detalle.producto_nombre_externo', read_only=True, allow_null=True, default=None,
+    )
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
     corte_manga_config = serializers.SerializerMethodField()
@@ -2894,6 +2914,10 @@ class OrdenCorteMangaDetalleListSerializer(serializers.ModelSerializer):
     # listado (llega con ``fields = '__all__'``, sin query extra).
 
     producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+    # Nombre de la muestra con SKU (``producto`` null); vive en la línea del pedido (EC-963).
+    producto_nombre_externo = serializers.CharField(
+        source='pedido_detalle.producto_nombre_externo', read_only=True, allow_null=True, default=None,
+    )
     talla_nombre = serializers.CharField(source='talla.nombre', read_only=True, allow_null=True, default=None)
     color_nombre = serializers.CharField(source='color.nombre', read_only=True, allow_null=True, default=None)
 
