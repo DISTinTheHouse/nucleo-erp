@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from compras.api.serializers import _nombre_usuario
 from compras.models import CalidadInspeccion, DevolucionProveedor, DevolucionProveedorDetalle
 from compras.services import devolucion_proveedor as servicio
+from nucleo.kpis import entero_param
 from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset
 from nucleo.middleware import ip_auditoria
 
@@ -82,10 +83,13 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
             .prefetch_related("detalles__producto")
             .order_by("-fecha", "-id")
         )
-        p = self.request.query_params
-        for campo in ("recepcion", "calidad_inspeccion", "orden_compra", "proveedor", "estatus"):
-            if p.get(campo):
-                qs = qs.filter(**{campo: p[campo]})
+        # Ids no enteros → 400 como los demás listados (#1402); antes, 500.
+        for campo in ("recepcion", "calidad_inspeccion", "orden_compra", "proveedor"):
+            valor = entero_param(self.request, campo)
+            if valor is not None:
+                qs = qs.filter(**{f"{campo}_id": valor})
+        if self.request.query_params.get("estatus"):
+            qs = qs.filter(estatus=self.request.query_params["estatus"])
         return qs
 
     def _exigir(self, clave):
@@ -137,7 +141,7 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
         (el POST la rechaza); sin los renglones ya devueltos completos. 2 consultas sin
         importar los renglones."""
         empresa = getattr(request.user, "empresa", None)
-        pk = request.query_params.get("calidad_inspeccion")
+        pk = entero_param(request, "calidad_inspeccion")  # no entero → 400 (#1402)
         if not empresa or not pk or not CalidadInspeccion.objects.filter(pk=pk, recepcion__empresa=empresa).exists():
             raise ValidationError({"calidad_inspeccion": "Inspección no encontrada."})
         filas = []

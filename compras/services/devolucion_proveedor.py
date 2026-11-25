@@ -152,7 +152,10 @@ def crear(*, inspeccion, motivo, renglones, user, ip=None, user_agent=None):
     pedidos = defaultdict(lambda: CERO)
     for r in renglones:
         try:
-            pedidos[int(r["calidad_detalle"])] += Decimal(str(r["cantidad"]))
+            cantidad = Decimal(str(r["cantidad"]))
+            if not cantidad.is_finite():  # NaN/Infinity: 500 al comparar (#1402)
+                raise ValueError
+            pedidos[int(r["calidad_detalle"])] += cantidad
         except Exception:
             raise ValidationError({"detalles": "Cada renglón lleva calidad_detalle y cantidad."})
     for cd_id, cantidad in pedidos.items():

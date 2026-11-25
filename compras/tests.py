@@ -4704,6 +4704,30 @@ class DevolucionProveedorContratoTests(TestCase):
         self.assertNotIn(inspeccion.pk, self._inspecciones(devolucion_pendiente="true"))
         self.assertIn(inspeccion.pk, self._inspecciones(devolucion_pendiente="false"))
 
+    def test_entradas_no_numericas_son_400(self):
+        """#1402: ids no enteros en filtros y ``pendientes/`` y cantidades no finitas → 400."""
+        for campo in ("recepcion", "calidad_inspeccion", "orden_compra", "proveedor"):
+            with self.subTest(campo=campo):
+                resp = self._client().get(self.URL, {campo: "abc"})
+                self.assertEqual(resp.status_code, 400, resp.content[:300])
+                self.assertEqual(resp.json(), {campo: "Debe ser un entero válido."})
+        resp = self._client().get(f"{self.URL}pendientes/", {"calidad_inspeccion": "abc"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json(), {"calidad_inspeccion": "Debe ser un entero válido."})
+
+        inspeccion = self._inspeccion()
+        detalle = inspeccion.detalles.get()
+        self.assertEqual(
+            [d["id"] for d in self._client().get(self.URL, {"calidad_inspeccion": inspeccion.pk}).json()], [])
+        for cantidad in ("NaN", "sNaN", "Infinity", "-Infinity", "abc"):
+            with self.subTest(cantidad=cantidad):
+                resp = self._client().post(self.URL, {
+                    "calidad_inspeccion": inspeccion.pk, "motivo": "Defecto",
+                    "detalles": [{"calidad_detalle": detalle.pk, "cantidad": cantidad}],
+                }, format="json")
+                self.assertEqual(resp.status_code, 400, resp.content[:300])
+                self.assertEqual(resp.json(), {"detalles": "Cada renglón lleva calidad_detalle y cantidad."})
+
     # --- bandera y filtro de calidad -------------------------------------------
 
     def test_bandera_y_filtro_con_la_regla_de_pendientes(self):
