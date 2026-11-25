@@ -3573,6 +3573,66 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 + "). Cancela primero el picking."
             )})
 
+    # Destinos que mueven la prenda por SKU: una talla pendiente de SKU (#731) no
+    # puede ir ahí. APARTADO no se valida: apartar no consume la variante.
+    DESTINOS_REQUIEREN_SKU = {
+        "BORDADO": "lleva_bordado", "REFLEJANTE": "lleva_reflejante",
+        "CORTE_MANGA": "lleva_corte_manga", "EMBARQUE": None,
+    }
+
+    @staticmethod
+    def _pendiente_sku_q(empresa_id):
+        """Anotación ``pendiente_sku``: talla de catálogo (no muestra) sin variante de un
+        producto que sí tiene variantes en la empresa. Subconsulta por FK indexada."""
+        from catalogo.models import ProductoVariante
+        return ExpressionWrapper(
+            Q(variante__isnull=True, pedido_detalle__producto__isnull=False)
+            & (Q(pedido_detalle__producto_nombre_externo__isnull=True)
+               | Q(pedido_detalle__producto_nombre_externo=""))
+            & Exists(ProductoVariante.objects.filter(
+                producto_id=OuterRef("pedido_detalle__producto_id"), empresa_id=empresa_id)),
+            output_field=BooleanField(),
+        )
+
+    def _exigir_sin_pendientes_sku(self, pedido, programaciones):
+        """Lo programado a BORDADO/REFLEJANTE/CORTE_MANGA/EMBARQUE no puede exceder las
+        piezas con SKU que llevan ese destino: las tallas pendientes de SKU no se
+        programan. Una consulta."""
+        programado = {}
+        for p in programaciones:
+            if p["destino"] in self.DESTINOS_REQUIEREN_SKU:
+                programado[p["destino"]] = programado.get(p["destino"], 0) + int(p["cantidad"] or 0)
+        if not programado:
+            return
+        tallas = list(
+            PedidoDetalleTalla.objects.filter(pedido_detalle__pedido=pedido)
+            .annotate(pendiente_sku=self._pendiente_sku_q(pedido.empresa_id))
+            .order_by("pedido_detalle_id", "id")
+            .values("id", "pedido_detalle_id", "cantidad", "pendiente_sku", "talla__nombre",
+                    "pedido_detalle__producto__nombre", "lleva_bordado", "lleva_reflejante",
+                    "lleva_corte_manga")
+        )
+        errores = []
+        for destino, cantidad in sorted(programado.items()):
+            campo = self.DESTINOS_REQUIEREN_SKU[destino]
+            alcance = [t for t in tallas if campo is None or t[campo]]
+            pendientes = [t for t in alcance if t["pendiente_sku"]]
+            con_sku = sum(t["cantidad"] for t in alcance if not t["pendiente_sku"])
+            if pendientes and cantidad > con_sku:
+                detalle = ", ".join(
+                    f"renglón {t['pedido_detalle_id']} ({t['pedido_detalle__producto__nombre']}) "
+                    f"talla {t['talla__nombre']} [pedido_detalle_talla_id={t['id']}]"
+                    for t in pendientes
+                )
+                errores.append(
+                    f"{destino}: programas {cantidad} pzs y solo {con_sku} tienen SKU. "
+                    f"Pendientes de SKU: {detalle}."
+                )
+        if errores:
+            raise ValidationError({"programaciones": (
+                "No se pueden programar tallas pendientes de SKU. " + " ".join(errores)
+            )})
+
     @staticmethod
     def _exigir_programable(pedido):
         """Solo se programa un pedido confirmado y no cancelado (EC-750). Sin consultas:
@@ -4033,6 +4093,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
                     "usuario_nombre": sello.get("usuario_nombre"),
                 })
             self._exigir_programacion_cubre_surtido(pedido, programaciones)
+            self._exigir_sin_pendientes_sku(pedido, programaciones)
             pedido.programacion_conf = {"programaciones": programaciones}
             pedido.save(update_fields=["programacion_conf", "updated_at"])
 
@@ -4153,6 +4214,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 "talla": t.talla.nombre,
                 "sku": t.variante.sku if t.variante else t.sku_muestra,
                 "variante_id": t.variante_id,
+                # Talla de catálogo sin variante de un producto con variantes (#731):
+                # no se programa a BORDADO/REFLEJANTE/CORTE_MANGA/EMBARQUE. Sin consultas.
+                "pendiente_sku": bool(not muestra and not t.variante_id and det.producto_id
+                                      and t.producto_con_variantes),
                 "es_muestra": muestra,
                 "cantidad": t.cantidad,
                 "servicios": [s for s, f in (("BORDADO", t.lleva_bordado), ("REFLEJANTE", t.lleva_reflejante),

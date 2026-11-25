@@ -2432,7 +2432,7 @@ Una sola llamada con lo que hoy se ve en 3 pestañas (detalle con servicios, sto
   "renglones": [
     { "pedido_detalle_talla_id": 1198, "pedido_detalle_id": 689,
       "producto": "FILIPINA MEDICA LA DAMA", "color": "MARINO",
-      "talla": "G", "sku": "1022703G", "variante_id": 1564, "es_muestra": false,
+      "talla": "G", "sku": "1022703G", "variante_id": 1564, "pendiente_sku": false, "es_muestra": false,
       "cantidad": 2, "servicios": ["BORDADO"], "stock_disponible": 2000, "faltante": 0 }
   ]
 }
@@ -2443,6 +2443,7 @@ Una sola llamada con lo que hoy se ve en 3 pestañas (detalle con servicios, sto
   - **Reparto entre renglones que comparten clave (EC-644):** el stock de una clave (misma variante, o mismo producto sin variantes — p. ej. varias tallas de un producto sin variantes, o la misma variante en dos partidas) **se reparte entre sus renglones en el orden de la respuesta** (`pedido_detalle_id`, luego id de talla): cada renglón recibe lo que queda después de los anteriores, así que la suma de piezas cubiertas nunca excede el disponible. Ej.: disponible 15 y CH/M/G de 10 → CH `15`/`0`, M `5`/`5`, G `0`/`10`. Los renglones `null` no consumen el stock de la clave.
 - `faltante`: `max(cantidad - stock_disponible, 0)`, con el `stock_disponible` ya repartido; `null` igual que arriba.
 - `servicios`: `BORDADO`, `REFLEJANTE`, `CORTE_MANGA`, `CAMBIO_TALLA` que lleva esa talla.
+- `pendiente_sku`: `true` en una talla de catálogo (no muestra) sin variante de un producto que sí tiene variantes (#731). No suma consultas. Esas piezas no se programan a `BORDADO`/`REFLEJANTE`/`CORTE_MANGA`/`EMBARQUE` (ver `PATCH`).
 - Front: pinta la tabla de `renglones`, el `<select>` de destino con `destinos_aplicables`, precarga `programacion_conf.programaciones` y guarda con el `PATCH` de abajo.
 
 - **Endpoint**: `PATCH /api/v1/ventas/pedidos/{id}/programar/`
@@ -2465,6 +2466,14 @@ Una sola llamada con lo que hoy se ve en 3 pestañas (detalle con servicios, sto
     ```json
     { "programaciones": "Este pedido no lleva estos servicios, no se puede programar: BORDADO." }
     ```
+    Tallas pendientes de SKU: lo programado a `BORDADO`/`REFLEJANTE`/`CORTE_MANGA`/`EMBARQUE` no puede exceder las piezas **con SKU** que llevan ese destino (`EMBARQUE`: todas las tallas; el resto: las que llevan el servicio). Si se excede y hay tallas `pendiente_sku` en ese alcance, `400` con cada renglón y talla:
+
+    ```json
+    { "programaciones": "No se pueden programar tallas pendientes de SKU. EMBARQUE: programas 7 pzs y solo 0 tienen SKU. Pendientes de SKU: renglón 54 (FILIPINA ...) talla CH [pedido_detalle_talla_id=116], ..." }
+    ```
+
+    `APARTADO` no se valida. Una consulta extra en el `PATCH`, sólo si se programa alguno de esos destinos.
+
     Es todo o nada: si mandas un destino válido junto con uno inválido en el mismo PATCH, no se guarda ninguno. `EMBARQUE`/`APARTADO` son logística genérica y siempre se aceptan, sin importar qué lleve el pedido. Ver `destinos_aplicables` abajo para saber de antemano qué destinos mandar.
   - `fecha`, `usuario_id` y `usuario_nombre` **no se envían** — el servidor los sella solos por cada renglón de programación (igual que el resto de la auditoría de la API); si el body los incluye, se ignoran en silencio.
 - **Respuesta** (`200`):
