@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from django.db import transaction
 from django.db.models import Exists, OuterRef, Sum
 from django.utils import timezone
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
@@ -36,6 +37,24 @@ from catalogo.api.serializers import ProductoVarianteSerializer
 from catalogo.models import Color, ProductoVariante, VarianteProductoProduccion
 from inventarios.models import Ubicacion
 from produccion.services.common import config_como_dict, revisar_empresa
+
+
+def nombre_cancelado_por(orden):
+    """Quién canceló (EC-966): nombre completo o, si no tiene, su correo; ``None``
+    si no está cancelada. Misma regla que WMS (EC-949) y Compras (EC-926)."""
+    usuario = orden.cancelado_por if orden.cancelado_por_id else None
+    return (usuario.get_full_name().strip() or usuario.email) if usuario else None
+
+
+class CanceladoPorNombreMixin(serializers.Serializer):
+    """``cancelado_por_nombre`` (EC-966) junto a ``cancelado_por``. ``cancelado_por``
+    viaja en el ``select_related`` del viewset: sin consulta extra por fila."""
+
+    cancelado_por_nombre = serializers.SerializerMethodField()
+
+    @extend_schema_field({"type": "string", "nullable": True})
+    def get_cancelado_por_nombre(self, obj):
+        return nombre_cancelado_por(obj)
 
 
 class _SkuPorTallaMixin:
@@ -659,7 +678,7 @@ def ligar_pedidos_op(op, pedidos=None):
 PERMISO_COSTOS_PRODUCCION = "R-PRODUCCION-COSTOS"
 
 
-class OrdenProduccionSerializer(_FechasPedidoListadoMixin, serializers.ModelSerializer):
+class OrdenProduccionSerializer(_FechasPedidoListadoMixin, CanceladoPorNombreMixin, serializers.ModelSerializer):
     orden_produccion_detalle = OrdenProduccionDetalleSerializer(many=True)
     estatus_op_display = serializers.CharField(source="get_estatus_op_display", read_only=True)
     pedido_vinculado = serializers.SerializerMethodField()
@@ -1150,7 +1169,7 @@ class OrdenBordadoDetalleSerializer(serializers.ModelSerializer):
                 return value
         return None
 
-class OrdenBordadoSerializer(serializers.ModelSerializer):
+class OrdenBordadoSerializer(CanceladoPorNombreMixin, serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
     detalles = OrdenBordadoDetalleSerializer(many=True, read_only=True)
     # ``empresa``/``sucursal`` siguen viajando como id (read_only en Meta); estos
@@ -2268,7 +2287,7 @@ class OrdenReflejanteDetalleSerializer(serializers.ModelSerializer):
                 return value
         return None
 
-class OrdenReflejanteSerializer(serializers.ModelSerializer):
+class OrdenReflejanteSerializer(CanceladoPorNombreMixin, serializers.ModelSerializer):
     detalles = OrdenReflejanteDetalleSerializer(many=True, read_only=True)
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
     # ``empresa``/``sucursal`` siguen viajando como id (read_only en Meta); estos
@@ -2744,7 +2763,7 @@ class OrdenCorteMangaDetalleSerializer(serializers.ModelSerializer):
                 return value
         return None
 
-class OrdenesCorteMangaSerializer(serializers.ModelSerializer):
+class OrdenesCorteMangaSerializer(CanceladoPorNombreMixin, serializers.ModelSerializer):
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True)
     # ``empresa``/``sucursal`` siguen viajando como id (read_only en Meta); estos
     # dos son etiquetas legibles adicionales, mismo patrón ``source=`` que

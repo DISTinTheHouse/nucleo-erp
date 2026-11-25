@@ -4468,3 +4468,86 @@ class RecepcionCancelacionBackfillTests(TestCase):
         )
         with mock.patch("builtins.print"):
             self.assertEqual(recuperar(apps, None), (0, 0))  # no pisa lo ya escrito
+
+
+class DevolucionProveedorCanceladoPorNombreTests(TestCase):
+    """EC-966: ``cancelado_por_nombre`` de la devolución a proveedor con la regla de
+    Recepciones (nombre completo o correo; ``null`` sin cancelar), sin consultas por fila.
+    Empresa, proveedor, almacén y OC de ``OrdenCompraCancelacionTests``."""
+
+    URL = "/api/v1/compras/devoluciones-proveedor/"
+
+    @classmethod
+    def setUpTestData(cls):
+        OrdenCompraCancelacionTests.setUpTestData.__func__(cls)
+        _conceder(cls.a["usuario"], "R-WMS-RECEPCIONES")
+        empresa, sucursal = cls.a["empresa"], cls.a["sucursal"]
+        cls.con_nombre = Usuario.objects.create(
+            username="ana@acme-cx.test", email="ana@acme-cx.test", first_name="Ana", last_name="López",
+            empresa=empresa,
+        )
+        cls.sin_nombre = Usuario.objects.create(username="sn@acme-cx.test", email="sn@acme-cx.test", empresa=empresa)
+        oc = OrdenCompraCancelacionTests._oc(cls, Estatus.AUTORIZADA)
+        cls.recepcion = OrdenCompraCancelacionTests._recepcion(cls, oc)
+        departamento = Departamento.objects.create(empresa=empresa, sucursal=sucursal, codigo="CAL", nombre="Calidad")
+        inspector = Empleado.objects.create(
+            empresa=empresa, sucursal=sucursal, departamento=departamento,
+            puesto=Puesto.objects.create(empresa=empresa, nombre="Inspector"),
+            numero_empleado="EMP-966", nombre="Ana", apellido_paterno="Lopez", fecha_ingreso=timezone.localdate(),
+        )
+        cls.inspeccion = CalidadInspeccion.objects.create(
+            recepcion=cls.recepcion, inspector=inspector, fecha=timezone.localdate(), estado="rechazada",
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(self.a["usuario"])
+
+    def _devolucion(self, cancelado_por=None):
+        from compras.models import DevolucionProveedor
+
+        extra = {}
+        if cancelado_por is not None:
+            extra = {
+                "estatus": DevolucionProveedor.Estatus.CANCELADA, "motivo_cancelacion": "x",
+                "fecha_cancelacion": timezone.now(), "cancelado_por": cancelado_por,
+            }
+        return DevolucionProveedor.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], calidad_inspeccion=self.inspeccion,
+            recepcion=self.recepcion, proveedor=self.a["proveedor"], almacen=self.a["almacen"],
+            motivo="Rechazo", usuario=self.a["usuario"], **extra,
+        )
+
+    def _listado(self):
+        resp = self.client.get(self.URL)
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        data = resp.json()
+        return {f["id"]: f for f in (data["results"] if isinstance(data, dict) and "results" in data else data)}
+
+    def _nombre(self, dev):
+        resp = self.client.get(f"{self.URL}{dev.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        detalle = resp.json()["cancelado_por_nombre"]
+        self.assertEqual(self._listado()[dev.pk]["cancelado_por_nombre"], detalle)
+        return detalle
+
+    def test_nombre_correo_o_null(self):
+        self.assertEqual(self._nombre(self._devolucion(self.con_nombre)), "Ana López")
+        self.assertEqual(self._nombre(self._devolucion(self.sin_nombre)), "sn@acme-cx.test")
+        self.assertIsNone(self._nombre(self._devolucion()))
+
+    def test_listado_no_crece_con_canceladas(self):
+        def consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                filas = self._listado()
+            return len(ctx.captured_queries), len(filas)
+
+        self._devolucion(self.con_nombre)
+        una, _ = consultas()
+        for n in range(3):
+            usuario = Usuario.objects.create(
+                username=f"c{n}@acme-cx.test", email=f"c{n}@acme-cx.test", first_name=f"C{n}",
+                empresa=self.a["empresa"],
+            )
+            self._devolucion(usuario)
+        self.assertEqual(consultas(), (una, 4))

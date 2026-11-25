@@ -344,7 +344,7 @@ class OrdenProduccionService:
         # no está en él, en la misma consulta que la lee.
         from produccion.api.serializers import anotar_pre_orden
         op = anotar_pre_orden((OrdenProduccion.objects if base is None else base).filter(pk=op_id)).select_related(
-            'empresa', 'sucursal', 'pedido__cliente', 'usuario_asignado',
+            'empresa', 'sucursal', 'pedido__cliente', 'usuario_asignado', 'cancelado_por',
         ).prefetch_related(
             # Sólo renglones activos (EC-880), como el listado y los KPIs.
             models.Prefetch(

@@ -9724,3 +9724,208 @@ class PreOrdenCrearOpRetencionTests(TestCase):
         self.assertEqual(resp.status_code, 400, resp.content)
         self.assertEqual(resp.json()["pedido"], [mensaje_retenido(self.retenido)])
         self._sin_op(pre)
+
+
+class CanceladoPorNombreProduccionTests(TestCase):
+    """EC-966: ``cancelado_por_nombre`` junto a ``cancelado_por`` en OP, OB, OR,
+    OCM y SM (detalle, listado y respuesta de cancelar), sin consultas por fila."""
+
+    URL = "/api/v1/produccion/"
+    # ``(ruta, modelo, campo del folio, campo del estatus, valor de Cancelado)``
+    SERVICIOS = (
+        ("orden-bordado", OrdenesBordado, "folio_bordado", "estatus_bordado", 8),
+        ("orden-reflejante", OrdenesReflejante, "folio_reflejante", "estatus_reflejante", 7),
+        ("orden-corte-manga", OrdenesCorteManga, "folio_ocm", "estatus_corte", 7),
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        from terceros.models import Proveedor
+
+        cls.empresa = Empresa.objects.create(codigo="ec966", razon_social="EC966 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="E96", nombre="Matriz")
+        SerieFolio.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, tipo_documento="Salida a Maquila", serie="SM",
+            relleno_ceros=5, separador="-",
+        )
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.usuario = Usuario.objects.create(
+            username="ec966@acme.test", email="ec966@acme.test", first_name="Ana", last_name="López",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.sin_nombre = Usuario.objects.create(
+            username="sin-nombre@acme.test", email="sin-nombre@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.cliente = Cliente.objects.create(
+            empresa=cls.empresa, nombre="Cliente", razon_social="CLIENTE SA", rfc="CLI010101AA1",
+        )
+        cls.pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.cliente, moneda=cls.moneda,
+            persona_pagos="Pagos", correo_facturas="f@acme.test", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        cls.maquilero = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="Maquila SA", es_maquilero=True, moneda=cls.moneda,
+            sat_regimen_fiscal=SatRegimenFiscal.objects.get_or_create(
+                codigo="601", defaults={"descripcion": "General de Ley"})[0],
+            sat_forma_pago=SatFormaPago.objects.get_or_create(
+                codigo="03", defaults={"descripcion": "Transferencia"})[0],
+            sat_metodo_pago=SatMetodoPago.objects.get_or_create(
+                codigo="PUE", defaults={"descripcion": "Pago en una sola exhibición"})[0],
+        )
+        cls.unidad = UnidadMedida.objects.create(clave="PZA", nombre="Pieza")
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(self.usuario)
+        self._n = 0
+
+    # --- helpers ---------------------------------------------------------------
+
+    def _folio(self, prefijo):
+        self._n += 1
+        return f"{prefijo}-966-{self._n}"
+
+    def _op(self):
+        return OrdenProduccion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, folio_op=self._folio("OP"), pedido=self.pedido,
+            centro_confeccion=self.maquilero, costo_maquila_unitario=Decimal("10"),
+        )
+
+    def _servicio(self, modelo, campo_folio):
+        return modelo.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido,
+            **{campo_folio: self._folio("ORD")},
+        )
+
+    def _sm(self):
+        op = self._op()
+        det = OrdenProduccionDetalle.objects.create(
+            op=op, bom=ListaMaterialBom.objects.create(empresa=self.empresa),
+            cantidad=Decimal("5"), unidad=self.unidad,
+        )
+        resp = self.client.post(
+            f"{self.URL}salidas-maquila/",
+            {"op": op.pk, "detalles": [{"op_detalle": det.pk, "cantidad": "2"}]}, format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content[:300])
+        return SalidaMaquila.objects.get(pk=resp.json()["id"])
+
+    def _get(self, url, **params):
+        resp = self.client.get(url, params)
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return resp.json()
+
+    @staticmethod
+    def _filas(data):
+        return data["results"] if isinstance(data, dict) and "results" in data else data
+
+    def _fila(self, url, pk):
+        filas = [f for f in self._filas(self._get(url)) if f["id"] == pk]
+        self.assertEqual(len(filas), 1)
+        return filas[0]
+
+    def _assert_cancelada_por_ana(self, data):
+        self.assertEqual((data["cancelado_por"], data["cancelado_por_nombre"]), (self.usuario.pk, "Ana López"))
+
+    # --- sin cancelar ----------------------------------------------------------
+
+    def test_null_si_no_esta_cancelada(self):
+        op = self._op()
+        for data in (
+            self._get(f"{self.URL}orden-produccion/{op.pk}/"),
+            self._get(f"{self.URL}orden-produccion/onboarding/", op_id=op.pk),
+        ):
+            self.assertIn("cancelado_por_nombre", data)
+            self.assertIsNone(data["cancelado_por_nombre"])
+        for ruta, modelo, campo_folio, _, _ in self.SERVICIOS:
+            with self.subTest(ruta=ruta):
+                orden = self._servicio(modelo, campo_folio)
+                for data in (self._get(f"{self.URL}{ruta}/{orden.pk}/"), self._fila(f"{self.URL}{ruta}/", orden.pk)):
+                    self.assertIn("cancelado_por_nombre", data)
+                    self.assertIsNone(data["cancelado_por_nombre"])
+        sm = self._sm()
+        for data in (self._get(f"{self.URL}salidas-maquila/{sm.pk}/"), self._fila(f"{self.URL}salidas-maquila/", sm.pk)):
+            self.assertIn("cancelado_por_nombre", data)
+            self.assertIsNone(data["cancelado_por_nombre"])
+
+    # --- cancelar cada tipo ----------------------------------------------------
+
+    def test_op_por_estatus(self):
+        op = self._op()
+        resp = self.client.post(
+            f"{self.URL}orden-produccion/{op.pk}/estatus/",
+            {"estatus_op": int(OrdenProduccion.EstatusOrdenProduccion.CANCELADO), "motivo": "Cliente canceló"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self._assert_cancelada_por_ana(resp.json())
+        self._assert_cancelada_por_ana(self._get(f"{self.URL}orden-produccion/{op.pk}/"))
+        self._assert_cancelada_por_ana(self._get(f"{self.URL}orden-produccion/onboarding/", op_id=op.pk))
+
+    def test_ob_or_ocm_por_cancelar(self):
+        for ruta, modelo, campo_folio, _, _ in self.SERVICIOS:
+            with self.subTest(ruta=ruta):
+                orden = self._servicio(modelo, campo_folio)
+                resp = self.client.post(
+                    f"{self.URL}{ruta}/{orden.pk}/cancelar/", {"motivo": "Ya no va"}, format="json",
+                )
+                self.assertEqual(resp.status_code, 200, resp.content[:300])
+                self._assert_cancelada_por_ana(resp.json())
+                self._assert_cancelada_por_ana(self._get(f"{self.URL}{ruta}/{orden.pk}/"))
+                self._assert_cancelada_por_ana(self._fila(f"{self.URL}{ruta}/", orden.pk))
+
+    def test_sm_por_cancelar(self):
+        sm = self._sm()
+        resp = self.client.post(f"{self.URL}salidas-maquila/{sm.pk}/cancelar/", {"motivo": "Error"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self._assert_cancelada_por_ana(resp.json())
+        self._assert_cancelada_por_ana(self._get(f"{self.URL}salidas-maquila/{sm.pk}/"))
+        self._assert_cancelada_por_ana(self._fila(f"{self.URL}salidas-maquila/", sm.pk))
+
+    def test_sin_nombre_usa_el_correo(self):
+        orden = self._servicio(OrdenesBordado, "folio_bordado")
+        self.client.force_authenticate(self.sin_nombre)
+        resp = self.client.post(f"{self.URL}orden-bordado/{orden.pk}/cancelar/", {"motivo": "x"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(resp.json()["cancelado_por_nombre"], "sin-nombre@acme.test")
+
+    # --- consultas -------------------------------------------------------------
+
+    def _cancelar_en_bd(self, modelo, pk, campo_estatus, valor):
+        # Un usuario distinto por fila: sin ``select_related`` cada una pediría el suyo.
+        self._n += 1
+        usuario = Usuario.objects.create(
+            username=f"c{self._n}@acme.test", email=f"c{self._n}@acme.test", first_name=f"C{self._n}",
+            empresa=self.empresa,
+        )
+        modelo.objects.filter(pk=pk).update(
+            **{campo_estatus: valor}, motivo_cancelacion="x", fecha_cancelacion=timezone.now(),
+            cancelado_por=usuario,
+        )
+
+    def _consultas(self, url):
+        with CaptureQueriesContext(connection) as ctx:
+            filas = self._filas(self._get(url))
+        self.assertTrue(all(f["cancelado_por_nombre"] for f in filas))
+        return len(ctx.captured_queries), len(filas)
+
+    def test_listados_no_crecen_con_canceladas(self):
+        for ruta, modelo, campo_folio, campo_estatus, valor in self.SERVICIOS:
+            with self.subTest(ruta=ruta):
+                orden = self._servicio(modelo, campo_folio)
+                self._cancelar_en_bd(modelo, orden.pk, campo_estatus, valor)
+                una, filas = self._consultas(f"{self.URL}{ruta}/")
+                self.assertEqual(filas, 1)
+                for _ in range(3):
+                    orden = self._servicio(modelo, campo_folio)
+                    self._cancelar_en_bd(modelo, orden.pk, campo_estatus, valor)
+                self.assertEqual(self._consultas(f"{self.URL}{ruta}/"), (una, 4))
+        cancelada = SalidaMaquila.Estatus.CANCELADA
+        self._cancelar_en_bd(SalidaMaquila, self._sm().pk, "estatus", cancelada)
+        una, filas = self._consultas(f"{self.URL}salidas-maquila/")
+        self.assertEqual(filas, 1)
+        for _ in range(3):
+            self._cancelar_en_bd(SalidaMaquila, self._sm().pk, "estatus", cancelada)
+        self.assertEqual(self._consultas(f"{self.URL}salidas-maquila/"), (una, 4))
