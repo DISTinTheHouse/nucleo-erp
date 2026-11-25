@@ -4377,7 +4377,9 @@ Cambios de comportamiento:
 
 ## 🚫 Producción - Cancelaciones
 
-Toda cancelación pide `motivo` y guarda en la orden `motivo_cancelacion`, `fecha_cancelacion` y `cancelado_por`. Los tres son de solo lectura y vienen en el detalle (y en la respuesta de cancelar). La cancelación también queda en `AuditoriaEvento` y en la bitácora (`/api/v1/auditoria/documentos/?tipo=orden_produccion|orden_bordado|orden_reflejante|orden_corte_manga`, renglón `→ Cancelado`). Cancelado es terminal.
+Toda cancelación pide `motivo` y guarda en la orden `motivo_cancelacion`, `fecha_cancelacion` y `cancelado_por`. Los tres son de solo lectura y vienen en el detalle (y en la respuesta de cancelar).
+
+**`cancelado_por_nombre` (EC-966):** junto a `cancelado_por` (el id) viaja `cancelado_por_nombre`, de solo lectura: nombre completo del usuario o, si no tiene, su correo; `null` si la orden no está cancelada. Misma regla que WMS (EC-949) y Compras (EC-926). Viene en todas las respuestas que traen `cancelado_por`: detalle de OP (`orden-produccion/{id}/` y `onboarding/?op_id=`), detalle y listado de OB/OR/OCM y de la SM, y las respuestas de `estatus/` y `cancelar/`. Sin consultas extra: el usuario viaja en el mismo `select_related`. El listado de OP no trae datos de cancelación. La cancelación también queda en `AuditoriaEvento` y en la bitácora (`/api/v1/auditoria/documentos/?tipo=orden_produccion|orden_bordado|orden_reflejante|orden_corte_manga`, renglón `→ Cancelado`). Cancelado es terminal.
 
 ### OP — `POST /api/v1/produccion/orden-produccion/{id}/estatus/` con `{"estatus_op": 7, "motivo": "..."}`
 
@@ -4387,13 +4389,13 @@ Toda cancelación pide `motivo` y guarda en la orden `motivo_cancelacion`, `fech
   - el consumo de la OP (`consumo/`) queda en cero;
   - el evento `CAMBIO_ESTATUS` incluye `material_devuelto`.
 - `400` si la OP tiene una recepción de producto terminado viva (primero se cancela en WMS) o una salida a maquila Enviada (primero se cancela la SM). El mensaje trae el folio que bloquea.
-- La respuesta agrega `motivo_cancelacion`, `fecha_cancelacion` y `cancelado_por`.
+- La respuesta agrega `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por` y `cancelado_por_nombre`.
 - **`DELETE /orden-produccion/{id}/` hace exactamente lo mismo**: motivo en el body o en `?motivo=` (sin motivo → `400`), con los mismos candados y la misma devolución. Ya no cancela una OP Completada (`409`).
 
 ### OB / OR / OCM — `POST /api/v1/produccion/{orden-bordado|orden-reflejante|orden-corte-manga}/{id}/cancelar/`
 
 - Body `{"motivo": "Cliente quitó el bordado"}`. Permiso `D-PRODUCCION-OB` / `D-PRODUCCION-OR` / `D-PRODUCCION-CM`.
-- `200 {"id", "folio", "estatus", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por"}`. Estatus cancelado: bordado `8` (ahora con etiqueta "Cancelado"), reflejante y corte `7`.
+- `200 {"id", "folio", "estatus", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por", "cancelado_por_nombre"}`. Estatus cancelado: bordado `8` (ahora con etiqueta "Cancelado"), reflejante y corte `7`.
 - `400` si:
   - ya está cancelada;
   - está terminada (Finalizado/Completado) o dada de baja;
@@ -4409,7 +4411,7 @@ Toda cancelación pide `motivo` y guarda en la orden `motivo_cancelacion`, `fech
 ### Salida a maquila — `POST /api/v1/produccion/salidas-maquila/{id}/cancelar/`
 
 - **Ahora exige `{"motivo": "..."}`**: sin motivo → `400 {"motivo": "Indica el motivo de la cancelación."}`.
-- Guarda `motivo_cancelacion`, `fecha_cancelacion` y `cancelado_por` (en el detalle y en el listado de la SM) y deja `AuditoriaEvento` `produccion/CANCELAR`.
+- Guarda `motivo_cancelacion`, `fecha_cancelacion` y `cancelado_por`, con `cancelado_por_nombre` (en el detalle, en el listado y en la respuesta de `cancelar/` de la SM) y deja `AuditoriaEvento` `produccion/CANCELAR`.
 - Las reglas de siempre no cambian: solo se cancela una SM Enviada y sin recepciones.
 
 ### ⚠️ Cambios para el frontend
