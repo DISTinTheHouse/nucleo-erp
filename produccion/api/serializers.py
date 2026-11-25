@@ -3088,6 +3088,10 @@ def resumen_pre_orden_pedido(pedido):
         "estatus_display": dict(PreOrdenProduccion.Estatus.choices).get(p["estatus"]),
         "semaforo": semaforo(p["estatus"], p.get("materiales_faltantes") or 0, fem, fecha_compromiso(pedido)),
         "fecha_estimada_material": fem,
+        # EC-968: estatus de la OP ligada (``null`` sin OP), como en ``pre-ordenes/``.
+        "op_estatus": p.get("op_estatus"),
+        "op_estatus_display": (dict(OrdenProduccion.EstatusOrdenProduccion.choices).get(p["op_estatus"])
+                               if p.get("op_estatus") is not None else None),
     }
 
 
