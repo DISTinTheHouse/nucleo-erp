@@ -12140,3 +12140,160 @@ class SucursalCobrosPagosTests(FinanzasBase):
             (cobro.data["sucursal"], cobro.data["sucursal_nombre"], cobro.data["folio"], pago.data["sucursal"]),
             (inactiva.pk, "Cerrada", "OF-000001", inactiva.pk),
         )
+
+
+class CanceladoPorNombreFinanzasTests(TestCase):
+    """EC-971: ``cancelado_por_nombre`` junto a ``cancelado_por`` en los documentos de
+    Finanzas (listado y detalle), ``null`` sin cancelar, sin consultas por fila y sin
+    exponer más datos del usuario."""
+
+    URL = "/api/v1/finanzas/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.empresa = Empresa.objects.create(codigo="ec971", razon_social="EC971 SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="E97", nombre="Matriz")
+        cls.usuario = Usuario.objects.create(
+            username="ec971@acme.test", email="ec971@acme.test", first_name="Ana", last_name="López",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.sin_nombre = Usuario.objects.create(
+            username="sin-nombre-971@acme.test", email="sin-nombre-971@acme.test",
+            empresa=cls.empresa, sucursal_default=cls.sucursal,
+        )
+        cls.cuenta = cls._cuenta(cls.empresa)
+        cls.otra_empresa = Empresa.objects.create(codigo="ec971b", razon_social="EC971B SA")
+        cls.otra_cuenta = cls._cuenta(cls.otra_empresa)
+
+    @classmethod
+    def _cuenta(cls, empresa):
+        banco = Banco.objects.create(empresa=empresa, nombre="Banco 971")
+        return CuentaBancaria.objects.create(empresa=empresa, banco=banco, moneda=cls.moneda, alias="Cta 971")
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(self.usuario)
+
+    def _cancelar(self, doc, usuario, estatus):
+        doc.estatus = estatus
+        doc.motivo_cancelacion, doc.fecha_cancelacion, doc.cancelado_por = "Error de captura", timezone.now(), usuario
+        doc.save()
+        return doc
+
+    def _movimiento(self, cuenta=None, cancelado_por=None):
+        mb = MovimientoBancario.objects.create(cuenta_bancaria=cuenta or self.cuenta, importe=Decimal("10"))
+        if cancelado_por is not None:
+            self._cancelar(mb, cancelado_por, MovimientoBancario.Estatus.CANCELADO)
+        return mb
+
+    def _get(self, ruta):
+        resp = self.client.get(f"{self.URL}{ruta}")
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return resp.json()
+
+    @staticmethod
+    def _filas(data):
+        return data["results"] if isinstance(data, dict) and "results" in data else data
+
+    def _fila(self, ruta, pk):
+        filas = [f for f in self._filas(self._get(ruta)) if f["id"] == pk]
+        self.assertEqual(len(filas), 1)
+        return filas[0]
+
+    def test_movimiento_cancelado_trae_el_nombre_en_listado_y_detalle(self):
+        mb = self._movimiento(cancelado_por=self.usuario)
+        for data in (self._get(f"movimientos-bancarios/{mb.pk}/"), self._fila("movimientos-bancarios/", mb.pk)):
+            self.assertEqual((data["cancelado_por"], data["cancelado_por_nombre"]), (self.usuario.pk, "Ana López"))
+
+    def test_sin_cancelar_es_null(self):
+        mb = self._movimiento()
+        for data in (self._get(f"movimientos-bancarios/{mb.pk}/"), self._fila("movimientos-bancarios/", mb.pk)):
+            self.assertIsNone(data["cancelado_por"])
+            self.assertIsNone(data["cancelado_por_nombre"])
+
+    def test_sin_nombre_cae_al_correo(self):
+        mb = self._movimiento(cancelado_por=self.sin_nombre)
+        self.assertEqual(self._get(f"movimientos-bancarios/{mb.pk}/")["cancelado_por_nombre"], self.sin_nombre.email)
+
+    def test_usuario_borrado_deja_null(self):
+        efimero = Usuario.objects.create(username="efimero-971@acme.test", email="efimero-971@acme.test",
+                                         first_name="Efí", empresa=self.empresa)
+        mb = self._movimiento(cancelado_por=efimero)
+        efimero.delete()
+        data = self._get(f"movimientos-bancarios/{mb.pk}/")
+        self.assertEqual((data["cancelado_por"], data["cancelado_por_nombre"]), (None, None))
+
+    def test_no_expone_otros_datos_del_usuario(self):
+        mb = self._movimiento(cancelado_por=self.usuario)
+        data = self._get(f"movimientos-bancarios/{mb.pk}/")
+        self.assertEqual({k for k in data if k.startswith("cancelado_por")}, {"cancelado_por", "cancelado_por_nombre"})
+        # Con nombre completo, ni el correo ni el username viajan en la respuesta.
+        self.assertNotIn(self.usuario.email, str(data))
+        self.assertNotIn(self.usuario.username, str(data))
+
+    def test_conciliacion_y_poliza(self):
+        conciliacion = self._cancelar(
+            ConciliacionBancaria.objects.create(cuenta_bancaria=self.cuenta),
+            self.usuario, ConciliacionBancaria.Estatus.CANCELADA,
+        )
+        poliza = self._cancelar(
+            Poliza.objects.create(empresa=self.empresa, sucursal=self.sucursal, concepto="EC-971"),
+            self.usuario, Poliza.PolizaStatus.CANCELADA,
+        )
+        self.assertEqual(self._fila("conciliaciones-bancarias/", conciliacion.pk)["cancelado_por_nombre"], "Ana López")
+        self.assertEqual(self._get(f"conciliaciones-bancarias/{conciliacion.pk}/")["cancelado_por_nombre"], "Ana López")
+        self.assertEqual(self._fila("polizas/", poliza.pk)["cancelado_por_nombre"], "Ana López")
+        self.assertEqual(self._get(f"polizas/{poliza.pk}/")["cancelado_por_nombre"], "Ana López")
+
+    def test_otra_empresa_no_se_ve(self):
+        ajeno = self._movimiento(cuenta=self.otra_cuenta, cancelado_por=self.usuario)
+        self.assertEqual(self.client.get(f"{self.URL}movimientos-bancarios/{ajeno.pk}/").status_code, 404)
+        self.assertNotIn(ajeno.pk, [f["id"] for f in self._filas(self._get("movimientos-bancarios/"))])
+
+    def test_listados_sin_consulta_por_fila(self):
+        """Mismo número de consultas con uno o cuatro documentos cancelados por usuarios distintos."""
+        usuarios = [self.usuario, self.sin_nombre] + [
+            Usuario.objects.create(username=f"u{i}-971@acme.test", email=f"u{i}-971@acme.test",
+                                   first_name=f"U{i}", empresa=self.empresa)
+            for i in range(2)
+        ]
+
+        def conciliacion(u):
+            return self._cancelar(ConciliacionBancaria.objects.create(cuenta_bancaria=self.cuenta),
+                                  u, ConciliacionBancaria.Estatus.CANCELADA)
+
+        def poliza(u):
+            return self._cancelar(Poliza.objects.create(empresa=self.empresa, sucursal=self.sucursal),
+                                  u, Poliza.PolizaStatus.CANCELADA)
+
+        casos = (
+            ("movimientos-bancarios/", lambda u: self._movimiento(cancelado_por=u)),
+            ("conciliaciones-bancarias/", conciliacion),
+            ("polizas/", poliza),
+        )
+        for ruta, crear in casos:
+            with self.subTest(ruta=ruta):
+                crear(usuarios[0])
+                with CaptureQueriesContext(connection) as uno:
+                    self._get(ruta)
+                for u in usuarios[1:]:
+                    crear(u)
+                with CaptureQueriesContext(connection) as cuatro:
+                    filas = self._filas(self._get(ruta))
+                self.assertEqual(len(cuatro), len(uno), [q["sql"] for q in cuatro.captured_queries])
+                self.assertEqual(sum(1 for f in filas if f["cancelado_por_nombre"]), 4)
+
+    def test_todo_serializer_con_cancelado_por_trae_el_nombre(self):
+        from finanzas.api import serializers as s
+
+        con_cancelado_por = []
+        for nombre, clase in inspect.getmembers(s, inspect.isclass):
+            if not (issubclass(clase, s.serializers.ModelSerializer) and clase.__module__ == s.__name__):
+                continue
+            campos = clase().fields
+            if "cancelado_por" in campos:
+                con_cancelado_por.append(nombre)
+                self.assertIn("cancelado_por_nombre", campos, nombre)
+                self.assertTrue(campos["cancelado_por_nombre"].read_only, nombre)
+        self.assertGreaterEqual(len(con_cancelado_por), 8, con_cancelado_por)
