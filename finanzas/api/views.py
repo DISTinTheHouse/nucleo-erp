@@ -2538,8 +2538,11 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
         empresa = getattr(user, "empresa", None)
         if empresa is None:
             return ConciliacionBancaria.objects.none()
-        # EC-971: ``cancelado_por`` para ``cancelado_por_nombre``, sin consulta por fila.
-        qs = ConciliacionBancaria.objects.filter(cuenta_bancaria__empresa=empresa).select_related("cancelado_por")
+        # EC-971: ``cancelado_por`` para ``cancelado_por_nombre`` y ``cuenta_bancaria`` para
+        # ``cuenta_bancaria_alias``, sin consulta por fila.
+        qs = ConciliacionBancaria.objects.filter(cuenta_bancaria__empresa=empresa).select_related(
+            "cuenta_bancaria", "cancelado_por"
+        )
         qp = self.request.query_params
         cuenta_bancaria = qp.get("cuenta_bancaria") or qp.get("cuenta_bancaria_id")
         estatus = (qp.get("estatus") or "").strip()
