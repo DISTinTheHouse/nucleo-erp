@@ -7,6 +7,7 @@ from catalogo.models import Producto, ProductoVariante
 from inventarios.models import Almacen
 from logistica.models import Envio
 from hr.models import Empleado
+from nucleo.listados import nombre_para_mostrar_usuario as _nombre_usuario
 from wms.models import (
     Despacho,
     DespachoDetalle,
@@ -22,11 +23,6 @@ from wms.models import (
 )
 from ventas.services.pedido_vinculado import armar_pedido_vinculado
 from wms.services.rfid_label_service import zpl_rfid_vigente
-
-
-def _nombre_usuario(usuario):
-    """Nombre completo del usuario o, si no tiene first/last name, su correo."""
-    return (usuario.get_full_name().strip() or usuario.email) if usuario else None
 
 
 class _CanceladoPorNombreMixin(serializers.Serializer):
@@ -288,12 +284,7 @@ class TransferenciaListSerializer(_CanceladoPorNombreMixin, serializers.ModelSer
         ]
 
     def get_usuario_nombre(self, obj):
-        usuario = obj.usuario
-        if not usuario:
-            return None
-        # Mismo fallback que ``reporte-movimientos-periodo``: nombre completo y,
-        # si el usuario no tiene first/last name, el email.
-        return usuario.get_full_name().strip() or usuario.email
+        return _nombre_usuario(obj.usuario)
 
 
 class TransferenciaRetrieveSerializer(TransferenciaListSerializer):
@@ -361,10 +352,7 @@ class PickingDetalleSerializer(_VarianteDeLineaWmsMixin, serializers.ModelSerial
         return str(obj.ubicacion) if obj.ubicacion_id else None
 
     def get_operador_nombre(self, obj):
-        operador = obj.operador
-        if not operador:
-            return None
-        return operador.get_full_name().strip() or operador.email
+        return _nombre_usuario(obj.operador)
 
 
 class PickingOrdenTrabajoReadSerializer(serializers.ModelSerializer):
@@ -518,18 +506,11 @@ class PickingSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
             "motivo_cancelacion", "fecha_cancelacion", "cancelado_por",
         ]
 
-    def _nombre_usuario(self, usuario):
-        if not usuario:
-            return None
-        # Mismo fallback que ``TransferenciaListSerializer.usuario_nombre``:
-        # nombre completo y, si el usuario no tiene first/last name, el email.
-        return usuario.get_full_name().strip() or usuario.email
-
     def get_operador_nombre(self, obj):
-        return self._nombre_usuario(obj.operador)
+        return _nombre_usuario(obj.operador)
 
     def get_usuario_nombre(self, obj):
-        return self._nombre_usuario(obj.usuario)
+        return _nombre_usuario(obj.usuario)
 
     def get_oleada_nombre(self, obj):
         return str(obj.oleada) if obj.oleada_id else None
@@ -733,19 +714,14 @@ class PackingSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
         ]
 
         
-    def _nombre_usuario(self, usuario):
-        if not usuario:
-            return None
-        return usuario.get_full_name().strip() or usuario.email
-
     def get_operador_nombre(self, obj):
-        return self._nombre_usuario(obj.operador)
+        return _nombre_usuario(obj.operador)
     
     def get_pedido_vinculado(self, obj):
         return armar_pedido_vinculado(obj)
 
     def get_usuario_nombre(self, obj):
-        return self._nombre_usuario(obj.usuario)
+        return _nombre_usuario(obj.usuario)
 
 
 class PackingCreateSerializer(serializers.ModelSerializer):
@@ -876,8 +852,7 @@ class DespachoSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
     usuario_nombre = serializers.SerializerMethodField()
 
     def get_usuario_nombre(self, obj):
-        u = obj.usuario if obj.usuario_id else None
-        return (u.get_full_name().strip() or u.email) if u else None
+        return _nombre_usuario(obj.usuario) if obj.usuario_id else None
 
     def get_chofer_nombre(self, obj):
         return nombre_chofer(obj.chofer) if obj.chofer_id else None

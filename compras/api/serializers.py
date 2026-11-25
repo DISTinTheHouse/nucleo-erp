@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from rest_framework import serializers
+from nucleo.listados import nombre_para_mostrar_usuario as _nombre_usuario
 from compras.models import (
     CalidadInspeccion,
     CalidadInspeccionDetalle,
@@ -12,13 +13,6 @@ from compras.models import (
     RecepcionRFIDEncuadre,
     RecepcionRFIDLectura,
 )
-
-
-def _nombre_usuario(u):
-    # ``Usuario`` extiende ``AbstractUser`` y su ``__str__`` devuelve
-    # ``username``, que no es el identificador de login (se entra por email).
-    # Mismo fallback que en producción/wms/inventarios.
-    return (u.get_full_name().strip() or u.email) if u else None
 
 
 class OrdenCompraDetalleReadSerializer(serializers.ModelSerializer):
