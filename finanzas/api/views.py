@@ -521,6 +521,9 @@ class CuentaPorCobrarViewSet(FinanzasBaseViewSet):
         )
         if empresa is None:
             return CuentaPorCobrar.objects.none()
+        if self.action == 'retrieve':
+            # EC-971: ``cancelado_por_nombre`` de la factura anidada.
+            qs = qs.select_related('factura__cancelado_por')
         qs = qs.filter(CuentaPorCobrar.q_de_la_empresa(empresa)).distinct()
         qs = por_sucursal(qs, user, 'factura__sucursal')
 
@@ -599,6 +602,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
             # y talla en bloque. Antes cada renglón costaba ~3 consultas.
             qs = qs.select_related(
                 'cliente__sat_regimen_fiscal', 'cliente__sat_uso_cfdi', 'pedido__cliente_regimen_fiscal',
+                'cancelado_por',  # EC-971: ``cancelado_por_nombre``
             ).prefetch_related(
                 Prefetch(
                     'factura_detalles',
@@ -1349,6 +1353,8 @@ class PolizaViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         if self._es_lectura():
             lineas = Prefetch(lineas, queryset=PolizaDetalle.objects.select_related("cuenta_contable"))
         qs = super().get_queryset().prefetch_related(lineas)
+        if self._es_lectura():
+            qs = qs.select_related("cancelado_por")  # EC-971: ``cancelado_por_nombre``
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
@@ -1482,7 +1488,8 @@ class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         # la consulta; ``tiene_pdf_adjunto`` sale de un CASE en SQL.
         qs = (
             super().get_queryset()
-            .select_related("proveedor", "moneda", "oc", "recepcion", "salida_maquila")
+            # EC-971: ``cancelado_por`` para ``cancelado_por_nombre``, sin consulta por fila.
+            .select_related("proveedor", "moneda", "oc", "recepcion", "salida_maquila", "cancelado_por")
             # EC-904: al leer, el producto de cada línea en la misma consulta de las líneas.
             .prefetch_related(
                 Prefetch(
@@ -2058,7 +2065,8 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         if self._es_lectura():
             # EC-904: cada línea con la factura de su CxC (folio) en la misma consulta.
             # EC-874: y la sucursal (``sucursal_nombre``/``sucursal_codigo``).
-            qs = qs.select_related("cliente", "cuenta_bancaria__moneda", "sucursal").prefetch_related(
+            # EC-971: ``cancelado_por`` para ``cancelado_por_nombre``.
+            qs = qs.select_related("cliente", "cuenta_bancaria__moneda", "sucursal", "cancelado_por").prefetch_related(
                 Prefetch("cobro_detalles", queryset=CobroDetalle.objects.select_related("cxc__factura"))
             )
         qp = self.request.query_params
@@ -2322,7 +2330,8 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             # factura de proveedor) en bloque; antes eran ~3 consultas por fila del
             # listado. Sólo al leer, como en ``CobroViewSet``.
             # EC-874: y la sucursal (``sucursal_nombre``/``sucursal_codigo``).
-            qs = qs.select_related("proveedor", "cuenta_bancaria__moneda", "sucursal").prefetch_related(
+            # EC-971: ``cancelado_por`` para ``cancelado_por_nombre``.
+            qs = qs.select_related("proveedor", "cuenta_bancaria__moneda", "sucursal", "cancelado_por").prefetch_related(
                 Prefetch("pago_detalles", queryset=PagoDetalle.objects.select_related("cxp__factura_proveedor"))
             )
         qp = self.request.query_params
@@ -2433,7 +2442,10 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
         empresa = getattr(user, "empresa", None)
         if empresa is None:
             return MovimientoBancario.objects.none()
-        qs = MovimientoBancario.objects.filter(cuenta_bancaria__empresa=empresa).select_related("cuenta_bancaria")
+        # EC-971: ``cancelado_por`` para ``cancelado_por_nombre``, sin consulta por fila.
+        qs = MovimientoBancario.objects.filter(cuenta_bancaria__empresa=empresa).select_related(
+            "cuenta_bancaria", "cancelado_por"
+        )
         qp = self.request.query_params
         cuenta_bancaria = qp.get("cuenta_bancaria") or qp.get("cuenta_bancaria_id")
         tipo_movimiento = (qp.get("tipo_movimiento") or "").strip()
@@ -2526,7 +2538,8 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
         empresa = getattr(user, "empresa", None)
         if empresa is None:
             return ConciliacionBancaria.objects.none()
-        qs = ConciliacionBancaria.objects.filter(cuenta_bancaria__empresa=empresa)
+        # EC-971: ``cancelado_por`` para ``cancelado_por_nombre``, sin consulta por fila.
+        qs = ConciliacionBancaria.objects.filter(cuenta_bancaria__empresa=empresa).select_related("cancelado_por")
         qp = self.request.query_params
         cuenta_bancaria = qp.get("cuenta_bancaria") or qp.get("cuenta_bancaria_id")
         estatus = (qp.get("estatus") or "").strip()
@@ -2687,7 +2700,8 @@ class NotaCreditoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         if self._es_lectura():
             # EC-904: cliente, factura (moneda) y líneas con su renglón de factura en
             # bloque. Antes el listado hacía ~3 consultas por nota.
-            qs = qs.select_related("cliente", "factura__moneda").prefetch_related(
+            # EC-971: ``cancelado_por`` para ``cancelado_por_nombre``.
+            qs = qs.select_related("cliente", "factura__moneda", "cancelado_por").prefetch_related(
                 Prefetch(
                     "nota_credito_detalles",
                     queryset=NotaCreditoDetalle.objects.select_related(
