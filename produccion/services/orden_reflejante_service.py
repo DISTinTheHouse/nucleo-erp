@@ -141,13 +141,14 @@ class OrdenReflejanteService:
 
         Mismo contrato que ``OrdenBordadoService.contratado_por_pedido``.
         """
+        # Sin las muestras sin SKU, como ``_tallas_*_qs`` (alta y parcialidad del
+        # detalle): así el listado y el detalle reportan la misma cobertura (EC-964).
         filas = (
-            PedidoDetalleTalla.objects
-            .filter(
+            excluir_muestras_sin_sku(PedidoDetalleTalla.objects.filter(
                 pedido_detalle__pedido_id__in=list(pedido_ids),
                 lleva_reflejante=True,
                 cantidad__gt=0,
-            )
+            ))
             .values("pedido_detalle__pedido_id")
             .annotate(total=Sum("cantidad"))
         )

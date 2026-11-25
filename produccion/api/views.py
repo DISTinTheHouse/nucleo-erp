@@ -1563,7 +1563,8 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
         # de la OB vienen del prefetch de ``detalles`` (``.all()`` lee su caché)
         # y lo contratado por el pedido es la suma de ``por_detalle``, que
         # ``partialidad_de_orden`` armó con el MISMO predicado que
-        # ``contratado_por_pedido`` (``lleva_bordado=True, cantidad__gt=0``).
+        # ``contratado_por_pedido`` (``lleva_bordado=True, cantidad__gt=0``, sin muestras
+        # sin SKU: ``excluir_muestras_sin_sku``).
         # Pasarlos evita repetir esas dos agregaciones; el listado, que no los
         # tiene, sigue consultándolas.
         cubierto = sum(float(d.cantidad or 0) for d in orden.detalles.all())
@@ -1995,7 +1996,8 @@ class OrdenReflejanteViewSet(
         # de la OR vienen del prefetch de ``detalles`` (``.all()`` lee su caché)
         # y lo contratado por el pedido es la suma de ``por_detalle``, que
         # ``partialidad_de_orden`` armó con el MISMO predicado que
-        # ``contratado_por_pedido`` (``lleva_reflejante=True, cantidad__gt=0``).
+        # ``contratado_por_pedido`` (``lleva_reflejante=True, cantidad__gt=0``, sin muestras
+        # sin SKU: ``excluir_muestras_sin_sku``).
         # Pasarlos evita repetir esas dos agregaciones; el listado, que no los
         # tiene, sigue consultándolas.
         cubierto = sum(float(d.cantidad or 0) for d in orden.detalles.all())

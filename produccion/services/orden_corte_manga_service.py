@@ -125,13 +125,14 @@ class OrdenCorteMangaService:
         Mismo contrato que ``OrdenReflejanteService.contratado_por_pedido``
         (``lleva_corte_manga=True, cantidad > 0``).
         """
+        # Sin las muestras sin SKU, como ``_tallas_*_qs`` (alta y parcialidad del
+        # detalle): así el listado y el detalle reportan la misma cobertura (EC-964).
         filas = (
-            PedidoDetalleTalla.objects
-            .filter(
+            excluir_muestras_sin_sku(PedidoDetalleTalla.objects.filter(
                 pedido_detalle__pedido_id__in=list(pedido_ids),
                 lleva_corte_manga=True,
                 cantidad__gt=0,
-            )
+            ))
             .values("pedido_detalle__pedido_id")
             .annotate(total=Sum("cantidad"))
         )
