@@ -375,7 +375,11 @@ class PedidoConOcAbiertas(ValidationError):
     ``ordenes_compra`` es el texto de siempre (el front lo muestra tal cual) y
     ``ordenes_compra_bloqueantes`` la lista ``[{id, folio, estatus}]`` para ligar a
     cada OC. ``detail`` se asigna sin pasar por ``_get_error_details`` de DRF, que
-    volvería texto los ids y el estatus y ``"None"`` un folio vacío."""
+    volvería texto los ids y el estatus y ``"None"`` un folio vacío. Por eso
+    ``get_codes``/``get_full_details`` se redefinen: las de DRF piden ``.code`` a
+    cada valor y con enteros o ``None`` lanzarían ``AttributeError``."""
+
+    default_code = "ordenes_compra_abiertas"
 
     def __init__(self, ocs):
         super().__init__()
@@ -384,6 +388,16 @@ class PedidoConOcAbiertas(ValidationError):
             "ordenes_compra": (
                 f"Tiene OC en borrador o por autorizar: {etiquetas}. Cancélalas o autorízalas primero."),
             "ordenes_compra_bloqueantes": ocs,
+        }
+
+    def get_codes(self):
+        return {"ordenes_compra": self.default_code, "ordenes_compra_bloqueantes": self.default_code}
+
+    def get_full_details(self):
+        return {
+            "ordenes_compra": {"message": self.detail["ordenes_compra"], "code": self.default_code},
+            "ordenes_compra_bloqueantes": {
+                "message": self.detail["ordenes_compra_bloqueantes"], "code": self.default_code},
         }
 
 
@@ -3750,7 +3764,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             .exclude(estatus__in=[E.CANCELADA, E.RECIBIDA]).distinct().order_by("pk").values("pk", "folio", "estatus")
         )
         abiertas = [
-            {"id": o["pk"], "folio": o["folio"], "estatus": o["estatus"]}
+            {"id": o["pk"], "folio": o["folio"] or None, "estatus": o["estatus"]}  # "" → null
             for o in ocs if o["estatus"] in (E.BORRADOR, E.POR_AUTORIZAR)
         ]
         if abiertas:

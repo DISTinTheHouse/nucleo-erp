@@ -5185,6 +5185,29 @@ class PedidoReglasEstatusTests(TestCase):
         })
         self.assertEqual([o["folio"] for o in resp.json()["ordenes_compra_marcadas"]], ["OC-973-A"])
 
+    def test_oc_abiertas_folio_vacio_sale_null_y_codigos_seguros(self):
+        """EC-973: un folio ``""`` sale ``null`` en la lista (y ``#id`` en el texto), y
+        ``get_codes``/``get_full_details`` no truenan con el ``detail`` crudo."""
+        from compras.models import OrdenCompra
+        from ventas.api.views import PedidoConOcAbiertas
+
+        oc = OrdenCompra.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, moneda=self.moneda, usuario=self.mesa,
+            fecha_oc=timezone.localdate(), pedido=self.pedido, folio="",
+            estatus=OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        )
+        resp = self._cancelar(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json()["ordenes_compra_bloqueantes"], [{"id": oc.pk, "folio": None, "estatus": 1}])
+        self.assertIn(f"#{oc.pk}", resp.json()["ordenes_compra"])
+
+        exc = PedidoConOcAbiertas([{"id": oc.pk, "folio": None, "estatus": 1}])
+        self.assertEqual(exc.get_codes(), {
+            "ordenes_compra": "ordenes_compra_abiertas", "ordenes_compra_bloqueantes": "ordenes_compra_abiertas"})
+        completos = exc.get_full_details()
+        self.assertEqual(completos["ordenes_compra"]["message"], exc.detail["ordenes_compra"])
+        self.assertEqual(completos["ordenes_compra_bloqueantes"]["message"], [{"id": oc.pk, "folio": None, "estatus": 1}])
+
 
 def pedido_trazabilidad_url(pedido_id):
     return f"/api/v1/ventas/pedidos/{pedido_id}/trazabilidad/"
