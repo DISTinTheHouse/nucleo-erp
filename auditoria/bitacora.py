@@ -10,6 +10,10 @@ Límites conocidos:
   quedan en la bitácora.
 - ``wms.Picking``, ``Packing`` y ``Transferencia`` no tienen ``activo``: nunca
   registran baja ni restauración, solo cambios de estatus.
+
+Una vista que escribe su propio renglón (p. ej. el cierre de saldo de una OC)
+marca la instancia con ``_bitacora_omitir = True`` antes del ``save()``: ese
+guardado no registra nada y la marca se consume (#1371).
 """
 import logging
 import re
@@ -68,16 +72,20 @@ DOCUMENTOS = {
     ),
     "inventarios.AjusteInventario": Doc("ajuste_inventario"),
     # Sin empresa propia: ``empresa_id``/``sucursal_id`` son propiedades de su recepción.
-    "compras.CalidadInspeccion": Doc("calidad_inspeccion", None, "estado", None, [("recepcion", "recepcion_id")]),
+    # Sin folio propio: ``folio_bitacora`` es el de su recepción (inspección) o su OC/OP (encuadre) (#1374).
+    "compras.CalidadInspeccion": Doc("calidad_inspeccion", "folio_bitacora", "estado", None,
+                                     [("recepcion", "recepcion_id")]),
     "compras.DevolucionProveedor": Doc("devolucion_proveedor", "folio", "estatus", "total",
                                        [("recepcion", "recepcion_id"), ("orden_compra", "orden_compra_id")]),
-    "compras.RecepcionRFIDEncuadre": Doc("encuadre_rfid", None, "estatus", None, [("orden_compra", "orden_compra_id")]),
+    "compras.RecepcionRFIDEncuadre": Doc("encuadre_rfid", "folio_bitacora", "estatus", None,
+                                         [("orden_compra", "orden_compra_id"), ("orden_produccion", "op_id")]),
 }
 
 #: tipo -> etiqueta del modelo, para validar ``?tipo=`` y buscar el documento.
 TIPOS = {doc.tipo: label for label, doc in DOCUMENTOS.items()}
 
 _PREVIO = "_bitacora_previo"
+_OMITIR = "_bitacora_omitir"
 
 # Etiquetas uniformes (#1065): formato oración y con acentos.
 _ACENTOS = {
@@ -174,7 +182,9 @@ def _al_guardar(sender, instance, created, raw=False, **kwargs):
     est_prev, activo_prev = getattr(instance, _PREVIO, (None, None))
     est = instance.__dict__.get(doc.estatus) if doc.estatus else None
     activo = instance.__dict__.get("activo")
-    if created:
+    if instance.__dict__.pop(_OMITIR, False):
+        pass  # la vista ya escribió su propio renglón
+    elif created:
         _registrar(instance, doc, "crear", nuevo=est)
     else:
         if doc.estatus and est_prev is not None and est != est_prev:

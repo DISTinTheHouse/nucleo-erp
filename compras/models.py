@@ -538,6 +538,14 @@ class RecepcionRFIDEncuadre(models.Model):
     def __str__(self):
         return f"Encuadre RFID {self.pk}"
 
+    @property
+    def folio_bitacora(self):
+        """Folio de su OC u OP para la bitácora (#1374). El API las trae en el
+        ``select_related`` o recién asignadas: guardar no cuesta otra consulta."""
+        if self.orden_compra_id:
+            return self.orden_compra.folio
+        return self.op.folio_op if self.op_id else None
+
 
 class RecepcionRFIDLectura(models.Model):
     encuadre = models.ForeignKey(
@@ -619,6 +627,11 @@ class CalidadInspeccion(models.Model):
     @property
     def sucursal_id(self):
         return self.recepcion.sucursal_id
+
+    @property
+    def folio_bitacora(self):
+        """Folio de su recepción (#1374): ya cargada para ``empresa_id``, sin otra consulta."""
+        return self.recepcion.folio
 
     class Meta:
         db_table = 'calidad_inspecciones'
