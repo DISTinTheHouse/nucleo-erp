@@ -4365,6 +4365,8 @@ Toda cancelación de finanzas exige **`motivo`** (body JSON o `?motivo=` en DELE
 
 Al cancelar quedan en el documento (solo lectura en el serializer) `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`, un `AuditoriaEvento` (`modulo="finanzas"`, `accion="CANCELAR"`, motivo en `despues_json`) y el cambio de estatus en la bitácora (`/api/v1/auditoria/documentos/`).
 
+**`cancelado_por_nombre` (EC-971):** junto a `cancelado_por` (el id) viaja `cancelado_por_nombre`, de solo lectura: nombre completo del usuario o, si no tiene, su correo; `null` si el documento no está cancelado (o si después se borró al usuario). Misma regla que Producción (EC-966), WMS (EC-949) y Compras (EC-926); no expone otros datos del usuario. Viene en todas las respuestas que traen `cancelado_por`: listado y detalle de nota de crédito, póliza, cobro, pago, factura de proveedor, movimiento bancario y conciliación; detalle de factura (también anidada en el detalle de CxC) y las respuestas de sus acciones (`cancelar/`, `emitir/`, etc.). El listado de facturas y las CxP no traen datos de cancelación. Sin consultas extra por fila: el usuario viaja en el mismo `select_related`.
+
 | Documento | Endpoint | Permiso |
 |---|---|---|
 | Factura | `POST facturas/{id}/cancelar/` | `E-FIN-FACTURAS` |
