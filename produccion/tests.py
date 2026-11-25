@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from django.db import IntegrityError, connection, transaction
-from django.test import override_settings, TestCase
+from django.test import override_settings, SimpleTestCase, TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -364,6 +364,21 @@ class BaseOrdenTrabajoTests:
         segunda = self._save(pedido)
         self.assertNotEqual(segunda.pk, primera.pk)
         self.assertEqual(self.MODEL.objects.filter(pedido=pedido).count(), 2)
+
+    def test_full_match_nunca_senala_una_orden_cancelada(self):
+        """La orden viva cubre el 100% y hay una cancelada con id mayor: el 409
+        debe señalar la viva, no la de id mayor (EC-969 en OB, #1389 en OR/OCM)."""
+        pedido, detalle = self._crear_pedido()
+        self._talla(detalle, self.talla_ch, 10)
+        viva = self._save(pedido)
+        cancelada = self.MODEL.objects.get(pk=viva.pk)
+        cancelada.pk = cancelada.id = None
+        setattr(cancelada, self.FOLIO_FIELD, "CANCELADA")
+        setattr(cancelada, self.ESTATUS_FIELD, self.CANCELADO)
+        cancelada.save()
+        self.assertGreater(cancelada.pk, viva.pk)
+
+        self.assertEqual(self.SERVICE.buscar_existente_full_match(pedido).pk, viva.pk)
 
     def test_sin_constraint_dos_ordenes_activas_por_pedido_conviven(self):
         """Inverso del test de arriba: fija el estado que dejan ``0025``/``0026``.
@@ -10123,3 +10138,24 @@ class PreOrdenOpEstatusTests(TestCase):
         varias, n4 = consultas()
         self.assertEqual((n1, n4), (1, 4))
         self.assertEqual(varias, base)
+
+
+class DetalleProductoNombreExternoTests(SimpleTestCase):
+    """#1379 (EC-963): el renglón de una muestra con SKU (``producto`` null)
+    publica el nombre de su línea del pedido; el de catálogo, ``null``."""
+
+    def test_renglon_de_muestra_publica_el_nombre_de_la_linea(self):
+        from produccion.api.serializers import (
+            OrdenBordadoDetalleListSerializer, OrdenCorteMangaDetalleListSerializer,
+            OrdenReflejanteDetalleListSerializer,
+        )
+        for modelo, serializer in (
+            (OrdenBordadoDetalle, OrdenBordadoDetalleListSerializer),
+            (OrdenReflejanteDetalle, OrdenReflejanteDetalleListSerializer),
+            (OrdenCorteMangaDetalle, OrdenCorteMangaDetalleListSerializer),
+        ):
+            with self.subTest(serializer=serializer.__name__):
+                muestra = modelo(cantidad=1, pedido_detalle=PedidoDetalle(producto_nombre_externo="Muestra"))
+                catalogo = modelo(cantidad=1, pedido_detalle=PedidoDetalle())
+                self.assertEqual(serializer(muestra).data["producto_nombre_externo"], "Muestra")
+                self.assertIsNone(serializer(catalogo).data["producto_nombre_externo"])

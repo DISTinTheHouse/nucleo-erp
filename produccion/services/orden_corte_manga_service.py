@@ -5,6 +5,7 @@ from django.db.models import Sum, F
 from catalogo.compatibilidad import Proceso, exigir_compatibilidad
 from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesCorteManga, OrdenCorteMangaDetalle
+from produccion.services.cancelacion_service import estatus_cancelado
 from produccion.services.common import (
     exigir_tope_programado,
     EPS_CANTIDAD,
@@ -109,6 +110,8 @@ class OrdenCorteMangaService:
                 pedido=pedido,
                 activo=True,
             )
+            # Una cancelada ya no ocupa el pedido: el 409 no la señala (#1389, como OB en EC-969).
+            .exclude(estatus_corte=estatus_cancelado("corte_manga"))
             .order_by("-id")
             .first()
         )

@@ -376,7 +376,7 @@ def _con_detalles_prefetcheados(orden, detalle_model):
         [orden],
         Prefetch(
             "detalles",
-            queryset=detalle_model.objects.select_related("producto", "talla", "color"),
+            queryset=detalle_model.objects.select_related("producto", "talla", "color", "pedido_detalle"),
         ),
     )
     return orden
@@ -1444,7 +1444,7 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
                     # retrieve. Ponerlo en el ``Meta`` afectaría toda consulta
                     # al modelo (admin incluido); aquí sólo afecta a esta vista.
                     queryset=OrdenBordadoDetalle.objects.select_related(
-                        "producto", "talla", "color"
+                        "producto", "talla", "color", "pedido_detalle"
                     ).order_by("id"),
                 )
             )
@@ -1911,7 +1911,7 @@ class OrdenReflejanteViewSet(
                     # Orden estable local al Prefetch; ver el equivalente en
                     # ``OrdenBordadoViewSet``.
                     queryset=OrdenReflejanteDetalle.objects.select_related(
-                        "producto", "talla", "color"
+                        "producto", "talla", "color", "pedido_detalle"
                     ).order_by("id"),
                 )
             )
@@ -2351,7 +2351,7 @@ class OrdenesCorteMangaViewSet(
                     # Orden estable local al Prefetch; ver el equivalente en
                     # ``OrdenBordadoViewSet``.
                     queryset=OrdenCorteMangaDetalle.objects.select_related(
-                        "producto", "talla", "color"
+                        "producto", "talla", "color", "pedido_detalle"
                     ).order_by("id"),
                 )
             )

@@ -7,6 +7,7 @@ from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesReflejante, OrdenReflejanteDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
 from ventas.services.retencion_service import bloquear_pedido_vivo
+from produccion.services.cancelacion_service import estatus_cancelado
 from produccion.services.common import exigir_tope_programado, EPS_CANTIDAD, cantidades_asignadas, crear_orden_con_guardia_duplicado, excluir_muestras_sin_sku, payload_duplicada, pendientes_por_linea, revisar_empresa, tallas_orden_trabajo_qs, tallas_para_alta
 from produccion.utils.folios import generate_or_folio
 
@@ -114,6 +115,8 @@ class OrdenReflejanteService:
                 pedido=pedido,
                 activo=True,
             )
+            # Una cancelada ya no ocupa el pedido: el 409 no la señala (#1389, como OB en EC-969).
+            .exclude(estatus_reflejante=estatus_cancelado("reflejante"))
             .order_by("-id")
             .first()
         )
