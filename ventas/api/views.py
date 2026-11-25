@@ -3585,14 +3585,14 @@ class PedidoViewSet(viewsets.ModelViewSet):
         """Anotación ``pendiente_sku``: talla de catálogo (no muestra) sin variante de un
         producto que sí tiene variantes en la empresa. Subconsulta por FK indexada."""
         from catalogo.models import ProductoVariante
-        return ExpressionWrapper(
-            Q(variante__isnull=True, pedido_detalle__producto__isnull=False)
-            & (Q(pedido_detalle__producto_nombre_externo__isnull=True)
-               | Q(pedido_detalle__producto_nombre_externo=""))
-            & Exists(ProductoVariante.objects.filter(
-                producto_id=OuterRef("pedido_detalle__producto_id"), empresa_id=empresa_id)),
-            output_field=BooleanField(),
-        )
+        no_muestra = (Q(pedido_detalle__producto_nombre_externo__isnull=True)
+                      | Q(pedido_detalle__producto_nombre_externo=""))
+        catalogo = (Q(variante__isnull=True, pedido_detalle__producto__isnull=False) & no_muestra
+                    & Exists(ProductoVariante.objects.filter(
+                        producto_id=OuterRef("pedido_detalle__producto_id"), empresa_id=empresa_id)))
+        # Muestra sin SKU de producción vinculado: tampoco tiene SKU.
+        muestra = ~no_muestra & (Q(sku_muestra__isnull=True) | Q(sku_muestra=""))
+        return ExpressionWrapper(catalogo | muestra, output_field=BooleanField())
 
     def _exigir_sin_pendientes_sku(self, pedido, programaciones):
         """Lo programado a BORDADO/REFLEJANTE/CORTE_MANGA/EMBARQUE no puede exceder las
@@ -3609,7 +3609,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             .annotate(pendiente_sku=self._pendiente_sku_q(pedido.empresa_id))
             .order_by("pedido_detalle_id", "id")
             .values("id", "pedido_detalle_id", "cantidad", "pendiente_sku", "talla__nombre",
-                    "pedido_detalle__producto__nombre", "lleva_bordado", "lleva_reflejante",
+                    "pedido_detalle__producto__nombre", "pedido_detalle__producto_nombre_externo", "lleva_bordado", "lleva_reflejante",
                     "lleva_corte_manga")
         )
         errores = []
@@ -3620,7 +3620,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             con_sku = sum(t["cantidad"] for t in alcance if not t["pendiente_sku"])
             if pendientes and cantidad > con_sku:
                 detalle = ", ".join(
-                    f"renglón {t['pedido_detalle_id']} ({t['pedido_detalle__producto__nombre']}) "
+                    f"renglón {t['pedido_detalle_id']} ({t['pedido_detalle__producto__nombre'] or t['pedido_detalle__producto_nombre_externo']}) "
                     f"talla {t['talla__nombre']} [pedido_detalle_talla_id={t['id']}]"
                     for t in pendientes
                 )
@@ -4214,10 +4214,11 @@ class PedidoViewSet(viewsets.ModelViewSet):
                 "talla": t.talla.nombre,
                 "sku": t.variante.sku if t.variante else t.sku_muestra,
                 "variante_id": t.variante_id,
-                # Talla de catálogo sin variante de un producto con variantes (#731):
+                # Talla de catálogo sin variante de un producto con variantes (#731), o
+                # muestra sin SKU de producción vinculado:
                 # no se programa a BORDADO/REFLEJANTE/CORTE_MANGA/EMBARQUE. Sin consultas.
-                "pendiente_sku": bool(not muestra and not t.variante_id and det.producto_id
-                                      and t.producto_con_variantes),
+                "pendiente_sku": (not t.sku_muestra) if muestra else bool(
+                    not t.variante_id and det.producto_id and t.producto_con_variantes),
                 "es_muestra": muestra,
                 "cantidad": t.cantidad,
                 "servicios": [s for s, f in (("BORDADO", t.lleva_bordado), ("REFLEJANTE", t.lleva_reflejante),
