@@ -3,11 +3,13 @@ calidad rechazó o puso en cuarentena. Lógica en ``compras.services.devolucion_
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.filters import OrderingFilter
 from rest_framework.response import Response
 
 from compras.api.serializers import _nombre_usuario
 from compras.models import CalidadInspeccion, DevolucionProveedor, DevolucionProveedorDetalle
 from compras.services import devolucion_proveedor as servicio
+from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset
 from nucleo.middleware import ip_auditoria
 
 PERMISO_LEER = "R-WMS-RECEPCIONES"
@@ -54,6 +56,20 @@ def _motivo(request, mensaje):
 class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = DevolucionProveedorSerializer
     http_method_names = ["get", "post"]
+    # EC-973: como OC y recepciones. Sin ``?limit=`` sigue la lista completa; con él,
+    # ``{count, next, previous, results}``. ``?search=`` solo en el listado.
+    pagination_class = PaginacionOpcionalLimitOffset
+    search_fields = [
+        "folio", "recepcion__folio", "orden_compra__folio", "proveedor__nombre", "proveedor__razon_social",
+    ]
+    filter_backends = [
+        *[b for b in viewsets.ReadOnlyModelViewSet.filter_backends if b is not OrderingFilter],
+        OrdenamientoEstableFilter,
+    ]
+    # Lista blanca de ``?ordering=`` (#863); sin él, ``-fecha, -id``.
+    ordering_fields = [
+        "id", "folio", "fecha", "estatus", "total", "proveedor__nombre", "recepcion__folio", "orden_compra__folio",
+    ]
 
     def get_queryset(self):
         user = self.request.user

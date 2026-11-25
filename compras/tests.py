@@ -4752,3 +4752,39 @@ class DevolucionProveedorContratoTests(TestCase):
         self._inspeccion()
         self._inspeccion("liberado", estado="aprobada")
         self.assertEqual(consultas(), (una, 4))
+
+    # --- listado de devoluciones -------------------------------------------------
+
+    def test_listado_paginado_y_con_busqueda(self):
+        inspeccion = self._inspeccion()
+        todos = ["DVP-973-A", "DVP-973-B", "DVP-973-C"]
+        for folio in todos:
+            self._devolucion(inspeccion, "1", folio=folio)
+        self._devolucion(self._inspeccion(tenant="b"), "1", folio="DVP-973-X", tenant="b")
+
+        # Sin ``?limit=``: la lista completa, como antes.
+        resp = self._client().get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()), 3)
+
+        resp = self._client().get(self.URL, {"limit": 2})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        pagina = resp.json()
+        self.assertEqual(set(pagina), {"count", "next", "previous", "results"})
+        self.assertEqual((pagina["count"], len(pagina["results"]), pagina["previous"]), (3, 2, None))
+        self.assertIn("offset=2", pagina["next"])
+        self.assertEqual(len(self._client().get(self.URL, {"limit": 2, "offset": 2}).json()["results"]), 1)
+        self.assertEqual(self._client().get(self.URL, {"limit": 0}).status_code, 400)
+
+        for termino, esperados in (("973-B", ["DVP-973-B"]), (inspeccion.recepcion.folio, todos),
+                                   ("Proveedor acme", todos), ("DVP-973-X", [])):
+            with self.subTest(search=termino):
+                data = self._client().get(self.URL, {"search": termino, "limit": 50}).json()
+                self.assertEqual(sorted(d["folio"] for d in data["results"]), esperados)
+                self.assertEqual(data["count"], len(esperados))
+
+        data = self._client().get(self.URL, {"ordering": "folio", "limit": 50}).json()
+        self.assertEqual([d["folio"] for d in data["results"]], todos)
+        # ``?search=`` no saca el detalle (``BusquedaSoloListadoFilter``).
+        resp = self._client().get(f"{self.URL}{data['results'][0]['id']}/", {"search": "nada"})
+        self.assertEqual(resp.status_code, 200)
