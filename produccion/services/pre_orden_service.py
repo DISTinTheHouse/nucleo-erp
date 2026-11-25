@@ -628,8 +628,9 @@ def cancelar(pre_id, user, motivo=""):
     from compras.models import NecesidadCompra as N
     pre = PreOrdenProduccion.objects.select_for_update().get(pk=pre_id)
     # Convertida cuya OP se canceló: se puede cancelar también (queda la liga a la OP).
-    op_cancelada = (pre.estatus == E.CONVERTIDA and pre.op_id is not None and OrdenProduccion.objects.filter(
-        pk=pre.op_id, estatus_op=OrdenProduccion.EstatusOrdenProduccion.CANCELADO).exists())
+    # Convertida sin OP (la OP se dio de baja): también se puede cancelar (#1386).
+    op_cancelada = (pre.estatus == E.CONVERTIDA and (pre.op_id is None or OrdenProduccion.objects.filter(
+        pk=pre.op_id, estatus_op=OrdenProduccion.EstatusOrdenProduccion.CANCELADO).exists()))
     if pre.estatus not in CANCELABLES and not op_cancelada:
         raise ValidationError({"estatus": f"La pre-orden está {pre.get_estatus_display().lower()}."})
     liberadas = N.objects.filter(pre_orden=pre, estatus=N.Estatus.PENDIENTE).update(estatus=N.Estatus.CANCELADA, updated_at=timezone.now())
