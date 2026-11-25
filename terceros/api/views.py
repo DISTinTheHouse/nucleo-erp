@@ -643,7 +643,7 @@ class ProveedorViewSet(viewsets.ModelViewSet):
         empresa = getattr(request.user, "empresa", None)
         qs = (
             OrdenCompra.objects.filter(proveedor=proveedor, empresa=empresa, activo=True)
-            .select_related("empresa", "sucursal", "moneda", "usuario", "pedido", "proveedor")
+            .select_related("empresa", "sucursal", "moneda", "usuario", "pedido", "proveedor", "cerrada_por")
             .prefetch_related("pedidos")
         ) if empresa is not None else OrdenCompra.objects.none()
         qs = con_pre_ordenes(qs)

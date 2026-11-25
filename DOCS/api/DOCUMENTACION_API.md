@@ -3227,7 +3227,7 @@ Los `GET` no cambian.
 
 - Solo admin de empresa o superuser (`403` si no). Body `{"motivo": "Liberada por error"}`, obligatorio (`400 {"motivo": ...}`).
 - Saca del almacén lo que entró con esa inspección: una **SALIDA** ligada a la recepción, al mismo costo con que entró. Aparece en el kardex y en `reporte-movimientos-periodo` / `reporte-existencias-periodo` (`accion="SALIDA"`, `despues_json.reversa_calidad=true`).
-- La inspección queda `estado="anulada"` (`estado_label: "Anulada"`) con `motivo_anulacion`, `fecha_anulacion` y `anulada_por`. Sus cantidades dejan de contar en lo recibido y lo rechazado de la OC/OP.
+- La inspección queda `estado="anulada"` (`estado_label: "Anulada"`) con `motivo_anulacion`, `fecha_anulacion`, `anulada_por` y `anulada_por_nombre` (#1373). Sus cantidades dejan de contar en lo recibido y lo rechazado de la OC/OP.
 - La recepción vuelve a **En calidad** (`estatus: 4`): reaparece en `calidad-inspecciones/onboarding/` para inspeccionarla de nuevo, o se cancela con `recepciones/{id}/cancelar/` (ahora sí procede, y `puede_cancelar` vuelve a `true`). El estatus de la OC/OP se recalcula.
 - `400` si:
   - ya está anulada;
@@ -3235,7 +3235,9 @@ Los `GET` no cambian.
   - la OC tiene el saldo cerrado;
   - la OP está Completada;
   - hay una factura de proveedor sin cancelar;
+  - la inspección tiene devoluciones a proveedor aplicadas → `400 {"devoluciones_proveedor"}`: cancélalas primero (#1372; si no, lo rechazado se reclamaría dos veces tras reinspeccionar);
   - **ya no hay existencia suficiente** (se surtió o se consumió). En ese caso se corrige con un ajuste de inventario.
+- Tras la SALIDA se recalculan las pre-órdenes **Listas** de la sucursal, igual que tras consumir una OP (#1375): la que se quede sin material regresa a Faltan materiales / En compra con `regreso_motivo` "Se revirtió la calidad de la recepción RC-…".
 - `200 {"calidad_inspeccion": {...}, "recepcion_estatus": 4, "orden_compra_estatus", "movimiento_id", "movimiento_inventario_id"}`.
 - Auditoría: `AuditoriaEvento` `compras/REVERTIR` (tabla `calidad_inspecciones`) y `inventarios/SALIDA` (tabla `existencias`).
 
@@ -3245,14 +3247,14 @@ Para cuando el proveedor surtió parcial y ya no mandará el resto.
 
 - Requiere `A-COMPRAS-OC`. Body `{"motivo": "Proveedor ya no surte"}`, obligatorio.
 - Solo aplica a una OC **Parcialmente recibida** (`estatus: 4`) sin recepciones esperando calidad. Si no → `400`.
-- La OC pasa a **Recibida** (`estatus: 5`) con `saldo_cerrado: true`, `motivo_cierre`, `fecha_cierre` y `cerrada_por` (en el detalle y en el listado; de solo lectura). No se reabre, y su calidad ya no se puede revertir.
+- La OC pasa a **Recibida** (`estatus: 5`) con `saldo_cerrado: true`, `motivo_cierre`, `fecha_cierre`, `cerrada_por` y `cerrada_por_nombre` (#1373) (en el detalle, el listado y el historial de OC del proveedor; de solo lectura). El detalle de la pre-orden (`GET /api/v1/produccion/pre-ordenes/{id}/`) también trae `saldo_cerrado` en cada `ordenes_compra[]` (#1376). No se reabre, y su calidad ya no se puede revertir.
 - Necesidades de pre-orden en la OC: cada una se queda con lo que sí llegó (Recibida). **Lo que faltaba vuelve a ser una necesidad Pendiente sin OC**, para comprarlo en otra OC, siempre que su pre-orden siga abierta. Después se recalculan las pre-órdenes.
 - Responde `200` con la OC (forma del retrieve). Auditoría `compras/CERRAR_SALDO`.
 
 ### Encuadre RFID: cancelar y auditoría
 
 - `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/cancelar/` con `{"motivo": "Escaneo duplicado"}` (obligatorio). Aplica a un encuadre Pendiente, o Aceptado que aún no generó recepción. `400` si ya está cancelado o ya tiene recepción (en ese caso se cancela la recepción). No mueve inventario.
-- Campos nuevos (solo lectura): `aceptado_por`, `fecha_aceptacion`, `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`.
+- Campos nuevos (solo lectura): `aceptado_por`, `aceptado_por_nombre`, `fecha_aceptacion`, `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`, `cancelado_por_nombre` (#1373).
 - `aceptar/` y `cancelar/` dejan `AuditoriaEvento` (`compras/ACEPTAR`, `compras/CANCELAR`, tabla `recepcion_rfid_encuadre`).
 
 ### Rastreo en auditoría (bitácora)
@@ -3264,8 +3266,10 @@ Todo se ve en `GET /api/v1/auditoria/documentos/?tipo=...&documento_id=...` y en
 | Revertir calidad | `calidad_inspeccion` (nuevo) | `Aprobada → Anulada` |
 | | `recepcion` | `Cerrada → En calidad` |
 | | `movimiento_inventario` | la `Salida` de la reversa, colgada de la recepción |
-| Cerrar saldo | `orden_compra` | `Parcialmente recibida → Saldo cerrado` (`estatus_codigo: "SALDO_CERRADO"`) |
+| Cerrar saldo | `orden_compra` | un solo renglón (#1371): `Parcialmente recibida → Saldo cerrado` (`estatus_codigo: "SALDO_CERRADO"`) |
 | Encuadre | `encuadre_rfid` (nuevo) | `Pendiente → Aceptado` y `→ Cancelado` |
+
+`folio` (#1374): la inspección lleva el de su recepción y el encuadre el de su OC (u OP); ninguno tiene folio propio.
 
 La línea de tiempo de la OC o de la recepción ya incluye la inspección, sus movimientos (entrada y salida de la reversa) y los cambios de estatus. El motivo completo, quién y cuándo están en el documento (`motivo_anulacion`/`anulada_por`, `motivo_cierre`/`cerrada_por`, `motivo_cancelacion`/`cancelado_por`) y en `AuditoriaEvento`.
 

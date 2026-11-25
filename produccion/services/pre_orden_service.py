@@ -530,16 +530,16 @@ def recalcular_ids(ids, motivo_regreso=None):
             recalcular(pre, motivo_regreso=motivo_regreso)
 
 
-def recalcular_listas(empresa_id, sucursal_id, op=None):
-    """Tras consumir una OP: las pre-órdenes Listas de la sucursal pueden haberse
-    quedado sin material."""
-    motivo = f"La OP {op.folio_op} consumió el material." if op is not None else None
-    recalcular_ids(
-        PreOrdenProduccion.objects.filter(
-            empresa_id=empresa_id, sucursal_id=sucursal_id, estatus=E.LISTA,
-        ).exclude(op=op).values_list("pk", flat=True),
-        motivo_regreso=motivo,
-    )
+def recalcular_listas(empresa_id, sucursal_id, op=None, motivo=None):
+    """Tras bajar existencia (consumo de una OP o reversa de calidad, #1375): las
+    pre-órdenes Listas de la sucursal pueden haberse quedado sin material. Las de
+    ``op`` no se recalculan."""
+    if motivo is None and op is not None:
+        motivo = f"La OP {op.folio_op} consumió el material."
+    listas = PreOrdenProduccion.objects.filter(empresa_id=empresa_id, sucursal_id=sucursal_id, estatus=E.LISTA)
+    if op is not None:  # ``exclude(op=None)`` dejaría fuera las que no tienen OP
+        listas = listas.exclude(op=op)
+    recalcular_ids(listas.values_list("pk", flat=True), motivo_regreso=motivo)
 
 
 def repartir_recepcion_oc(oc_id):

@@ -122,6 +122,8 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
     sucursal_telefono = serializers.CharField(source='sucursal.telefono', read_only=True, default=None)
     almacen_nombre = serializers.CharField(source='almacen.nombre', read_only=True, default=None)
     usuario_nombre = serializers.SerializerMethodField()
+    # ``cerrada_por`` va en el ``select_related`` de cada queryset (#1373).
+    cerrada_por_nombre = serializers.SerializerMethodField()
     moneda_codigo = serializers.CharField(source='moneda.codigo_iso', read_only=True)
     moneda_simbolo = serializers.CharField(source='moneda.simbolo', read_only=True, allow_null=True)
     pedido_folio = serializers.CharField(source='pedido.folio', read_only=True, allow_null=True)
@@ -240,6 +242,7 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'motivo_cierre',
             'fecha_cierre',
             'cerrada_por',
+            'cerrada_por_nombre',
             'pedido_cancelado',
             'fecha_pedido_cancelado',
             'activo',
@@ -269,6 +272,9 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
 
     def get_usuario_nombre(self, obj):
         return _nombre_usuario(obj.usuario)
+
+    def get_cerrada_por_nombre(self, obj):
+        return _nombre_usuario(obj.cerrada_por) if obj.cerrada_por_id else None
 
     def to_internal_value(self, data):
         # Convert "0" or 0 to None for FK fields if they are optional
@@ -749,6 +755,8 @@ class CalidadInspeccionDetalleSerializer(serializers.ModelSerializer):
 class CalidadInspeccionSerializer(serializers.ModelSerializer):
     estado_label = serializers.CharField(source="get_estado_display", read_only=True)
     inspector_nombre = serializers.SerializerMethodField()
+    # ``anulada_por`` va en el ``select_related`` del viewset (#1373).
+    anulada_por_nombre = serializers.SerializerMethodField()
     recepcion_folio = serializers.CharField(source="recepcion.folio", read_only=True)
     detalles = CalidadInspeccionDetalleSerializer(many=True, read_only=True)
     pedido_id = serializers.SerializerMethodField()
@@ -791,8 +799,12 @@ class CalidadInspeccionSerializer(serializers.ModelSerializer):
             "motivo_anulacion",
             "fecha_anulacion",
             "anulada_por",
+            "anulada_por_nombre",
         ]
         read_only_fields = ["motivo_anulacion", "fecha_anulacion", "anulada_por"]
+
+    def get_anulada_por_nombre(self, obj):
+        return _nombre_usuario(obj.anulada_por) if obj.anulada_por_id else None
 
     def get_inspector_nombre(self, obj):
         if not obj.inspector_id:
@@ -838,7 +850,7 @@ class RecepcionRFIDLecturaSerializer(serializers.ModelSerializer):
         ]
 
 
-class RecepcionRFIDEncuadreSerializer(serializers.ModelSerializer):
+class RecepcionRFIDEncuadreSerializer(_CancelacionRecepcionMixin, serializers.ModelSerializer):
     orden_compra_folio = serializers.CharField(source="orden_compra.folio", read_only=True, default=None)
     op_folio = serializers.CharField(source="op.folio_op", read_only=True, default=None)
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True, default=None)
@@ -846,6 +858,8 @@ class RecepcionRFIDEncuadreSerializer(serializers.ModelSerializer):
     estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
     lecturas = RecepcionRFIDLecturaSerializer(many=True, read_only=True)
     resumen = serializers.SerializerMethodField()
+    # ``aceptado_por``/``cancelado_por`` van en el ``select_related`` del viewset (#1373).
+    aceptado_por_nombre = serializers.SerializerMethodField()
 
     class Meta:
         model = RecepcionRFIDEncuadre
@@ -855,12 +869,16 @@ class RecepcionRFIDEncuadreSerializer(serializers.ModelSerializer):
             "almacen", "almacen_nombre", "usuario", "serie_codigo", "fecha_recepcion",
             "remision", "factura_referencia", "observaciones", "estatus", "estatus_label",
             "activo", "created_at", "updated_at", "lecturas", "resumen",
-            "aceptado_por", "fecha_aceptacion", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por",
+            "aceptado_por", "aceptado_por_nombre", "fecha_aceptacion", "motivo_cancelacion", "fecha_cancelacion",
+            "cancelado_por", "cancelado_por_nombre",
         ]
         read_only_fields = [
             "empresa", "sucursal", "proveedor", "usuario", "recepcion", "estatus", "activo",
             "aceptado_por", "fecha_aceptacion", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por",
         ]
+
+    def get_aceptado_por_nombre(self, obj):
+        return _nombre_usuario(obj.aceptado_por) if obj.aceptado_por_id else None
 
     def get_resumen(self, obj):
         from compras.api.views import resumen_encuadre_rfid

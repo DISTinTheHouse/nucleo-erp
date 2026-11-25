@@ -3524,6 +3524,8 @@ class PreOrdenProduccionDetailSerializer(PreOrdenProduccionListSerializer):
         ocs.update({oc.pk: oc for oc in obj.ordenes_compra.all()})
         return [
             {"id": oc.pk, "folio": oc.folio, "estatus": oc.estatus, "estatus_label": oc.get_estatus_display(),
+             # Recibida con saldo cerrado: no se recibió completa (#1376).
+             "saldo_cerrado": oc.saldo_cerrado,
              "proveedor": oc.proveedor_id, "fecha_entrega_estimada": oc.fecha_entrega_estimada}
             for oc in sorted(ocs.values(), key=lambda o: o.pk)
         ]

@@ -26,6 +26,7 @@ from catalogo.models import Producto, ProductoVariante
 from compras.models import (
     CalidadInspeccion,
     CalidadInspeccionDetalle,
+    DevolucionProveedor,
     OrdenCompra,
     OrdenCompraDetalle,
     OrdenCompraRutaCritica,
@@ -355,6 +356,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             'almacen',
             'moneda',
             'usuario',
+            'cerrada_por',  # cerrada_por_nombre (#1373)
         )
         empresa = getattr(user, "empresa", None)
         if empresa:
@@ -604,6 +606,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
             oc.cerrada_por = request.user if getattr(request.user, "pk", None) else None
             oc.estatus = OrdenCompra.EstatusOrdenCompra.RECIBIDA
             oc._change_reason = motivo[:100]
+            oc._bitacora_omitir = True  # el renglón "Saldo cerrado" de abajo es el único (#1371)
             oc.save(update_fields=[
                 "saldo_cerrado", "motivo_cierre", "fecha_cierre", "cerrada_por", "estatus", "updated_at",
             ])
@@ -922,6 +925,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         return con_pre_ordenes(
             OrdenCompra.objects.select_related(
                 "proveedor", "pedido", "solicitud_compra", "empresa", "sucursal", "almacen", "moneda", "usuario",
+                "cerrada_por",
             )
             .prefetch_related("pedidos")
         ).get(pk=pk)
@@ -3199,7 +3203,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
     """
 
     queryset = CalidadInspeccion.objects.all().select_related(
-        "recepcion", "inspector",
+        "recepcion", "inspector", "anulada_por",
         *(f"recepcion__{r}" for r in RELACIONES_PEDIDO),  # pedido(s) de cada recepción
     )
     serializer_class = CalidadInspeccionSerializer
@@ -3380,6 +3384,14 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
                 raise ValidationError({"facturas_proveedores": (
                     "La recepción tiene una factura de proveedor sin cancelar: cancélala primero en Finanzas."
                 )})
+            # Lo ya reclamado al proveedor se volvería a reclamar tras reinspeccionar (#1372).
+            # Crear una devolución bloquea esta misma inspección: no hay carrera.
+            if DevolucionProveedor.objects.filter(
+                calidad_inspeccion=inspeccion, estatus=DevolucionProveedor.Estatus.APLICADA
+            ).exists():
+                raise ValidationError({"devoluciones_proveedor": (
+                    "La inspección tiene devoluciones a proveedor aplicadas: cancélalas primero."
+                )})
 
             entrada = (
                 MovimientoInventario.objects.filter(recepcion=recepcion, tipo_movimiento="ENTRADA")
@@ -3437,6 +3449,13 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
                 MovimientoInventarioDetalle.objects.bulk_create(nuevos)
                 # Sale al costo con que entró; el promedio no se mueve por una salida.
                 costeo.costear(recepcion.empresa_id, [(n, -n.cantidad, None) for n in nuevos], costeo.Origen.OPERACION)
+                # Sin apartado, igual que el consumo de una OP: una pre-orden Lista de
+                # la sucursal puede quedarse sin el material que salió (#1375).
+                from produccion.services.pre_orden_service import recalcular_listas
+                motivo_regreso = f"Se revirtió la calidad de la recepción {recepcion.folio or recepcion.pk}."
+                transaction.on_commit(lambda: recalcular_listas(
+                    recepcion.empresa_id, recepcion.sucursal_id, recepcion.op, motivo=motivo_regreso,
+                ))
 
             inspeccion.estado = CalidadInspeccion.ESTADO_ANULADA
             inspeccion.motivo_anulacion, inspeccion.fecha_anulacion = motivo, timezone.now()
@@ -3912,7 +3931,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         user = self.request.user
         qs = (
             self.queryset
-            .select_related("orden_compra", "op", "almacen", "proveedor", "sucursal")
+            .select_related("orden_compra", "op", "almacen", "proveedor", "sucursal", "aceptado_por", "cancelado_por")
             .prefetch_related(prefetch_lecturas_rfid())
         )
         empresa = getattr(user, "empresa", None)
