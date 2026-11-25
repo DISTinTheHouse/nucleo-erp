@@ -46,6 +46,7 @@ from nucleo.permisos import CODIGOS_PRODUCCION_OP, LecturaPorCodigo, permisos_de
 from produccion.models import (
     OrdenBordadoDetalle, OrdenesBordado, OrdenesReflejante, OrdenReflejanteDetalle, OrdenProduccion, OrdenProduccionDetalle, SalidaMaquila, SalidaMaquilaDetalle,
 )
+from produccion.api.serializers import CanceladoPorNombreMixin
 from produccion.scope import ordenes_bordado_visibles, ordenes_produccion_visibles, ordenes_reflejante_visibles
 from terceros.models import Proveedor
 
@@ -71,7 +72,7 @@ class SalidaMaquilaDetalleSerializer(serializers.ModelSerializer):
                                        "queryset": OrdenReflejanteDetalle.objects.none()}}
 
 
-class SalidaMaquilaSerializer(serializers.ModelSerializer):
+class SalidaMaquilaSerializer(CanceladoPorNombreMixin, serializers.ModelSerializer):
     detalles = SalidaMaquilaDetalleSerializer(many=True, required=False)
     op_folio = serializers.CharField(source="op.folio_op", read_only=True, allow_null=True, default=None)
     ob_folio = serializers.CharField(source="ob.folio_bordado", read_only=True, allow_null=True, default=None)
@@ -178,7 +179,7 @@ class SalidaMaquilaSerializer(serializers.ModelSerializer):
             "total_piezas", "piezas_recibidas", "piezas_faltantes",
             "total", "observaciones", "usuario", "usuario_nombre", "created_at", "detalles",
             "recepciones", "facturas_proveedor",
-            "motivo_cancelacion", "fecha_cancelacion", "cancelado_por",
+            "motivo_cancelacion", "fecha_cancelacion", "cancelado_por", "cancelado_por_nombre",
         ]
         read_only_fields = ["folio", "estatus", "sucursal", "fecha_recepcion", "total_piezas", "total",
                             "usuario", "created_at", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por"]
@@ -262,7 +263,8 @@ class SalidaMaquilaListSerializer(SalidaMaquilaSerializer):
 
 
 TIPOS_SERIE_SM = ["Salida a Maquila", "SALIDA_MAQUILA", "SM"]
-_RELACIONES = ("op", "ob", "orden_r", "centro_confeccion", "sucursal", "usuario")
+# ``cancelado_por``: ``cancelado_por_nombre`` (EC-966) sin consulta por fila.
+_RELACIONES = ("op", "ob", "orden_r", "centro_confeccion", "sucursal", "usuario", "cancelado_por")
 # Recepción y factura de maquila del detalle (#1239), sin el PDF binario de la factura.
 _PREFETCH_DOCUMENTOS = (
     Prefetch("recepciones", queryset=Recepcion.objects.only(

@@ -76,6 +76,7 @@ from produccion.api.serializers import (
     anotar_pre_orden,
     CorteMangaAvancesSerializer,
     leer_mapa_pdt,
+    nombre_cancelado_por,
     AltaCatalogoInputSerializer,
     ListaMaterialBomSerializer,
     BomDetalleSerializer,
@@ -697,7 +698,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             # una query lazy en retrieve; el listado usa el serializer ligero y no
             # las toca, por eso solo se aplica fuera de ``list``.
             queryset = queryset.select_related(
-                "empresa", "sucursal", "pedido__cliente", "usuario_asignado"
+                "empresa", "sucursal", "pedido__cliente", "usuario_asignado", "cancelado_por"
             ).prefetch_related(
                 # En el detalle cada pedido trae su cliente (``pedidos[].cliente``):
                 # una sola consulta para todos los pedidos de la OP.
@@ -1137,6 +1138,7 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
             'motivo_cancelacion': op.motivo_cancelacion,
             'fecha_cancelacion': op.fecha_cancelacion,
             'cancelado_por': op.cancelado_por_id,
+            'cancelado_por_nombre': nombre_cancelado_por(op),
         })
 
     # ``detail=False`` fuera de ``get_queryset()`` a propósito (EC-412): el
@@ -1406,6 +1408,7 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
             "estatus": orden.estatus_bordado,
             "motivo_cancelacion": orden.motivo_cancelacion, "fecha_cancelacion": orden.fecha_cancelacion,
             "cancelado_por": orden.cancelado_por_id,
+            "cancelado_por_nombre": nombre_cancelado_por(orden),
         })
 
     def get_queryset(self):
@@ -1427,7 +1430,7 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
         """
         qs = (
             ordenes_bordado_base()
-            .select_related("pedido", "usuario_asignado", "empresa", "sucursal", "proveedor")
+            .select_related("pedido", "usuario_asignado", "empresa", "sucursal", "proveedor", "cancelado_por")
             .prefetch_related(
                 Prefetch(
                     "detalles",
@@ -1897,7 +1900,7 @@ class OrdenReflejanteViewSet(
         """
         qs = (
             ordenes_reflejante_base()
-            .select_related("empresa", "sucursal", "pedido", "usuario_asignado")
+            .select_related("empresa", "sucursal", "pedido", "usuario_asignado", "cancelado_por")
             .prefetch_related(
                 Prefetch(
                     "detalles",
@@ -2053,6 +2056,7 @@ class OrdenReflejanteViewSet(
             "estatus": orden.estatus_reflejante,
             "motivo_cancelacion": orden.motivo_cancelacion, "fecha_cancelacion": orden.fecha_cancelacion,
             "cancelado_por": orden.cancelado_por_id,
+            "cancelado_por_nombre": nombre_cancelado_por(orden),
         })
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
@@ -2336,7 +2340,7 @@ class OrdenesCorteMangaViewSet(
         """
         qs = (
             ordenes_corte_manga_base()
-            .select_related("pedido", "usuario_asignado", "empresa", "sucursal")
+            .select_related("pedido", "usuario_asignado", "empresa", "sucursal", "cancelado_por")
             .prefetch_related(
                 Prefetch(
                     "detalles",
@@ -2449,6 +2453,7 @@ class OrdenesCorteMangaViewSet(
             "estatus": orden.estatus_corte,
             "motivo_cancelacion": orden.motivo_cancelacion, "fecha_cancelacion": orden.fecha_cancelacion,
             "cancelado_por": orden.cancelado_por_id,
+            "cancelado_por_nombre": nombre_cancelado_por(orden),
         })
 
     @action(detail=False, methods=["get", "post"], url_path="onboarding", url_name="onboarding")
