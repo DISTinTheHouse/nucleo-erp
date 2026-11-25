@@ -3987,11 +3987,16 @@ class OnboardingReflejanteConfigCrudoTests(TestCase):
             "/api/v1/produccion/orden-corte-manga/onboarding/", pedido
         )
 
-        self.assertEqual(set(lineas[0].keys()), CLAVES_LINEA_ONBOARDING_BASE)
+        # Corte de manga suma sku/sku_proscai/producto_nombre_externo (EC-964), sin existencias.
+        self.assertEqual(
+            set(lineas[0].keys()),
+            CLAVES_LINEA_ONBOARDING_BASE | {"sku", "sku_proscai", "producto_nombre_externo"},
+        )
         self.assertNotIn("corte_manga_config", lineas[0])
 
     def test_or_onboarding_solo_suma_una_clave_sobre_la_base(self):
-        """El shape de OR es el de siempre MÁS ``reflejante_config``.
+        """El shape de OR es el de siempre MÁS ``reflejante_config`` (y, desde
+        EC-964, ``sku``/``sku_proscai``/``producto_nombre_externo``).
 
         Fija que la clave nueva es aditiva: no se quitó ni renombró ninguna de
         las 15 que ya emitía el helper.
@@ -4006,7 +4011,8 @@ class OnboardingReflejanteConfigCrudoTests(TestCase):
 
         self.assertEqual(
             set(lineas[0].keys()),
-            CLAVES_LINEA_ONBOARDING_BASE | {"reflejante_config"},
+            CLAVES_LINEA_ONBOARDING_BASE
+            | {"reflejante_config", "sku", "sku_proscai", "producto_nombre_externo"},  # EC-964
         )
 
 
