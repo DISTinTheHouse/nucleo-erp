@@ -369,6 +369,24 @@ class PedidoConDependencias(APIException):
         })
 
 
+class PedidoConOcAbiertas(ValidationError):
+    """400 de ``pedidos/{id}/cancelar/`` con OC en borrador o por autorizar (EC-973).
+
+    ``ordenes_compra`` es el texto de siempre (el front lo muestra tal cual) y
+    ``ordenes_compra_bloqueantes`` la lista ``[{id, folio, estatus}]`` para ligar a
+    cada OC. ``detail`` se asigna sin pasar por ``_get_error_details`` de DRF, que
+    volvería texto los ids y el estatus y ``"None"`` un folio vacío."""
+
+    def __init__(self, ocs):
+        super().__init__()
+        etiquetas = ", ".join(o["folio"] or f"#{o['id']}" for o in ocs)
+        self.detail = {
+            "ordenes_compra": (
+                f"Tiene OC en borrador o por autorizar: {etiquetas}. Cancélalas o autorízalas primero."),
+            "ordenes_compra_bloqueantes": ocs,
+        }
+
+
 def _objetos_bloqueantes(exc):
     return getattr(exc, "protected_objects", None) or getattr(exc, "restricted_objects", None) or ()
 
@@ -3729,12 +3747,14 @@ class PedidoViewSet(viewsets.ModelViewSet):
         E = OC.EstatusOrdenCompra
         ocs = list(
             OC.objects.filter(Q(pedido=pedido) | Q(pedidos=pedido), activo=True)
-            .exclude(estatus__in=[E.CANCELADA, E.RECIBIDA]).distinct().values("pk", "folio", "estatus")
+            .exclude(estatus__in=[E.CANCELADA, E.RECIBIDA]).distinct().order_by("pk").values("pk", "folio", "estatus")
         )
-        abiertas = [o["folio"] or f"#{o['pk']}" for o in ocs if o["estatus"] in (E.BORRADOR, E.POR_AUTORIZAR)]
+        abiertas = [
+            {"id": o["pk"], "folio": o["folio"], "estatus": o["estatus"]}
+            for o in ocs if o["estatus"] in (E.BORRADOR, E.POR_AUTORIZAR)
+        ]
         if abiertas:
-            raise ValidationError({"ordenes_compra": (
-                f"Tiene OC en borrador o por autorizar: {', '.join(abiertas)}. Cancélalas o autorízalas primero.")})
+            raise PedidoConOcAbiertas(abiertas)
         if ocs:
             OC.objects.filter(pk__in=[o["pk"] for o in ocs]).update(
                 pedido_cancelado=True, fecha_pedido_cancelado=timezone.now(), updated_at=timezone.now())

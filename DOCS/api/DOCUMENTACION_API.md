@@ -2529,7 +2529,7 @@ Mismo `PATCH /api/v1/ventas/pedidos/{id}/` y mismo `DELETE` de siempre; solo cam
 
 Body `{"motivo": "..."}` (obligatorio → `400 {"motivo"}`). Además de devolver inventario y liberar reservas, en la misma transacción:
 
-- **OC ligadas** (`pedido` o `pedidos`): si alguna está en `1` Borrador o `2` Por autorizar → `400 {"ordenes_compra": "Tiene OC en borrador o por autorizar: ..."}`; compras la cancela o autoriza primero. Las autorizadas / parcialmente recibidas **no se cancelan solas**: quedan con `pedido_cancelado: true` y `fecha_pedido_cancelado` (visibles en `GET /api/v1/compras/ordenes/`) para que compras decida.
+- **OC ligadas** (`pedido` o `pedidos`): si alguna está en `1` Borrador o `2` Por autorizar → `400 {"ordenes_compra": "Tiene OC en borrador o por autorizar: OC-1, #2. Cancélalas o autorízalas primero.", "ordenes_compra_bloqueantes": [{"id": 1, "folio": "OC-1", "estatus": 1}, {"id": 2, "folio": null, "estatus": 2}]}` (EC-973: el texto no cambia; la lista trae cada OC bloqueante, `folio` `null` si no tiene, ordenadas por id); compras la cancela o autoriza primero. Las autorizadas / parcialmente recibidas **no se cancelan solas**: quedan con `pedido_cancelado: true` y `fecha_pedido_cancelado` (visibles en `GET /api/v1/compras/ordenes/`) para que compras decida.
 - **Pre-orden abierta** del pedido: se cancela (evento `cancelada` con el motivo). Necesidades `pendiente` → `cancelada`; las ya en una OC → `huerfana`.
 - Respuesta `200` agrega `pre_ordenes_canceladas: [{id, necesidades_liberadas, necesidades_huerfanas}]` y `ordenes_compra_marcadas: [{id, folio}]`; lo mismo queda en el `AuditoriaEvento` `CANCELAR` del pedido.
 
