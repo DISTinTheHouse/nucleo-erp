@@ -9929,3 +9929,91 @@ class CanceladoPorNombreProduccionTests(TestCase):
         for _ in range(3):
             self._cancelar_en_bd(SalidaMaquila, self._sm().pk, "estatus", cancelada)
         self.assertEqual(self._consultas(f"{self.URL}salidas-maquila/"), (una, 4))
+
+
+class PreOrdenOpEstatusTests(TestCase):
+    """EC-968: el listado y el detalle de ``pre-ordenes`` traen ``op_estatus`` y
+    ``op_estatus_display`` de la OP ligada (``null`` sin OP), sin consultas por fila."""
+
+    URL = "/api/v1/produccion/pre-ordenes/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from produccion.models import PreOrdenProduccion
+        cls.empresa = Empresa.objects.create(codigo="acme-poe", razon_social="acme-poe SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTY", nombre="Matriz")
+        cls.usuario = Usuario.objects.create(
+            username="poe", email="poe@acme-poe.test", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.E = PreOrdenProduccion.Estatus
+        cls.sin_op = cls._pre(cls.E.EN_COMPRA)
+
+    @classmethod
+    def _op(cls, folio, estatus):
+        return OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op=folio, estatus_op=estatus,
+        )
+
+    @classmethod
+    def _pre(cls, estatus, op=None):
+        from produccion.models import PreOrdenProduccion
+        return PreOrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, origen=PreOrdenProduccion.Origen.RESURTIDO,
+            estatus=estatus, op=op,
+        )
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        return client
+
+    def test_sin_op_es_null(self):
+        r = self._client().get(f"{self.URL}{self.sin_op.pk}/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.data["op_estatus"])
+        self.assertIsNone(r.data["op_estatus_display"])
+        fila = next(f for f in self._client().get(self.URL).data if f["id"] == self.sin_op.pk)
+        self.assertIsNone(fila["op_estatus"])
+        self.assertIsNone(fila["op_estatus_display"])
+
+    def test_op_activa(self):
+        op = self._op("OP-POE-1", OrdenProduccion.EstatusOrdenProduccion.BORDANDO)
+        pre = self._pre(self.E.CONVERTIDA, op)
+        r = self._client().get(f"{self.URL}{pre.pk}/")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["op_estatus"], OrdenProduccion.EstatusOrdenProduccion.BORDANDO)
+        self.assertEqual(r.data["op_estatus_display"], "En produccion")
+        fila = next(f for f in self._client().get(self.URL).data if f["id"] == pre.pk)
+        self.assertEqual(fila["op_estatus"], OrdenProduccion.EstatusOrdenProduccion.BORDANDO)
+
+    def test_op_cancelada_y_cancelar_la_trae(self):
+        op = self._op("OP-POE-2", OrdenProduccion.EstatusOrdenProduccion.CANCELADO)
+        pre = self._pre(self.E.CONVERTIDA, op)
+        r = self._client().get(f"{self.URL}{pre.pk}/")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["op_estatus"], 7)
+        self.assertEqual(r.data["op_estatus_display"], "Cancelado")
+        fila = next(f for f in self._client().get(self.URL).data if f["id"] == pre.pk)
+        self.assertEqual((fila["op_estatus"], fila["op_estatus_display"]), (7, "Cancelado"))
+        r = self._client().post(f"{self.URL}{pre.pk}/cancelar/")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["estatus"], self.E.CANCELADA)
+        self.assertEqual((r.data["op_estatus"], r.data["op_estatus_display"]), (7, "Cancelado"))
+
+    def test_listado_consultas_constantes(self):
+        def consultas():
+            client = self._client()
+            with CaptureQueriesContext(connection) as ctx:
+                r = client.get(self.URL)
+            self.assertEqual(r.status_code, 200)
+            return len(ctx.captured_queries), len(r.data)
+
+        base, n1 = consultas()
+        for i, est in enumerate((OrdenProduccion.EstatusOrdenProduccion.PENDIENTE,
+                                 OrdenProduccion.EstatusOrdenProduccion.CANCELADO,
+                                 OrdenProduccion.EstatusOrdenProduccion.COMPLETADO)):
+            self._pre(self.E.CONVERTIDA, self._op(f"OP-POE-L{i}", est))
+        varias, n4 = consultas()
+        self.assertEqual((n1, n4), (1, 4))
+        self.assertEqual(varias, base)
