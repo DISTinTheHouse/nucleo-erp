@@ -5,6 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
+from compras.api.serializers import _nombre_usuario
 from compras.models import CalidadInspeccion, DevolucionProveedor, DevolucionProveedorDetalle
 from compras.services import devolucion_proveedor as servicio
 from nucleo.middleware import ip_auditoria
@@ -28,7 +29,9 @@ class DevolucionProveedorSerializer(serializers.ModelSerializer):
     recepcion_folio = serializers.CharField(source="recepcion.folio", read_only=True, default=None)
     orden_compra_folio = serializers.CharField(source="orden_compra.folio", read_only=True, default=None)
     usuario_nombre = serializers.CharField(source="usuario.get_full_name", read_only=True, default=None)
-    cancelado_por_nombre = serializers.CharField(source="cancelado_por.get_full_name", read_only=True, default=None)
+    # Nombre completo o correo; ``null`` sin cancelar (EC-966, como ``_CancelacionRecepcionMixin``).
+    # ``cancelado_por`` va en el ``select_related`` del viewset.
+    cancelado_por_nombre = serializers.SerializerMethodField()
 
     class Meta:
         model = DevolucionProveedor
@@ -36,6 +39,9 @@ class DevolucionProveedorSerializer(serializers.ModelSerializer):
                   "orden_compra_folio", "proveedor", "proveedor_nombre", "almacen", "motivo", "fecha", "usuario",
                   "usuario_nombre", "total", "movimiento_inventario", "motivo_cancelacion", "fecha_cancelacion",
                   "cancelado_por", "cancelado_por_nombre", "detalles"]
+
+    def get_cancelado_por_nombre(self, obj):
+        return _nombre_usuario(obj.cancelado_por) if obj.cancelado_por_id else None
 
 
 def _motivo(request, mensaje):
