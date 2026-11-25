@@ -4698,8 +4698,11 @@ class DevolucionProveedorContratoTests(TestCase):
             "detalles": [{"calidad_detalle": fila["calidad_detalle"], "cantidad": fila["cantidad_pendiente"]}],
         }, format="json")
         self.assertEqual(resp.status_code, 201, resp.content[:300])
-        self.assertEqual(Decimal(self._pendientes(inspeccion)[0]["cantidad_pendiente"]), Decimal("0"))
+        # Devuelto completo: sin renglones, bandera false y fuera del filtro.
+        self.assertEqual(self._pendientes(inspeccion), [])
         self.assertIs(self._inspecciones()[inspeccion.pk], False)
+        self.assertNotIn(inspeccion.pk, self._inspecciones(devolucion_pendiente="true"))
+        self.assertIn(inspeccion.pk, self._inspecciones(devolucion_pendiente="false"))
 
     # --- bandera y filtro de calidad -------------------------------------------
 
@@ -4713,6 +4716,8 @@ class DevolucionProveedorContratoTests(TestCase):
         liberada = self._inspeccion("liberado", estado="aprobada")
         anulada = self._inspeccion(estado=CalidadInspeccion.ESTADO_ANULADA)
 
+        self.assertEqual(self._pendientes(devuelta), [])
+        self.assertEqual(Decimal(self._pendientes(parcial)[0]["cantidad_pendiente"]), Decimal("3"))
         self.assertEqual(self._inspecciones(), {
             pendiente.pk: True, cuarentena.pk: True, parcial.pk: True,
             devuelta.pk: False, liberada.pk: False, anulada.pk: False,

@@ -134,13 +134,16 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
     def pendientes(self, request):
         """``?calidad_inspeccion=`` → renglones rechazo/cuarentena con lo que falta devolver
         y su artículo (nombre, SKU, talla, color; EC-973). Inspección anulada → ``[]``
-        (el POST la rechaza). 2 consultas sin importar los renglones."""
+        (el POST la rechaza); sin los renglones ya devueltos completos. 2 consultas sin
+        importar los renglones."""
         empresa = getattr(request.user, "empresa", None)
         pk = request.query_params.get("calidad_inspeccion")
         if not empresa or not pk or not CalidadInspeccion.objects.filter(pk=pk, recepcion__empresa=empresa).exists():
             raise ValidationError({"calidad_inspeccion": "Inspección no encontrada."})
         filas = []
         for k, (f, v) in servicio.pendientes(pk).items():
+            if v <= 0:  # ya devuelto completo: el POST no lo acepta
+                continue
             rd = f.recepcion_detalle
             filas.append({
                 "calidad_detalle": k, "recepcion_detalle": rd.pk, "resultado": f.resultado,
