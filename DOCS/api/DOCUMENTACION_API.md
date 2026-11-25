@@ -2196,7 +2196,8 @@ Cada documento que nació del pedido, para la pestaña "Documentos" del detalle.
 - **Respuesta** (`200`), siempre con las 15 llaves; una lista vacía es "sin registros":
   ```json
   {
-    "pre_ordenes": [{ "id": 3, "origen": "pedido", "estatus": "pendiente_validar", "op_id": null, "created_at": "...", "op_folio": null }],
+    "pre_ordenes": [{ "id": 3, "origen": "pedido", "estatus": "pendiente_validar", "op_id": null, "created_at": "...", "op_folio": null,
+                     "op_estatus": null, "op_estatus_display": null }],
     "salidas_maquila": [{ "id": 7, "folio": "SM-00007", "estatus": "ENVIADA", "fecha_envio": "2026-11-10", "fecha_recepcion": null,
                           "total_piezas": "120.00", "total": null, "centro_confeccion_nombre": "Maquila SA",
                           "op_folio": null, "ob_folio": "OB-00045", "or_folio": null }],
@@ -4410,7 +4411,7 @@ Toda cancelación pide `motivo` y guarda en la orden `motivo_cancelacion`, `fech
 - **Estatus de la OP ligada (EC-968)**: el listado `GET /pre-ordenes/`, el detalle `GET /pre-ordenes/{id}/` y las respuestas de sus acciones que devuelven la pre-orden (`confirmar-existencias/`, `aceptar/`, `rechazar/`, `cancelar/` y el alta `POST /pre-ordenes/`) traen, junto a `op` y `op_folio`:
   - `op_estatus`: `OrdenProduccion.estatus_op` (entero: `1` Pendiente … `7` Cancelado);
   - `op_estatus_display`: su etiqueta (`"Cancelado"`).
-  Ambos son `null` si no hay OP ligada. Ofrecer "Cancelar pre-orden" en una Convertida cuando `estatus == "convertida"` y `op_estatus == 7`: es la misma regla de `cancelar/`. Sin consultas extra (la OP ya viene en la misma consulta).
+  Ambos son `null` si no hay OP ligada. También los traen, con el mismo formato, el `pre_orden` del detalle del pedido (`GET /api/v1/ventas/pedidos/{id}/`; y el de `pedidos-especiales/`, que usa el mismo resumen) y cada `pre_ordenes[]` de `GET /api/v1/ventas/pedidos/{id}/documentos/`. Ofrecer "Cancelar pre-orden" en una Convertida cuando `estatus == "convertida"` y `op_estatus == 7`: es la misma regla de `cancelar/`. Sin consultas extra (la OP ya viene en la misma consulta).
 
 ### Salida a maquila — `POST /api/v1/produccion/salidas-maquila/{id}/cancelar/`
 
