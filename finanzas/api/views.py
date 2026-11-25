@@ -1488,8 +1488,7 @@ class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         # la consulta; ``tiene_pdf_adjunto`` sale de un CASE en SQL.
         qs = (
             super().get_queryset()
-            # EC-971: ``cancelado_por`` para ``cancelado_por_nombre``, sin consulta por fila.
-            .select_related("proveedor", "moneda", "oc", "recepcion", "salida_maquila", "cancelado_por")
+            .select_related("proveedor", "moneda", "oc", "recepcion", "salida_maquila")
             # EC-904: al leer, el producto de cada línea en la misma consulta de las líneas.
             .prefetch_related(
                 Prefetch(
@@ -1507,6 +1506,10 @@ class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
                 )
             )
         )
+        if self._es_lectura():
+            # EC-971: ``cancelado_por`` para ``cancelado_por_nombre``, sin consulta por
+            # fila. Sólo al leer, como en ``CobroViewSet``: las escrituras no lo usan.
+            qs = qs.select_related("cancelado_por")
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
