@@ -462,6 +462,30 @@ class OrdenBordadoAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
             OrdenBordadoService.cantidades_asignadas_por_pedidos([pedido.pk]), ({}, {})
         )
 
+    def test_409_de_pedido_cubierto_nunca_senala_una_ob_cancelada(self):
+        """La OB viva cubre el 100% y hay una cancelada con id mayor: el 409
+        debe reportar la viva, no la cancelada (antes salía la de id mayor)."""
+        pedido, detalle = self._crear_pedido()
+        talla = self._talla(detalle, self.talla_ch, 10)
+        viva = self._save(pedido)
+        cancelada = OrdenesBordado.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+            folio_bordado="OB-CANCELADA",
+            estatus_bordado=OrdenesBordado.EstatusBordado.CANCELADO_LEGACY,
+        )
+        OrdenBordadoDetalle.objects.create(
+            ob=cancelada, pedido_detalle=detalle, producto=self.producto,
+            talla=talla.talla, cantidad=10,
+        )
+        self.assertGreater(cancelada.pk, viva.pk)
+
+        with self.assertRaises(self.DUPLICADA) as ctx:
+            self._save(pedido)
+
+        self.assertEqual(
+            str(ctx.exception.detail["orden_bordado_existente"]["id"]), str(viva.pk)
+        )
+
 
 class OrdenCorteMangaAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
     FLAG = "lleva_corte_manga"

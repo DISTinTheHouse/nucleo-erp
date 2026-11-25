@@ -114,6 +114,8 @@ class OrdenBordadoService:
                 pedido=pedido,
                 activo=True,
             )
+            # Una cancelada ya no ocupa el pedido: el 409 no la señala (EC-969).
+            .exclude(estatus_bordado=estatus_cancelado("bordado"))
             .order_by("-id")
             .first()
         )
