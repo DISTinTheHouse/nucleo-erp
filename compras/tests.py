@@ -4551,3 +4551,151 @@ class DevolucionProveedorCanceladoPorNombreTests(TestCase):
             )
             self._devolucion(usuario)
         self.assertEqual(consultas(), (una, 4))
+
+
+class DevolucionProveedorContratoTests(TestCase):
+    """EC-973: ``pendientes/`` con el artículo y sin inspecciones anuladas, la bandera
+    ``tiene_devolucion_pendiente`` y el filtro ``?devolucion_pendiente=`` de calidad
+    (misma regla, acotados a la empresa) y el listado de devoluciones paginado y con
+    búsqueda. Empresas, proveedor, almacén y OC de ``OrdenCompraCancelacionTests``."""
+
+    URL = "/api/v1/compras/devoluciones-proveedor/"
+    CALIDAD_URL = "/api/v1/compras/calidad-inspecciones/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import Talla
+
+        OrdenCompraCancelacionTests.setUpTestData.__func__(cls)
+        for clave in ("R-WMS-RECEPCIONES", "C-WMS-RECEPCIONES"):
+            _conceder(cls.a["usuario"], clave)
+            _conceder(cls.b["usuario"], clave)
+        cls.variante = ProductoVariante.objects.create(
+            producto=cls.a["producto"], empresa=cls.a["empresa"], sku="INS-973-M",
+            color=Color.objects.create(nombre="Azul 973", codigo="A73", codigo_hex="#0000ff"),
+            talla=Talla.objects.create(nombre="M-973"), precio_base="1",
+        )
+        cls.inspectores = {}
+        for clave in ("a", "b"):
+            t = getattr(cls, clave)
+            departamento = Departamento.objects.create(
+                empresa=t["empresa"], sucursal=t["sucursal"], codigo="CAL", nombre="Calidad")
+            cls.inspectores[clave] = Empleado.objects.create(
+                empresa=t["empresa"], sucursal=t["sucursal"], departamento=departamento,
+                puesto=Puesto.objects.create(empresa=t["empresa"], nombre="Inspector"),
+                numero_empleado=f"EMP-973-{clave}", nombre="Ana", apellido_paterno="Lopez",
+                fecha_ingreso=timezone.localdate(),
+            )
+
+    def _client(self, user=None):
+        client = APIClient()
+        client.force_authenticate(user or self.a["usuario"])
+        return client
+
+    def _inspeccion(self, resultado="rechazo", tenant="a", estado="rechazada", variante=True):
+        """Inspección de una recepción de 10 piezas: 6 aprobadas y 4 con ``resultado``."""
+        t = getattr(self, tenant)
+        recepcion = Recepcion.objects.create(
+            empresa=t["empresa"], sucursal=t["sucursal"], proveedor=t["proveedor"], almacen=t["almacen"],
+            usuario=t["usuario"], folio=f"RC-973-{Recepcion.objects.count() + 1}", fecha_recepcion=timezone.now(),
+            estatus=Recepcion.EstatusRecepcion.RECIBIDA,
+        )
+        renglon = RecepcionDetalle.objects.create(
+            recepcion=recepcion, producto=t["producto"], cantidad_recibida=10,
+            producto_variante=self.variante if variante and tenant == "a" else None,
+        )
+        inspeccion = CalidadInspeccion.objects.create(
+            recepcion=recepcion, inspector=self.inspectores[tenant], fecha=timezone.localdate(), estado=estado,
+        )
+        CalidadInspeccionDetalle.objects.create(
+            calidad_inspeccion=inspeccion, recepcion_detalle=renglon, cantidad_inspeccionada=10,
+            cantidad_aprobada=6, cantidad_rechazada=4 if resultado == "rechazo" else 0, resultado=resultado,
+        )
+        return inspeccion
+
+    def _devolucion(self, inspeccion, cantidad, folio=None, estatus=None, tenant="a"):
+        from compras.models import DevolucionProveedor, DevolucionProveedorDetalle
+
+        t = getattr(self, tenant)
+        dev = DevolucionProveedor.objects.create(
+            empresa=t["empresa"], sucursal=t["sucursal"], calidad_inspeccion=inspeccion,
+            recepcion=inspeccion.recepcion, proveedor=t["proveedor"], almacen=t["almacen"], motivo="Rechazo",
+            usuario=t["usuario"], folio=folio or f"DVP-973-{DevolucionProveedor.objects.count() + 1}",
+            estatus=estatus or DevolucionProveedor.Estatus.APLICADA,
+        )
+        detalle = inspeccion.detalles.get()
+        DevolucionProveedorDetalle.objects.create(
+            devolucion=dev, calidad_detalle=detalle, recepcion_detalle=detalle.recepcion_detalle,
+            producto=detalle.recepcion_detalle.producto, cantidad=cantidad, costo_unitario=0, importe=0,
+        )
+        return dev
+
+    def _pendientes(self, inspeccion, user=None):
+        resp = self._client(user).get(f"{self.URL}pendientes/", {"calidad_inspeccion": inspeccion.pk})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return resp.json()
+
+    def _inspecciones(self, user=None, **params):
+        resp = self._client(user).get(self.CALIDAD_URL, params)
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return {i["id"]: i["tiene_devolucion_pendiente"] for i in resp.json()}
+
+    # --- pendientes/ -------------------------------------------------------------
+
+    def test_pendientes_trae_nombre_sku_talla_y_color(self):
+        inspeccion = self._inspeccion()
+        detalle = inspeccion.detalles.get()
+
+        with CaptureQueriesContext(connection) as ctx:
+            filas = self._pendientes(inspeccion)
+
+        self.assertEqual(len(filas), 1)
+        fila = filas[0]
+        self.assertEqual(Decimal(fila.pop("cantidad_pendiente")), Decimal("4"))
+        self.assertEqual(fila, {
+            "calidad_detalle": detalle.pk, "recepcion_detalle": detalle.recepcion_detalle_id,
+            "resultado": "rechazo", "producto": self.a["producto"].pk, "producto_nombre": "Insumo acme-cx",
+            "producto_variante_sku": "INS-973-M", "producto_variante_talla": "M-973",
+            "producto_variante_color": "Azul 973",
+        })
+        # Sin variante (materia prima): nombre del producto; SKU, talla y color null.
+        sin_variante = self._pendientes(self._inspeccion("cuarentena", variante=False))[0]
+        self.assertEqual(
+            [sin_variante[k] for k in ("producto_nombre", "producto_variante_sku", "producto_variante_talla",
+                                        "producto_variante_color")],
+            ["Insumo acme-cx", None, None, None],
+        )
+        self.assertEqual(Decimal(sin_variante["cantidad_pendiente"]), Decimal("4"))
+        # Sin consultas por renglón: más renglones, mismas consultas.
+        otro = RecepcionDetalle.objects.create(
+            recepcion=inspeccion.recepcion, producto=self.a["producto"], producto_variante=self.variante,
+            cantidad_recibida=5,
+        )
+        CalidadInspeccionDetalle.objects.create(
+            calidad_inspeccion=inspeccion, recepcion_detalle=otro, cantidad_inspeccionada=5,
+            cantidad_rechazada=5, resultado="rechazo",
+        )
+        with CaptureQueriesContext(connection) as ctx2:
+            self.assertEqual(len(self._pendientes(inspeccion)), 2)
+        self.assertEqual(len(ctx2.captured_queries), len(ctx.captured_queries))
+
+    def test_pendientes_descuenta_devuelto_y_excluye_anulada(self):
+        from compras.models import DevolucionProveedor
+
+        inspeccion = self._inspeccion()
+        self._devolucion(inspeccion, "1.5")
+        self._devolucion(inspeccion, "2", estatus=DevolucionProveedor.Estatus.CANCELADA)  # no cuenta
+        self.assertEqual(Decimal(self._pendientes(inspeccion)[0]["cantidad_pendiente"]), Decimal("2.5"))
+
+        CalidadInspeccion.objects.filter(pk=inspeccion.pk).update(estado=CalidadInspeccion.ESTADO_ANULADA)
+        self.assertEqual(self._pendientes(inspeccion), [])
+
+    def test_post_acepta_lo_que_ofrece_pendientes(self):
+        inspeccion = self._inspeccion()
+        fila = self._pendientes(inspeccion)[0]
+        resp = self._client().post(self.URL, {
+            "calidad_inspeccion": inspeccion.pk, "motivo": "Defecto",
+            "detalles": [{"calidad_detalle": fila["calidad_detalle"], "cantidad": fila["cantidad_pendiente"]}],
+        }, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content[:300])
+        self.assertEqual(Decimal(self._pendientes(inspeccion)[0]["cantidad_pendiente"]), Decimal("0"))

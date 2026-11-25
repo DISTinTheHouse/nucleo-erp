@@ -3162,7 +3162,7 @@ Ya NO trae `movimiento_id`/`movimiento_inventario_id` — no hubo movimiento de 
 
 Base: `/api/v1/compras/devoluciones-proveedor/`. Permisos: leer `R-WMS-RECEPCIONES`, crear/cancelar `C-WMS-RECEPCIONES` (`403`). Acotado a la empresa del usuario (otra empresa: `404`).
 
-- `GET .../pendientes/?calidad_inspeccion={id}` → renglones `rechazo`/`cuarentena` con `cantidad_pendiente` (rechazada, o inspeccionada − aprobada, menos lo ya devuelto).
+- `GET .../pendientes/?calidad_inspeccion={id}` → renglones `rechazo`/`cuarentena` `[{calidad_detalle, recepcion_detalle, resultado, producto, producto_nombre, producto_variante_sku, producto_variante_talla, producto_variante_color, cantidad_pendiente}]` (`cantidad_pendiente`: rechazada, o inspeccionada − aprobada, menos lo ya devuelto en devoluciones aplicadas). SKU/talla/color `null` sin variante (materia prima). Inspección anulada → `[]` (el POST la rechaza). Inspección de otra empresa → `400 {"calidad_inspeccion"}`.
 - `POST .../` body `{"calidad_inspeccion": id, "motivo": "...", "detalles": [{"calidad_detalle": id, "cantidad": "1"}]}` (`detalles` opcional = todo lo pendiente) → `201` con el documento. Errores `400`: sin `motivo`, inspección anulada, nada pendiente, cantidad mayor a la pendiente.
 - `POST .../{id}/cancelar/` body `{"motivo"}` → `200`; llena `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`. Ya cancelada → `400`.
 - `GET .../` (filtros `recepcion`, `calidad_inspeccion`, `orden_compra`, `proveedor`, `estatus`) y `GET .../{id}/`.

@@ -440,6 +440,13 @@ class RecepcionDetalle(models.Model):
         variante = self.producto_variante or self.variante_produccion
         return getattr(getattr(variante, "talla", None), "nombre", None)
 
+    @property
+    def articulo_color(self):
+        """Como ``articulo_talla``; quien lo use trae ``producto_variante__color`` y
+        ``variante_produccion__color`` en su ``select_related``."""
+        variante = self.producto_variante or self.variante_produccion
+        return getattr(getattr(variante, "color", None), "nombre", None)
+
 
 class RecepcionRFIDEncuadre(models.Model):
     class Estatus(models.TextChoices):

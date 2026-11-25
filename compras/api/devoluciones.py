@@ -116,13 +116,21 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="pendientes")
     def pendientes(self, request):
-        """``?calidad_inspeccion=`` → renglones rechazo/cuarentena con lo que falta devolver."""
+        """``?calidad_inspeccion=`` → renglones rechazo/cuarentena con lo que falta devolver
+        y su artículo (nombre, SKU, talla, color; EC-973). Inspección anulada → ``[]``
+        (el POST la rechaza). 2 consultas sin importar los renglones."""
         empresa = getattr(request.user, "empresa", None)
         pk = request.query_params.get("calidad_inspeccion")
         if not empresa or not pk or not CalidadInspeccion.objects.filter(pk=pk, recepcion__empresa=empresa).exists():
             raise ValidationError({"calidad_inspeccion": "Inspección no encontrada."})
-        return Response([
-            {"calidad_detalle": k, "recepcion_detalle": f.recepcion_detalle_id, "resultado": f.resultado,
-             "producto": f.recepcion_detalle.producto_id, "cantidad_pendiente": str(v)}
-            for k, (f, v) in servicio.pendientes(pk).items()
-        ])
+        filas = []
+        for k, (f, v) in servicio.pendientes(pk).items():
+            rd = f.recepcion_detalle
+            filas.append({
+                "calidad_detalle": k, "recepcion_detalle": rd.pk, "resultado": f.resultado,
+                "producto": rd.producto_id, "producto_nombre": rd.articulo_nombre,
+                # Mismos nombres que los renglones de la recepción y de la OC.
+                "producto_variante_sku": rd.articulo_sku, "producto_variante_talla": rd.articulo_talla,
+                "producto_variante_color": rd.articulo_color, "cantidad_pendiente": str(v),
+            })
+        return Response(filas)
