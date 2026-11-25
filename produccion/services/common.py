@@ -25,7 +25,8 @@ from ventas.models import PedidoDetalleTalla
 EPS_CANTIDAD = 1e-9
 
 
-def cantidades_asignadas(detalle_model, fk_orden, pedido_ids, campo_estatus=None):
+def cantidades_asignadas(detalle_model, fk_orden, pedido_ids, campo_estatus=None,
+                         estatus_cancelado=7):
     """Lo ya programado en órdenes activas, para varios pedidos en una query.
 
     ``fk_orden`` es el nombre de la FK a la orden padre en el modelo de detalle
@@ -44,8 +45,11 @@ def cantidades_asignadas(detalle_model, fk_orden, pedido_ids, campo_estatus=None
     La clave ``(pedido_detalle_id, talla_id)`` no colisiona entre pedidos —un
     ``PedidoDetalle`` pertenece a un único pedido— así que el dict combinado es
     seguro. Sólo cuenta órdenes ``activo=True``: las dadas de baja no consumen
-    cupo, ni las canceladas (estatus 7) cuando se pasa ``campo_estatus``
-    (reflejante/corte de manga, #775).
+    cupo, ni las canceladas cuando se pasa ``campo_estatus``: las que tienen
+    ``estatus_cancelado`` en ese campo. El valor de cancelado depende del tipo
+    de orden: 7 en reflejante/corte de manga (#775, el default), 8 en bordado,
+    donde 7 es Finalizado y sí consume cupo (EC-969). Ver
+    ``cancelacion_service.estatus_cancelado``.
     """
     filas = (
         detalle_model.objects
@@ -53,7 +57,7 @@ def cantidades_asignadas(detalle_model, fk_orden, pedido_ids, campo_estatus=None
             f"{fk_orden}__pedido_id__in": list(pedido_ids),
             f"{fk_orden}__activo": True,
         })
-        .exclude(**({f"{fk_orden}__{campo_estatus}": 7} if campo_estatus else {}))
+        .exclude(**({f"{fk_orden}__{campo_estatus}": estatus_cancelado} if campo_estatus else {}))
         .values("pedido_detalle_id", "talla_id")
         .annotate(asignado=Sum("cantidad"))
     )

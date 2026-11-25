@@ -17,6 +17,7 @@ from produccion.services.common import (
     tallas_orden_trabajo_qs,
     tallas_para_alta,
 )
+from produccion.services.cancelacion_service import estatus_cancelado
 from produccion.utils.folios import generate_ob_folio
 
 
@@ -113,14 +114,23 @@ class OrdenBordadoService:
                 pedido=pedido,
                 activo=True,
             )
+            # Una cancelada ya no ocupa el pedido: el 409 no la señala (EC-969).
+            .exclude(estatus_bordado=estatus_cancelado("bordado"))
             .order_by("-id")
             .first()
         )
 
     @staticmethod
     def cantidades_asignadas_por_pedidos(pedido_ids):
-        """``common.cantidades_asignadas`` para OBs; ver allí el contrato."""
-        return cantidades_asignadas(OrdenBordadoDetalle, "ob", pedido_ids)
+        """``common.cantidades_asignadas`` para OBs; ver allí el contrato.
+
+        Las canceladas (8, ``CANCELADO_LEGACY``) liberan su cupo; las
+        finalizadas (7) lo siguen consumiendo (EC-969).
+        """
+        return cantidades_asignadas(
+            OrdenBordadoDetalle, "ob", pedido_ids,
+            "estatus_bordado", estatus_cancelado("bordado"),
+        )
 
     @staticmethod
     def contratado_por_pedido(pedido_ids):

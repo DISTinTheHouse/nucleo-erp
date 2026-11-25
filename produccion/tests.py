@@ -167,9 +167,6 @@ class BaseOrdenTrabajoTests:
     SERVICE = None
     MODEL = None
     DUPLICADA = None
-    #: ¿Una orden cancelada (sin baja) libera el cupo del pedido? Sí en
-    #: reflejante y corte de manga desde ddd8342 (#775); no en bordado.
-    CANCELADA_LIBERA_CUPO = False
 
     #: ¿El modelo conserva la constraint parcial "una orden activa por pedido"?
     #: Los tres tipos la tuvieron; se fueron quitando al habilitar parcialidades
@@ -351,14 +348,12 @@ class BaseOrdenTrabajoTests:
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(self.MODEL.objects.filter(pedido=pedido).count(), 1)
 
-    def test_orden_cancelada_pero_activa_bloquea_o_libera_segun_el_tipo(self):
-        """Cancelar una orden sin darla de baja (soft delete):
-
-        - bordado: el pedido sigue tomado (``cantidades_asignadas`` solo mira
-          ``activo``);
-        - reflejante y corte de manga: la cancelada (estatus 7) libera el cupo
-          (ddd8342, #775), así que se puede volver a generar la orden.
-        """
+    def test_orden_cancelada_pero_activa_libera_el_cupo(self):
+        """Cancelar una orden sin darla de baja (soft delete) libera su cupo en
+        los tres tipos, así que se puede volver a generar la orden: reflejante
+        y corte de manga desde ddd8342 (#775, estatus 7), bordado desde EC-969
+        (estatus 8; antes el pedido seguía tomado porque ``cantidades_asignadas``
+        solo miraba ``activo``)."""
         pedido, detalle = self._crear_pedido()
         self._talla(detalle, self.talla_ch, 10)
 
@@ -366,15 +361,9 @@ class BaseOrdenTrabajoTests:
         setattr(primera, self.ESTATUS_FIELD, self.CANCELADO)
         primera.save(update_fields=[self.ESTATUS_FIELD])
 
-        if self.CANCELADA_LIBERA_CUPO:
-            segunda = self._save(pedido)
-            self.assertNotEqual(segunda.pk, primera.pk)
-            self.assertEqual(self.MODEL.objects.filter(pedido=pedido).count(), 2)
-            return
-        with self.assertRaises(self.DUPLICADA):
-            self._save(pedido)
-
-        self.assertEqual(self.MODEL.objects.filter(pedido=pedido).count(), 1)
+        segunda = self._save(pedido)
+        self.assertNotEqual(segunda.pk, primera.pk)
+        self.assertEqual(self.MODEL.objects.filter(pedido=pedido).count(), 2)
 
     def test_sin_constraint_dos_ordenes_activas_por_pedido_conviven(self):
         """Inverso del test de arriba: fija el estado que dejan ``0025``/``0026``.
@@ -422,7 +411,6 @@ class OrdenReflejanteAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
     ESTATUS_FIELD = "estatus_reflejante"
     CANCELADO = OrdenesReflejante.EstatusReflejante.CANCELADO
     CONSTRAINT_ACTIVA = False  # removida en 0025
-    CANCELADA_LIBERA_CUPO = True
 
 
 class OrdenBordadoAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
@@ -435,6 +423,69 @@ class OrdenBordadoAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
     CANCELADO = OrdenesBordado.EstatusBordado.CANCELADO_LEGACY
     CONSTRAINT_ACTIVA = False  # removida en 0026
 
+    # --- EC-969: en bordado 7 es Finalizado y 8 Cancelado ---------------------
+
+    def test_ob_finalizada_sigue_consumiendo_el_cupo(self):
+        """Una OB terminada no devuelve sus piezas: volver a generar la OB del
+        pedido completo se rechaza (409 de duplicada, apuntando a ella)."""
+        pedido, detalle = self._crear_pedido()
+        self._talla(detalle, self.talla_ch, 10)
+        primera = self._save(pedido)
+        primera.estatus_bordado = OrdenesBordado.EstatusBordado.FINALIZADO
+        primera.save(update_fields=["estatus_bordado"])
+
+        with self.assertRaises(self.DUPLICADA) as ctx:
+            self._save(pedido)
+
+        self.assertEqual(
+            str(ctx.exception.detail["orden_bordado_existente"]["id"]), str(primera.pk)
+        )
+        self.assertEqual(self.MODEL.objects.filter(pedido=pedido).count(), 1)
+
+    def test_cantidades_asignadas_cuenta_finalizadas_y_no_canceladas(self):
+        pedido, detalle = self._crear_pedido()
+        self._talla(detalle, self.talla_ch, 10)
+        orden = self._save(pedido)
+        clave = (detalle.pk, self.talla_ch.pk)
+        E = OrdenesBordado.EstatusBordado
+
+        orden.estatus_bordado = E.FINALIZADO
+        orden.save(update_fields=["estatus_bordado"])
+        self.assertEqual(
+            OrdenBordadoService.cantidades_asignadas_por_pedidos([pedido.pk]),
+            ({clave: 10.0}, {}),
+        )
+
+        orden.estatus_bordado = E.CANCELADO_LEGACY
+        orden.save(update_fields=["estatus_bordado"])
+        self.assertEqual(
+            OrdenBordadoService.cantidades_asignadas_por_pedidos([pedido.pk]), ({}, {})
+        )
+
+    def test_409_de_pedido_cubierto_nunca_senala_una_ob_cancelada(self):
+        """La OB viva cubre el 100% y hay una cancelada con id mayor: el 409
+        debe reportar la viva, no la cancelada (antes salía la de id mayor)."""
+        pedido, detalle = self._crear_pedido()
+        talla = self._talla(detalle, self.talla_ch, 10)
+        viva = self._save(pedido)
+        cancelada = OrdenesBordado.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+            folio_bordado="OB-CANCELADA",
+            estatus_bordado=OrdenesBordado.EstatusBordado.CANCELADO_LEGACY,
+        )
+        OrdenBordadoDetalle.objects.create(
+            ob=cancelada, pedido_detalle=detalle, producto=self.producto,
+            talla=talla.talla, cantidad=10,
+        )
+        self.assertGreater(cancelada.pk, viva.pk)
+
+        with self.assertRaises(self.DUPLICADA) as ctx:
+            self._save(pedido)
+
+        self.assertEqual(
+            str(ctx.exception.detail["orden_bordado_existente"]["id"]), str(viva.pk)
+        )
+
 
 class OrdenCorteMangaAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
     FLAG = "lleva_corte_manga"
@@ -445,7 +496,6 @@ class OrdenCorteMangaAntiduplicadoTests(BaseOrdenTrabajoTests, TestCase):
     ESTATUS_FIELD = "estatus_corte"
     CANCELADO = OrdenesCorteManga.EstatusCorte.CANCELADO
     CONSTRAINT_ACTIVA = False  # removida en 0025
-    CANCELADA_LIBERA_CUPO = True
 
 
 class OrdenBordadoScopeTenantTests(BaseOrdenTrabajoTests, TestCase):
@@ -2211,6 +2261,59 @@ class OrdenBordadoParcialidadesTests(TestCase):
         self.assertIsNotNone(lineas)
         self.assertEqual(lineas[self.talla_ch.pk]["cantidad_pendiente"], 10.0)
         self.assertEqual(lineas[self.talla_m.pk]["cantidad_pendiente"], 6.0)
+
+    # --- EC-969: la cancelada (8) libera, la finalizada (7) no ----------------
+
+    def _marcar(self, ob_id, estatus):
+        OrdenesBordado.objects.filter(pk=ob_id).update(estatus_bordado=estatus)
+
+    def test_ob_cancelada_devuelve_sus_piezas_al_get_y_la_finalizada_no(self):
+        E = OrdenesBordado.EstatusBordado
+        cancelada = self._post([(self.pdt_ch, self.CANTIDAD_CH)])
+        finalizada = self._post([(self.pdt_m, self.CANTIDAD_M)])
+        self.assertEqual(cancelada.status_code, 201, cancelada.data)
+        self.assertEqual(finalizada.status_code, 201, finalizada.data)
+        self.assertIsNone(self._lineas_del_get())
+
+        self._marcar(cancelada.data["id"], E.CANCELADO_LEGACY)
+        self._marcar(finalizada.data["id"], E.FINALIZADO)
+
+        lineas = self._lineas_del_get()
+        self.assertIsNotNone(lineas)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_asignada"], 0.0)
+        self.assertEqual(lineas[self.talla_ch.pk]["cantidad_pendiente"], 10.0)
+        self.assertEqual(lineas[self.talla_m.pk]["cantidad_asignada"], 6.0)
+        self.assertEqual(lineas[self.talla_m.pk]["cantidad_pendiente"], 0.0)
+
+    def _programar_bordado(self, cantidad):
+        self.pedido.programacion_conf = {
+            "programaciones": [{"destino": "BORDADO", "cantidad": cantidad}]
+        }
+        self.pedido.save(update_fields=["programacion_conf"])
+
+    def test_tope_programado_admite_nueva_ob_si_la_anterior_se_cancelo(self):
+        """Mesa de control programó 10 a BORDADO y la primera OB los tomó todos
+        (CH). Cancelada, una OB de M (6) cabe en el tope; los cupos por línea y
+        por renglón no la frenan, así que quien decidiría es el tope."""
+        self._programar_bordado(10)
+        primera = self._post([(self.pdt_ch, self.CANTIDAD_CH)])
+        self.assertEqual(primera.status_code, 201, primera.data)
+        self._marcar(primera.data["id"], OrdenesBordado.EstatusBordado.CANCELADO_LEGACY)
+
+        resp = self._post([(self.pdt_m, self.CANTIDAD_M)])
+
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+    def test_tope_programado_sigue_contando_la_ob_finalizada(self):
+        self._programar_bordado(10)
+        primera = self._post([(self.pdt_ch, self.CANTIDAD_CH)])
+        self.assertEqual(primera.status_code, 201, primera.data)
+        self._marcar(primera.data["id"], OrdenesBordado.EstatusBordado.FINALIZADO)
+
+        resp = self._post([(self.pdt_m, self.CANTIDAD_M)])
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("excede lo programado", str(resp.data))
 
 
 class OrdenBordadoRevisionParcialidadesTests(OrdenBordadoParcialidadesTests):
