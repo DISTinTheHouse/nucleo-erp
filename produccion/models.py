@@ -691,7 +691,8 @@ class OrdenesReflejante(_EstatusPrevioMixin, StatusLifecycleModel):
 class OrdenReflejanteDetalle(models.Model):
     orden_r = models.ForeignKey(OrdenesReflejante, on_delete=models.CASCADE, related_name='detalles')
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE)
-    producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+    #: Nulo en las líneas de MUESTRA con SKU de producción, como en la OB (EC-964).
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, null=True, blank=True)
     cantidad = models.FloatField()
     tipo_reflejante = models.CharField(max_length=50, null=True, blank=True)
     posicion = models.CharField(max_length=50, null=True, blank=True)
@@ -801,7 +802,8 @@ class OrdenesCorteManga(_EstatusPrevioMixin, StatusLifecycleModel):
 class OrdenCorteMangaDetalle(models.Model):
     ocm = models.ForeignKey(OrdenesCorteManga, on_delete=models.CASCADE, related_name='detalles')
     pedido_detalle = models.ForeignKey(PedidoDetalle, on_delete=models.CASCADE)
-    producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+    #: Nulo en las líneas de MUESTRA con SKU de producción, como en la OB (EC-964).
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, null=True, blank=True)
     cantidad = models.FloatField()
     talla = models.ForeignKey(Talla, on_delete=models.SET_NULL, null=True, blank=True)
     color = models.ForeignKey(Color, on_delete=models.SET_NULL, null=True, blank=True)
