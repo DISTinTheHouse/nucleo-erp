@@ -6,6 +6,7 @@ from produccion.models import (
     OrdenesReflejante,
     OrdenReflejanteDetalle,
 )
+from ventas.services.sku_produccion_service import es_muestra
 from wms.models import PickingOrdenTrabajo
 from wms.utils.folios import generate_folio_multi_tipo
 
@@ -96,6 +97,11 @@ ORDENES_TRABAJO_CONFIG = (
 )
 
 
+def _muestra_sin_sku(talla):
+    """``excluir_muestras_sin_sku`` sobre una ``PedidoDetalleTalla`` ya cargada."""
+    return es_muestra(talla.pedido_detalle) and not talla.variante_id and not talla.sku_muestra
+
+
 def generar_ordenes(picking, requested_items, user):
     """Genera las órdenes de trabajo configuradas y las enlaza al picking.
 
@@ -115,7 +121,13 @@ def generar_ordenes(picking, requested_items, user):
     enlaces = []
 
     for cfg in ORDENES_TRABAJO_CONFIG:
-        items = [it for it in requested_items if it[cfg["flag"]]]
+        # Mismo criterio que el onboarding (``excluir_muestras_sin_sku``): una muestra
+        # sin SKU no entra a ninguna orden de trabajo (EC-964). El picking ya las
+        # rechaza al cargar las tallas; esto evita que una llegue con producto nulo.
+        items = [
+            it for it in requested_items
+            if it[cfg["flag"]] and not _muestra_sin_sku(it["talla"])
+        ]
         if not items:
             continue
 
@@ -140,13 +152,16 @@ def generar_ordenes(picking, requested_items, user):
         for item in items:
             talla = item["talla"]
             variante = getattr(talla, "variante", None)
+            # Una muestra no tiene variante de catálogo: su talla y color salen de la
+            # propia fila del pedido (EC-964). Las de catálogo siguen igual.
+            muestra = variante is None and es_muestra(talla.pedido_detalle)
             detalles.append(
                 cfg["detalle_model"](
                     pedido_detalle=talla.pedido_detalle,
                     producto=talla.pedido_detalle.producto,
                     cantidad=float(item["cantidad"]),
-                    talla=getattr(variante, "talla", None),
-                    color=getattr(variante, "color", None),
+                    talla=talla.talla if muestra else getattr(variante, "talla", None),
+                    color=talla.pedido_detalle.color if muestra else getattr(variante, "color", None),
                     **{cfg["detalle_fk"]: orden},
                     **cfg["detalle_extra"](talla),
                 )

@@ -59,6 +59,7 @@ def _cargar_tallas_del_pedido(pedido, talla_ids):
         .select_related(
             "talla",
             "pedido_detalle__producto",
+            "pedido_detalle__color",  # color de los renglones de muestra en OB/OR/OCM
             "variante",
             "variante__talla",
             "variante__color",
