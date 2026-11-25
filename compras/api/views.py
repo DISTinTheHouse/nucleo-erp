@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from django.db import transaction
 from django.db.models import (
-    Count, DecimalField, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum, Value, Window,
+    Count, DecimalField, Exists, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum, Value, Window,
     prefetch_related_objects,
 )
 from django.db.models.functions import Coalesce, RowNumber
@@ -101,6 +101,7 @@ from compras.services.maquila import (
     CENTAVO, ESTATUS_OP_RECIBIBLES, apartado_en_maquila, facturar_maquila, marcar_recibida, origen_sm,
     renglones_sm_servicio, pendiente_de_sm, pendiente_por_renglon_sm, recibido_sm_subquery,
 )
+from compras.services import devolucion_proveedor
 from compras.services.recepcion_pedidos import RELACIONES_PEDIDO, origen_folio, pedidos_de_recepciones
 from compras.services.cancelacion_recepcion import (
     MOTIVO_CANCELACION_MAX,
@@ -3232,9 +3233,23 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
             )
         )
         empresa = getattr(user, "empresa", None)
-        if empresa:
-            return qs.filter(recepcion__empresa=empresa).order_by("-fecha", "-id")
-        return qs.none()
+        if not empresa:
+            return qs.none()
+        # EC-973: misma regla que ``devoluciones-proveedor/pendientes/``, en la misma
+        # consulta (EXISTS por inspección, sin N+1). La anulada sale ``false``.
+        qs = qs.filter(recepcion__empresa=empresa).annotate(
+            tiene_devolucion_pendiente=Exists(
+                devolucion_proveedor.renglones_devolvibles().filter(
+                    calidad_inspeccion=OuterRef("pk"), cantidad_pendiente__gt=0,
+                )
+            )
+        )
+        # Solo en el listado: en el detalle o una acción un filtro suelto daría 404.
+        if self.action == "list":
+            pendiente = booleano_param(self.request, "devolucion_pendiente", None)
+            if pendiente is not None:
+                qs = qs.filter(tiene_devolucion_pendiente=pendiente)
+        return qs.order_by("-fecha", "-id")
 
     def _abonar_renglon(self, recepcion, renglon, cantidad_aprobada):
         existencia = (

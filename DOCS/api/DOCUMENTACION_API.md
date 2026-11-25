@@ -3166,6 +3166,7 @@ Base: `/api/v1/compras/devoluciones-proveedor/`. Permisos: leer `R-WMS-RECEPCION
 - `POST .../` body `{"calidad_inspeccion": id, "motivo": "...", "detalles": [{"calidad_detalle": id, "cantidad": "1"}]}` (`detalles` opcional = todo lo pendiente) → `201` con el documento. Errores `400`: sin `motivo`, inspección anulada, nada pendiente, cantidad mayor a la pendiente.
 - `POST .../{id}/cancelar/` body `{"motivo"}` → `200`; llena `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`. Ya cancelada → `400`.
 - `GET .../` (filtros `recepcion`, `calidad_inspeccion`, `orden_compra`, `proveedor`, `estatus`) y `GET .../{id}/`.
+- Calidad con algo por devolver: `GET /api/v1/compras/calidad-inspecciones/` (lista y detalle) trae `tiene_devolucion_pendiente` (bool, misma regla que `pendientes/`: algún renglón con `cantidad_pendiente > 0`; anulada → `false`) y el listado acepta `?devolucion_pendiente=true|false` (inválido → `400`). Acotado a la empresa activa como el resto del listado.
 
 Campos: `folio` (serie `DEVOLUCION_PROVEEDOR` de la sucursal si existe; si no `DVP-AAMMDDhhmmss…`), `estatus` (`aplicada`/`cancelada`), `motivo`, `fecha`, `usuario`, `total` (cantidad × costo MXN del renglón de la OC), `movimiento_inventario`, `detalles[]` (`cantidad`, `costo_unitario`, `importe`).
 

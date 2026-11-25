@@ -4699,3 +4699,56 @@ class DevolucionProveedorContratoTests(TestCase):
         }, format="json")
         self.assertEqual(resp.status_code, 201, resp.content[:300])
         self.assertEqual(Decimal(self._pendientes(inspeccion)[0]["cantidad_pendiente"]), Decimal("0"))
+        self.assertIs(self._inspecciones()[inspeccion.pk], False)
+
+    # --- bandera y filtro de calidad -------------------------------------------
+
+    def test_bandera_y_filtro_con_la_regla_de_pendientes(self):
+        pendiente = self._inspeccion()
+        cuarentena = self._inspeccion("cuarentena")
+        parcial = self._inspeccion()
+        self._devolucion(parcial, "1")
+        devuelta = self._inspeccion()
+        self._devolucion(devuelta, "4")
+        liberada = self._inspeccion("liberado", estado="aprobada")
+        anulada = self._inspeccion(estado=CalidadInspeccion.ESTADO_ANULADA)
+
+        self.assertEqual(self._inspecciones(), {
+            pendiente.pk: True, cuarentena.pk: True, parcial.pk: True,
+            devuelta.pk: False, liberada.pk: False, anulada.pk: False,
+        })
+        self.assertEqual(
+            set(self._inspecciones(devolucion_pendiente="true")), {pendiente.pk, cuarentena.pk, parcial.pk})
+        self.assertEqual(
+            set(self._inspecciones(devolucion_pendiente="false")), {devuelta.pk, liberada.pk, anulada.pk})
+        # Detalle: misma bandera; el filtro no aplica fuera del listado.
+        for inspeccion, esperado in ((pendiente, True), (devuelta, False)):
+            resp = self._client().get(f"{self.CALIDAD_URL}{inspeccion.pk}/", {"devolucion_pendiente": "true"})
+            self.assertEqual(resp.status_code, 200, resp.content[:300])
+            self.assertIs(resp.json()["tiene_devolucion_pendiente"], esperado)
+        resp = self._client().get(self.CALIDAD_URL, {"devolucion_pendiente": "quizas"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json(), {"devolucion_pendiente": "Debe ser true o false."})
+
+    def test_filtro_acotado_a_la_empresa(self):
+        propia = self._inspeccion()
+        ajena = self._inspeccion(tenant="b")
+        self.assertEqual(set(self._inspecciones(devolucion_pendiente="true")), {propia.pk})
+        self.assertEqual(self._inspecciones(self.b["usuario"], devolucion_pendiente="true"), {ajena.pk: True})
+        self.assertEqual(self._client().get(f"{self.CALIDAD_URL}{ajena.pk}/").status_code, 404)
+        resp = self._client().get(f"{self.URL}pendientes/", {"calidad_inspeccion": ajena.pk})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self._inspecciones(self.sin_empresa, devolucion_pendiente="true"), {})
+
+    def test_bandera_sin_n_mas_1(self):
+        def consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                filas = self._inspecciones()
+            return len(ctx.captured_queries), len(filas)
+
+        self._devolucion(self._inspeccion(), "1")
+        una, _ = consultas()
+        self._devolucion(self._inspeccion("cuarentena"), "1")
+        self._inspeccion()
+        self._inspeccion("liberado", estado="aprobada")
+        self.assertEqual(consultas(), (una, 4))
