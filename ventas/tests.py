@@ -11529,3 +11529,57 @@ class CotizacionOpcionesDeduplicadasTests(_CotizacionesModoServidorBase, TestCas
                 self._cotizacion(self.empresa, self.admin, otro, self.mxn, 1, "1.00", self.base)
         with self.assertNumQueries(1):
             self.assertEqual(len(self._get().json()["cliente"]), 13)
+
+
+class PedidoPreOrdenOpEstatusTests(TestCase):
+    """EC-968: el ``pre_orden`` del detalle del pedido y cada ``pre_ordenes[]`` de
+    ``documentos/`` traen ``op_estatus``/``op_estatus_display`` de la OP ligada
+    (``null`` sin OP), con el mismo número de consultas con o sin OP."""
+
+    setUpTestData = classmethod(PedidoTrazabilidadTests.setUpTestData.__func__)
+    setUp = PedidoTrazabilidadTests.setUp
+    _siguiente = PedidoTrazabilidadTests._siguiente
+    _pedido = PedidoTrazabilidadTests._pedido
+
+    def _con_pre_orden(self, estatus_op=None):
+        from produccion.models import PreOrdenProduccion
+        pedido = self._pedido()
+        op = None
+        if estatus_op is not None:
+            op = OrdenProduccion.objects.create(
+                empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+                folio_op=self._siguiente("OP"), estatus_op=estatus_op,
+            )
+        PreOrdenProduccion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=pedido,
+            estatus=PreOrdenProduccion.Estatus.CONVERTIDA if op else PreOrdenProduccion.Estatus.PENDIENTE_VALIDAR,
+            op=op,
+        )
+        return pedido
+
+    def _get(self, url):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = client.get(url)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json(), len(ctx.captured_queries)
+
+    def _ambas(self, pedido):
+        detalle, n_detalle = self._get(f"/api/v1/ventas/pedidos/{pedido.pk}/")
+        docs, n_docs = self._get(f"/api/v1/ventas/pedidos/{pedido.pk}/documentos/")
+        (fila,) = docs["pre_ordenes"]
+        return detalle["pre_orden"], fila, (n_detalle, n_docs)
+
+    def test_op_estatus_sin_op_activa_y_cancelada(self):
+        E = OrdenProduccion.EstatusOrdenProduccion
+        casos = ((None, None, None), (E.BORDANDO, 3, "En produccion"), (E.CANCELADO, 7, "Cancelado"))
+        consultas = set()
+        for estatus_op, codigo, etiqueta in casos:
+            with self.subTest(estatus_op=estatus_op):
+                resumen, fila, n = self._ambas(self._con_pre_orden(estatus_op))
+                self.assertEqual((resumen["op_estatus"], resumen["op_estatus_display"]), (codigo, etiqueta))
+                self.assertEqual((fila["op_estatus"], fila["op_estatus_display"]), (codigo, etiqueta))
+                consultas.add(n)
+        # Mismas consultas con y sin OP (la OP va en la misma subconsulta/consulta).
+        self.assertEqual(len(consultas), 1, consultas)

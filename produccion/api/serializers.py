@@ -3088,6 +3088,10 @@ def resumen_pre_orden_pedido(pedido):
         "estatus_display": dict(PreOrdenProduccion.Estatus.choices).get(p["estatus"]),
         "semaforo": semaforo(p["estatus"], p.get("materiales_faltantes") or 0, fem, fecha_compromiso(pedido)),
         "fecha_estimada_material": fem,
+        # EC-968: estatus de la OP ligada (``null`` sin OP), como en ``pre-ordenes/``.
+        "op_estatus": p.get("op_estatus"),
+        "op_estatus_display": (dict(OrdenProduccion.EstatusOrdenProduccion.choices).get(p["op_estatus"])
+                               if p.get("op_estatus") is not None else None),
     }
 
 
@@ -3408,6 +3412,10 @@ class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
     def get_pedidos_vinculados(self, obj):
         return getattr(obj, "pedidos_json", None) or []
     op_folio = serializers.CharField(source="op.folio_op", read_only=True, allow_null=True, default=None)
+    # Estatus de la OP ligada (EC-968): con ``op_estatus == 7`` (Cancelado) una
+    # Convertida se puede cancelar. ``op`` viene en ``select_related``: sin consultas.
+    op_estatus = serializers.IntegerField(source="op.estatus_op", read_only=True, allow_null=True, default=None)
+    op_estatus_display = serializers.CharField(source="op.get_estatus_op_display", read_only=True, allow_null=True, default=None)
     piezas_total = serializers.FloatField(read_only=True, default=0.0)
     tallas_total = serializers.IntegerField(read_only=True, default=0)
     fecha_compromiso = serializers.SerializerMethodField()
@@ -3422,7 +3430,7 @@ class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
             "id", "origen", "origen_display", "referencia", "producto", "producto_nombre", "notas", "motivo_rechazo",
             "pedidos_vinculados",
             "pedido", "pedido_folio", "cliente_nombre", "sucursal", "sucursal_nombre", "estatus", "estatus_display",
-            "op", "op_folio", "piezas_total", "tallas_total", "fecha_confirmacion_existencias",
+            "op", "op_folio", "op_estatus", "op_estatus_display", "piezas_total", "tallas_total", "fecha_confirmacion_existencias",
             "fecha_compromiso", "dias_en_estatus", "materiales_faltantes", "fecha_estimada_material",
             "regreso", "semaforo", "created_at", "updated_at",
         ]

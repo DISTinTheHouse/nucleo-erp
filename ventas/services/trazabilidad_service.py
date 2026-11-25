@@ -630,7 +630,7 @@ def documentos_pedido(pedido, *, user, permisos=None):
     from ventas.scope import _ve_toda_la_empresa
     from ventas.services.pedido_field_filter_service import puede_ver_contabilidad
     from produccion.api.serializers import PERMISO_COSTOS_PRODUCCION
-    from produccion.models import PreOrdenProduccion, SalidaMaquila
+    from produccion.models import OrdenProduccion, PreOrdenProduccion, SalidaMaquila
     from inventarios.models import MovimientoInventario
     from ventas.services.pedido_documentos_service import sucursales_de_documentos
     from wms.models import Despacho, Picking
@@ -649,8 +649,12 @@ def documentos_pedido(pedido, *, user, permisos=None):
     pk, empresa_id = pedido.pk, pedido.empresa_id
     pre_ordenes = _lista(
         PreOrdenProduccion.objects.filter(Q(pedido_id=pk) | Q(pedidos=pk), empresa_id=empresa_id).distinct().order_by("id"),
-        "id", "origen", "estatus", "op_id", "created_at", op_folio=F("op__folio_op"),
+        "id", "origen", "estatus", "op_id", "created_at", op_folio=F("op__folio_op"), op_estatus=F("op__estatus_op"),
     )
+    # EC-968: etiqueta del estatus de la OP ligada (``null`` sin OP), como en ``pre-ordenes/``.
+    etiquetas_op = dict(OrdenProduccion.EstatusOrdenProduccion.choices)
+    for fila in pre_ordenes:
+        fila["op_estatus_display"] = etiquetas_op.get(fila["op_estatus"]) if fila["op_estatus"] is not None else None
     salidas_maquila = None  # sin ``R-PRODUCCION-OP``: null, como su endpoint (403)
     if permisos.alguno(CODIGOS_PRODUCCION_OP):
         sm_qs = SalidaMaquila.objects.filter(activo=True, empresa_id=empresa_id).filter(

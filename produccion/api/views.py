@@ -2817,7 +2817,8 @@ def _ordenes_servicio_json(pedido_ref):
 
 def _pre_orden_json(pedido_ref):
     """Pre-orden vigente del pedido (la más reciente no cancelada) como JSON:
-    ``{id, estatus, materiales_faltantes, fecha_estimada_material}``."""
+    ``{id, estatus, materiales_faltantes, fecha_estimada_material, op_estatus}``
+    (``op_estatus``: el de la OP ligada, EC-968; ``null`` sin OP)."""
     from django.db.models.functions import JSONObject
     return Subquery(
         PreOrdenProduccion.objects.filter(pedido_id=pedido_ref)
@@ -2825,7 +2826,7 @@ def _pre_orden_json(pedido_ref):
         .order_by("-id")
         .annotate(fem=_fecha_estimada_material(OuterRef("pk")))
         .values(json=JSONObject(id="id", estatus="estatus", materiales_faltantes="materiales_faltantes",
-                                fecha_estimada_material="fem"))[:1]
+                                fecha_estimada_material="fem", op_estatus="op__estatus_op"))[:1]
     )
 
 
