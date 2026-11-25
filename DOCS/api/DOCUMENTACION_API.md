@@ -5319,6 +5319,8 @@ Lo que controla el cupo ahora:
 
 > **Pendiente por línea**: cada objeto de `detalles[]` incluye `cantidad_asignada` y `cantidad_pendiente` (= `max(0, cantidad_pedido - cantidad_asignada)`) sobre las órdenes activas del pedido, y un pedido sin ninguna línea con saldo **no aparece** en `pedidos`. Misma semántica que el onboarding de Bordado; ver esa sección para el detalle de los renglones con `talla = NULL`.
 
+> **Líneas de muestra (EC-964)**: mismo criterio que Bordado. Una línea de muestra (`producto_nombre_externo` no vacío, sin `producto`) **sin SKU** (sin `variante` ni `sku_muestra`) no se ofrece en el GET ni se acepta en el POST (con `detalles_override` → 400; si el pedido no tiene otra línea → 400 sin consumir folio). **Con SKU** sí: cada línea del GET trae además `sku` (`variante.sku` o, en muestras, `sku_muestra`), `sku_proscai` (`null` en muestras) y `producto_nombre_externo` (`null` en catálogo); en muestras `producto_id` y `producto_nombre` vienen `null`. A diferencia de Bordado no trae `existencias`. El POST guarda el renglón de la OR con `producto` nulo (`OrdenReflejanteDetalle.producto` es nullable) y el detalle (`GET .../{id}/`) publica su `sku`. Las líneas de catálogo no cambian.
+
 **GET onboarding — shape**
 
 ```json
@@ -5495,6 +5497,8 @@ Cuando la solicitud de OR parcial sí excede el cupo restante (validación de su
 - **Objetivo**: patrón onboarding idéntico a ÓrdenesBordado/ÓrdenesReflejante y WMS: catálogos precargados para que Next.js muestre selector de pedido + operadores + preview folio.
 
 > **Pendiente por línea**: cada objeto de `detalles[]` incluye `cantidad_asignada` y `cantidad_pendiente` (= `max(0, cantidad_pedido - cantidad_asignada)`) sobre las órdenes activas del pedido, y un pedido sin ninguna línea con saldo **no aparece** en `pedidos`. Misma semántica que el onboarding de Bordado; ver esa sección para el detalle de los renglones con `talla = NULL`.
+
+> **Líneas de muestra (EC-964)**: mismo criterio que Bordado. Una línea de muestra (`producto_nombre_externo` no vacío, sin `producto`) **sin SKU** (sin `variante` ni `sku_muestra`) no se ofrece en el GET ni se acepta en el POST (con `detalles_override` → 400; si el pedido no tiene otra línea → 400 sin consumir folio). **Con SKU** sí: cada línea del GET trae además `sku` (`variante.sku` o, en muestras, `sku_muestra`), `sku_proscai` (`null` en muestras) y `producto_nombre_externo` (`null` en catálogo); en muestras `producto_id` y `producto_nombre` vienen `null`. A diferencia de Bordado no trae `existencias`. El POST guarda el renglón de la OCM con `producto` nulo (`OrdenCorteMangaDetalle.producto` es nullable) y el detalle (`GET .../{id}/`) publica su `sku`. Las líneas de catálogo no cambian.
 
 **GET onboarding — shape**
 
