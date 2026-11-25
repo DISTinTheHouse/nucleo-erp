@@ -4759,6 +4759,27 @@ class DevolucionProveedorContratoTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json(), {"devolucion_pendiente": "Debe ser true o false."})
 
+    def test_bandera_en_la_respuesta_de_onboarding(self):
+        """La respuesta del POST ``onboarding/`` serializa la inspección sin anotar:
+        la bandera sale del cálculo de respaldo, con la misma regla."""
+        for resultado, rechazada, esperado in (("rechazo", 4, True), ("liberado", 0, False)):
+            with self.subTest(resultado=resultado):
+                recepcion = Recepcion.objects.create(
+                    empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.a["proveedor"],
+                    almacen=self.a["almacen"], usuario=self.a["usuario"],
+                    folio=f"RC-973-OB-{resultado}", fecha_recepcion=timezone.now(),
+                    estatus=Recepcion.EstatusRecepcion.EN_CALIDAD,
+                )
+                renglon = RecepcionDetalle.objects.create(
+                    recepcion=recepcion, producto=self.a["producto"], cantidad_recibida=10)
+                resp = self._client().post(f"{self.CALIDAD_URL}onboarding/", {
+                    "recepcion": recepcion.pk, "inspector": self.inspectores["a"].pk,
+                    "detalle": [{"recepcion_detalle": renglon.pk, "cantidad_aprobada": str(10 - rechazada),
+                                 "cantidad_rechazada": str(rechazada), "resultado": resultado}],
+                }, format="json")
+                self.assertEqual(resp.status_code, 200, resp.content[:300])
+                self.assertIs(resp.json()["calidad_inspeccion"]["tiene_devolucion_pendiente"], esperado)
+
     def test_filtro_acotado_a_la_empresa(self):
         propia = self._inspeccion()
         ajena = self._inspeccion(tenant="b")
