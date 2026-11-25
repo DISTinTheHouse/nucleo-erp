@@ -4407,6 +4407,10 @@ Toda cancelación pide `motivo` y guarda en la orden `motivo_cancelacion`, `fech
 
 - Al cancelar la OP, su pre-orden (Convertida) registra el evento `op_cancelada` en `GET /pre-ordenes/{id}/historial/` (`evento_display: "OP cancelada"`, descripción con el folio y el motivo).
 - La pre-orden no cambia sola. Para que el pedido vuelva a generar producción, se cancela con `POST /pre-ordenes/{id}/cancelar/`, que ya lo permite cuando su OP está cancelada; después el pedido crea una pre-orden nueva.
+- **Estatus de la OP ligada (EC-968)**: el listado `GET /pre-ordenes/`, el detalle `GET /pre-ordenes/{id}/` y las respuestas de sus acciones que devuelven la pre-orden (`confirmar-existencias/`, `aceptar/`, `rechazar/`, `cancelar/` y el alta `POST /pre-ordenes/`) traen, junto a `op` y `op_folio`:
+  - `op_estatus`: `OrdenProduccion.estatus_op` (entero: `1` Pendiente … `7` Cancelado);
+  - `op_estatus_display`: su etiqueta (`"Cancelado"`).
+  Ambos son `null` si no hay OP ligada. Ofrecer "Cancelar pre-orden" en una Convertida cuando `estatus == "convertida"` y `op_estatus == 7`: es la misma regla de `cancelar/`. Sin consultas extra (la OP ya viene en la misma consulta).
 
 ### Salida a maquila — `POST /api/v1/produccion/salidas-maquila/{id}/cancelar/`
 
