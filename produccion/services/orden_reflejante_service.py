@@ -7,7 +7,7 @@ from rest_framework.exceptions import ValidationError, APIException
 from produccion.models import OrdenesReflejante, OrdenReflejanteDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
 from ventas.services.retencion_service import bloquear_pedido_vivo
-from produccion.services.common import exigir_tope_programado, EPS_CANTIDAD, cantidades_asignadas, crear_orden_con_guardia_duplicado, exigir_producto_en_tallas, payload_duplicada, pendientes_por_linea, revisar_empresa, tallas_orden_trabajo_qs, tallas_para_alta
+from produccion.services.common import exigir_tope_programado, EPS_CANTIDAD, cantidades_asignadas, crear_orden_con_guardia_duplicado, excluir_muestras_sin_sku, payload_duplicada, pendientes_por_linea, revisar_empresa, tallas_orden_trabajo_qs, tallas_para_alta
 from produccion.utils.folios import generate_or_folio
 
 
@@ -59,7 +59,8 @@ class OrdenReflejanteService:
 
     @staticmethod
     def _tallas_reflejante_qs(pedido_id):
-        return tallas_orden_trabajo_qs(pedido_id, "lleva_reflejante")
+        # Mismo conjunto que el GET de onboarding y que la OB: sin muestras sin SKU (EC-964).
+        return excluir_muestras_sin_sku(tallas_orden_trabajo_qs(pedido_id, "lleva_reflejante"))
 
     @staticmethod
     def _payload_duplicada(existente):
@@ -140,13 +141,14 @@ class OrdenReflejanteService:
 
         Mismo contrato que ``OrdenBordadoService.contratado_por_pedido``.
         """
+        # Sin las muestras sin SKU, como ``_tallas_*_qs`` (alta y parcialidad del
+        # detalle): así el listado y el detalle reportan la misma cobertura (EC-964).
         filas = (
-            PedidoDetalleTalla.objects
-            .filter(
+            excluir_muestras_sin_sku(PedidoDetalleTalla.objects.filter(
                 pedido_detalle__pedido_id__in=list(pedido_ids),
                 lleva_reflejante=True,
                 cantidad__gt=0,
-            )
+            ))
             .values("pedido_detalle__pedido_id")
             .annotate(total=Sum("cantidad"))
         )
@@ -534,7 +536,8 @@ class OrdenReflejanteService:
 
         # El folio se consume DESPUÉS de todas las validaciones, para que un
         # rechazo no gaste consecutivo de la serie.
-        exigir_producto_en_tallas(detalle_tallas, "reflejante")
+        # Las muestras con SKU de producción sí generan OR: el detalle admite producto
+        # nulo, como en la OB (EC-964).
         folio_reflejante = generate_or_folio(pedido.empresa_id, pedido.sucursal_id)
 
         orden_reflejante = crear_orden_con_guardia_duplicado(

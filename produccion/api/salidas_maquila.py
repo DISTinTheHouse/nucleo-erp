@@ -309,8 +309,11 @@ def _descripcion(det):
 
 
 def _descripcion_ob(det):
-    partes = [getattr(det.producto, "nombre", None), getattr(det.talla, "nombre", None),
-              getattr(det.color, "nombre", None)]
+    # Muestra (``producto`` nulo, EC-964): su nombre externo en lugar del producto.
+    nombre = getattr(det.producto, "nombre", None) if det.producto_id else (
+        getattr(det.pedido_detalle, "producto_nombre_externo", None)
+    )
+    partes = [nombre, getattr(det.talla, "nombre", None), getattr(det.color, "nombre", None)]
     return " ".join(p for p in partes if p) or f"Renglón {det.pk}"
 
 
@@ -394,6 +397,7 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
                 ]
             programado = base.aggregate(t=Sum("cantidad"))["t"] or Decimal("0")
             enviadas = SalidaMaquilaDetalle.objects.filter(salida__op=doc)
+            base_por_pk = {}
         else:
             # OB / OR: sus renglones; no tienen costo de maquila (precio por renglón).
             if datos.get("ob") is not None:
@@ -404,10 +408,11 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
                                          "OR", "or_detalle")
                 enviadas = SalidaMaquilaDetalle.objects.filter(salida__orden_r=doc)
             precio_op = Decimal("0")
-            base = list(doc.detalles.select_related("producto", "talla", "color"))
+            base = list(doc.detalles.select_related("producto", "talla", "color", "pedido_detalle"))
             if not renglones:
                 renglones = [{campo_det: d, "cantidad": Decimal(str(d.cantidad))} for d in base]
             programado = sum((Decimal(str(d.cantidad)) for d in base), Decimal("0"))
+            base_por_pk = {d.pk: d for d in base}
         if not renglones:
             raise ValidationError({"detalles": [f"La {sigla} no tiene renglones; captura los de la salida."]})
         if any((precio_op if r.get("precio_unitario") is None else r["precio_unitario"]) <= 0 for r in renglones):
@@ -444,7 +449,11 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
             precio = precio_op if precio is None else precio
             importe = (r["cantidad"] * precio).quantize(Decimal("0.01"))
             det, det_ob, det_or = r.get("op_detalle"), r.get("ob_detalle"), r.get("or_detalle")
+            # El renglón ya leído en ``base`` (con sus JOINs): la descripción no
+            # consulta producto/talla/color/pedido_detalle por renglón.
             det_servicio = det_ob or det_or
+            if det_servicio is not None:
+                det_servicio = base_por_pk.get(det_servicio.pk, det_servicio)
             filas.append(SalidaMaquilaDetalle(
                 salida=sm, op_detalle=det, ob_detalle=det_ob, or_detalle=det_or, cantidad=r["cantidad"],
                 precio_unitario=precio, importe=importe,

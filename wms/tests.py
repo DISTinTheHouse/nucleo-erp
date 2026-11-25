@@ -3758,3 +3758,84 @@ class CancelacionesEC949Tests(TestCase):
                 self.assertEqual(self._api(self.intruso).get(f"{url}{doc_id}/").status_code, 404)
         self.assertEqual(self._revertir(tr, self.intruso).status_code, 404)
         self.assertEqual(self._api(self.intruso).get(f"{self.URL_TR}{tr.pk}/").status_code, 404)
+
+
+class GenerarOrdenesMuestraTests(TestCase):
+    """EC-964: las órdenes de trabajo que genera el picking (OB/OR/OCM) siguen la
+    regla del onboarding: una muestra sin SKU no entra, y una con SKU toma talla y
+    color de su propia fila del pedido (no tiene variante de catálogo)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import Color, Talla
+        from inventarios.models import Almacen
+        from nucleo.models import Moneda
+        from terceros.models import Cliente
+        from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+        from wms.models import Picking
+
+        cls.empresa = Empresa.objects.create(codigo="gom", razon_social="Genera OT SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTZ", nombre="Matriz")
+        cls.admin = Usuario.objects.create(
+            username="gom-admin", email="gom-admin@example.com", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        almacen = Almacen.objects.create(codigo="PT", nombre="PT", empresa=cls.empresa, sucursal=cls.sucursal)
+        pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal,
+            cliente=Cliente.objects.create(empresa=cls.empresa, nombre="Cliente"),
+            moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"),
+        )
+        cls.picking = Picking.objects.create(
+            folio="PK-GOM", empresa=cls.empresa, sucursal=cls.sucursal, pedido=pedido,
+            operador=cls.admin, almacen=almacen, usuario=cls.admin,
+        )
+        cls.color = Color.objects.create(nombre="Amarillo", codigo="AMA", codigo_hex="#ffff00")
+        cls.talla_ch = Talla.objects.create(nombre="CH")
+        linea = PedidoDetalle.objects.create(
+            pedido=pedido, producto=None, producto_nombre_externo="Muestra", color=cls.color,
+        )
+        cls.con_sku = PedidoDetalleTalla.objects.create(
+            pedido_detalle=linea, talla=cls.talla_ch, cantidad=3, sku_muestra="MUE-CH",
+        )
+        cls.sin_sku = PedidoDetalleTalla.objects.create(
+            pedido_detalle=linea, talla=Talla.objects.create(nombre="M"), cantidad=2,
+        )
+
+    def _items(self):
+        from ventas.models import PedidoDetalleTalla
+
+        tallas = PedidoDetalleTalla.objects.filter(pk__in=[self.con_sku.pk, self.sin_sku.pk]).select_related(
+            "talla", "pedido_detalle__producto", "pedido_detalle__color", "variante",
+        ).order_by("id")
+        return [
+            {"talla": t, "cantidad": t.cantidad, "generar_orden_bordado": True,
+             "generar_orden_reflejante": True, "generar_orden_corte_manga": True}
+            for t in tallas
+        ]
+
+    def test_muestra_sin_sku_no_entra_y_con_sku_lleva_su_talla_y_color(self):
+        from itertools import count
+
+        from produccion.models import OrdenBordadoDetalle, OrdenCorteMangaDetalle, OrdenReflejanteDetalle
+        from wms.services.picking_pipeline.work_orders import generar_ordenes
+
+        folios = count(1)
+        with patch("wms.services.picking_pipeline.work_orders.generate_folio_multi_tipo",
+                   side_effect=lambda *a, **k: f"OT-{next(folios)}"):
+            resultado = generar_ordenes(self.picking, self._items(), self.admin)
+
+        self.assertEqual({r["tipo"] for r in resultado}, {"BORDADO", "REFLEJANTE", "CORTE_MANGA"})
+        for modelo in (OrdenBordadoDetalle, OrdenReflejanteDetalle, OrdenCorteMangaDetalle):
+            with self.subTest(modelo=modelo.__name__):
+                filas = list(modelo.objects.filter(pedido_detalle=self.con_sku.pedido_detalle)
+                             .values_list("producto_id", "talla_id", "color_id", "cantidad"))
+                self.assertEqual(filas, [(None, self.talla_ch.pk, self.color.pk, 3.0)])
+
+    def test_solo_muestras_sin_sku_no_genera_ordenes(self):
+        from wms.services.picking_pipeline.work_orders import generar_ordenes
+
+        items = [it for it in self._items() if it["talla"].pk == self.sin_sku.pk]
+        with patch("wms.services.picking_pipeline.work_orders.generate_folio_multi_tipo") as folio:
+            self.assertEqual(generar_ordenes(self.picking, items, self.admin), [])
+        folio.assert_not_called()

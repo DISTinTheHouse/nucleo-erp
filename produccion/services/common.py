@@ -175,31 +175,14 @@ def revisar_empresa(user, obj):
     return None
 
 
-def exigir_producto_en_tallas(detalle_tallas, tipo_label):
-    """Rechaza con 400 las tallas de líneas de muestra (``producto`` null).
-
-    El detalle de OB/OR/OCM exige ``producto``; sin este corte el
-    ``bulk_create`` reventaba con ``IntegrityError`` (500). Se llama antes de
-    generar el folio para que el rechazo no consuma consecutivo.
-    """
-    sin_producto = [dt.pk for dt in detalle_tallas if dt.pedido_detalle.producto_id is None]
-    if sin_producto:
-        raise ValidationError({
-            "err": (
-                f"No se puede generar la orden de {tipo_label}: el pedido tiene "
-                "líneas de muestra sin producto de catálogo."
-            ),
-            "pedido_detalle_talla_ids": sin_producto,
-        })
-
-
 def excluir_muestras_sin_sku(qs):
     """Quita las tallas de líneas de MUESTRA sin SKU de producción.
 
     Muestra = ``producto_nombre_externo`` no vacío (``nombre_es_muestra``). Sin SKU =
     sin ``variante`` de catálogo y sin ``sku_muestra``. Una línea de catálogo nunca se
     oculta, aunque su combinación producto/color/talla no tenga variante (#518).
-    Fuente única del GET y del POST de onboarding de OB.
+    Fuente única del GET y del POST de onboarding de OB, OR y OCM (EC-964): las
+    muestras con SKU entran a la orden con ``producto`` nulo en su detalle.
     """
     muestra = Q(pedido_detalle__producto_nombre_externo__isnull=False) & ~Q(
         pedido_detalle__producto_nombre_externo=""

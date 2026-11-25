@@ -63,6 +63,7 @@ from produccion.models import (
     OrdenProduccionPedido,
     OrdenProduccionDetalle,
     SalidaMaquila,
+    SalidaMaquilaDetalle,
     OrdenProduccionRutaCritica,
     OrdenReflejanteDetalle,
     ProductoTerminadoEntradas,
@@ -3986,11 +3987,16 @@ class OnboardingReflejanteConfigCrudoTests(TestCase):
             "/api/v1/produccion/orden-corte-manga/onboarding/", pedido
         )
 
-        self.assertEqual(set(lineas[0].keys()), CLAVES_LINEA_ONBOARDING_BASE)
+        # Corte de manga suma sku/sku_proscai/producto_nombre_externo (EC-964), sin existencias.
+        self.assertEqual(
+            set(lineas[0].keys()),
+            CLAVES_LINEA_ONBOARDING_BASE | {"sku", "sku_proscai", "producto_nombre_externo"},
+        )
         self.assertNotIn("corte_manga_config", lineas[0])
 
     def test_or_onboarding_solo_suma_una_clave_sobre_la_base(self):
-        """El shape de OR es el de siempre MÁS ``reflejante_config``.
+        """El shape de OR es el de siempre MÁS ``reflejante_config`` (y, desde
+        EC-964, ``sku``/``sku_proscai``/``producto_nombre_externo``).
 
         Fija que la clave nueva es aditiva: no se quitó ni renombró ninguna de
         las 15 que ya emitía el helper.
@@ -4005,7 +4011,8 @@ class OnboardingReflejanteConfigCrudoTests(TestCase):
 
         self.assertEqual(
             set(lineas[0].keys()),
-            CLAVES_LINEA_ONBOARDING_BASE | {"reflejante_config"},
+            CLAVES_LINEA_ONBOARDING_BASE
+            | {"reflejante_config", "sku", "sku_proscai", "producto_nombre_externo"},  # EC-964
         )
 
 
@@ -4791,18 +4798,19 @@ class OnboardingPostScopeTenantTests(TestCase):
                 self.assertNotIn(str(self.CANTIDAD_AJENA), str(resp.data))
 
 
-class OnboardingPostLineaMuestraTests(TestCase):
-    """POST de onboarding con tallas de una línea de muestra (``producto`` null):
-    400 accionable en vez del 500 por ``IntegrityError`` (#276)."""
+class _OrdenTrabajoMuestraTests:
+    """#516/#518 (OB) y EC-964 (OR/OCM): GET y POST de onboarding aplican el mismo
+    criterio sobre las líneas de muestra (``producto`` null). Sin SKU no se ofrecen
+    ni se aceptan; con SKU se ofrecen y generan la orden con ``producto`` nulo.
 
-    # Bordado ya no está aquí: acepta muestras con SKU y ve ``OrdenBordadoMuestraTests``.
-    CASOS = (
-        ("/api/v1/produccion/orden-reflejante/onboarding/", OrdenesReflejante, "ORDEN_REFLEJANTE"),
-        ("/api/v1/produccion/orden-corte-manga/onboarding/", OrdenesCorteManga, "ORDEN_CORTE_MANGA"),
-    )
-    #: Códigos de las secciones que ejercita la clase (#1133); la subclase de bordado
-    #: los reemplaza por el de la OB.
-    CLAVES = (CODIGO_ONBOARDING[CASOS[0][0]], CODIGO_ONBOARDING[CASOS[1][0]])
+    Mixin (no hereda ``TestCase``): cada subclase declara ``URL`` (onboarding),
+    ``DETALLE_URL``, ``MODELO``, ``TIPO_DOCUMENTO`` y ``BORDADO``: el GET de Bordado
+    publica ``existencias`` y no ``producto_nombre_externo``; OR y OCM al revés
+    (su contrato previo no cambia, solo se le agregan campos).
+    """
+
+    URL = DETALLE_URL = MODELO = TIPO_DOCUMENTO = None
+    BORDADO = False
 
     @classmethod
     def setUpTestData(cls):
@@ -4817,84 +4825,112 @@ class OnboardingPostLineaMuestraTests(TestCase):
             username="operador", email="operador@acme.test",
             empresa=cls.empresa, sucursal_default=cls.sucursal,
         )
-        _conceder_permisos(cls.usuario, cls.empresa, cls.CLAVES)
-        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente 1")
-        cls.pedido = Pedido.objects.create(
-            empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente,
-            moneda=Moneda.objects.create(codigo_iso="MXN", nombre="Peso"),
+        # Leer la sección y crear órdenes en ella (EC-899).
+        lectura = CODIGO_ONBOARDING[cls.URL]
+        _conceder_permisos(cls.usuario, cls.empresa, (lectura, lectura.replace("R-", "C-", 1)))
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.talla = Talla.objects.create(nombre="CH")
+        cls.pedido, cls.pdt = cls._pedido_con_muestra(cls.empresa, cls.sucursal)
+
+    @classmethod
+    def _pedido_con_muestra(cls, empresa, sucursal, sku_muestra=None):
+        pedido = Pedido.objects.create(
+            empresa=empresa, sucursal=sucursal,
+            cliente=Cliente.objects.create(empresa=empresa, nombre="Cliente 1"), moneda=cls.moneda,
             persona_pagos="Pagos", correo_facturas="pagos@acme.test", telefono_pagos="8100000000",
             forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
         )
         detalle = PedidoDetalle.objects.create(
-            pedido=cls.pedido, producto=None, producto_nombre_externo="ZXCZX"
+            pedido=pedido, producto=None, producto_nombre_externo="ZXCZX"
         )
-        cls.pdt = PedidoDetalleTalla.objects.create(
-            pedido_detalle=detalle, talla=Talla.objects.create(nombre="CH"), cantidad=5,
+        pdt = PedidoDetalleTalla.objects.create(
+            pedido_detalle=detalle, talla=cls.talla, cantidad=5, sku_muestra=sku_muestra,
             lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
         )
-        _programar(cls.pedido)
-
-    def test_linea_de_muestra_responde_400_sin_crear_ni_consumir_folio(self):
-        client = APIClient()
-        client.force_authenticate(user=self.usuario)
-        for url, modelo, tipo_documento in self.CASOS:
-            with self.subTest(url=url):
-                serie = SerieFolio.objects.get(empresa=self.empresa, tipo_documento=tipo_documento)
-                folio_previo = serie.folio_actual
-
-                resp = client.post(url, {"pedido": self.pedido.pk}, format="json")
-
-                self.assertEqual(resp.status_code, 400, resp.data)
-                self.assertEqual(
-                    [str(i) for i in resp.data["pedido_detalle_talla_ids"]], [str(self.pdt.pk)]
-                )
-                self.assertFalse(modelo.objects.filter(pedido=self.pedido).exists())
-                serie.refresh_from_db()
-                self.assertEqual(serie.folio_actual, folio_previo)
-
-
-class OrdenBordadoMuestraTests(OnboardingPostLineaMuestraTests):
-    """#516/#518: GET y POST de OB aplican el mismo criterio sobre las muestras."""
-
-    URL = "/api/v1/produccion/orden-bordado/onboarding/"
-    CASOS = ()
-    CLAVES = (CODIGO_ONBOARDING[URL],)
+        # Mesa de control programa las 5 piezas: el tope del alta lo exige.
+        pedido.programacion_conf = {"programaciones": [{"destino": d, "cantidad": 5} for d in DESTINOS]}
+        pedido.save(update_fields=["programacion_conf"])
+        return pedido, pdt
 
     def _client(self):
         client = APIClient()
         client.force_authenticate(user=self.usuario)
         return client
 
-    def _linea_en_get(self):
+    def _linea_en_get(self, pedido=None):
+        pedido = pedido or self.pedido
         data = self._client().get(self.URL).json()
-        pedido = next((p for p in data["pedidos"] if p["id"] == self.pedido.pk), None)
-        return None if pedido is None else {l["talla_id"]: l for l in pedido["detalles"]}
+        encontrado = next((p for p in data["pedidos"] if p["id"] == pedido.pk), None)
+        return None if encontrado is None else {l["talla_id"]: l for l in encontrado["detalles"]}
 
     def test_muestra_sin_sku_no_se_ofrece_ni_se_acepta(self):
-        serie = SerieFolio.objects.get(empresa=self.empresa, tipo_documento="ORDEN_BORDADO")
+        serie = SerieFolio.objects.get(empresa=self.empresa, tipo_documento=self.TIPO_DOCUMENTO)
         self.assertIsNone(self._linea_en_get())
 
         resp = self._client().post(self.URL, {"pedido": self.pedido.pk}, format="json")
 
         self.assertEqual(resp.status_code, 400, resp.data)
-        self.assertFalse(OrdenesBordado.objects.filter(pedido=self.pedido).exists())
+        self.assertFalse(self.MODELO.objects.filter(pedido=self.pedido).exists())
         serie.refresh_from_db()
         self.assertEqual(serie.folio_actual, 0)
 
-    def test_muestra_con_sku_se_ofrece_y_genera_ob_sin_producto(self):
+    def test_muestra_con_sku_se_ofrece_con_sku(self):
         PedidoDetalleTalla.objects.filter(pk=self.pdt.pk).update(sku_muestra="MUE-001")
-        self.assertIn(self.pdt.talla_id, self._linea_en_get())
+
+        linea = self._linea_en_get()[self.pdt.talla_id]
+
+        self.assertEqual(linea["pedido_detalle_talla_id"], self.pdt.pk)
+        self.assertIsNone(linea["producto_id"])
+        self.assertEqual(linea["sku"], "MUE-001")
+        self.assertIsNone(linea["sku_proscai"])
+        if self.BORDADO:
+            self.assertIsNone(linea["existencias"])
+            self.assertNotIn("producto_nombre_externo", linea)
+        else:
+            self.assertEqual(linea["producto_nombre_externo"], "ZXCZX")
+            self.assertNotIn("existencias", linea)
+
+    def test_muestra_con_sku_genera_orden_sin_producto(self):
+        PedidoDetalleTalla.objects.filter(pk=self.pdt.pk).update(sku_muestra="MUE-001")
 
         resp = self._client().post(self.URL, {"pedido": self.pedido.pk}, format="json")
 
         self.assertEqual(resp.status_code, 201, resp.data)
-        detalle = OrdenesBordado.objects.get(pedido=self.pedido).detalles.get()
+        detalle = self.MODELO.objects.get(pedido=self.pedido).detalles.get()
         self.assertIsNone(detalle.producto_id)
         self.assertEqual(detalle.cantidad, 5)
-        # La OB queda visible por API aunque el detalle no tenga producto.
-        self.assertEqual(
-            self._client().get(f"/api/v1/produccion/orden-bordado/{resp.data['id']}/").status_code, 200
+        # La orden queda visible por API (detalle y listado) aunque el renglón no tenga producto.
+        retrieve = self._client().get(f"{self.DETALLE_URL}{resp.data['id']}/")
+        self.assertEqual(retrieve.status_code, 200, retrieve.content)
+        self.assertEqual(retrieve.json()["detalles"][0]["sku"], "MUE-001")
+        self.assertEqual(self._client().get(self.DETALLE_URL).status_code, 200)
+
+    def test_cobertura_igual_en_listado_y_detalle_con_muestra_sin_sku(self):
+        """EC-964: lo contratado no cuenta la muestra sin SKU, que ninguna orden puede
+        cubrir; el listado y el detalle reportan la misma cobertura."""
+        linea = PedidoDetalle.objects.create(
+            pedido=self.pedido,
+            producto=Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre="Playera"),
         )
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=linea, talla=self.talla, cantidad=4,
+            lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
+        )
+        resp = self._client().post(self.URL, {"pedido": self.pedido.pk}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        listado = self._client().get(self.DETALLE_URL).json()
+        filas = listado["results"] if isinstance(listado, dict) else listado
+        fila = next(f for f in filas if f["id"] == resp.data["id"])
+        detalle = self._client().get(f"{self.DETALLE_URL}{resp.data['id']}/").json()
+        # El listado de OCM no publica cobertura (solo su detalle).
+        fuentes = (fila, detalle) if "cantidad_contratada" in fila else (detalle,)
+        self.assertTrue(self.MODELO is OrdenesCorteManga or len(fuentes) == 2)
+        for fuente in fuentes:
+            self.assertEqual(
+                (fuente["cantidad_cubierta"], fuente["cantidad_contratada"], fuente["cobertura_completa"]),
+                (4, 4, True),
+            )
 
     def test_linea_de_catalogo_sin_variante_no_se_oculta(self):
         """#518: el filtro es solo para muestras."""
@@ -4905,6 +4941,8 @@ class OrdenBordadoMuestraTests(OnboardingPostLineaMuestraTests):
         self.assertIn(self.pdt.talla_id, self._linea_en_get())
         resp = self._client().post(self.URL, {"pedido": self.pedido.pk}, format="json")
         self.assertEqual(resp.status_code, 201, resp.data)
+        detalle = self.MODELO.objects.get(pedido=self.pedido).detalles.get()
+        self.assertIsNotNone(detalle.producto_id)
 
     def test_override_de_talla_oculta_se_rechaza(self):
         resp = self._client().post(
@@ -4914,6 +4952,43 @@ class OrdenBordadoMuestraTests(OnboardingPostLineaMuestraTests):
             format="json",
         )
         self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertFalse(self.MODELO.objects.filter(pedido=self.pedido).exists())
+
+    def test_muestra_con_sku_de_otra_empresa_no_se_ofrece_ni_se_acepta(self):
+        otra = Empresa.objects.create(codigo="otra", razon_social="Otra SA")
+        pedido_ajeno, _pdt = self._pedido_con_muestra(
+            otra, Sucursal.objects.create(empresa=otra, codigo="GDL", nombre="Guadalajara"),
+            sku_muestra="AJENO-001",
+        )
+
+        self.assertIsNone(self._linea_en_get(pedido_ajeno))
+        resp = self._client().post(self.URL, {"pedido": pedido_ajeno.pk}, format="json")
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertNotIn("AJENO-001", str(resp.data))
+        self.assertFalse(self.MODELO.objects.filter(pedido=pedido_ajeno).exists())
+
+
+class OrdenBordadoMuestraTests(_OrdenTrabajoMuestraTests, TestCase):
+    URL = "/api/v1/produccion/orden-bordado/onboarding/"
+    DETALLE_URL = "/api/v1/produccion/orden-bordado/"
+    MODELO = OrdenesBordado
+    TIPO_DOCUMENTO = "ORDEN_BORDADO"
+    BORDADO = True
+
+
+class OrdenReflejanteMuestraTests(_OrdenTrabajoMuestraTests, TestCase):
+    URL = "/api/v1/produccion/orden-reflejante/onboarding/"
+    DETALLE_URL = "/api/v1/produccion/orden-reflejante/"
+    MODELO = OrdenesReflejante
+    TIPO_DOCUMENTO = "ORDEN_REFLEJANTE"
+
+
+class OrdenCorteMangaMuestraTests(_OrdenTrabajoMuestraTests, TestCase):
+    URL = "/api/v1/produccion/orden-corte-manga/onboarding/"
+    DETALLE_URL = "/api/v1/produccion/orden-corte-manga/"
+    MODELO = OrdenesCorteManga
+    TIPO_DOCUMENTO = "ORDEN_CORTE_MANGA"
 
 
 class OrdenCorteMangaParcialidadesTests(TestCase):
@@ -9030,6 +9105,58 @@ class SalidaMaquilaOrigenServicioTests(SalidaMaquilaReglasTests):
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(resp.data["origen"], "OB")
         self.assertEqual(resp.data["folio_display"], f"{resp.data['folio']} · OB-SM-1")
+
+    def test_or_con_renglon_de_muestra_sin_producto(self):
+        """EC-964: una OR de muestra (renglón sin ``producto``) sale a maquila como la OB."""
+        orr = OrdenesReflejante.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido, folio_reflejante="OR-SM-MUE",
+        )
+        det = OrdenReflejanteDetalle.objects.create(
+            orden_r=orr, pedido_detalle=self.or_det.pedido_detalle, cantidad=4,
+        )
+        resp = self._alta({"orden_r": orr.pk, "centro_confeccion": self.maquilero.pk})
+        self.assertEqual(resp.status_code, 400)  # sin precio: la OR no tiene costo de maquila
+        resp = self._alta({"orden_r": orr.pk, "centro_confeccion": self.maquilero.pk, "detalles": [
+            {"or_detalle": det.pk, "cantidad": "4", "precio_unitario": "3"}]})
+        self.assertEqual(resp.status_code, 201, resp.data)
+        renglon = SalidaMaquilaDetalle.objects.get(salida_id=resp.data["id"])
+        self.assertEqual(renglon.or_detalle_id, det.pk)
+        # Sin talla ni color: el nombre de la muestra de su línea del pedido.
+        self.assertEqual(renglon.descripcion, "Playera")
+        client = APIClient()
+        client.force_authenticate(user=self.usuario)
+        self.assertEqual(client.get(f"{self.URL}{resp.data['id']}/").status_code, 200)
+
+    def test_sm_de_muestra_con_nombre_y_sku_de_la_talla(self):
+        """EC-964: en la SM de OB y OR una muestra (renglón sin ``producto``) sale con el
+        nombre externo de su línea y el ``sku_muestra`` de su talla, en la
+        descripción y en los renglones de la recepción (una sola consulta)."""
+        from compras.services.maquila import renglones_sm_servicio
+
+        talla = Talla.objects.create(nombre="SM-CH")
+        pd = self.ob_det.pedido_detalle
+        PedidoDetalleTalla.objects.create(pedido_detalle=pd, talla=talla, cantidad=9, sku_muestra="MUE-SM-CH")
+        OrdenBordadoDetalle.objects.filter(pk=self.ob_det.pk).update(talla=talla)
+        orr = OrdenesReflejante.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido, folio_reflejante="OR-SM-MUE2",
+        )
+        or_det = OrdenReflejanteDetalle.objects.create(orden_r=orr, pedido_detalle=pd, talla=talla, cantidad=2)
+        altas = (
+            ({"ob": self.ob.pk, "detalles": [
+                {"ob_detalle": self.ob_det.pk, "cantidad": "1", "precio_unitario": "2"}]}, "ob_detalle"),
+            ({"orden_r": orr.pk, "centro_confeccion": self.maquilero.pk, "detalles": [
+                {"or_detalle": or_det.pk, "cantidad": "1", "precio_unitario": "2"}]}, "or_detalle"),
+        )
+        for body, campo in altas:
+            with self.subTest(campo=campo):
+                resp = self._alta(body)
+                self.assertEqual(resp.status_code, 201, resp.data)
+                self.assertEqual(SalidaMaquilaDetalle.objects.get(salida_id=resp.data["id"]).descripcion,
+                                 "Playera SM-CH")
+                with self.assertNumQueries(1):
+                    filas = renglones_sm_servicio([resp.data["id"]])[resp.data["id"]]
+                self.assertEqual((filas[0]["producto_id"], filas[0]["producto_nombre"], filas[0]["sku"]),
+                                 (None, "Playera", "MUE-SM-CH"))
 
     def test_or_sin_centro_400(self):
         body = self._or()

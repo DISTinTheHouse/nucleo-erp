@@ -166,7 +166,8 @@ def _programado_para_destino(pedido, destino):
 
 def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn,
                                 incluir_config_crudo=False, destino_programacion=None,
-                                incluir_sku=False, sucursal_ids_existencias=()):
+                                incluir_sku=False, sucursal_ids_existencias=(),
+                                incluir_existencias=True, incluir_nombre_externo=False):
     """Arma la lista ``pedidos`` del GET de onboarding de órdenes de trabajo.
 
     Compartido por Bordado / Reflejante / Corte de Manga: los tres emitían el
@@ -191,17 +192,24 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
     No se emite para los tres por igual —que sería lo genérico— porque eso
     cambiaría el shape de las respuestas de Bordado y Corte de Manga, que hoy
     ya son correctas. Se activa sólo donde falta el dato.
+
+    ``incluir_nombre_externo`` (Reflejante y Corte de Manga, EC-964) añade a cada
+    línea ``producto_nombre_externo``: el nombre de la muestra, que no tiene
+    ``producto`` de catálogo. Opt-in para no cambiar la respuesta de Bordado.
+    ``incluir_existencias=False`` (esos dos mismos) publica el SKU sin
+    ``existencias``: se ahorra la query agregada, que sólo usa Bordado.
     """
     # Retenido por mesa de control: no se ofrece (el alta lo rechazaría).
     pedidos_lista = list(pedidos_qs.filter(retenido=False))
     por_linea, sin_talla = cantidades_asignadas_fn([p.id for p in pedidos_lista])
 
     existencias = {}
-    if incluir_sku:
-        # ``incluir_sku`` (sólo Bordado): se descartan las líneas de MUESTRA sin
-        # SKU (sin ``variante`` de catálogo ni ``sku_muestra``) y cada línea
-        # publica ``sku``/``sku_proscai``/``existencias``. Las existencias se
-        # suman en UNA query agregada por las variantes de todo el payload.
+    if incluir_sku and incluir_existencias:
+        # ``incluir_sku`` (Bordado, Reflejante y Corte de Manga): se descartan las
+        # líneas de MUESTRA sin SKU (sin ``variante`` de catálogo ni ``sku_muestra``)
+        # y cada línea publica ``sku``/``sku_proscai`` (+ ``existencias`` con
+        # ``incluir_existencias``). Las existencias se suman en UNA query agregada
+        # por las variantes de todo el payload.
         variante_ids = {
             dt.variante_id
             for p in pedidos_lista for det in p.detalles.all() for dt in det.tallas.all()
@@ -318,7 +326,10 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
                 # El código Proscai vive en el producto (el de la variante nunca se llena);
                 # mismo valor que publica el catálogo en ``ProductoVarianteSerializer``.
                 linea["sku_proscai"] = (var.producto.cod_proscai or var.cod_proscai or None) if var else None
-                linea["existencias"] = existencias.get(dt.variante_id, 0) if var else None
+                if incluir_existencias:
+                    linea["existencias"] = existencias.get(dt.variante_id, 0) if var else None
+            if incluir_nombre_externo:
+                linea["producto_nombre_externo"] = det.producto_nombre_externo
             if incluir_config_crudo:
                 # El config ÍNTEGRO, con todos sus elementos y sus claves
                 # verbatim. Misma clave, misma forma y mismo ``or None`` que
@@ -1552,7 +1563,8 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
         # de la OB vienen del prefetch de ``detalles`` (``.all()`` lee su caché)
         # y lo contratado por el pedido es la suma de ``por_detalle``, que
         # ``partialidad_de_orden`` armó con el MISMO predicado que
-        # ``contratado_por_pedido`` (``lleva_bordado=True, cantidad__gt=0``).
+        # ``contratado_por_pedido`` (``lleva_bordado=True, cantidad__gt=0``, sin muestras
+        # sin SKU: ``excluir_muestras_sin_sku``).
         # Pasarlos evita repetir esas dos agregaciones; el listado, que no los
         # tiene, sigue consultándolas.
         cubierto = sum(float(d.cantidad or 0) for d in orden.detalles.all())
@@ -1984,7 +1996,8 @@ class OrdenReflejanteViewSet(
         # de la OR vienen del prefetch de ``detalles`` (``.all()`` lee su caché)
         # y lo contratado por el pedido es la suma de ``por_detalle``, que
         # ``partialidad_de_orden`` armó con el MISMO predicado que
-        # ``contratado_por_pedido`` (``lleva_reflejante=True, cantidad__gt=0``).
+        # ``contratado_por_pedido`` (``lleva_reflejante=True, cantidad__gt=0``, sin muestras
+        # sin SKU: ``excluir_muestras_sin_sku``).
         # Pasarlos evita repetir esas dos agregaciones; el listado, que no los
         # tiene, sigue consultándolas.
         cubierto = sum(float(d.cantidad or 0) for d in orden.detalles.all())
@@ -2077,7 +2090,7 @@ class OrdenReflejanteViewSet(
                 .select_related("cliente", "sucursal")
                 .prefetch_related(
                     "detalles",
-                    _tallas_ot_prefetch("lleva_reflejante"),
+                    _tallas_ot_prefetch("lleva_reflejante", con_variante=True),
                     "detalles__producto",
                     "detalles__color",
                 )
@@ -2112,6 +2125,12 @@ class OrdenReflejanteViewSet(
                 # vía, así que no se activa ahí y su respuesta no cambia.
                 incluir_config_crudo=True,
                 destino_programacion="REFLEJANTE",
+                # Muestras como en Bordado (EC-964): sin SKU no se ofrecen; con SKU
+                # salen con ``sku`` y ``producto_nombre_externo``. Sin existencias:
+                # no se usan aquí y costarían una query más.
+                incluir_sku=True,
+                incluir_existencias=False,
+                incluir_nombre_externo=True,
             )
 
             return Response({
@@ -2467,7 +2486,7 @@ class OrdenesCorteMangaViewSet(
                 .select_related("cliente", "sucursal")
                 .prefetch_related(
                     "detalles",
-                    _tallas_ot_prefetch("lleva_corte_manga"),
+                    _tallas_ot_prefetch("lleva_corte_manga", con_variante=True),
                     "detalles__producto",
                     "detalles__color",
                 )
@@ -2495,6 +2514,12 @@ class OrdenesCorteMangaViewSet(
                 "corte_manga_config",
                 OrdenCorteMangaService.cantidades_asignadas_por_pedidos,
                 destino_programacion="CORTE_MANGA",
+                # Muestras como en Bordado (EC-964): sin SKU no se ofrecen; con SKU
+                # salen con ``sku`` y ``producto_nombre_externo``. Sin existencias:
+                # no se usan aquí y costarían una query más.
+                incluir_sku=True,
+                incluir_existencias=False,
+                incluir_nombre_externo=True,
             )
 
             return Response({
