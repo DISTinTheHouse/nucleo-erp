@@ -4905,6 +4905,33 @@ class _OrdenTrabajoMuestraTests:
         self.assertEqual(retrieve.json()["detalles"][0]["sku"], "MUE-001")
         self.assertEqual(self._client().get(self.DETALLE_URL).status_code, 200)
 
+    def test_cobertura_igual_en_listado_y_detalle_con_muestra_sin_sku(self):
+        """EC-964: lo contratado no cuenta la muestra sin SKU, que ninguna orden puede
+        cubrir; el listado y el detalle reportan la misma cobertura."""
+        linea = PedidoDetalle.objects.create(
+            pedido=self.pedido,
+            producto=Producto.objects.create(tipo=_tipo_producto(), empresa=self.empresa, nombre="Playera"),
+        )
+        PedidoDetalleTalla.objects.create(
+            pedido_detalle=linea, talla=self.talla, cantidad=4,
+            lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
+        )
+        resp = self._client().post(self.URL, {"pedido": self.pedido.pk}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+
+        listado = self._client().get(self.DETALLE_URL).json()
+        filas = listado["results"] if isinstance(listado, dict) else listado
+        fila = next(f for f in filas if f["id"] == resp.data["id"])
+        detalle = self._client().get(f"{self.DETALLE_URL}{resp.data['id']}/").json()
+        # El listado de OCM no publica cobertura (solo su detalle).
+        fuentes = (fila, detalle) if "cantidad_contratada" in fila else (detalle,)
+        self.assertTrue(self.MODELO is OrdenesCorteManga or len(fuentes) == 2)
+        for fuente in fuentes:
+            self.assertEqual(
+                (fuente["cantidad_cubierta"], fuente["cantidad_contratada"], fuente["cobertura_completa"]),
+                (4, 4, True),
+            )
+
     def test_linea_de_catalogo_sin_variante_no_se_oculta(self):
         """#518: el filtro es solo para muestras."""
         PedidoDetalle.objects.filter(pk=self.pdt.pedido_detalle_id).update(
@@ -9094,10 +9121,42 @@ class SalidaMaquilaOrigenServicioTests(SalidaMaquilaReglasTests):
         self.assertEqual(resp.status_code, 201, resp.data)
         renglon = SalidaMaquilaDetalle.objects.get(salida_id=resp.data["id"])
         self.assertEqual(renglon.or_detalle_id, det.pk)
-        self.assertEqual(renglon.descripcion, f"Renglón {det.pk}")
+        # Sin talla ni color: el nombre de la muestra de su línea del pedido.
+        self.assertEqual(renglon.descripcion, "Playera")
         client = APIClient()
         client.force_authenticate(user=self.usuario)
         self.assertEqual(client.get(f"{self.URL}{resp.data['id']}/").status_code, 200)
+
+    def test_sm_de_muestra_con_nombre_y_sku_de_la_talla(self):
+        """EC-964: en la SM de OB y OR una muestra (renglón sin ``producto``) sale con el
+        nombre externo de su línea y el ``sku_muestra`` de su talla, en la
+        descripción y en los renglones de la recepción (una sola consulta)."""
+        from compras.services.maquila import renglones_sm_servicio
+
+        talla = Talla.objects.create(nombre="SM-CH")
+        pd = self.ob_det.pedido_detalle
+        PedidoDetalleTalla.objects.create(pedido_detalle=pd, talla=talla, cantidad=9, sku_muestra="MUE-SM-CH")
+        OrdenBordadoDetalle.objects.filter(pk=self.ob_det.pk).update(talla=talla)
+        orr = OrdenesReflejante.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido, folio_reflejante="OR-SM-MUE2",
+        )
+        or_det = OrdenReflejanteDetalle.objects.create(orden_r=orr, pedido_detalle=pd, talla=talla, cantidad=2)
+        altas = (
+            ({"ob": self.ob.pk, "detalles": [
+                {"ob_detalle": self.ob_det.pk, "cantidad": "1", "precio_unitario": "2"}]}, "ob_detalle"),
+            ({"orden_r": orr.pk, "centro_confeccion": self.maquilero.pk, "detalles": [
+                {"or_detalle": or_det.pk, "cantidad": "1", "precio_unitario": "2"}]}, "or_detalle"),
+        )
+        for body, campo in altas:
+            with self.subTest(campo=campo):
+                resp = self._alta(body)
+                self.assertEqual(resp.status_code, 201, resp.data)
+                self.assertEqual(SalidaMaquilaDetalle.objects.get(salida_id=resp.data["id"]).descripcion,
+                                 "Playera SM-CH")
+                with self.assertNumQueries(1):
+                    filas = renglones_sm_servicio([resp.data["id"]])[resp.data["id"]]
+                self.assertEqual((filas[0]["producto_id"], filas[0]["producto_nombre"], filas[0]["sku"]),
+                                 (None, "Playera", "MUE-SM-CH"))
 
     def test_or_sin_centro_400(self):
         body = self._or()
