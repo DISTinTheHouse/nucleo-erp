@@ -2443,7 +2443,7 @@ Una sola llamada con lo que hoy se ve en 3 pestañas (detalle con servicios, sto
   - **Reparto entre renglones que comparten clave (EC-644):** el stock de una clave (misma variante, o mismo producto sin variantes — p. ej. varias tallas de un producto sin variantes, o la misma variante en dos partidas) **se reparte entre sus renglones en el orden de la respuesta** (`pedido_detalle_id`, luego id de talla): cada renglón recibe lo que queda después de los anteriores, así que la suma de piezas cubiertas nunca excede el disponible. Ej.: disponible 15 y CH/M/G de 10 → CH `15`/`0`, M `5`/`5`, G `0`/`10`. Los renglones `null` no consumen el stock de la clave.
 - `faltante`: `max(cantidad - stock_disponible, 0)`, con el `stock_disponible` ya repartido; `null` igual que arriba.
 - `servicios`: `BORDADO`, `REFLEJANTE`, `CORTE_MANGA`, `CAMBIO_TALLA` que lleva esa talla.
-- `pendiente_sku`: `true` en una talla de catálogo (no muestra) sin variante de un producto que sí tiene variantes (#731). No suma consultas. Esas piezas no se programan a `BORDADO`/`REFLEJANTE`/`CORTE_MANGA`/`EMBARQUE` (ver `PATCH`).
+- `pendiente_sku`: `true` en una talla de catálogo (no muestra) sin variante de un producto que sí tiene variantes (#731), o una muestra sin SKU de producción vinculado (`sku: null`). No suma consultas. Esas piezas no se programan a `BORDADO`/`REFLEJANTE`/`CORTE_MANGA`/`EMBARQUE` (ver `PATCH`).
 - Front: pinta la tabla de `renglones`, el `<select>` de destino con `destinos_aplicables`, precarga `programacion_conf.programaciones` y guarda con el `PATCH` de abajo.
 
 - **Endpoint**: `PATCH /api/v1/ventas/pedidos/{id}/programar/`
