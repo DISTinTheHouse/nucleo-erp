@@ -10,7 +10,7 @@ from produccion.services.common import (
     EPS_CANTIDAD,
     cantidades_asignadas,
     crear_orden_con_guardia_duplicado,
-    exigir_producto_en_tallas,
+    excluir_muestras_sin_sku,
     payload_duplicada,
     pendientes_por_linea,
     revisar_empresa,
@@ -54,7 +54,8 @@ class OrdenCorteMangaService:
 
     @staticmethod
     def _tallas_corte_manga_qs(pedido_id):
-        return tallas_orden_trabajo_qs(pedido_id, "lleva_corte_manga")
+        # Mismo conjunto que el GET de onboarding y que la OB: sin muestras sin SKU (EC-964).
+        return excluir_muestras_sin_sku(tallas_orden_trabajo_qs(pedido_id, "lleva_corte_manga"))
 
     @staticmethod
     def _payload_duplicada(existente):
@@ -392,7 +393,8 @@ class OrdenCorteMangaService:
 
         # El folio se consume DESPUÉS de todas las validaciones, para que un
         # rechazo no gaste consecutivo de la serie.
-        exigir_producto_en_tallas(detalle_tallas, "corte de manga")
+        # Las muestras con SKU de producción sí generan OCM: el detalle admite producto
+        # nulo, como en la OB (EC-964).
         folio_ocm = generate_ocm_folio(pedido.empresa_id, pedido.sucursal_id)
 
         orden_corte_manga = crear_orden_con_guardia_duplicado(
