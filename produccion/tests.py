@@ -8367,7 +8367,10 @@ class EditarOrdenServicioTests(TestCase):
 
     def test_cancelada_no_se_edita_y_libera_cupo(self):
         self.assertTrue(OrdenReflejanteService.cantidades_asignadas_por_pedidos([self.pedido.pk])[0])
-        self.assertEqual(self._patch({"estatus_reflejante": 7}).status_code, 200)
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        resp = client.post(f"{self.url}cancelar/", {"motivo": "Prueba"}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.data)
         por_linea, sin_talla = OrdenReflejanteService.cantidades_asignadas_por_pedidos([self.pedido.pk])
         self.assertEqual((por_linea, sin_talla), ({}, {}))
         resp = self._patch({"estatus_reflejante": 3})

@@ -390,6 +390,8 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
         # Bloquea el documento de origen: dos SM simultáneas no rebasan juntas el tope (#1088).
         if datos.get("op") is not None:
             doc = OrdenProduccion.objects.select_for_update().get(pk=datos["op"].pk)
+            if doc.estatus_op == OrdenProduccion.EstatusOrdenProduccion.CANCELADO:
+                raise ValidationError({"op": "La OP está cancelada: no admite salidas a maquila."})
             sigla, precio_op = "OP", doc.costo_maquila_unitario or Decimal("0")
             base = doc.orden_produccion_detalle.filter(activo=True)
             if not renglones:
@@ -409,6 +411,9 @@ class SalidaMaquilaViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mix
                 doc, sigla, campo_det = (OrdenesReflejante.objects.select_for_update().get(pk=datos["orden_r"].pk),
                                          "OR", "or_detalle")
                 enviadas = SalidaMaquilaDetalle.objects.filter(salida__orden_r=doc)
+            if (sigla == "OB" and doc.estatus_bordado == OrdenesBordado.EstatusBordado.CANCELADO_LEGACY) or (
+                    sigla == "OR" and doc.estatus_reflejante == OrdenesReflejante.EstatusReflejante.CANCELADO):
+                raise ValidationError({"ob" if sigla == "OB" else "orden_r": f"La {sigla} está cancelada: no admite salidas a maquila."})
             precio_op = Decimal("0")
             base = list(doc.detalles.select_related("producto", "talla", "color", "pedido_detalle"))
             if not renglones:

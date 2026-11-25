@@ -68,9 +68,9 @@ def exigir_op_cancelable(op):
         raise ValidationError({"recepciones": (
             f"La OP tiene la recepción {rec or ''} de producto terminado: cancélala primero en WMS."
         ).replace("  ", " ")})
-    sm = SalidaMaquila.objects.filter(op=op, estatus=SalidaMaquila.Estatus.ENVIADA).values_list("folio", flat=True).first()
+    sm = SalidaMaquila.objects.filter(op=op, estatus__in=(SalidaMaquila.Estatus.ENVIADA, SalidaMaquila.Estatus.RECIBIDA)).values_list("folio", "estatus").first()
     if sm is not None:
-        raise ValidationError({"salidas_maquila": f"La OP tiene la salida a maquila {sm} enviada: cancélala primero."})
+        raise ValidationError({"salidas_maquila": f"La OP tiene la salida a maquila {sm[0]} {'recibida' if sm[1] == SalidaMaquila.Estatus.RECIBIDA else 'enviada'}: cancélala primero."})
 
 
 def devolver_consumo_op(op, user, motivo, request=None):
@@ -204,10 +204,10 @@ def cancelar_orden_servicio(tipo, orden, user, motivo, request=None):
     if actual in cerrados:
         raise ValidationError({campo: "La orden ya está terminada; no se cancela."})
     if fk_sm:
-        sm = SalidaMaquila.objects.filter(**{fk_sm: orden}, estatus=SalidaMaquila.Estatus.ENVIADA).values_list(
-            "folio", flat=True).first()
+        sm = SalidaMaquila.objects.filter(**{fk_sm: orden}, estatus__in=(
+            SalidaMaquila.Estatus.ENVIADA, SalidaMaquila.Estatus.RECIBIDA)).values_list("folio", "estatus").first()
         if sm is not None:
-            raise ValidationError({"salidas_maquila": f"La orden tiene la salida a maquila {sm} enviada: cancélala primero."})
+            raise ValidationError({"salidas_maquila": f"La orden tiene la salida a maquila {sm[0]} {'recibida' if sm[1] == SalidaMaquila.Estatus.RECIBIDA else 'enviada'}: cancélala primero."})
     setattr(orden, campo, cancelado)
     orden.save(update_fields=[campo, *sellar(orden, user, motivo)])
     ip, ua = _meta(request)

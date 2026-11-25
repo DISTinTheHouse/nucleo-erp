@@ -660,6 +660,10 @@ class OrdenProduccionViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         if not request.user.tiene_permiso(self.PERMISO_BORRAR):
             raise PermissionDenied("No tienes permiso para dar de baja órdenes de producción (D-PRODUCCION-OP).")
+        try:
+            _require_produccion(request.user)
+        except ValidationError as e:
+            raise PermissionDenied(e.detail.get("permiso") if isinstance(e.detail, dict) else e.detail)
         op = self.get_object()
         cancelado = OrdenProduccion.EstatusOrdenProduccion.CANCELADO
         if op.estatus_op == cancelado:
