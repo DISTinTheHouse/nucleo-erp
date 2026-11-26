@@ -9679,13 +9679,18 @@ class TimbrarFacturaTests(EmitirFacturaTests):
                 else:
                     self.facturama.cancel_cfdi.return_value = resultado
 
-                self.assertEqual(self._cancelar(factura, motivo="No se entregó").status_code, 400)
+                resp = self._cancelar(factura, motivo="No se entregó")
+
+                self.assertEqual(resp.status_code, 400, resp.data)
+                llave = "cfdi" if isinstance(resultado, Exception) else "cancelacion_pendiente"
+                self.assertIn(llave, resp.data)
 
                 rastro, eventos = self._rastro(factura)
                 self.assertEqual(rastro, ("", None, None))
                 self.assertFalse(eventos.exists())
                 self.assertEqual(factura.estatus, Factura.FacturaStatus.BORRADOR)
                 self.assertNotIn("No se entregó", factura.observaciones or "")
+        self.assertEqual(self.facturama.cancel_cfdi.call_count, 3)  # los tres llegaron a Facturama
         # Lo que sí se guarda (EC-806): la solicitud ante el SAT, la reserva y el motivo fijado.
         self.assertTrue(factura.cfdi_cancelacion_solicitada)
         self.assertIsNotNone(factura.cfdi_cancelacion_en_curso_desde)
@@ -9695,21 +9700,30 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         factura = self._timbrada()
         self.assertEqual(self._emitir(factura).status_code, 200)
         self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
-        base = len(connection.atomic_blocks)
-        visto = {}
+        visto, orden = {}, []
         original = finanzas_views.canc.registrar_cancelacion
+        contrapoliza = FacturaPolizaService.cancelar
+
+        def espiar_poliza(*args, **kwargs):
+            orden.append("contrapoliza")
+            return contrapoliza(*args, **kwargs)
 
         def espiar(doc, *args, **kwargs):
-            visto["profundidad"] = len(connection.atomic_blocks)
+            orden.append("rastro")
+            # Lo llama ``_cancelar_en_erp`` antes de salir de su ``atomic``, no la vista después.
+            visto["dentro_de"] = {marco.function for marco in inspect.stack()}
             visto["estatus"] = Factura.objects.get(pk=doc.pk).estatus  # ya cancelada, mismo atomic
             visto["cxc"] = CuentaPorCobrar.objects.get(factura=doc).estatus
             return original(doc, *args, **kwargs)
 
-        with patch.object(finanzas_views.canc, "registrar_cancelacion", side_effect=espiar):
+        with patch.object(finanzas_views.canc, "registrar_cancelacion", side_effect=espiar), patch(
+            "finanzas.services.factura_cancelacion_service.FacturaPolizaService.cancelar", side_effect=espiar_poliza,
+        ):
             resp = self._cancelar(factura, motivo_sat="03", motivo="No se entregó")
 
         self.assertEqual(resp.status_code, 200, resp.data)
-        self.assertGreater(visto["profundidad"], base)
+        self.assertIn("_cancelar_en_erp", visto["dentro_de"])
+        self.assertEqual(orden, ["contrapoliza", "rastro"])
         self.assertEqual(visto["estatus"], Factura.FacturaStatus.CANCELADA)
         self.assertEqual(visto["cxc"], CuentaPorCobrar.EstatusCxC.CANCELADA)
         (motivo, fecha, cancelado_por), eventos = self._rastro(factura)
