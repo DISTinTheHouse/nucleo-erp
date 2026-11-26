@@ -11802,7 +11802,8 @@ class StockDigitalTests(TestCase):
             estatus=Recepcion.EstatusRecepcion.PARCIAL,
         )
         RecepcionDetalle.objects.create(
-            recepcion=recepcion, producto_variante=cls.var_m, orden_produccion_detalle=op_det, cantidad_recibida=2,
+            recepcion=recepcion, producto=producto, producto_variante=cls.var_m, orden_produccion_detalle=op_det,
+            cantidad_recibida=2,
         )
 
         proveedor = Proveedor.objects.create(
@@ -11891,7 +11892,10 @@ class StockDigitalTests(TestCase):
         self.assertEqual(self._get(f"{STOCK_DIGITAL_URL}{self.var_b.pk}/").status_code, 404)  # otra empresa
         client = APIClient()
         client.force_authenticate(self.admin)
-        self.assertEqual(client.post(STOCK_DIGITAL_URL, {}).status_code, 405)
+        # ``LecturaPorCodigo`` niega antes de resolver el método (``action`` es None): 403.
+        self.assertIn(client.post(STOCK_DIGITAL_URL, {}).status_code, (403, 405))
+        for page_size in ("abc", "0", "201"):
+            self.assertEqual(self._get(f"{STOCK_DIGITAL_URL}?page_size={page_size}").status_code, 400, page_size)
 
     def test_consultas_no_crecen_con_los_skus(self):
         def consultas(n):

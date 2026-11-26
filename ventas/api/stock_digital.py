@@ -9,8 +9,9 @@ ni cómo se surte un pedido.
 Alcance: la empresa activa del usuario, superusuario incluido (el stock es de una
 empresa); sin empresa no se ve nada. Códigos: ``CODIGOS_STOCK_DIGITAL``.
 
-Listado (50 por página, ``?page_size=`` hasta 200), SKUs activos de producto
-terminado ordenados por SKU:
+Listado (50 por página, ``?page_size=`` entero de 1 a 200; otro valor → 400),
+SKUs activos de producto terminado ordenados por SKU. ``?page=`` inválido o fuera
+de rango → 404 "Página inválida.":
 
 - ``?q=`` SKU, nombre de la variante o del producto.
 - ``?producto=``, ``?categoria=``, ``?color=``, ``?talla=`` (ids).
@@ -52,6 +53,16 @@ class _Pagina(PageNumberPagination):
     page_size = 50
     page_size_query_param = "page_size"
     max_page_size = 200
+
+    def get_page_size(self, request):
+        """``?page_size=`` inválido → 400 como los demás filtros (#1426); antes caía
+        en silencio a 50 (o a 200 si pasaba del tope)."""
+        valor = entero_param(request, self.page_size_query_param, positivo=True)
+        if valor is None:
+            return self.page_size
+        if valor > self.max_page_size:
+            raise ValidationError({self.page_size_query_param: f"Máximo {self.max_page_size}."})
+        return valor
 
 
 def _fila(v, totales):

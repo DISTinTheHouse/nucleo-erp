@@ -2228,7 +2228,7 @@ Cada documento que nació del pedido, para la pestaña "Documentos" del detalle.
 
 Por SKU: cuánto hay, cuánto está comprometido y cuánto viene en camino. **Solo informativo**: no aparta piezas, no mueve inventario y no cambia cómo se autoriza ni cómo se surte un pedido.
 
-- **Listado**: `GET /api/v1/ventas/stock-digital/` — SKUs activos de producto terminado de la empresa activa, ordenados por SKU, paginado (`page`; `page_size` 50 por omisión, máximo 200).
+- **Listado**: `GET /api/v1/ventas/stock-digital/` — SKUs activos de producto terminado de la empresa activa, ordenados por SKU, paginado (`page`; `page_size` 50 por omisión, entero de 1 a 200: otro valor → `400`; `page` inválido o fuera de rango → `404 "Página inválida."`).
   - Filtros: `q` (SKU, nombre de la variante o del producto), `producto`, `categoria`, `color`, `talla` (ids), `variantes=1,2,3` (hasta 200 ids exactos, aunque estén inactivos; p. ej. los renglones de una cotización), `sucursal` (solo existencias, pedidos, OP y OC de esa sucursal), `solo=disponibles|faltantes|comprometidos|entradas|existencia`. Un valor inválido → `400`.
 - **Detalle**: `GET /api/v1/ventas/stock-digital/{variante_id}/` — los mismos totales y de dónde salen. Acepta `sucursal`. De otra empresa o inexistente → `404`.
 - **Permisos**: `R-CRM`, `R-CRM-COTIZACIONES`, `R-CRM-PEDIDOS`, `R-MESACONTROL`, `R-MESACONTROL-COTI` o `R-MESACONTROL-PEDIDOS` (admin de empresa y superusuario pasan); sin ninguno → `403`.
@@ -2238,8 +2238,8 @@ Por SKU: cuánto hay, cuánto está comprometido y cuánto viene en camino. **So
   |---|---|
   | `existencia_real` | Existencia en `ALM-00`, de donde sale todo pedido. Lo que el picking ya pasó a apartados o embarque ya no cuenta. |
   | `comprometido` | Pedidos activos Autorizados (3) o En proceso (4): por talla, `pedida − surtida por picking` (nunca negativo). Se libera al surtir o al cancelar el pedido. |
-  | `en_produccion` | OP activas abiertas (Pendiente, Preparación, En producción, Revisión, Detenido): `cantidad − recibido`. |
-  | `en_compra` | OC activas Autorizadas o Parcialmente recibidas: `cantidad − recibido`. |
+  | `en_produccion` | OP activas abiertas (Pendiente, Preparación, En producción, Revisión, Detenido): `cantidad − recibido`. Recibido = recepciones activas no canceladas **menos lo que Calidad rechazó** en ellas (sin inspecciones anuladas), como en compras (#1424). |
+  | `en_compra` | OC activas Autorizadas o Parcialmente recibidas: `cantidad − recibido` (recibido neto de rechazos, igual que en OP). |
   | `disponible_hoy` | `existencia_real − comprometido`. |
   | `disponible_digital` | `existencia_real + en_produccion + en_compra − comprometido`. Negativa = faltante. |
   | `proxima_entrada` | La `fecha_entrega_estimada` más cercana de esas OP/OC (`null` si no se capturó). |
@@ -2264,6 +2264,7 @@ Por SKU: cuánto hay, cuánto está comprometido y cuánto viene en camino. **So
   - `compromisos[]` (primero el que se entrega antes): `pedido_id`, `folio`, `cliente_nombre`, `vendedor`, `sucursal_id`, `estatus`, `estatus_display`, `clasificacion`, `retenido`, `fecha_confirmacion`, `entrega_desde`, `entrega_hasta`, `pedida`, `surtida`, `pendiente`.
   - `entradas_produccion[]`: `op_id`, `folio`, `sucursal_id`, `estatus`, `estatus_display`, `pedido_folio`, `fecha_entrega_estimada`, `cantidad`, `recibido`, `pendiente`.
   - `entradas_compra[]`: `orden_compra_id`, `folio`, `sucursal_id`, `proveedor`, `estatus`, `estatus_display`, `fecha_entrega_estimada`, `cantidad`, `recibido`, `pendiente`.
+  - `estatus_display` en tipo oración y con acentos en las tres listas ("En proceso", "En producción", "Parcialmente recibida"); `estatus` es el código (#1426). `recibido` ya viene neto de rechazos de Calidad.
 - Fuera de alcance: muestras sin SKU de catálogo y tallas de pedido sin variante.
 
 ---
