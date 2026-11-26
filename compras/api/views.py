@@ -114,6 +114,7 @@ from compras.services.cancelacion_recepcion import (
     validar_cancelacion_recepcion,
 )
 from terceros.models import Proveedor, Transportista
+from wms.services.rfid_scan_service import etiquetas_por_epc, normalizar_epc
 
 logger = logging.getLogger(__name__)
 
@@ -3774,20 +3775,65 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 def _resolver_tag_rfid(encuadre, codigo_tag):
-    """Resuelve un tag por sku/codigo/cod_proscai contra la OC u OP del encuadre."""
+    """Resuelve un ``codigo_tag`` (obsoleto, EC-982) por sku/codigo/cod_proscai
+    contra la OC u OP del encuadre.
+
+    Parte el texto por espacios y comas y busca con cualquiera de las partes
+    (así el frontend mandaba ``"EPC SKU"``). Si varias partes coinciden, gana
+    la de ``id`` menor: orden explícito, no el que diera el plan de Postgres.
+    """
     tokens = [t.strip() for t in codigo_tag.replace(",", " ").split() if t.strip()] or [codigo_tag]
 
     producto_variante = (
         ProductoVariante.objects.select_related("producto")
         .filter(empresa=encuadre.empresa, activo=True, sku__in=tokens)
+        .order_by("pk")
         .first()
     )
     producto = producto_variante.producto if producto_variante else (
         Producto.objects.filter(empresa=encuadre.empresa, activo=True)
         .filter(Q(codigo__in=tokens) | Q(cod_proscai__in=tokens))
+        .order_by("pk")
         .first()
     )
+    return {
+        **_renglon_tag_rfid(encuadre, producto, producto_variante),
+        "codigo_tag": codigo_tag,
+        "etiqueta": None,
+        "metadata": {"resolved": bool(producto), "tokens": tokens, "source": "API-RFID"},
+    }
 
+
+def _resolver_epc_rfid(encuadre, epc):
+    """Resuelve un EPC (EC-982) por la etiqueta que imprimió el ERP con él.
+
+    Solo etiquetas de la empresa del encuadre (``etiquetas_por_epc``, que también
+    acepta el EPC con relleno o sin ceros); un EPC de otra empresa es igual a uno
+    desconocido. Sin filtro de sucursal. Etiqueta con variante: variante y
+    producto salen de la impresión; solo con producto, la regla por producto de
+    siempre. ``codigo_tag`` = el EPC de la etiqueta (forma canónica) o, si no
+    está registrado, el EPC normalizado: el único por encuadre deduplica la pieza
+    aunque el lector la reporte con o sin relleno.
+    """
+    epc_normalizado = normalizar_epc(epc)
+    etiqueta = etiquetas_por_epc([epc_normalizado], encuadre.empresa_id, con_producto=True).get(epc_normalizado)
+    producto = producto_variante = None
+    if etiqueta is not None:
+        producto_variante = etiqueta.impresion.producto_variante
+        producto = producto_variante.producto if producto_variante else etiqueta.impresion.producto
+    metadata = {"resolved": bool(producto), "source": RecepcionRFIDLectura.FUENTE_EPC, "epc_leido": epc_normalizado}
+    if etiqueta is None:
+        metadata["motivo"] = "epc_no_registrado"
+    return {
+        **_renglon_tag_rfid(encuadre, producto, producto_variante),
+        "codigo_tag": etiqueta.epc if etiqueta is not None else epc_normalizado,
+        "etiqueta": etiqueta,
+        "metadata": metadata,
+    }
+
+
+def _renglon_tag_rfid(encuadre, producto, producto_variante):
+    """Renglón de la OC u OP del encuadre para un producto/variante ya resuelto."""
     orden_compra_detalle = None
     orden_produccion_detalle = None
     if producto:
@@ -3819,7 +3865,6 @@ def _resolver_tag_rfid(encuadre, codigo_tag):
         "producto_variante": producto_variante,
         "orden_compra_detalle": orden_compra_detalle,
         "orden_produccion_detalle": orden_produccion_detalle,
-        "metadata": {"resolved": bool(producto), "tokens": tokens, "source": "API-RFID"},
     }
 
 
@@ -3977,8 +4022,9 @@ def resumen_encuadre_rfid(encuadre, mapas=None):
 class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
     """API REST del encuadre RFID de recepción (OC u OP).
 
-    "Esperado" resta lo ya recibido. Las lecturas se resuelven por SKU/código,
-    todavía no por EPC.
+    "Esperado" resta lo ya recibido. Las lecturas llegan por ``epc`` (EC-982),
+    resuelto con la etiqueta que imprimió el ERP, o por ``codigo_tag`` (obsoleto:
+    SKU/código, para lectores tipo teclado).
     """
 
     queryset = RecepcionRFIDEncuadre.objects.all()
@@ -4161,6 +4207,17 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         prefetch_related_objects([encuadre], prefetch_lecturas_rfid())
         return Response(RecepcionRFIDEncuadreSerializer(encuadre).data, status=status.HTTP_201_CREATED)
 
+    @extend_schema(
+        request=RecepcionRFIDLecturaInputSerializer,
+        responses={201: RecepcionRFIDLecturaSerializer},
+        description=(
+            "Una pieza leída. Manda exactamente uno de `epc` (recomendado) o `codigo_tag` "
+            "(obsoleto); ambos o ninguno → 400. Con `epc`, la etiqueta impresa por el ERP "
+            "en la empresa del encuadre da producto y variante; un EPC no registrado se "
+            "guarda sin asignar (`metadata.motivo = \"epc_no_registrado\"`). Repetido en el "
+            "encuadre → `400 {\"<campo enviado>\": \"Este tag ya fue leído en este encuadre.\"}`."
+        ),
+    )
     @action(detail=True, methods=["post"])
     def lecturas(self, request, pk=None):
         # Sin el prefetch de lecturas (solo el retrieve lo hace): solo se
@@ -4180,18 +4237,23 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
 
             input_serializer = RecepcionRFIDLecturaInputSerializer(data=request.data)
             input_serializer.is_valid(raise_exception=True)
-            codigo_tag = input_serializer.validated_data["codigo_tag"].strip()
-            if not codigo_tag:
-                raise ValidationError({"codigo_tag": "Requerido."})
+            datos = input_serializer.validated_data
+            # El error de repetido va en el campo que se mandó.
+            campo = "epc" if "epc" in datos else "codigo_tag"
+            if campo == "epc":
+                resolved = _resolver_epc_rfid(encuadre, datos["epc"])
+            else:
+                resolved = _resolver_tag_rfid(encuadre, datos["codigo_tag"])
+            codigo_tag = resolved["codigo_tag"]
             if encuadre.lecturas.filter(codigo_tag=codigo_tag).exists():
-                raise ValidationError({"codigo_tag": self.TAG_REPETIDO})
+                raise ValidationError({campo: self.TAG_REPETIDO})
 
-            resolved = _resolver_tag_rfid(encuadre, codigo_tag)
             try:
                 with transaction.atomic():
                     lectura = RecepcionRFIDLectura.objects.create(
                         encuadre=encuadre,
                         codigo_tag=codigo_tag,
+                        etiqueta=resolved["etiqueta"],
                         orden_compra_detalle=resolved["orden_compra_detalle"],
                         orden_produccion_detalle=resolved["orden_produccion_detalle"],
                         producto=resolved["producto"],
@@ -4205,7 +4267,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
                 # violación (FK, NOT NULL...) sigue su curso.
                 if not self._es_tag_repetido(exc):
                     raise
-                raise ValidationError({"codigo_tag": self.TAG_REPETIDO}) from exc
+                raise ValidationError({campo: self.TAG_REPETIDO}) from exc
         return Response(RecepcionRFIDLecturaSerializer(lectura).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])

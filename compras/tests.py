@@ -2934,11 +2934,35 @@ class OrdenCompraVariantesPTTests(TestCase):
         self.assertEqual([d["producto_variante_color"] for d in detalles], ["Negro", "Negro"])
 
     def test_rfid_asigna_el_tag_al_renglon_de_su_talla(self):
+        # EC-982: una pieza por EPC; la talla sale de la etiqueta impresa.
+        from wms.models import EtiquetaRFIDDetalle, EtiquetaRFIDImpresion
+
+        impresion = EtiquetaRFIDImpresion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, producto=self.producto, producto_variante=self.g, cantidad=3,
+        )
+        epcs = [f"0A0B0C0D0E0F00000000000{i}" for i in range(3)]
+        for epc in epcs:
+            EtiquetaRFIDDetalle.objects.create(impresion=impresion, epc=epc, barcode_value="CAM-G")
+        oc_id = self._oc_pt()["orden_compra"]["id"]
+        url = "/api/v1/compras/recepcion-rfid-encuadres/"
+        enc = self.api.post(url, {"tipo_origen": "OC", "orden_compra": oc_id, "almacen": self.almacen.pk}, format="json").json()
+        for epc in epcs:
+            resp = self.api.post(f"{url}{enc['id']}/lecturas/", {"epc": epc}, format="json")
+            self.assertEqual(resp.status_code, 201, resp.content)
+        resumen = self.api.get(f"{url}{enc['id']}/").json()["resumen"]
+        self.assertEqual([(d["producto_variante_talla"], d["leido"]) for d in resumen["detalle"]],
+                         [("CH", "0"), ("G", "3.0000")])
+
+    def test_rfid_codigo_tag_obsoleto_sigue_partiendo_por_espacios(self):
+        # Contrato anterior (``"EPC SKU"``): se conserva hasta que el frontend use ``epc``.
         oc_id = self._oc_pt()["orden_compra"]["id"]
         url = "/api/v1/compras/recepcion-rfid-encuadres/"
         enc = self.api.post(url, {"tipo_origen": "OC", "orden_compra": oc_id, "almacen": self.almacen.pk}, format="json").json()
         for i in range(3):
-            self.api.post(f"{url}{enc['id']}/lecturas/", {"codigo_tag": f"CAM-G EPC{i}"}, format="json")
+            resp = self.api.post(f"{url}{enc['id']}/lecturas/", {"codigo_tag": f"CAM-G EPC{i}"}, format="json")
+            self.assertEqual(resp.status_code, 201, resp.content)
+            self.assertIsNone(resp.json()["epc"])
+            self.assertIsNone(resp.json()["etiqueta"])
         resumen = self.api.get(f"{url}{enc['id']}/").json()["resumen"]
         self.assertEqual([(d["producto_variante_talla"], d["leido"]) for d in resumen["detalle"]],
                          [("CH", "0"), ("G", "3.0000")])
@@ -2949,6 +2973,232 @@ class OrdenCompraVariantesPTTests(TestCase):
         }).json()["busqueda"]
         self.assertEqual([v["sku"] for v in busqueda["variantes"]], ["CAM-G"])
         self.assertEqual((len(busqueda["proveedores"]), len(busqueda["productos"])), (1, 1))
+
+
+class EncuadreRFIDLecturaEPCTests(TestCase):
+    """EC-982: ``lecturas/`` por ``epc`` resuelto con la etiqueta impresa por el
+    ERP; ``codigo_tag`` queda obsoleto, con largo máximo y resolución determinista."""
+
+    URL = "/api/v1/compras/recepcion-rfid-encuadres/"
+    EPC_G = "11112222333344445555AAAA"
+    EPC_PRODUCTO = "11112222333344445555BBBB"
+    EPC_B = "99998888777766665555CCCC"
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import Talla
+        from wms.models import EtiquetaRFIDDetalle, EtiquetaRFIDImpresion
+
+        regimen = SatRegimenFiscal.objects.create(codigo="601", descripcion="General")
+        forma = SatFormaPago.objects.create(codigo="03", descripcion="Transferencia")
+        metodo = SatMetodoPago.objects.create(codigo="PUE", descripcion="Una exhibición")
+        cls.moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        tallas = {t: Talla.objects.create(nombre=t) for t in ("CH", "G")}
+        tipo = _tipo_producto()
+        cls.t = {}
+        for clave in ("a", "b"):
+            empresa = Empresa.objects.create(codigo=f"ec982-{clave}", razon_social=f"EC982 {clave} SA")
+            sucursal = Sucursal.objects.create(empresa=empresa, codigo=f"E9{clave}", nombre=f"Suc {clave}")
+            # Segunda sucursal: las etiquetas se imprimen en una y se reciben en otra.
+            otra_sucursal = Sucursal.objects.create(empresa=empresa, codigo=f"E9{clave}2", nombre=f"Suc {clave} 2")
+            producto = Producto.objects.create(empresa=empresa, nombre=f"Camisa {clave}", tipo=tipo)
+            variantes = {
+                t: ProductoVariante.objects.create(
+                    producto=producto, empresa=empresa, color=color, talla=talla,
+                    sku=f"C982{clave}-{t}", precio_base="1",
+                )
+                for t, talla in tallas.items()
+            }
+            cls.t[clave] = {
+                "empresa": empresa, "sucursal": sucursal, "otra_sucursal": otra_sucursal,
+                "producto": producto, "variantes": variantes,
+                "almacen": Almacen.objects.create(empresa=empresa, sucursal=sucursal, codigo="A", nombre="A"),
+                "proveedor": Proveedor.objects.create(
+                    empresa=empresa, nombre=f"P982{clave}", moneda=cls.moneda, sat_regimen_fiscal=regimen,
+                    sat_forma_pago=forma, sat_metodo_pago=metodo, codigo=f"P982{clave}", razon_social="P",
+                    telefono="8100000000", contacto_principal="Ana", rfc="XAXX010101000",
+                    email=f"p982{clave}@p.test",
+                ),
+                "usuario": Usuario.objects.create(
+                    username=f"ec982-{clave}", email=f"ec982-{clave}@ec982.test", empresa=empresa,
+                    sucursal_default=sucursal, is_admin_empresa=True,
+                ),
+            }
+        a, b = cls.t["a"], cls.t["b"]
+
+        def etiqueta(t, epc, sucursal, variante=None):
+            impresion = EtiquetaRFIDImpresion.objects.create(
+                empresa=t["empresa"], sucursal=sucursal, producto=t["producto"], producto_variante=variante,
+            )
+            return EtiquetaRFIDDetalle.objects.create(impresion=impresion, epc=epc, barcode_value="X")
+
+        cls.etiqueta_g = etiqueta(a, cls.EPC_G, a["otra_sucursal"], a["variantes"]["G"])
+        cls.etiqueta_producto = etiqueta(a, cls.EPC_PRODUCTO, a["sucursal"])
+        cls.etiqueta_b = etiqueta(b, cls.EPC_B, b["sucursal"], b["variantes"]["G"])
+
+    def setUp(self):
+        self.api = APIClient()
+        self.api.force_authenticate(user=self.t["a"]["usuario"])
+        t = self.t["a"]
+        self.oc = OrdenCompra.objects.create(
+            empresa=t["empresa"], sucursal=t["sucursal"], proveedor=t["proveedor"], moneda=self.moneda,
+            usuario=t["usuario"], fecha_oc=timezone.localdate(), tipo_compra="PT",
+        )
+        self.renglon_ch, self.renglon_g = [
+            OrdenCompraDetalle.objects.create(
+                orden_compra=self.oc, producto=t["producto"], producto_variante=t["variantes"][talla],
+                sucursal=t["sucursal"], cantidad=5,
+            )
+            for talla in ("CH", "G")
+        ]
+        self.encuadre = RecepcionRFIDEncuadre.objects.create(
+            tipo_origen="OC", orden_compra=self.oc, empresa=t["empresa"], sucursal=t["sucursal"],
+            proveedor=t["proveedor"], almacen=t["almacen"], usuario=t["usuario"], fecha_recepcion=timezone.now(),
+        )
+
+    def _leer(self, body):
+        return self.api.post(f"{self.URL}{self.encuadre.pk}/lecturas/", body, format="json")
+
+    def _leer_ok(self, body):
+        resp = self._leer(body)
+        self.assertEqual(resp.status_code, 201, resp.content)
+        return resp.json()
+
+    def test_epc_con_variante_va_al_renglon_de_su_talla(self):
+        # Impresa en otra sucursal de la empresa: no hay filtro por sucursal.
+        data = self._leer_ok({"epc": self.EPC_G})
+        variante = self.t["a"]["variantes"]["G"]
+        self.assertEqual(
+            (data["epc"], data["codigo_tag"], data["etiqueta"], data["producto_variante"], data["producto"],
+             data["orden_compra_detalle"], data["metadata"]["source"], data["metadata"]["resolved"]),
+            (self.EPC_G, self.EPC_G, self.etiqueta_g.pk, variante.pk, variante.producto_id,
+             self.renglon_g.pk, "EPC", True),
+        )
+        self.assertNotIn("motivo", data["metadata"])
+        detalle = self.api.get(f"{self.URL}{self.encuadre.pk}/").json()
+        self.assertEqual([(d["producto_variante_talla"], d["leido"]) for d in detalle["resumen"]["detalle"]],
+                         [("CH", "0"), ("G", "1.0000")])
+        self.assertEqual(detalle["lecturas"][0]["epc"], self.EPC_G)
+
+    def test_epc_con_variante_inactiva_se_asigna_por_la_etiqueta(self):
+        ProductoVariante.objects.filter(pk=self.t["a"]["variantes"]["G"].pk).update(activo=False)
+        data = self._leer_ok({"epc": self.EPC_G})
+        self.assertEqual(data["orden_compra_detalle"], self.renglon_g.pk)
+
+    def test_epc_solo_con_producto_usa_la_regla_por_producto(self):
+        # Sin variante: el primer renglón del producto, como un código de producto.
+        data = self._leer_ok({"epc": self.EPC_PRODUCTO})
+        self.assertEqual(
+            (data["etiqueta"], data["producto"], data["producto_variante"], data["orden_compra_detalle"]),
+            (self.etiqueta_producto.pk, self.t["a"]["producto"].pk, None, self.renglon_ch.pk),
+        )
+
+    def test_epc_en_op_va_al_renglon_de_su_variante(self):
+        from nucleo.models import UnidadMedida
+        from produccion.models import ListaMaterialBom, OrdenProduccion, OrdenProduccionDetalle
+
+        t = self.t["a"]
+        unidad = UnidadMedida.objects.create(clave="PZA-982", nombre="Pieza")
+        op = OrdenProduccion.objects.create(empresa=t["empresa"], sucursal=t["sucursal"], folio_op="OP-982")
+        renglones = {
+            talla: OrdenProduccionDetalle.objects.create(
+                op=op, producto_variante=t["variantes"][talla], cantidad=4, unidad=unidad,
+                bom=ListaMaterialBom.objects.create(
+                    empresa=t["empresa"], producto_variante=t["variantes"][talla], activo=True,
+                ),
+            )
+            for talla in ("CH", "G")
+        }
+        self.encuadre = RecepcionRFIDEncuadre.objects.create(
+            tipo_origen="OP", op=op, empresa=t["empresa"], sucursal=t["sucursal"], almacen=t["almacen"],
+            usuario=t["usuario"], fecha_recepcion=timezone.now(),
+        )
+        data = self._leer_ok({"epc": self.EPC_G})
+        self.assertEqual((data["orden_produccion_detalle"], data["orden_compra_detalle"]),
+                         (renglones["G"].op_detalle_id, None))
+
+    def test_epc_desconocido_se_guarda_sin_asignar(self):
+        data = self._leer_ok({"epc": "dead-beef:0000 1111 2222 3333"})
+        self.assertEqual(
+            (data["epc"], data["codigo_tag"], data["etiqueta"], data["producto"], data["orden_compra_detalle"],
+             data["metadata"]["resolved"], data["metadata"]["motivo"]),
+            ("DEADBEEF0000111122223333", "DEADBEEF0000111122223333", None, None, None,
+             False, "epc_no_registrado"),
+        )
+        resumen = self.api.get(f"{self.URL}{self.encuadre.pk}/").json()["resumen"]
+        self.assertEqual(resumen["total_sin_asignar"], "1.0000")
+
+    def test_epc_de_otra_empresa_es_como_uno_desconocido(self):
+        data = self._leer_ok({"epc": self.EPC_B})
+        self.assertEqual(
+            (data["etiqueta"], data["producto"], data["producto_variante"], data["orden_compra_detalle"],
+             data["metadata"]["motivo"]),
+            (None, None, None, None, "epc_no_registrado"),
+        )
+
+    def test_ambos_o_ninguno_es_400(self):
+        for body in ({}, {"epc": self.EPC_G, "codigo_tag": "C982a-G"}):
+            with self.subTest(body=body):
+                resp = self._leer(body)
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn("epc", resp.json())
+        self.assertFalse(self.encuadre.lecturas.exists())
+
+    def test_epc_vacio_o_sin_hex_es_400(self):
+        for epc in ("", "  ", "- : -"):
+            with self.subTest(epc=epc):
+                self.assertEqual(self._leer({"epc": epc}).status_code, 400)
+
+    def test_epc_repetido_con_y_sin_relleno_es_400(self):
+        self._leer_ok({"epc": self.EPC_G})
+        for forma in (self.EPC_G, self.EPC_G.lower(), f"{self.EPC_G}00000000", "11:11-2222 3333444455 55AAAA"):
+            with self.subTest(forma=forma):
+                resp = self._leer({"epc": forma})
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {"epc": "Este tag ya fue leído en este encuadre."})
+        self.assertEqual(self.encuadre.lecturas.count(), 1)
+
+    def test_epc_desconocido_repetido_es_400(self):
+        self._leer_ok({"epc": "ABCDEF0123456789"})
+        self.assertEqual(self._leer({"epc": "abcdef0123456789"}).status_code, 400)
+
+    def test_codigo_tag_repetido_sigue_en_su_campo(self):
+        self._leer_ok({"codigo_tag": "C982a-G"})
+        self.assertEqual(self._leer({"codigo_tag": "C982a-G"}).json(),
+                         {"codigo_tag": "Este tag ya fue leído en este encuadre."})
+
+    def test_largo_mayor_al_del_modelo_es_400(self):
+        for campo in ("codigo_tag", "epc"):
+            with self.subTest(campo=campo):
+                resp = self._leer({campo: "A" * 121})
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn(campo, resp.json())
+        self.assertEqual(self._leer({"codigo_tag": "Z" * 120}).status_code, 201)
+
+    def test_codigo_tag_con_varias_coincidencias_es_determinista(self):
+        # Gana la variante de id menor (CH), sin importar el orden de las partes.
+        ch = self.t["a"]["variantes"]["CH"]
+        for i, codigo in enumerate(("C982a-G C982a-CH", "C982a-CH,C982a-G")):
+            with self.subTest(codigo=codigo):
+                data = self._leer_ok({"codigo_tag": f"{codigo} T{i}"})
+                self.assertEqual((data["producto_variante"], data["orden_compra_detalle"]),
+                                 (ch.pk, self.renglon_ch.pk))
+
+    def test_codigo_de_producto_repetido_en_dos_productos_es_determinista(self):
+        t = self.t["a"]
+        tipo = t["producto"].tipo
+        primero = Producto.objects.create(empresa=t["empresa"], nombre="Tela 1", tipo=tipo, codigo="T982")
+        Producto.objects.create(empresa=t["empresa"], nombre="Tela 2", tipo=tipo, cod_proscai="T982")
+        data = self._leer_ok({"codigo_tag": "T982"})
+        self.assertEqual(data["producto"], primero.pk)
+
+    def test_lectura_por_epc_no_crece_en_consultas(self):
+        with CaptureQueriesContext(connection) as por_codigo:
+            self._leer_ok({"codigo_tag": "C982a-G"})
+        with CaptureQueriesContext(connection) as por_epc:
+            self._leer_ok({"epc": self.EPC_G})
+        self.assertLessEqual(len(por_epc), len(por_codigo))
 
 
 class ComprasDashboardRetiradoTests(TestCase):

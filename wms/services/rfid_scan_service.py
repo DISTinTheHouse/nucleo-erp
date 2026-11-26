@@ -43,12 +43,14 @@ def variantes_epc(epc):
     return {v for v in out if len(v) >= 8}
 
 
-def etiquetas_por_epc(epcs, empresa_id=None):
+def etiquetas_por_epc(epcs, empresa_id=None, con_producto=False):
     """``{epc_leido: EtiquetaRFIDDetalle}`` en una sola consulta.
 
     Con ``empresa_id`` (lector con token) solo busca en esa empresa. Sin ella
     (``/api/receive-scan/``) busca en todas: el EPC es único global. Cada
-    detalle trae ``empresa_id_`` de su impresión.
+    detalle trae ``empresa_id_`` de su impresión. ``con_producto`` trae además
+    la impresión con su producto y variante en la misma consulta (encuadre
+    RFID de recepción, EC-982).
     """
     variantes = {epc: variantes_epc(epc) for epc in epcs}
     todas = set().union(*variantes.values()) if variantes else set()
@@ -57,12 +59,12 @@ def etiquetas_por_epc(epcs, empresa_id=None):
     qs = EtiquetaRFIDDetalle.objects.filter(epc__in=todas)
     if empresa_id:
         qs = qs.filter(impresion__empresa_id=empresa_id)
-    por_variante = {
-        d.epc: d
-        for d in qs.annotate(empresa_id_=F("impresion__empresa_id")).only(
-            "id", "epc", "estado", "leida_at"
-        )
-    }
+    qs = qs.annotate(empresa_id_=F("impresion__empresa_id"))
+    if con_producto:
+        qs = qs.select_related("impresion__producto", "impresion__producto_variante__producto")
+    else:
+        qs = qs.only("id", "epc", "estado", "leida_at")
+    por_variante = {d.epc: d for d in qs}
     out = {}
     for epc, vs in variantes.items():
         # Exacto primero; luego cualquier variante.

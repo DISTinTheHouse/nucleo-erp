@@ -3236,12 +3236,31 @@ Mismo payload que `recepciones/onboarding/` (reusa la lógica, no la duplica): `
 ```
 Manda `orden_compra` **u** `op` (nunca ambos). `empresa`/`sucursal`/`proveedor`/`usuario` los pone el backend. Sin empresa (superusuario incluido) → `400 {"empresa"}`; `almacen` de otra empresa → `400 {"almacen"}` (#875).
 
-**2) Escanear un tag** — `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/lecturas/`
+**2) Escanear una pieza** — `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/lecturas/`
+
+Manda **exactamente uno** de `epc` o `codigo_tag`; ambos o ninguno → `400 {"epc"}`. Los dos campos tienen tope de 120 caracteres (más largo → `400` en ese campo, antes era `500`). Solo funciona si el encuadre sigue `PENDIENTE` (`400 {"estatus"}`).
 
 ```json
-{ "codigo_tag": "9999-NEG" }
+{ "epc": "11112222333344445555AAAA" }
 ```
-Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto. Con SKU, la lectura va al renglón de esa variante (si la orden no la tiene, a un renglón del producto sin variante; si tampoco, queda sin asignar). Un tag repetido en el mismo encuadre regresa `400 {"codigo_tag": "Este tag ya fue leído en este encuadre."}`, también si llegan dos envíos simultáneos del mismo tag (lector tipo teclado que manda doble; antes el segundo podía dar `500`, EC-981). Solo funciona si el encuadre sigue `PENDIENTE` (`400 {"estatus"}`).
+**Por EPC (recomendado, EC-982).** Una lectura = una pieza. El EPC se normaliza (hex en mayúsculas, sin espacios, `:` ni `-`) y se busca la etiqueta que imprimió el ERP con él **en la empresa del encuadre** (cualquier sucursal); también se reconoce reportado con relleno a 128 bits o sin ceros a la izquierda.
+- Etiqueta con variante → producto y variante de la etiqueta, al renglón de esa variante (o, en OC, a un renglón del producto sin variante; si tampoco, sin asignar).
+- Etiqueta solo con producto → la regla por producto de siempre (el primer renglón del producto).
+- EPC no registrado, o de otra empresa → se guarda **sin asignar** (suma a `total_sin_asignar`) con `metadata.motivo = "epc_no_registrado"`.
+- `codigo_tag` se guarda con el EPC de la etiqueta (o el EPC normalizado si no está registrado): la misma pieza con o sin relleno es la misma lectura. Repetida → `400 {"epc": "Este tag ya fue leído en este encuadre."}`.
+
+Respuesta `201` (la lectura): los campos de siempre más `epc` (el EPC, `null` si llegó por `codigo_tag`) y `etiqueta` (id de `EtiquetaRFIDDetalle`, `null` si no está registrado o llegó por `codigo_tag`):
+```json
+{ "id": 7, "codigo_tag": "11112222333344445555AAAA", "epc": "11112222333344445555AAAA", "etiqueta": 55,
+  "orden_compra_detalle": 12, "orden_produccion_detalle": null, "producto": 3, "producto_nombre": "Camisa",
+  "producto_variante": 9, "producto_variante_nombre": "Camisa G", "cantidad_leida": "1.0000",
+  "metadata": { "resolved": true, "source": "EPC", "epc_leido": "11112222333344445555AAAA" },
+  "created_at": "2026-11-26T20:00:00Z" }
+```
+
+**Por `codigo_tag` (obsoleto, se retirará).** Para lectores tipo teclado: `{ "codigo_tag": "9999-NEG" }`. Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto; el texto se parte por espacios y comas y vale cualquiera de las partes (si varias coinciden, gana la de `id` menor). Con SKU, la lectura va al renglón de esa variante (si la orden no la tiene, a un renglón del producto sin variante; si tampoco, queda sin asignar). Como el repetido se detecta por el texto completo, un SKU solo cuenta una pieza por encuadre. Repetido → `400 {"codigo_tag": "Este tag ya fue leído en este encuadre."}`.
+
+El repetido regresa `400` también si llegan dos envíos simultáneos de la misma pieza (lector que manda doble; antes el segundo podía dar `500`, EC-981).
 
 **Listado** — `GET /api/v1/compras/recepcion-rfid-encuadres/` (EC-981). Fila ligera: los mismos campos del detalle **sin `lecturas[]` ni `resumen`**, más sus totales planos con los mismos nombres y formato que en `resumen`: `total_esperado`, `total_leido`, `total_sin_asignar` (texto decimal) y `completo` (bool). Para ver las lecturas usa el detalle.
 
@@ -7083,8 +7102,12 @@ No hay endpoint especial tipo onboarding. El modal consta de 3 partes:
 - **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/scans/`
 - **Descripción**: devuelve **últimas 50 filas de `RfidScan`** en orden DESC (reciente → antiguo). **Cada scan trae su `match_impresion`** (true/false): la lectura se liga a su `EtiquetaRFIDDetalle` (misma empresa del lector) al recibirse en `scans/receive/`, o al registrar la impresión si la lectura llegó antes. La primera lectura pone la etiqueta en `LEIDO`. Los tags ajenos (p. ej. `3035…` de fábrica) salen con `match_impresion: false`. Un no admin solo ve el detalle de etiquetas de sus sucursales.
 - **Autenticación**: Bearer token.
-- **Query params (opcionales para debug)**:
-  - `epc=XXXX` (hex): busca directo este EPC en el payload de 50 scans y devuelve `debug_get.query_epc_search.found_in_scans` (booleano rápido sin iterar).
+- **Query params (opcionales)**:
+  - `solo_match=1`: solo lecturas de etiquetas impresas por el ERP.
+  - `unicos=1`: la última lectura de cada EPC (el FX repite el mismo tag cada pocos segundos).
+  - `limite=N`: máximo de lecturas (1-200, default 50).
+  - `despues_de_id=N` (EC-982): cursor, solo lecturas con `id` mayor que `N` (entero ≥ 0; inválido → `400 {"despues_de_id"}`). Se aplica antes de `unicos` y `limite`. Para ignorar lo leído antes de empezar una captura: al iniciarla guarda el `id` más alto que regrese el feed (o `0` si viene vacío) y manda ese valor fijo en cada polling; con `unicos=1&limite=200` cubre hasta 200 piezas distintas por captura. Sin el parámetro, la misma respuesta de siempre.
+  - `epc=XXXX` (hex, debug): busca directo este EPC en el payload y devuelve `debug_get.query_epc_search.found_in_scans` (booleano rápido sin iterar).
 
 **Ejemplo URL de debug (recién impresa una etiqueta)**:
 
