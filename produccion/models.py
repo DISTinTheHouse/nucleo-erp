@@ -196,6 +196,10 @@ class PreOrdenProduccion(models.Model):
     motivo_rechazo = models.CharField(max_length=500, blank=True, default="")
     # Resurtido ligado a pedidos de venta que cubre (como ``OrdenCompra.pedidos``).
     pedidos = models.ManyToManyField(Pedido, related_name="pre_ordenes_resurtido", blank=True)
+    # Lo que ``crear-op`` devolvió en ``pedidos_omitidos`` (``[{id, folio, motivo}]``) al
+    # crear la OP: queda fijo, no se recalcula (EC-980). ``null`` = sin registro (no se
+    # ha convertido, o se convirtió antes de que existiera el campo).
+    pedidos_omitidos = models.JSONField(null=True, blank=True, default=None)
     usuario_crea = models.ForeignKey('usuarios.Usuario', on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     estatus = models.CharField(max_length=20, choices=Estatus.choices, default=Estatus.PENDIENTE_VALIDAR, db_index=True)
     op = models.ForeignKey(

@@ -38,6 +38,45 @@ EPS = Decimal("0.0001")
 CERO = Decimal("0")
 DIAS_AMARILLO = 3
 
+# Motivos por los que ``crear-op`` no liga a la OP un pedido del resurtido (#1367).
+OMISION_CANCELADO = "cancelado"
+OMISION_BAJA = "dado de baja"
+OMISION_OTRA_SUCURSAL = "de otra sucursal"
+
+
+def motivo_omision(estatus, activo, sucursal_id, sucursal_pre_id):
+    """Por qué ``crear-op`` no liga un pedido del resurtido a la OP, o ``None`` si
+    se liga. En este orden: cancelado, dado de baja, de otra sucursal. La usan
+    ``crear-op`` y la vista previa de ``pedidos_vinculados`` (EC-980); sin consultas."""
+    if estatus == Pedido.ESTATUS_CANCELADO:
+        return OMISION_CANCELADO
+    if not activo:
+        return OMISION_BAJA
+    if sucursal_id != sucursal_pre_id:
+        return OMISION_OTRA_SUCURSAL
+    return None
+
+
+# ``pedidos_omitidos_fuente`` de la pre-orden (EC-980): de dónde sale ``motivo_omision``.
+FUENTE_VISTA_PREVIA = "vista_previa"  # abierta: con el estado de hoy de cada pedido
+FUENTE_REGISTRADA = "registrada"  # lo que guardó ``crear-op`` (``pedidos_omitidos``)
+FUENTE_SIN_REGISTRO = "sin_registro"  # se convirtió antes de que se guardara
+
+
+def fuente_omisiones(pre, convertida_alguna_vez):
+    """``FUENTE_*`` o ``None`` si no aplica (origen pedido, rechazada, cancelada sin
+    haberse convertido). ``convertida_alguna_vez``: tuvo evento ``op_creada`` (el
+    ``op`` se pierde si la OP se da de baja); solo se consulta en la cancelada sin registro."""
+    if pre.origen != PreOrdenProduccion.Origen.RESURTIDO:
+        return None
+    if pre.pedidos_omitidos is not None:
+        return FUENTE_REGISTRADA
+    if pre.estatus in CANCELABLES:
+        return FUENTE_VISTA_PREVIA
+    if pre.estatus == E.CONVERTIDA or (pre.estatus == E.CANCELADA and convertida_alguna_vez):
+        return FUENTE_SIN_REGISTRO
+    return None
+
 
 # --------------------------------------------------------------------------- utilidades
 
@@ -74,10 +113,14 @@ def avisar(pre, tipo, mensaje):
     transaction.on_commit(_enviar)
 
 
+#: Largo de ``PreOrdenEvento.descripcion`` (``max_length``); ``evento()`` corta ahí.
+LARGO_DESCRIPCION_EVENTO = 500
+
+
 def evento(pre, tipo, usuario=None, descripcion=""):
     PreOrdenEvento.objects.create(
         pre_orden=pre, evento=tipo, usuario=usuario if getattr(usuario, "pk", None) else None,
-        descripcion=(descripcion or "")[:500],
+        descripcion=(descripcion or "")[:LARGO_DESCRIPCION_EVENTO],
     )
     clave = str(tipo)
     if clave == "creada" and pre.estatus == E.PENDIENTE_ACEPTAR:
@@ -643,11 +686,30 @@ def cancelar(pre_id, user, motivo=""):
     return pre
 
 
-def marcar_convertida(pre, op, user):
+def descripcion_op_creada(folio_op, pedidos_omitidos):
+    """``"OP OP-1. Pedidos omitidos: P-1 (cancelado), #12 (dado de baja) y 3 más."``:
+    folio (o ``#id``) y motivo de los que quepan en ``LARGO_DESCRIPCION_EVENTO``; la
+    lista completa queda en ``pedidos_omitidos``. Sin omitidos, ``"OP OP-1."``."""
+    base = f"OP {folio_op}."
+    partes = [f"{o['folio'] or '#' + str(o['id'])} ({o['motivo']})" for o in pedidos_omitidos]
+    for n in range(len(partes), 0, -1):
+        resto = len(partes) - n
+        texto = f"{base} Pedidos omitidos: {', '.join(partes[:n])}" + (f" y {resto} más" if resto else "") + "."
+        if len(texto) <= LARGO_DESCRIPCION_EVENTO:
+            return texto
+    return f"{base} Pedidos omitidos: {len(partes)}." if partes else base
+
+
+def marcar_convertida(pre, op, user, pedidos_omitidos):
+    """Convertida en OP. En un resurtido guarda ``pedidos_omitidos`` tal como lo
+    devuelve ``crear-op`` (EC-980; en una de pedido queda ``null``: no aplica) y los
+    lista en el evento ``op_creada``; misma transacción que la OP."""
     campos = _cambiar_estatus(pre, E.CONVERTIDA)
     pre.op = op
-    pre.save(update_fields=[*campos, "op", "updated_at"])
-    evento(pre, EV.OP_CREADA, user, f"OP {op.folio_op}.")
+    if pre.origen == PreOrdenProduccion.Origen.RESURTIDO:
+        pre.pedidos_omitidos = list(pedidos_omitidos)
+    pre.save(update_fields=[*campos, "op", "pedidos_omitidos", "updated_at"])
+    evento(pre, EV.OP_CREADA, user, descripcion_op_creada(op.folio_op, pedidos_omitidos))
 
 
 # --------------------------------------------------------------------------- resurtido

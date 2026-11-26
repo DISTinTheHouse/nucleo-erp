@@ -9847,6 +9847,288 @@ class PreOrdenCrearOpRetencionTests(TestCase):
         self._sin_op(pre)
 
 
+class PreOrdenPedidosOmitidosTests(TestCase):
+    """EC-980 (sigue a #1367): ``crear-op/`` omite los pedidos del resurtido cancelados,
+    dados de baja o de otra sucursal, y la pre-orden lo expone: ``motivo_omision`` en
+    cada ``pedidos_vinculados`` (vista previa mientras está abierta, lo registrado al
+    crear la OP después), ``pedidos_omitidos`` y ``pedidos_omitidos_fuente``.
+
+    Mismo escenario que ``PreOrdenCrearOpRetencionTests`` (se reusa su alta y sus
+    helpers sin heredar sus pruebas)."""
+
+    URL = PreOrdenCrearOpRetencionTests.URL
+    _pre = PreOrdenCrearOpRetencionTests._pre
+    _crear_op = PreOrdenCrearOpRetencionTests._crear_op
+    _sin_op = PreOrdenCrearOpRetencionTests._sin_op
+
+    @classmethod
+    def setUpTestData(cls):
+        from nucleo.models import Sucursal
+        from ventas.models import Pedido
+
+        PreOrdenCrearOpRetencionTests.setUpTestData.__func__(cls)
+        cls.otra_sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="GDL", nombre="Guadalajara")
+
+        def pedido(folio, **kw):
+            base = dict(
+                empresa=cls.empresa, sucursal=cls.sucursal, cliente=cls.libre.cliente, moneda=cls.libre.moneda,
+                folio=folio, estatus=3, persona_pagos="Pagos", correo_facturas="p@ec980.test",
+                telefono_pagos="8100000000", forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+            )
+            return Pedido.objects.create(**{**base, **kw})
+
+        cls.cancelado =pedido("P-980-C", estatus=Pedido.ESTATUS_CANCELADO)
+        cls.baja = pedido("P-980-B", activo=False)
+        cls.ajeno = pedido("P-980-S", sucursal=cls.otra_sucursal)
+        cls.cancelado_baja = pedido("P-980-CB", estatus=Pedido.ESTATUS_CANCELADO, activo=False)
+        cls.cancelado_retenido = pedido(
+            "P-980-CR", estatus=Pedido.ESTATUS_CANCELADO, retenido=True, motivo_retencion="Crédito",
+            retenido_por=cls.usuario,
+        )
+        cls.sin_folio = pedido(None, estatus=Pedido.ESTATUS_CANCELADO)
+
+    # --- helpers -----------------------------------------------------------
+    def _resurtido(self, *pedidos, estatus=None):
+        """Resurtido Lista (o en ``estatus``) ligado a ``pedidos``."""
+        from produccion.models import PreOrdenProduccion
+        pre = self._pre(origen=PreOrdenProduccion.Origen.RESURTIDO)
+        pre.pedidos.set(pedidos)
+        if estatus is not None:
+            PreOrdenProduccion.objects.filter(pk=pre.pk).update(estatus=estatus)
+            pre.refresh_from_db()
+        return pre
+
+    def _api(self, user=None):
+        client = APIClient()
+        client.force_authenticate(user=user or self.usuario)
+        return client
+
+    def _detalle(self, pre):
+        resp = self._api().get(f"{self.URL}{pre.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def _fila(self, pre):
+        data = self._api().get(self.URL).json()
+        filas = data["results"] if isinstance(data, dict) else data
+        return next(f for f in filas if f["id"] == pre.pk)
+
+    @staticmethod
+    def _motivos(data):
+        return {p["id"]: p["motivo_omision"] for p in data["pedidos_vinculados"]}
+
+    def _convertir(self, pre):
+        resp = self._crear_op(pre)
+        self.assertEqual(resp.status_code, 201, resp.content)
+        pre.refresh_from_db()
+        return resp.json()
+
+    def _ligados_a_op(self, pre):
+        from produccion.models import OrdenProduccionPedido
+        return set(OrdenProduccionPedido.objects.filter(op_id=pre.op_id).values_list("pedido_id", flat=True))
+
+    # --- crear-op ------------------------------------------------------------
+    def test_cada_motivo_se_omite_no_se_liga_y_queda_registrado(self):
+        casos = ((self.cancelado, "cancelado"), (self.baja, "dado de baja"), (self.ajeno, "de otra sucursal"))
+        for pedido, motivo in casos:
+            with self.subTest(motivo=motivo):
+                pre = self._resurtido(self.libre, pedido)
+                data = self._convertir(pre)
+                esperado = [{"id": pedido.pk, "folio": pedido.folio, "motivo": motivo}]
+                self.assertEqual(data["pedidos_omitidos"], esperado)
+                self.assertEqual(self._ligados_a_op(pre), {self.libre.pk})
+                self.assertEqual(set(pre.pedidos.values_list("pk", flat=True)), {self.libre.pk, pedido.pk})
+                self.assertEqual(pre.pedidos_omitidos, esperado)
+                detalle = self._detalle(pre)
+                self.assertEqual(detalle["pedidos_omitidos_fuente"], "registrada")
+                self.assertEqual(detalle["pedidos_omitidos"], esperado)
+                self.assertEqual(self._motivos(detalle), {self.libre.pk: None, pedido.pk: motivo})
+
+    def test_cancelado_y_dado_de_baja_cuenta_como_cancelado(self):
+        pre = self._resurtido(self.cancelado_baja)
+        data = self._convertir(pre)
+        self.assertEqual([o["motivo"] for o in data["pedidos_omitidos"]], ["cancelado"])
+
+    def test_omitido_y_retenido_no_bloquea(self):
+        pre = self._resurtido(self.libre, self.cancelado_retenido)
+        data = self._convertir(pre)
+        self.assertEqual(data["pedidos_omitidos"],
+                         [{"id": self.cancelado_retenido.pk, "folio": "P-980-CR", "motivo": "cancelado"}])
+        self.assertEqual(self._ligados_a_op(pre), {self.libre.pk})
+        self.assertEqual(pre.pedidos_omitidos, data["pedidos_omitidos"])
+
+    def test_retenido_no_omitido_junto_a_un_omitido_400_sin_op_ni_registro(self):
+        from ventas.services.retencion_service import mensaje_retenido
+
+        pre = self._resurtido(self.cancelado, self.retenido)
+        resp = self._crear_op(pre)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"pedido": [mensaje_retenido(self.retenido)]})
+        self._sin_op(pre)
+        self.assertIsNone(pre.pedidos_omitidos)
+        self.assertEqual(self._detalle(pre)["pedidos_omitidos_fuente"], "vista_previa")
+
+    def test_sin_omisiones_registra_lista_vacia(self):
+        pre = self._resurtido(self.libre)
+        data = self._convertir(pre)
+        self.assertEqual(data["pedidos_omitidos"], [])
+        self.assertEqual(pre.pedidos_omitidos, [])
+        detalle = self._detalle(pre)
+        self.assertEqual((detalle["pedidos_omitidos_fuente"], detalle["pedidos_omitidos"]), ("registrada", []))
+        self.assertEqual(self._motivos(detalle), {self.libre.pk: None})
+
+    def test_folio_nulo_se_conserva(self):
+        pre = self._resurtido(self.libre, self.sin_folio)
+        esperado = [{"id": self.sin_folio.pk, "folio": None, "motivo": "cancelado"}]
+        self.assertEqual(self._convertir(pre)["pedidos_omitidos"], esperado)
+        self.assertEqual(self._detalle(pre)["pedidos_omitidos"], esperado)
+
+    def test_evento_op_creada_lista_los_omitidos(self):
+        from produccion.models import PreOrdenEvento
+
+        pre = self._resurtido(self.libre, self.cancelado, self.sin_folio)
+        folio_op = self._convertir(pre)["folio_op"]
+        descripcion = PreOrdenEvento.objects.get(pre_orden=pre, evento=PreOrdenEvento.Evento.OP_CREADA).descripcion
+        self.assertEqual(
+            descripcion,
+            f"OP {folio_op}. Pedidos omitidos: P-980-C (cancelado), #{self.sin_folio.pk} (cancelado).",
+        )
+
+    def test_evento_op_creada_sin_omitidos_no_cambia(self):
+        from produccion.models import PreOrdenEvento
+
+        pre = self._resurtido(self.libre)
+        folio_op = self._convertir(pre)["folio_op"]
+        self.assertEqual(
+            PreOrdenEvento.objects.get(pre_orden=pre, evento=PreOrdenEvento.Evento.OP_CREADA).descripcion,
+            f"OP {folio_op}.",
+        )
+
+    def test_evento_op_creada_con_muchos_omitidos_cabe_y_dice_cuantos_faltan(self):
+        from produccion.services.pre_orden_service import LARGO_DESCRIPCION_EVENTO, descripcion_op_creada
+
+        omitidos = [{"id": i, "folio": f"P-{i:06d}", "motivo": "cancelado"} for i in range(1, 31)]
+        texto = descripcion_op_creada("OP-000001", omitidos)
+        self.assertLessEqual(len(texto), LARGO_DESCRIPCION_EVENTO)
+        self.assertRegex(texto, r"^OP OP-000001\. Pedidos omitidos: P-000001 \(cancelado\), .* y \d+ más\.$")
+        listados = texto.count("(cancelado)")
+        self.assertTrue(texto.endswith(f" y {30 - listados} más."))
+        # El último listado está completo: no se corta a media entrada.
+        self.assertIn(f"P-{listados:06d} (cancelado) y", texto)
+
+    def test_pre_orden_de_pedido_no_guarda_omitidos(self):
+        from produccion.models import OrdenProduccion
+        from produccion.services.pre_orden_service import marcar_convertida
+
+        self._convertir(self._resurtido(self.libre))
+        op = OrdenProduccion.objects.get(empresa=self.empresa)
+        pre = self._pre(pedido=self.libre)
+        marcar_convertida(pre, op, self.usuario, [])
+        pre.refresh_from_db()
+        self.assertEqual((pre.estatus, pre.op_id, pre.pedidos_omitidos), ("convertida", op.pk, None))
+        detalle = self._detalle(pre)
+        self.assertEqual((detalle["pedidos_omitidos"], detalle["pedidos_omitidos_fuente"]), (None, None))
+
+    # --- vista previa y registro ---------------------------------------------
+    def test_vista_previa_coincide_con_crear_op_en_listado_y_detalle(self):
+        from produccion.models import PreOrdenProduccion
+
+        E = PreOrdenProduccion.Estatus
+        pedidos = (self.libre, self.cancelado, self.baja, self.ajeno, self.cancelado_baja)
+        for estatus in (E.PENDIENTE_ACEPTAR, E.LISTA):
+            with self.subTest(estatus=estatus):
+                pre = self._resurtido(*pedidos)
+                PreOrdenProduccion.objects.filter(pk=pre.pk).update(estatus=estatus)
+                previas = [self._detalle(pre), self._fila(pre)]
+                for data in previas:
+                    self.assertEqual(data["pedidos_omitidos_fuente"], "vista_previa")
+                    self.assertIsNone(data["pedidos_omitidos"])
+                    # El front sigue recibiendo sus campos; los auxiliares no salen.
+                    self.assertEqual(set(data["pedidos_vinculados"][0]), {"id", "folio", "cliente_nombre", "motivo_omision"})
+                PreOrdenProduccion.objects.filter(pk=pre.pk).update(estatus=E.LISTA)
+                omitidos = self._convertir(pre)["pedidos_omitidos"]
+                esperado = {p.pk: None for p in pedidos} | {o["id"]: o["motivo"] for o in omitidos}
+                for data in previas:
+                    self.assertEqual(self._motivos(data), esperado)
+                self.assertEqual(self._motivos(self._detalle(pre)), esperado)
+
+    def test_registro_no_se_recalcula_con_el_estado_actual(self):
+        from ventas.models import Pedido
+
+        pre = self._resurtido(self.libre, self.cancelado)
+        self._convertir(pre)
+        Pedido.objects.filter(pk=self.libre.pk).update(estatus=Pedido.ESTATUS_CANCELADO)
+        Pedido.objects.filter(pk=self.cancelado.pk).update(estatus=3)
+        for data in (self._detalle(pre), self._fila(pre)):
+            self.assertEqual(data["pedidos_omitidos_fuente"], "registrada")
+            self.assertEqual(self._motivos(data), {self.libre.pk: None, self.cancelado.pk: "cancelado"})
+
+    def test_convertida_sin_registro(self):
+        from produccion.models import PreOrdenEvento, PreOrdenProduccion
+
+        E = PreOrdenProduccion.Estatus
+        convertida = self._resurtido(self.libre, self.cancelado, estatus=E.CONVERTIDA)
+        # Cancelada después de convertirse y con la OP ya dada de baja (``op`` en null).
+        cancelada = self._resurtido(self.cancelado, estatus=E.CANCELADA)
+        PreOrdenEvento.objects.create(pre_orden=cancelada, evento=PreOrdenEvento.Evento.OP_CREADA)
+        for pre in (convertida, cancelada):
+            for data in (self._detalle(pre), self._fila(pre)):
+                self.assertEqual(data["pedidos_omitidos_fuente"], "sin_registro")
+                self.assertIsNone(data["pedidos_omitidos"])
+                self.assertEqual(set(self._motivos(data).values()), {None})
+
+    def test_fuente_nula_cuando_no_aplica(self):
+        from produccion.models import PreOrdenProduccion
+
+        E = PreOrdenProduccion.Estatus
+        casos = {
+            "cancelada sin convertirse": self._resurtido(self.cancelado, estatus=E.CANCELADA),
+            "rechazada": self._resurtido(self.cancelado, estatus=E.RECHAZADA),
+            "origen pedido": self._pre(pedido=self.libre),
+        }
+        for caso, pre in casos.items():
+            with self.subTest(caso=caso):
+                data = self._detalle(pre)
+                self.assertIsNone(data["pedidos_omitidos_fuente"])
+                self.assertEqual(set(self._motivos(data).values()) - {None}, set())
+
+    def test_listado_no_crece_en_consultas(self):
+        from produccion.models import PreOrdenEvento, PreOrdenProduccion
+
+        E = PreOrdenProduccion.Estatus
+
+        def consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._api().get(self.URL)
+            self.assertEqual(resp.status_code, 200)
+            return len(ctx.captured_queries)
+
+        self._resurtido(self.libre, self.cancelado)
+        una = consultas()
+        for estatus in (E.LISTA, E.CONVERTIDA, E.CANCELADA, E.PENDIENTE_ACEPTAR):
+            pre = self._resurtido(self.libre, self.cancelado, self.baja, self.ajeno, estatus=estatus)
+            PreOrdenEvento.objects.create(pre_orden=pre, evento=PreOrdenEvento.Evento.OP_CREADA)
+        convertida = self._resurtido(self.libre, self.cancelado)
+        self._convertir(convertida)
+        self.assertEqual(consultas(), una)
+        self.assertEqual(una, 1)
+
+    def test_otra_empresa_404(self):
+        from nucleo.models import Empresa, Sucursal
+        from usuarios.models import Usuario
+
+        pre = self._resurtido(self.libre, self.cancelado)
+        otra = Empresa.objects.create(codigo="ec980-b", razon_social="Otra SA")
+        ajeno = Usuario.objects.create(
+            username="ec980b", email="ec980b@ec980.test", empresa=otra,
+            sucursal_default=Sucursal.objects.create(empresa=otra, codigo="B", nombre="B"), is_admin_empresa=True,
+        )
+        self.assertEqual(self._api(ajeno).get(f"{self.URL}{pre.pk}/").status_code, 404)
+        data = self._api(ajeno).get(self.URL).json()
+        filas = data["results"] if isinstance(data, dict) else data
+        self.assertNotIn(pre.pk, [f["id"] for f in filas])
+
+
 class CanceladoPorNombreProduccionTests(TestCase):
     """EC-966: ``cancelado_por_nombre`` junto a ``cancelado_por`` en OP, OB, OR,
     OCM y SM (detalle, listado y respuesta de cancelar), sin consultas por fila."""

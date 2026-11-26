@@ -3376,7 +3376,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         return PreOrdenProduccionListSerializer if self.action == "list" else PreOrdenProduccionDetailSerializer
 
     def get_queryset(self):
-        from django.db.models import DecimalField
+        from django.db.models import BooleanField, Case, DecimalField, When
         empresa = getattr(self.request.user, "empresa", None)
         if empresa is None:
             return PreOrdenProduccion.objects.none()
@@ -3394,11 +3394,23 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 piezas_total=Coalesce(Subquery(piezas, output_field=DecimalField(max_digits=14, decimal_places=2)), Value(Decimal("0"))),
                 tallas_total=Coalesce(Subquery(tallas, output_field=IntegerField()), Value(0)),
                 fem=_fecha_estimada_material(OuterRef("pk")),
-                # Pedidos ligados al resurtido, en la misma consulta.
+                # Pedidos ligados al resurtido, en la misma consulta. ``estatus``,
+                # ``activo`` y ``sucursal`` son para la vista previa de la omisión
+                # (EC-980); el serializer no los expone.
                 pedidos_json=ArraySubquery(
                     PreOrdenProduccion.pedidos.through.objects.filter(preordenproduccion_id=OuterRef("pk"))
                     .order_by("pedido_id").values(json=JSONObject(
-                        id="pedido_id", folio="pedido__folio", cliente_nombre="pedido__cliente_nombre"))
+                        id="pedido_id", folio="pedido__folio", cliente_nombre="pedido__cliente_nombre",
+                        estatus="pedido__estatus", activo="pedido__activo", sucursal="pedido__sucursal_id"))
+                ),
+                # Resurtido cancelado sin registro de omitidos: ¿se convirtió alguna vez?
+                # (``op`` es SET_NULL). El CASE solo evalúa el EXISTS en esas filas.
+                convertida_alguna_vez=Case(
+                    When(origen=PreOrdenProduccion.Origen.RESURTIDO, estatus=PreOrdenProduccion.Estatus.CANCELADA,
+                         pedidos_omitidos__isnull=True,
+                         then=Exists(PreOrdenEvento.objects.filter(
+                             pre_orden_id=OuterRef("pk"), evento=PreOrdenEvento.Evento.OP_CREADA))),
+                    default=Value(False), output_field=BooleanField(),
                 ),
             )
         )
@@ -3494,7 +3506,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         respuesta trae ``pedidos_omitidos``: pedidos del resurtido que no se ligaron (#1367)."""
         from nucleo.models import UnidadMedida
         from produccion.api.serializers import ligar_pedidos_op
-        from produccion.services.pre_orden_service import marcar_convertida, materiales, recalcular
+        from produccion.services.pre_orden_service import marcar_convertida, materiales, motivo_omision, recalcular
         pre = self.get_object()
         from ventas.services.retencion_service import mensaje_retenido
         with transaction.atomic():
@@ -3523,9 +3535,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             for p in bloqueados:
                 if p.pk not in ligados or p.pk == pre.pedido_id:
                     continue
-                motivo = ("cancelado" if p.estatus == Pedido.ESTATUS_CANCELADO else
-                          "dado de baja" if not p.activo else
-                          "de otra sucursal" if p.sucursal_id != pre.sucursal_id else None)
+                motivo = motivo_omision(p.estatus, p.activo, p.sucursal_id, pre.sucursal_id)
                 if motivo:
                     pedidos_omitidos.append({"id": p.pk, "folio": p.folio, "motivo": motivo})
             omitidos = {o["id"] for o in pedidos_omitidos}
@@ -3557,7 +3567,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 request, data=data, sucursal=pre.sucursal,
                 # Los pedidos del resurtido van directo a la OP, revisados arriba (no son
                 # pedidos de muestra: no pasan por ``_validar_pedido``).
-                post_crear=lambda op: (marcar_convertida(pre, op, request.user),
+                post_crear=lambda op: (marcar_convertida(pre, op, request.user, pedidos_omitidos),
                                        ligar_pedidos_op(op, pedidos_ligados)),
             )
         if respuesta.status_code != status.HTTP_201_CREATED:

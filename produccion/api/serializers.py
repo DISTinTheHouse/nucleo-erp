@@ -3413,11 +3413,36 @@ class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True, allow_null=True, default=None)
     sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True, allow_null=True, default=None)
     referencia = serializers.SerializerMethodField()
-    # ``[{id, folio, cliente_nombre}]`` (anotado como ``pedidos_json`` en la vista).
+    # ``[{id, folio, cliente_nombre, motivo_omision}]`` (anotado como ``pedidos_json`` en la vista).
     pedidos_vinculados = serializers.SerializerMethodField()
+    # EC-980: lo que guardó ``crear-op`` tal cual (``null`` = sin registro) y de dónde
+    # sale ``motivo_omision`` (``pre_orden_service.FUENTE_*`` o ``null``).
+    pedidos_omitidos = serializers.JSONField(read_only=True)
+    pedidos_omitidos_fuente = serializers.SerializerMethodField()
+
+    @staticmethod
+    def _fuente(obj):
+        from produccion.services.pre_orden_service import fuente_omisiones
+        return fuente_omisiones(obj, getattr(obj, "convertida_alguna_vez", False))
+
+    def get_pedidos_omitidos_fuente(self, obj):
+        return self._fuente(obj)
 
     def get_pedidos_vinculados(self, obj):
-        return getattr(obj, "pedidos_json", None) or []
+        """``motivo_omision``: vista previa con la regla de ``crear-op`` (que tampoco
+        revisa ``pre.pedido``), lo registrado al crear la OP, o ``null``. Sin consultas."""
+        from produccion.services import pre_orden_service as s
+        fuente = self._fuente(obj)
+        registrados = {o["id"]: o["motivo"] for o in obj.pedidos_omitidos or []} if fuente == s.FUENTE_REGISTRADA else {}
+        out = []
+        for p in getattr(obj, "pedidos_json", None) or []:
+            motivo = None
+            if fuente == s.FUENTE_VISTA_PREVIA and p["id"] != obj.pedido_id:
+                motivo = s.motivo_omision(p["estatus"], p["activo"], p["sucursal"], obj.sucursal_id)
+            elif fuente == s.FUENTE_REGISTRADA:
+                motivo = registrados.get(p["id"])
+            out.append({"id": p["id"], "folio": p["folio"], "cliente_nombre": p["cliente_nombre"], "motivo_omision": motivo})
+        return out
     op_folio = serializers.CharField(source="op.folio_op", read_only=True, allow_null=True, default=None)
     # Estatus de la OP ligada (EC-968): con ``op_estatus == 7`` (Cancelado) una
     # Convertida se puede cancelar. ``op`` viene en ``select_related``: sin consultas.
@@ -3435,7 +3460,7 @@ class PreOrdenProduccionListSerializer(serializers.ModelSerializer):
         model = PreOrdenProduccion
         fields = [
             "id", "origen", "origen_display", "referencia", "producto", "producto_nombre", "notas", "motivo_rechazo",
-            "pedidos_vinculados",
+            "pedidos_vinculados", "pedidos_omitidos", "pedidos_omitidos_fuente",
             "pedido", "pedido_folio", "cliente_nombre", "sucursal", "sucursal_nombre", "estatus", "estatus_display",
             "op", "op_folio", "op_estatus", "op_estatus_display", "piezas_total", "tallas_total", "fecha_confirmacion_existencias",
             "fecha_compromiso", "dias_en_estatus", "materiales_faltantes", "fecha_estimada_material",
