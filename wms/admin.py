@@ -356,7 +356,7 @@ class EtiquetaRFIDDetalleAdmin(admin.ModelAdmin):
 
 @admin.register(LectorRFID)
 class LectorRFIDAdmin(admin.ModelAdmin):
-    list_display = ("id", "nombre", "empresa", "sucursal", "activo", "ultima_lectura")
+    list_display = ("id", "nombre", "ubicacion", "empresa", "sucursal", "activo", "ultima_lectura")
     list_filter = ("activo", "empresa")
     search_fields = ("nombre",)
     readonly_fields = ("token", "ultima_lectura", "created_at", "updated_at")

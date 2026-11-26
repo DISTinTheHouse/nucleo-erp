@@ -432,8 +432,8 @@ def _token_de_authorization(auth):
     return ""
 
 
-def lector_desde_request(request):
-    """Lector activo dueño del token.
+def token_desde_request(request):
+    """Token del lector, o ``""`` si la petición no trae ninguno.
 
     Acepta, en este orden: header ``X-RFID-Token``, ``?token=`` en la URL y
     ``Authorization`` (Bearer o Basic con el token como contraseña).
@@ -441,6 +441,12 @@ def lector_desde_request(request):
     token = (request.headers.get("X-RFID-Token") or request.GET.get("token") or "").strip()
     if not token:
         token = _token_de_authorization(request.headers.get("Authorization"))
+    return token
+
+
+def lector_desde_request(request):
+    """Lector activo dueño del token (``None`` sin token o si no vale)."""
+    token = token_desde_request(request)
     if not token:
         return None
     return LectorRFID.objects.filter(token=token, activo=True).first()
@@ -469,20 +475,25 @@ def lectores_estado(user):
     for lc in LectorRFID.objects.filter(empresa_id=empresa_id).order_by("nombre").values(
         "id", "nombre", "sucursal_id", "activo", "ultima_conexion", "ultima_lectura"
     ):
-        seg_con, seg_lec = hace(lc["ultima_conexion"]), hace(lc["ultima_lectura"])
-        if seg_con is None or seg_con > SEGUNDOS_LECTOR_VIVO:
-            estado = "SIN_CONEXION"
-        elif seg_lec is not None and seg_lec <= SEGUNDOS_LECTOR_VIVO:
-            estado = "LEYENDO"
-        else:
-            estado = "CONECTADO_SIN_TAGS"
         filas.append({
             **lc,
-            "segundos_desde_conexion": seg_con,
-            "segundos_desde_lectura": seg_lec,
-            "estado": estado,
+            "segundos_desde_conexion": hace(lc["ultima_conexion"]),
+            "segundos_desde_lectura": hace(lc["ultima_lectura"]),
+            "estado": estado_lector(lc["ultima_conexion"], lc["ultima_lectura"], ahora),
         })
     return filas
+
+
+def estado_lector(ultima_conexion, ultima_lectura, ahora=None):
+    """``SIN_CONEXION``, ``LEYENDO`` o ``CONECTADO_SIN_TAGS`` con las dos marcas
+    que ya trae la fila del lector: no consulta nada."""
+    ahora = ahora or timezone.now()
+    vivo = timedelta(seconds=SEGUNDOS_LECTOR_VIVO)
+    if ultima_conexion is None or ahora - ultima_conexion > vivo:
+        return "SIN_CONEXION"
+    if ultima_lectura is not None and ahora - ultima_lectura <= vivo:
+        return "LEYENDO"
+    return "CONECTADO_SIN_TAGS"
 
 
 # Retención de lecturas huérfanas (#1155): tags ajenos leídos por un FX sin
@@ -869,5 +880,14 @@ def receive_scan_sin_token(request):
     Misma lógica que ``scans/receive/``. Con token (``?token=`` en la URL,
     ``X-RFID-Token`` o Basic) usa su lector y marca su heartbeat; sin token,
     cada lectura toma la empresa de la etiqueta impresa con su EPC.
+
+    Un token que no es de ningún lector activo (eliminado desde el ERP o
+    inventado) se rechaza con 401: no cae al modo sin token.
     """
-    return recibir_lecturas(request, lector_desde_request(request))
+    token = token_desde_request(request)
+    lector = None
+    if token:
+        lector = LectorRFID.objects.filter(token=token, activo=True).first()
+        if lector is None:
+            return JsonResponse({"status": "error", "message": "Lector no autorizado."}, status=401)
+    return recibir_lecturas(request, lector)

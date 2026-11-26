@@ -4,7 +4,7 @@ import secrets
 from django.contrib.postgres.indexes import OpClass
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models.functions import Upper
+from django.db.models.functions import Lower, Upper
 from simple_history.models import HistoricalRecords
 
 from nucleo.indices import GinIndexSoloPostgres
@@ -693,7 +693,11 @@ class LectorRFID(models.Model):
         null=True,
     )
     nombre = models.CharField(max_length=100)
+    # Dónde está físicamente (andén, puerta...). Texto libre, opcional.
+    ubicacion = models.CharField(max_length=150, blank=True, default="")
     token = models.CharField(max_length=64, unique=True, default=_generar_token_lector)
+    # ``False`` = eliminado desde el ERP: su token deja de valer y sus lecturas
+    # se conservan (soft delete).
     activo = models.BooleanField(default=True)
     ultima_lectura = models.DateTimeField(null=True, blank=True)
     # Último POST autenticado del FX, traiga tags o no (heartbeat incluido): con
@@ -707,6 +711,15 @@ class LectorRFID(models.Model):
         verbose_name = "Lector RFID"
         verbose_name_plural = "Lectores RFID"
         ordering = ["empresa_id", "nombre"]
+        constraints = [
+            # Nombre único por empresa entre los lectores vigentes; uno eliminado
+            # libera su nombre.
+            models.UniqueConstraint(
+                Lower("nombre"), "empresa",
+                condition=models.Q(activo=True),
+                name="uq_lector_rfid_empresa_nombre_activo",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.nombre} ({self.empresa_id})"

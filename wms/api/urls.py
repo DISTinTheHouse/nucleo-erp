@@ -1,5 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from wms.api.lectores_rfid import LectorRFIDViewSet
 from wms.api.surtido import SurtidoPedidoViewSet
 from wms.api.views import DespachoViewSet, TransferenciaViewSet, PickingViewSet, PackingViewSet, EtiquetaRFIDViewSet
 
@@ -9,6 +10,8 @@ router.register(r'pickings', PickingViewSet, basename='pickings')
 router.register(r'packings', PackingViewSet, basename='packings')
 router.register(r'despachos', DespachoViewSet, basename='despachos')
 router.register(r'surtido-pedidos', SurtidoPedidoViewSet, basename='surtido-pedidos')
+# Antes que etiquetas-rfid: si no, ``etiquetas-rfid/{pk}/`` tomaría "lectores" como pk.
+router.register(r'etiquetas-rfid/lectores', LectorRFIDViewSet, basename='lectores-rfid')
 router.register(r'etiquetas-rfid', EtiquetaRFIDViewSet, basename='etiquetas-rfid')
 
 urlpatterns = [

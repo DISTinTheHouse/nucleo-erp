@@ -3987,3 +3987,161 @@ class DespachoEntregadoPorNombreEC979Tests(TestCase):
         self.assertEqual(len(filas), 4)
         self.assertEqual({f["entregado_por_nombre"] for f in filas}, {"U0", "U1", "U2", "U3"})
         self.assertEqual(len(cuatro), len(uno))
+
+
+class LectoresRFIDApiTests(TestCase):
+    """``/api/v1/wms/etiquetas-rfid/lectores/``: alta, lista y baja de lectores."""
+
+    URL = "/api/v1/wms/etiquetas-rfid/lectores/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        cls.empresa_a = Empresa.objects.create(codigo="lect-a", razon_social="Empresa A")
+        cls.empresa_b = Empresa.objects.create(codigo="lect-b", razon_social="Empresa B")
+        cls.sucursal_a = Sucursal.objects.create(empresa=cls.empresa_a, codigo="LA1", nombre="LA1")
+        cls.sucursal_a2 = Sucursal.objects.create(empresa=cls.empresa_a, codigo="LA2", nombre="LA2")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.empresa_b, codigo="LB1", nombre="LB1")
+        cls.lector_a = LectorRFID.objects.create(empresa=cls.empresa_a, sucursal=cls.sucursal_a, nombre="FX A")
+        cls.lector_a2 = LectorRFID.objects.create(empresa=cls.empresa_a, sucursal=cls.sucursal_a2, nombre="FX A2")
+        cls.lector_b = LectorRFID.objects.create(empresa=cls.empresa_b, sucursal=cls.sucursal_b, nombre="FX B")
+        cls.admin_a = Usuario.objects.create(
+            username="lect-admin-a", email="lect-admin-a@example.com", empresa=cls.empresa_a,
+            sucursal_default=cls.sucursal_a, is_admin_empresa=True,
+        )
+        cls.admin_b = Usuario.objects.create(
+            username="lect-admin-b", email="lect-admin-b@example.com", empresa=cls.empresa_b,
+            sucursal_default=cls.sucursal_b, is_admin_empresa=True,
+        )
+        cls.lector_usuario = Usuario.objects.create(
+            username="lect-scan-a", email="lect-scan-a@example.com", empresa=cls.empresa_a,
+            sucursal_default=cls.sucursal_a,
+        )
+        permiso, _ = Permiso.objects.get_or_create(clave="R-WMS-SCANNER", defaults={"nombre": "R-WMS-SCANNER"})
+        UsuarioPermiso.objects.create(
+            usuario=cls.lector_usuario, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=cls.empresa_a,
+        )
+        cls.sin_permiso = Usuario.objects.create(
+            username="lect-nada-a", email="lect-nada-a@example.com", empresa=cls.empresa_a,
+            sucursal_default=cls.sucursal_a,
+        )
+
+    def _api(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def _post_fx(self, token):
+        return self.client.post(
+            f"/api/receive-scan/?token={token}",
+            data=json.dumps([{"epcId": "AAAABBBBCCCCDDDDEEEE7777"}]),
+            content_type="application/json",
+        )
+
+    # ── Lista ─────────────────────────────────────────────────────────
+
+    def test_lista_solo_empresa_activa_con_url_fx_y_estado(self):
+        resp = self._api(self.admin_a).get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        filas = resp.json()
+        self.assertEqual([f["nombre"] for f in filas], ["FX A", "FX A2"])
+        fila = filas[0]
+        self.assertTrue(fila["url_fx"].endswith(f"/api/receive-scan/?token={self.lector_a.token}"))
+        self.assertEqual(fila["estado"], "SIN_CONEXION")
+        self.assertIsNone(fila["ultima_conexion"])
+
+    def test_lista_paginada_con_limit(self):
+        data = self._api(self.admin_a).get(self.URL + "?limit=1").json()
+        self.assertEqual(data["count"], 2)
+        self.assertEqual(len(data["results"]), 1)
+
+    def test_lista_consultas_constantes(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as antes:
+            self._api(self.admin_a).get(self.URL)
+        for i in range(10):
+            LectorRFID.objects.create(empresa=self.empresa_a, sucursal=self.sucursal_a, nombre=f"extra-{i}")
+        with CaptureQueriesContext(connection) as despues:
+            self._api(self.admin_a).get(self.URL)
+        self.assertEqual(len(antes), len(despues))
+
+    def test_estado_leyendo_tras_lectura_del_fx(self):
+        self.assertEqual(self._post_fx(self.lector_a.token).status_code, 200)
+        fila = self._api(self.admin_a).get(f"{self.URL}{self.lector_a.pk}/").json()
+        self.assertEqual(fila["estado"], "LEYENDO")
+        self.assertIsNotNone(fila["ultima_lectura"])
+
+    def test_no_admin_con_permiso_ve_solo_sus_sucursales(self):
+        resp = self._api(self.lector_usuario).get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([f["nombre"] for f in resp.json()], ["FX A"])
+
+    def test_sin_r_wms_scanner_403(self):
+        self.assertEqual(self._api(self.sin_permiso).get(self.URL).status_code, 403)
+
+    def test_otra_empresa_404(self):
+        cliente = self._api(self.admin_b)
+        self.assertEqual(cliente.get(f"{self.URL}{self.lector_a.pk}/").status_code, 404)
+        self.assertEqual(cliente.delete(f"{self.URL}{self.lector_a.pk}/").status_code, 404)
+
+    # ── Alta ──────────────────────────────────────────────────────────
+
+    def test_alta_genera_token_y_url_fx(self):
+        resp = self._api(self.admin_a).post(self.URL, {"nombre": "Anden 2", "ubicacion": "Puerta 2"}, format="json")
+        self.assertEqual(resp.status_code, 201)
+        lector = LectorRFID.objects.get(pk=resp.json()["id"])
+        self.assertTrue(lector.token)
+        self.assertEqual(lector.empresa_id, self.empresa_a.pk)
+        self.assertEqual(lector.sucursal_id, self.sucursal_a.pk)  # sucursal por defecto del usuario
+        self.assertEqual(resp.json()["ubicacion"], "Puerta 2")
+        self.assertIn(f"token={lector.token}", resp.json()["url_fx"])
+
+    def test_alta_nombre_duplicado_400_sin_importar_mayusculas(self):
+        resp = self._api(self.admin_a).post(self.URL, {"nombre": "fx a"}, format="json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("nombre", resp.json())
+
+    def test_alta_mismo_nombre_en_otra_empresa_si_vale(self):
+        resp = self._api(self.admin_b).post(self.URL, {"nombre": "FX A"}, format="json")
+        self.assertEqual(resp.status_code, 201)
+
+    def test_alta_sucursal_de_otra_empresa_400(self):
+        resp = self._api(self.admin_a).post(
+            self.URL, {"nombre": "Nuevo", "sucursal": self.sucursal_b.pk}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("sucursal", resp.json())
+
+    def test_no_admin_no_crea_ni_elimina(self):
+        cliente = self._api(self.lector_usuario)
+        self.assertEqual(cliente.post(self.URL, {"nombre": "x"}, format="json").status_code, 403)
+        self.assertEqual(cliente.delete(f"{self.URL}{self.lector_a.pk}/").status_code, 403)
+
+    # ── Baja (soft delete) ────────────────────────────────────────────
+
+    def test_baja_invalida_token_y_conserva_lecturas(self):
+        self.assertEqual(self._post_fx(self.lector_a.token).status_code, 200)
+        cliente = self._api(self.admin_a)
+
+        self.assertEqual(cliente.delete(f"{self.URL}{self.lector_a.pk}/").status_code, 204)
+
+        self.assertEqual(self._post_fx(self.lector_a.token).status_code, 401)
+        self.assertEqual(RfidScan.objects.filter(lector=self.lector_a).count(), 1)
+        self.assertNotIn(self.lector_a.pk, [f["id"] for f in cliente.get(self.URL).json()])
+        self.assertEqual(cliente.get(f"{self.URL}{self.lector_a.pk}/").status_code, 404)
+
+    def test_baja_libera_el_nombre(self):
+        cliente = self._api(self.admin_a)
+        cliente.delete(f"{self.URL}{self.lector_a.pk}/")
+        self.assertEqual(cliente.post(self.URL, {"nombre": "FX A"}, format="json").status_code, 201)
+
+    def test_receive_scan_token_inventado_401_y_sin_token_sigue(self):
+        self.assertEqual(self._post_fx("no-existe").status_code, 401)
+        resp = self.client.post(
+            "/api/receive-scan/", data=json.dumps([{"epcId": "AAAABBBBCCCCDDDDEEEE7778"}]),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200)
