@@ -10004,6 +10004,31 @@ class PreOrdenPedidosOmitidosTests(TestCase):
             f"OP {folio_op}.",
         )
 
+    def test_evento_op_creada_con_muchos_omitidos_cabe_y_dice_cuantos_faltan(self):
+        from produccion.services.pre_orden_service import LARGO_DESCRIPCION_EVENTO, descripcion_op_creada
+
+        omitidos = [{"id": i, "folio": f"P-{i:06d}", "motivo": "cancelado"} for i in range(1, 31)]
+        texto = descripcion_op_creada("OP-000001", omitidos)
+        self.assertLessEqual(len(texto), LARGO_DESCRIPCION_EVENTO)
+        self.assertRegex(texto, r"^OP OP-000001\. Pedidos omitidos: P-000001 \(cancelado\), .* y \d+ más\.$")
+        listados = texto.count("(cancelado)")
+        self.assertTrue(texto.endswith(f" y {30 - listados} más."))
+        # El último listado está completo: no se corta a media entrada.
+        self.assertIn(f"P-{listados:06d} (cancelado) y", texto)
+
+    def test_pre_orden_de_pedido_no_guarda_omitidos(self):
+        from produccion.models import OrdenProduccion
+        from produccion.services.pre_orden_service import marcar_convertida
+
+        self._convertir(self._resurtido(self.libre))
+        op = OrdenProduccion.objects.get(empresa=self.empresa)
+        pre = self._pre(pedido=self.libre)
+        marcar_convertida(pre, op, self.usuario, [])
+        pre.refresh_from_db()
+        self.assertEqual((pre.estatus, pre.op_id, pre.pedidos_omitidos), ("convertida", op.pk, None))
+        detalle = self._detalle(pre)
+        self.assertEqual((detalle["pedidos_omitidos"], detalle["pedidos_omitidos_fuente"]), (None, None))
+
     # --- vista previa y registro ---------------------------------------------
     def test_vista_previa_coincide_con_crear_op_en_listado_y_detalle(self):
         from produccion.models import PreOrdenProduccion

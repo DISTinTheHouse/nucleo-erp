@@ -4496,13 +4496,13 @@ Toda cancelación pide `motivo` y guarda en la orden `motivo_cancelacion`, `fech
 `crear-op/` no liga a la OP los pedidos del resurtido cancelados, dados de baja o de otra sucursal (#1367); su respuesta `201` no cambia. La pre-orden lo expone en el listado, el detalle y las respuestas de sus acciones, sin consultas extra:
 
 - `pedidos_vinculados[]` agrega `motivo_omision`: `"cancelado"`, `"dado de baja"`, `"de otra sucursal"` o `null` (se liga, o no se sabe). `id`, `folio` y `cliente_nombre` no cambian.
-- `pedidos_omitidos`: lo que devolvió `crear-op/` al crear la OP (`[{"id", "folio", "motivo"}]`, `[]` si no omitió ninguno), guardado tal cual; `null` si no hay registro.
+- `pedidos_omitidos`: lo que devolvió `crear-op/` al crear la OP en un resurtido (`[{"id", "folio", "motivo"}]`, `[]` si no omitió ninguno), guardado tal cual; `null` si no hay registro o no aplica (pre-orden de pedido). Solo tiene sentido cuando `pedidos_omitidos_fuente` no es `null`.
 - `pedidos_omitidos_fuente`, de dónde sale `motivo_omision`:
   - `"vista_previa"`: resurtido abierto (Pendiente de aceptar a Lista para producir). Se calcula con el estado de hoy de cada pedido y la misma regla de `crear-op/`; al crear la OP manda lo que diga `crear-op/`.
   - `"registrada"`: se guardó al crear la OP. No se recalcula: un pedido cancelado después no aparece como omitido, y uno omitido que se reactiva sigue omitido.
   - `"sin_registro"`: se convirtió antes de que se guardara (también si después se canceló); `motivo_omision` es `null` en todos.
   - `null`: no aplica (pre-orden de pedido, resurtido rechazado o cancelado sin haberse convertido).
-- El evento `op_creada` del historial (`historial/`) lista los omitidos: `"OP OP-000123. Pedidos omitidos: P-000045 (cancelado), #46 (dado de baja)."`.
+- El evento `op_creada` del historial (`historial/`) lista los omitidos: `"OP OP-000123. Pedidos omitidos: P-000045 (cancelado), #46 (dado de baja)."`. Si no caben en los 500 caracteres de la descripción, lista los que quepan y termina con `"y K más."`; la lista completa está en `pedidos_omitidos`.
 
 ### Salida a maquila — `POST /api/v1/produccion/salidas-maquila/{id}/cancelar/`
 

@@ -113,10 +113,14 @@ def avisar(pre, tipo, mensaje):
     transaction.on_commit(_enviar)
 
 
+#: Largo de ``PreOrdenEvento.descripcion`` (``max_length``); ``evento()`` corta ahí.
+LARGO_DESCRIPCION_EVENTO = 500
+
+
 def evento(pre, tipo, usuario=None, descripcion=""):
     PreOrdenEvento.objects.create(
         pre_orden=pre, evento=tipo, usuario=usuario if getattr(usuario, "pk", None) else None,
-        descripcion=(descripcion or "")[:500],
+        descripcion=(descripcion or "")[:LARGO_DESCRIPCION_EVENTO],
     )
     clave = str(tipo)
     if clave == "creada" and pre.estatus == E.PENDIENTE_ACEPTAR:
@@ -682,22 +686,30 @@ def cancelar(pre_id, user, motivo=""):
     return pre
 
 
-def texto_omitidos(pedidos_omitidos):
-    """``"P-1 (cancelado), #12 (dado de baja)"``: folio, o ``#id`` si no tiene."""
-    return ", ".join(f"{o['folio'] or '#' + str(o['id'])} ({o['motivo']})" for o in pedidos_omitidos)
+def descripcion_op_creada(folio_op, pedidos_omitidos):
+    """``"OP OP-1. Pedidos omitidos: P-1 (cancelado), #12 (dado de baja) y 3 más."``:
+    folio (o ``#id``) y motivo de los que quepan en ``LARGO_DESCRIPCION_EVENTO``; la
+    lista completa queda en ``pedidos_omitidos``. Sin omitidos, ``"OP OP-1."``."""
+    base = f"OP {folio_op}."
+    partes = [f"{o['folio'] or '#' + str(o['id'])} ({o['motivo']})" for o in pedidos_omitidos]
+    for n in range(len(partes), 0, -1):
+        resto = len(partes) - n
+        texto = f"{base} Pedidos omitidos: {', '.join(partes[:n])}" + (f" y {resto} más" if resto else "") + "."
+        if len(texto) <= LARGO_DESCRIPCION_EVENTO:
+            return texto
+    return f"{base} Pedidos omitidos: {len(partes)}." if partes else base
 
 
 def marcar_convertida(pre, op, user, pedidos_omitidos):
-    """Convertida en OP. Guarda ``pedidos_omitidos`` tal como lo devuelve ``crear-op``
-    (EC-980) y los lista en el evento ``op_creada``; misma transacción que la OP."""
+    """Convertida en OP. En un resurtido guarda ``pedidos_omitidos`` tal como lo
+    devuelve ``crear-op`` (EC-980; en una de pedido queda ``null``: no aplica) y los
+    lista en el evento ``op_creada``; misma transacción que la OP."""
     campos = _cambiar_estatus(pre, E.CONVERTIDA)
     pre.op = op
-    pre.pedidos_omitidos = list(pedidos_omitidos)
+    if pre.origen == PreOrdenProduccion.Origen.RESURTIDO:
+        pre.pedidos_omitidos = list(pedidos_omitidos)
     pre.save(update_fields=[*campos, "op", "pedidos_omitidos", "updated_at"])
-    descripcion = f"OP {op.folio_op}."
-    if pre.pedidos_omitidos:
-        descripcion += f" Pedidos omitidos: {texto_omitidos(pre.pedidos_omitidos)}."
-    evento(pre, EV.OP_CREADA, user, descripcion)
+    evento(pre, EV.OP_CREADA, user, descripcion_op_creada(op.folio_op, pedidos_omitidos))
 
 
 # --------------------------------------------------------------------------- resurtido
