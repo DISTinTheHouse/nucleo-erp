@@ -346,6 +346,8 @@ CANCELACION_REP = _CancelacionSat(
     al_cancelar=_al_cancelar_rep,
     # Al cancelarse el REP se limpia ``rep_facturama_id``: ya no es el que se mandó a cancelar.
     ya_cancelado=lambda c, facturama_id: c.rep_facturama_id != facturama_id,
+    # #1399: el motivo de ``cancelar-rep/`` queda en el cobro, como el del CFDI de la factura.
+    campo_nota="observaciones",
 )
 # Facturama documenta ``pending``; ``requested`` es el valor que el ERP ya manejaba (#630).
 CANCELACION_PENDIENTE = ("pending", "requested")
@@ -442,16 +444,17 @@ class FacturaTimbradoService:
         return cobro
 
     @staticmethod
-    def cancelar_rep(cobro, motivo_sat=None):
+    def cancelar_rep(cobro, motivo_sat=None, nota=""):
         """Cancela el REP ante el SAT con el motivo elegido (EC-806), con reserva previa y
         Facturama fuera de toda transacción (#627; ver ``_cancelar_ante_sat``).
 
-        ``canceled``: el UUID pasa a ``rep_cancelado_uuid`` (#625). ``pending``/``requested``:
+        ``canceled``: el UUID pasa a ``rep_cancelado_uuid`` (#625) y ``nota`` va a
+        ``observaciones`` en la misma transacción (#1399). ``pending``/``requested``:
         queda ``rep_cancelacion_solicitada`` (#624) y se reintenta cuando el receptor acepte.
         Se cancela con ``rep_facturama_id`` aunque falte el UUID (timbrado sin confirmar, #622).
         """
-        obj, error = _cancelar_ante_sat(CANCELACION_REP, cobro.pk, motivo_sat)
-        _copiar(obj, cobro, CANCELACION_REP.campos)
+        obj, error = _cancelar_ante_sat(CANCELACION_REP, cobro.pk, motivo_sat, nota)
+        _copiar(obj, cobro, (*CANCELACION_REP.campos, "observaciones"))
         if error:
             raise error
         return cobro

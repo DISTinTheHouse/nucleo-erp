@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.models import CuentaBancaria, MovimientoBancario
+from finanzas.services.conciliacion_service import ConciliacionService
 from finanzas.services.movimiento_bancario_poliza_service import MovimientoBancarioPolizaService
 
 
@@ -58,6 +59,7 @@ class MovimientoBancarioService:
                     )
                 }
             )
+        ConciliacionService.exigir_fuera_de_cerrada([movimiento.pk])  # #1417
         cuenta = CuentaBancaria.objects.select_for_update().get(
             pk=movimiento.cuenta_bancaria_id
         )
