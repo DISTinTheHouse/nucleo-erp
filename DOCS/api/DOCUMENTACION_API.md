@@ -7052,7 +7052,7 @@ El frontend (Next.js) NO habla directamente con el lector FX. El flujo es:
 **Importante arquitectura**:
 
 - `POST /api/v1/wms/etiquetas-rfid/scans/receive/` es SOLO para el FX. **Next.js NUNCA llama a receive**.
-  - Autenticación: token del `LectorRFID` (alta en admin Django → *Lectores RFID*; el token se genera solo).
+  - Autenticación: token del `LectorRFID` (alta en WMS → RFID → Lectores RFID, ver "WMS - Lectores RFID"; el token se genera solo).
   - El token va en header `X-RFID-Token: <token>`, query `?token=<token>`, `Authorization: Bearer <token>` o `Authorization: Basic base64(<usuario>:<token>)` (contraseña = token, usuario libre). El HTTP POST del IoT Connector de Zebra solo ofrece Basic o TLS: con Basic se configura sin tocar la URL.
   - Acepta un evento suelto (`{"data": {"idHex": …}, "type": "SIMPLE"}`), un arreglo de eventos (lote) o NDJSON. Solo guarda EPCs en hex; heartbeats y eventos de gestión se ignoran.
   - Sin token válido o lector inactivo → `401`.
@@ -7401,6 +7401,77 @@ GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
 | 3    | Click **Iniciar Monitoreo** = `setInterval` cada **2000 ms (2s)** llamando `GET /api/v1/wms/etiquetas-rfid/scans/`. Usa `lastSeenId` (Ref) para agregar solo scans nuevos (ids mayores).                       |
 | 4    | Render tabla: columna `MATCH=✅/❌` + `sku`, `color`, `talla`, `folio`, `antenna`, `rssi`, `timestamp`. Si `match_impresion=false` mostrar EPC hex crudo; si `true` pintar fila VERDE con los campos producto. |
 | 5    | Debug rápido: ante duda click **Status FX** = `GET /scanner-stats/?epc=<EPC_IMPRESO>` y revisa `query_epc_found_count` (0 no leída, ≥1 leída) + `last_scan_seconds_ago` (>300s = FX offline).                  |
+
+---
+
+## 📡 WMS - Lectores RFID (administración)
+
+Pantalla **WMS → RFID → Lectores RFID**. Alta, lista y baja de los lectores FX de la empresa activa, cada uno con su token. Ya no hace falta el admin de Django para dar de alta un lector.
+
+- **Ruta**: `/api/v1/wms/etiquetas-rfid/lectores/` (mismo prefijo que el resto del RFID).
+- **Alcance**: siempre la empresa activa del usuario, superusuario incluido (como `scans/` y `scanner-stats`). Un usuario que no es admin solo ve los lectores de sus sucursales. Un lector de otra empresa responde `404`.
+- **Permisos**: para leer, `R-WMS-SCANNER`; sin él, `403`. Solo el superusuario o el admin de empresa (`is_admin_empresa`) puede crear o eliminar; para los demás, `403`.
+
+### Listar
+
+`GET /api/v1/wms/etiquetas-rfid/lectores/`. Sin `?limit=` regresa un arreglo; con `?limit=&offset=` regresa `{count, next, previous, results}`.
+
+```json
+[
+  {
+    "id": 9,
+    "nombre": "fx-toneles",
+    "ubicacion": "",
+    "sucursal": 1,
+    "sucursal_nombre": "Toneles",
+    "url_fx": "https://nucleo-erp.vercel.app/api/receive-scan/?token=<token>",
+    "estado": "SIN_CONEXION",
+    "ultima_conexion": "2026-11-23T14:04:23.497935-06:00",
+    "ultima_lectura": "2026-11-23T13:25:13.669896-06:00",
+    "created_at": "2026-11-05T12:40:19.248597-06:00"
+  }
+]
+```
+
+- `url_fx` es la URL completa que se pega en el **IoT Connector** del FX (HTTP POST). Lleva el token y la base del servidor que atendió la petición: en local, `http://localhost:8003/...`; en producción, `https://nucleo-erp.vercel.app/...`.
+- `estado` sale de las dos marcas del lector, con una ventana de 300 s:
+  - `LEYENDO`: entraron tags en esa ventana.
+  - `CONECTADO_SIN_TAGS`: el FX sí se reportó, pero sin tags.
+  - `SIN_CONEXION`: el FX nunca se ha reportado, o no se reporta desde hace más de 300 s.
+- `ultima_conexion` es el último POST autenticado del FX, traiga tags o no. `ultima_lectura` es el último POST que trajo tags. Las dos van en ISO; son `null` si nunca ha pasado.
+- **Costo**: una consulta para la página completa, más el `count` si se pagina, y una más para las sucursales si el usuario no es admin. No crece con el número de lectores.
+
+`GET /lectores/{id}/` regresa el mismo objeto de un solo lector.
+
+### Crear
+
+`POST /api/v1/wms/etiquetas-rfid/lectores/`
+
+```json
+{ "nombre": "FX Andén 2", "ubicacion": "Puerta 2", "sucursal": 1 }
+```
+
+- `nombre` es obligatorio. Debe ser único entre los lectores vigentes de la empresa, sin distinguir mayúsculas. Si se repite: `400 {"nombre": ["Ya existe un lector con este nombre en la empresa."]}`.
+- `ubicacion` es opcional, texto libre.
+- `sucursal` es opcional. Si no viene, se usa la sucursal por defecto del usuario; debe ser de la empresa activa, si no responde `400 {"sucursal": [...]}`. La sucursal decide quién ve las lecturas del lector.
+- Un usuario sin empresa activa recibe `400`.
+- **Respuesta**: `201` con el lector completo, `url_fx` incluida. El token se genera al crear el lector y no se puede editar.
+
+### Eliminar
+
+`DELETE /api/v1/wms/etiquetas-rfid/lectores/{id}/` responde `204`.
+
+- Es un **soft delete** (`activo = false`): las lecturas que ya registró el lector se conservan.
+- Su token deja de funcionar de inmediato: `/api/receive-scan/` y `scans/receive/` responden `401`.
+- El lector ya no aparece en el `GET`, y su detalle responde `404`.
+- Su nombre queda libre para un lector nuevo.
+
+### Cambio en `/api/receive-scan/`
+
+- **Con token** (`?token=`, `X-RFID-Token`, Bearer o Basic): la lectura queda ligada a su lector. Si el token no es de ningún lector activo (porque se eliminó o porque es inventado), responde `401` y ya no se guarda como lectura sin token.
+- **Sin token**: sigue igual que antes.
+
+El lector de hoy, en `192.168.1.249`, ya estaba registrado como `fx-toneles` con su propio token. Sigue funcionando sin reconfigurar el FX.
 
 ---
 
