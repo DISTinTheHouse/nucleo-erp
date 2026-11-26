@@ -4145,3 +4145,109 @@ class LectoresRFIDApiTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(resp.status_code, 200)
+
+
+class LectorRFIDEscaneoPorLectorTests(TestCase):
+    """``scans/?lector=`` con ``lector_id``/``lector_nombre`` y el aviso "en uso".
+
+    Mismos datos que ``LectoresRFIDApiTests`` sin heredar (y repetir) sus tests."""
+
+    URL = LectoresRFIDApiTests.URL
+    setUpTestData = classmethod(LectoresRFIDApiTests.setUpTestData.__func__)
+    _api = LectoresRFIDApiTests._api
+    SCANS_URL = "/api/v1/wms/etiquetas-rfid/scans/"
+
+    def _sembrar(self, lector, n, prefijo):
+        RfidScan.objects.bulk_create(
+            [RfidScan(empresa=lector.empresa, lector=lector, epc=f"{prefijo}{i:08d}") for i in range(n)]
+        )
+
+    def _en_uso(self, user, lector, **datos):
+        return self._api(user).post(f"{self.URL}{lector.pk}/en-uso/", datos, format="json")
+
+    # ── scans/?lector= ────────────────────────────────────────────────
+
+    def test_scans_traen_lector_id_y_nombre(self):
+        self._sembrar(self.lector_a, 1, "aaaa")
+        scan = self._api(self.admin_a).get(self.SCANS_URL).json()["scans"][0]
+        self.assertEqual(scan["lector_id"], self.lector_a.pk)
+        self.assertEqual(scan["lector_nombre"], "FX A")
+
+    def test_scans_filtra_por_lector(self):
+        self._sembrar(self.lector_a, 2, "aaaa")
+        self._sembrar(self.lector_a2, 3, "a2a2")
+        cliente = self._api(self.admin_a)
+        self.assertEqual(len(cliente.get(self.SCANS_URL).json()["scans"]), 5)
+        solo = cliente.get(f"{self.SCANS_URL}?lector={self.lector_a2.pk}").json()["scans"]
+        self.assertEqual({s["lector_id"] for s in solo}, {self.lector_a2.pk})
+        self.assertEqual(len(solo), 3)
+
+    def test_scans_lector_combinable_con_unicos(self):
+        RfidScan.objects.bulk_create(
+            [RfidScan(empresa=self.empresa_a, lector=self.lector_a, epc="REPETIDO00001") for _ in range(3)]
+            + [RfidScan(empresa=self.empresa_a, lector=self.lector_a2, epc="REPETIDO00001")]
+        )
+        url = f"{self.SCANS_URL}?lector={self.lector_a.pk}&unicos=1"
+        scans = self._api(self.admin_a).get(url).json()["scans"]
+        self.assertEqual(len(scans), 1)
+        self.assertEqual(scans[0]["lector_id"], self.lector_a.pk)
+
+    def test_scans_lector_no_numerico_400(self):
+        resp = self._api(self.admin_a).get(f"{self.SCANS_URL}?lector=abc")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("lector", resp.json())
+
+    def test_scans_lector_no_agrega_consultas(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._sembrar(self.lector_a, 5, "aaaa")
+        cliente = self._api(self.admin_a)
+        with CaptureQueriesContext(connection) as sin:
+            cliente.get(self.SCANS_URL)
+        with CaptureQueriesContext(connection) as con:
+            cliente.get(f"{self.SCANS_URL}?lector={self.lector_a.pk}")
+        self.assertEqual(len(sin), len(con))
+
+    # ── En uso ────────────────────────────────────────────────────────
+
+    def test_en_uso_lo_manda_quien_tiene_r_wms_scanner(self):
+        resp = self._en_uso(self.lector_usuario, self.lector_a, pantalla="Recepcion", documento="REC-1")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["en_uso_por"]["pantalla"], "Recepcion")
+
+        fila = self._api(self.admin_a).get(f"{self.URL}{self.lector_a.pk}/").json()
+        self.assertEqual(fila["en_uso_por"]["usuario"], self.lector_usuario.email)  # sin nombre: su correo
+        self.assertEqual(fila["en_uso_por"]["documento"], "REC-1")
+
+    def test_en_uso_sin_permiso_403(self):
+        self.assertEqual(self._en_uso(self.sin_permiso, self.lector_a).status_code, 403)
+
+    def test_en_uso_otra_empresa_404(self):
+        self.assertEqual(self._en_uso(self.admin_b, self.lector_a).status_code, 404)
+
+    def test_en_uso_conserva_desde_mientras_late(self):
+        primero = self._en_uso(self.lector_usuario, self.lector_a, pantalla="Recepcion").json()
+        segundo = self._en_uso(self.lector_usuario, self.lector_a, pantalla="Recepcion").json()
+        self.assertEqual(primero["en_uso_por"]["desde"], segundo["en_uso_por"]["desde"])
+
+    def test_en_uso_expira_sin_latido(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        self._en_uso(self.lector_usuario, self.lector_a, pantalla="Recepcion")
+        LectorRFID.objects.filter(pk=self.lector_a.pk).update(
+            en_uso_latido=timezone.now() - timedelta(seconds=61)
+        )
+        fila = self._api(self.admin_a).get(f"{self.URL}{self.lector_a.pk}/").json()
+        self.assertIsNone(fila["en_uso_por"])
+
+    def test_en_uso_otro_usuario_lo_toma(self):
+        self._en_uso(self.lector_usuario, self.lector_a, pantalla="Recepcion")
+        self._en_uso(self.admin_a, self.lector_a, pantalla="Surtido")
+        fila = self._api(self.admin_a).get(f"{self.URL}{self.lector_a.pk}/").json()
+        self.assertEqual(fila["en_uso_por"]["pantalla"], "Surtido")
+
+    def test_en_uso_pantalla_larga_400(self):
+        self.assertEqual(self._en_uso(self.admin_a, self.lector_a, pantalla="x" * 51).status_code, 400)

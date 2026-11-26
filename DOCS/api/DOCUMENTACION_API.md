@@ -7058,7 +7058,7 @@ El frontend (Next.js) NO habla directamente con el lector FX. El flujo es:
   - Sin token válido o lector inactivo → `401`.
   - Cada lectura queda ligada a la empresa y al lector.
 - Next.js solo consume 3 endpoints del V1 (mismo Bearer token que el resto del ERP). Todos acotados a la empresa activa del usuario, superusuario incluido (EC-884); sin empresa activa no se ve ni se borra nada. Las lecturas sin empresa (tags ajenos de `/api/receive-scan/` sin token) no aparecen en ninguno:
-  1. `GET /api/v1/wms/etiquetas-rfid/scans/` → polling (últimas 50 lecturas de la empresa + MATCH)
+  1. `GET /api/v1/wms/etiquetas-rfid/scans/` → polling (últimas 50 lecturas de la empresa + MATCH; `?lector=<id>` para un solo lector)
   2. `GET /api/v1/wms/etiquetas-rfid/scanner-stats/` → debug (solo superusuario / admin de empresa)
   3. `POST /api/v1/wms/etiquetas-rfid/scans/clear/` → borra las lecturas de la empresa (solo superusuario / admin de empresa)
 
@@ -7472,6 +7472,33 @@ Pantalla **WMS → RFID → Lectores RFID**. Alta, lista y baja de los lectores 
 - **Sin token**: sigue igual que antes.
 
 El lector de hoy, en `192.168.1.249`, ya estaba registrado como `fx-toneles` con su propio token. Sigue funcionando sin reconfigurar el FX.
+
+### Escaneo por lector
+
+**Lecturas de un lector.** `GET /api/v1/wms/etiquetas-rfid/scans/?lector=<id>` regresa solo las lecturas de ese lector. Se combina con `unicos=1` y `solo_match=1`.
+
+- Sin `lector`, regresa todas las de la empresa, igual que antes.
+- Un `lector` que no es número responde `400 {"lector": ...}`.
+- Cada scan trae ahora `lector_id` y `lector_nombre`. Los dos son `null` en lecturas sin token.
+- Sigue costando una sola consulta.
+
+**Qué lector registra una lectura.** La lectura queda en el lector **dueño del token** que manda el FX. Para que las lecturas caigan en otro lector, hay que pegar el `url_fx` de ese lector en el IoT Connector del FX.
+
+**Aviso "en uso".** Es informativo: no bloquea a nadie.
+
+- `POST /api/v1/wms/etiquetas-rfid/lectores/{id}/en-uso/` con `{ "pantalla": "Recepcion", "documento": "REC-123" }`.
+  - Los dos campos son opcionales: `pantalla` acepta hasta 50 caracteres y `documento` hasta 100.
+  - El front lo manda cada 30 s mientras alguien escanea con ese lector.
+  - Lo puede llamar cualquiera con `R-WMS-SCANNER`.
+  - Responde `200 {"en_uso_por": {...}}`.
+- `GET lectores/` trae en cada lector `en_uso_por: { usuario, pantalla, documento, desde } | null`.
+  - `usuario` es el nombre visible: nombre completo o, si no tiene, su correo.
+  - `desde` se conserva mientras el mismo usuario siga en la misma pantalla y documento.
+  - Si pasan **60 s sin latido**, regresa `null`.
+  - Si otro usuario manda latido sobre el mismo lector, queda como el usuario en uso.
+  - No agrega consultas al listado.
+
+`scanner-stats.lectores[]` ya usa los mismos `id` del catálogo de lectores.
 
 ---
 

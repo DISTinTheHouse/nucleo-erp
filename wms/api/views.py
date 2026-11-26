@@ -902,7 +902,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
     def scans(self, request):
         """Polling endpoint p/ Next.js: últimas 50 lecturas del FX + match automático.
 
-        Filtros opcionales: ``solo_match=1`` (solo etiquetas impresas por el ERP),
+        Filtros opcionales: ``lector=<id>`` (solo ese lector),
+        ``solo_match=1`` (solo etiquetas impresas por el ERP),
         ``unicos=1`` (última lectura por EPC) y ``limite`` (1-200, default 50).
 
         Acotado a la empresa activa del usuario, superusuario incluido (EC-884,
@@ -934,6 +935,13 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             base = base.filter(etiqueta__isnull=False)
         # ``unicos=1``: la última lectura de cada EPC (el FX repite el mismo tag
         # varias veces por segundo).
+        # ``lector=<id>``: solo las lecturas de ese lector (combinable con los
+        # otros dos). Sin él, todas las de la empresa, como antes.
+        lector_param = str(params.get("lector", "")).strip()
+        if lector_param:
+            if not lector_param.isdigit():
+                raise ValidationError({"lector": "Debe ser el id numérico de un lector."})
+            base = base.filter(lector_id=int(lector_param))
         if str(params.get("unicos", "")).lower() in {"1", "true", "si"}:
             base = base.filter(
                 pk__in=base.order_by("epc", "-created_at", "-id").distinct("epc").values("pk")
@@ -947,6 +955,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         scans = list(
             base
             .select_related(
+                "lector",
                 "etiqueta__impresion__producto",
                 "etiqueta__impresion__producto_variante__color",
                 "etiqueta__impresion__producto_variante__talla",
@@ -975,6 +984,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 "antenna": scan.antenna,
                 "rssi": scan.rssi,
                 "reader_ip": scan.reader_ip,
+                "lector_id": scan.lector_id,
+                "lector_nombre": scan.lector.nombre if scan.lector_id else None,
             }
             if detalle is not None:
                 ligadas += 1
