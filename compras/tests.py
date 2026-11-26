@@ -379,9 +379,13 @@ class RecepcionOnboardingAlmacenScopeTests(TestCase):
         self.assertTrue(resp.json()["recepcion"]["folio"].startswith("RC"))
 
     def test_series_recepcion_sin_tope_y_por_sucursal(self):
-        for i in range(60):  # más de las 50 que cortaba el GET (#1291)
-            SerieFolio.objects.create(empresa=self.empresa, sucursal=self.suc_2, tipo_documento="RECEPCION",
-                                      serie=("RC", "RT", "RZ")[i % 3])
+        # Más de las 50 que cortaba el GET (#1291): RC/RT/RZ en 20 sucursales (la serie
+        # es única por sucursal y tipo, ``uq_serie_folio_sucursal_tipo_serie``).
+        for i in range(20):
+            sucursal = Sucursal.objects.create(empresa=self.empresa, codigo=f"S{i:02d}", nombre=f"acme-ra S{i:02d}")
+            for serie in ("RC", "RT", "RZ"):
+                SerieFolio.objects.create(
+                    empresa=self.empresa, sucursal=sucursal, tipo_documento="RECEPCION", serie=serie)
         client = APIClient()
         client.force_authenticate(user=self.usuario)
         series = client.get(RECEPCION_ONBOARDING_URL).json()["catalogos"]["series_recepcion"]
@@ -462,6 +466,7 @@ class RecepcionOnboardingRenglonesTests(TestCase):
         )
         cls.almacen = Almacen.objects.create(empresa=cls.empresa, sucursal=cls.sucursal, codigo="A94", nombre="A94")
         cls.usuario = Usuario.objects.create(username="u@ec894.test", email="u@ec894.test", empresa=cls.empresa)
+        _conceder(cls.usuario, "R-WMS-RECEPCIONES", "C-WMS-RECEPCIONES")  # #1295, #1412
         proveedor = Proveedor.objects.create(
             empresa=cls.empresa, nombre="Proveedor", moneda=moneda, sat_regimen_fiscal=regimen,
             sat_forma_pago=forma, sat_metodo_pago=metodo, codigo="PROV-894", razon_social="Proveedor SA",
@@ -684,7 +689,11 @@ class OrdenCompraAislamientoEmpresaTests(TestCase):
             username="u@acme-oc.test", email="u@acme-oc.test", empresa=cls.a["empresa"],
             sucursal_default=cls.a["sucursal"],
         )
-        _conceder(cls.usuario, "A-COMPRAS-OC")
+        # #1412: alta y edición exigen C-/E-COMPRAS-OC; aceptar, serie activa (#1142, #1264).
+        _conceder(cls.usuario, "A-COMPRAS-OC", "C-COMPRAS-OC", "E-COMPRAS-OC")
+        SerieFolio.objects.create(
+            empresa=cls.a["empresa"], sucursal=cls.a["sucursal"], tipo_documento="ORDEN_COMPRA", serie="OC",
+        )
         cls.superuser = Usuario.objects.create(
             username="root@acme-oc.test", email="root@acme-oc.test", empresa=cls.a["empresa"],
             sucursal_default=cls.a["sucursal"], is_superuser=True,
@@ -954,7 +963,10 @@ class OrdenCompraCancelacionTests(TestCase):
             usuario = Usuario.objects.create(
                 username=f"u@{codigo}.test", email=f"u@{codigo}.test", empresa=empresa, sucursal_default=sucursal,
             )
-            _conceder(usuario, "A-COMPRAS-OC")
+            # #1408: los códigos que hoy exigen las vistas (alta, edición, baja, autorizar/
+            # cancelar la OC y recibirla).
+            _conceder(usuario, "A-COMPRAS-OC", "C-COMPRAS-OC", "E-COMPRAS-OC", "D-COMPRAS-OC",
+                      "R-WMS-RECEPCIONES", "C-WMS-RECEPCIONES")
             return {
                 "empresa": empresa, "sucursal": sucursal, "proveedor": proveedor,
                 "almacen": almacen, "producto": producto, "usuario": usuario,
@@ -964,6 +976,10 @@ class OrdenCompraCancelacionTests(TestCase):
         cls.b = tenant("globex-cx")
         SerieFolio.objects.create(
             empresa=cls.a["empresa"], sucursal=cls.a["sucursal"], tipo_documento="RECEPCION", serie="RC",
+        )
+        # #1408: el alta de OC exige serie activa en la sucursal.
+        SerieFolio.objects.create(
+            empresa=cls.a["empresa"], sucursal=cls.a["sucursal"], tipo_documento="ORDEN_COMPRA", serie="OC",
         )
         cls.sin_empresa = Usuario.objects.create(username="n@nowhere-cx.test", email="n@nowhere-cx.test")
 
@@ -1300,7 +1316,8 @@ class OrdenCompraCancelacionTests(TestCase):
             },
             format="json",
         )
-        self._assert_rechazo(resp, {"estatus": "La orden de compra no está disponible para recepción."}, oc, antes)
+        # Forma de DRF, lista por llave (#1189, #1296).
+        self._assert_rechazo(resp, {"estatus": ["La orden de compra no está disponible para recepción."]}, oc, antes)
         self.assertFalse(Recepcion.objects.filter(orden_compra=oc).exists())
 
         ofrecidas = client.get(RECEPCION_ONBOARDING_URL).json()["busqueda"]["ordenes_compra"]
@@ -2646,11 +2663,18 @@ class OrdenCompraPedidosSeriesRendimientoTests(TestCase):
         self.assertEqual(oc["pedidos"], esperado)
         self.assertEqual(self.client_api.get(f"{ORDENES_URL}{oc['id']}/").json()["pedidos"], esperado)
 
-    def test_pt_sin_serie_usa_folio_de_respaldo_con_prefijo_o(self):
+    def test_pt_sin_serie_es_400_sin_folio_de_respaldo(self):
+        """#1142/#1264: ya no hay folio de respaldo (``O-{empresa}-{id}``); sin serie PT
+        activa, aceptar responde 400 y la OC queda como estaba."""
         SerieFolio.objects.filter(tipo_documento="ORDEN_COMPRA_PT").delete()
-        folio = self._aceptar({"tipo_compra": "PT"})["folio"]
+        oc = self._crear({"tipo_compra": "PT"}).json()["orden_compra"]
+        resp = self.client_api.post(f"{ORDENES_URL}{oc['id']}/aceptar/", {}, format="json")
 
-        self.assertTrue(folio.startswith(f"O-{self.empresa.pk}-"), folio)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"folio": [
+            "La sucursal no tiene serie de folios activa para Orden de Compra PT. Configúrala en Series y folios."]})
+        self.assertEqual(OrdenCompra.objects.filter(pk=oc["id"]).values_list("folio", "estatus").get(),
+                         (oc["folio"], oc["estatus"]))
 
     def test_tipo_compra_invalido_responde_400(self):
         self.assertEqual(self._crear({"tipo_compra": "XX"}).status_code, 400)
@@ -3879,7 +3903,7 @@ class RecepcionSalidaMaquilaTests(TestCase):
         self._recibir_sm(1)
         r = self.client.get(RECEPCION_ONBOARDING_URL)
         sm = next(s for s in r.data["busqueda"]["salidas_maquila"] if s["id"] == self.sm.pk)
-        self.assertEqual(sm["piezas_pendientes"], Decimal("3.00"))
+        self.assertEqual(sm["piezas_pendientes"], "3.00")  # texto, como ``cantidad_pendiente``
         op = next(o for o in r.data["busqueda"]["ordenes_produccion"] if o["id"] == self.op.pk)
         renglon = next(d for d in op["detalle"] if d["id"] == self.op_detalle.pk)
         self.assertEqual(Decimal(renglon["cantidad_en_maquila"]), Decimal("3"))
@@ -3911,6 +3935,7 @@ class RecepcionSalidaMaquilaTests(TestCase):
         Usuario.objects.filter(pk=self.usuario.pk).update(is_admin_empresa=False)
         self.usuario.refresh_from_db()
         self.usuario.sucursales.add(self.sucursal)
+        _conceder(self.usuario, "R-WMS-RECEPCIONES")  # leer el onboarding (#1295), sin costos
         r = self.client.get(RECEPCION_ONBOARDING_URL)
         filas = r.data["busqueda"]["salidas_maquila"]
         self.assertTrue(filas)
@@ -4838,3 +4863,100 @@ class DevolucionProveedorContratoTests(TestCase):
         # ``?search=`` no saca el detalle (``BusquedaSoloListadoFilter``).
         resp = self._client().get(f"{self.URL}{data['results'][0]['id']}/", {"search": "nada"})
         self.assertEqual(resp.status_code, 200)
+
+    # --- #1409, #1419, #1420, #1421 ----------------------------------------------
+
+    def test_errores_nombran_el_articulo_no_el_id(self):
+        """#1421: el 400 de ``detalles`` nombra el renglón por su artículo, no por el
+        id de ``CalidadInspeccionDetalle``; nada se escribe. #1409: ``cantidad_pendiente``
+        con 4 decimales fijos."""
+        from compras.models import DevolucionProveedor
+
+        inspeccion = self._inspeccion()
+        detalle = inspeccion.detalles.get()
+        self.assertEqual(self._pendientes(inspeccion)[0]["cantidad_pendiente"], "4.0000")
+        liberado = CalidadInspeccionDetalle.objects.create(
+            calidad_inspeccion=inspeccion, cantidad_inspeccionada=5, cantidad_aprobada=5, resultado="liberado",
+            recepcion_detalle=RecepcionDetalle.objects.create(
+                recepcion=inspeccion.recepcion, producto=self.a["producto"], cantidad_recibida=5),
+        )
+        ajeno = self._inspeccion().detalles.get()
+        for calidad_detalle, cantidad, mensaje in (
+            (detalle.pk, "9", "Insumo acme-cx (SKU INS-973-M, talla M-973, color Azul 973): "
+                              "se pueden devolver hasta 4."),
+            (detalle.pk, "0", "Insumo acme-cx (SKU INS-973-M, talla M-973, color Azul 973): "
+                              "se pueden devolver hasta 4."),
+            (liberado.pk, "1", "Insumo acme-cx: no es rechazo ni cuarentena de esta inspección."),
+            (ajeno.pk, "1", "Uno de los renglones no pertenece a esta inspección."),
+        ):
+            with self.subTest(calidad_detalle=calidad_detalle, cantidad=cantidad):
+                resp = self._client().post(self.URL, {
+                    "calidad_inspeccion": inspeccion.pk, "motivo": "Defecto",
+                    "detalles": [{"calidad_detalle": calidad_detalle, "cantidad": cantidad}],
+                }, format="json")
+                self.assertEqual(resp.status_code, 400, resp.content[:300])
+                self.assertEqual(resp.json(), {"detalles": mensaje})
+        self.assertFalse(DevolucionProveedor.objects.exists())
+
+    def test_alta_con_total_en_la_bitacora_y_articulo_en_el_detalle(self):
+        """#1420: la bitácora registra el total real en el alta. #1409: el detalle trae
+        nombre, SKU, talla y color como ``pendientes/``, sin consultas por renglón."""
+        from auditoria.models import BitacoraDocumento
+
+        inspeccion = self._inspeccion()
+        oc = OrdenCompra.objects.create(
+            empresa=self.a["empresa"], sucursal=self.a["sucursal"], proveedor=self.a["proveedor"],
+            moneda=self.moneda, usuario=self.a["usuario"], fecha_oc=timezone.now().date(), estatus=Estatus.AUTORIZADA,
+        )
+        linea = OrdenCompraDetalle.objects.create(
+            orden_compra=oc, producto=self.a["producto"], sucursal=self.a["sucursal"], cantidad=10,
+            precio=Decimal("12.50"), importe=Decimal("125.00"),
+        )
+        RecepcionDetalle.objects.filter(pk=inspeccion.detalles.get().recepcion_detalle_id).update(
+            orden_compra_detalle=linea)
+
+        resp = self._client().post(
+            self.URL, {"calidad_inspeccion": inspeccion.pk, "motivo": "Defecto"}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content[:300])
+        data = resp.json()
+        self.assertEqual(data["total"], "50.00")  # 4 × 12.50
+        alta = BitacoraDocumento.objects.get(
+            tipo_documento="devolucion_proveedor", documento_id=str(data["id"]), accion="crear")
+        self.assertEqual(alta.total, Decimal("50.00"))
+        renglon = data["detalles"][0]
+        self.assertEqual(
+            [renglon[k] for k in ("producto_nombre", "producto_variante_sku", "producto_variante_talla",
+                                  "producto_variante_color", "cantidad", "importe")],
+            ["Insumo acme-cx", "INS-973-M", "M-973", "Azul 973", "4.0000", "50.00"],
+        )
+
+        def consultas():
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(self._client().get(self.URL).status_code, 200)
+            return len(ctx.captured_queries)
+
+        una = consultas()
+        self._devolucion(self._inspeccion(), "1")
+        self._devolucion(self._inspeccion(variante=False), "2")
+        self.assertEqual(consultas(), una)
+
+    def test_ordena_por_la_razon_social_que_muestra(self):
+        """#1419: ``proveedor_nombre`` es la razón social y se ordena con
+        ``?ordering=proveedor__razon_social`` (el nombre comercial va al revés)."""
+        segundo = Proveedor.objects.get(pk=self.a["proveedor"].pk)
+        segundo.pk, segundo._state.adding = None, True
+        segundo.codigo, segundo.nombre, segundo.razon_social = "PROV-1419", "AAA comercial", "ZZZ SA"
+        segundo.email = "p1419@acme-cx.test"
+        segundo.save()
+        Proveedor.objects.filter(pk=self.a["proveedor"].pk).update(nombre="ZZZ comercial", razon_social="AAA SA")
+        self._devolucion(self._inspeccion(), "1", folio="DVP-1419-A")
+        dev = self._devolucion(self._inspeccion(), "1", folio="DVP-1419-Z")
+        type(dev).objects.filter(pk=dev.pk).update(proveedor=segundo)
+
+        for orden, esperado in (("proveedor__razon_social", ["AAA SA", "ZZZ SA"]),
+                                ("-proveedor__razon_social", ["ZZZ SA", "AAA SA"]),
+                                ("proveedor__nombre", ["ZZZ SA", "AAA SA"])):
+            with self.subTest(ordering=orden):
+                resp = self._client().get(self.URL, {"ordering": orden})
+                self.assertEqual(resp.status_code, 200, resp.content[:300])
+                self.assertEqual([d["proveedor_nombre"] for d in resp.json()], esperado)
