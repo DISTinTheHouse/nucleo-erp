@@ -9,6 +9,7 @@ El motivo, quién y cuándo quedan en la orden (``motivo_cancelacion``,
 señal del cambio de estatus, en la bitácora de documentos.
 """
 from collections import defaultdict
+from nucleo.motivo import exigir_largo_motivo
 from decimal import Decimal
 
 from django.db import transaction
@@ -24,7 +25,6 @@ from produccion.models import (
     SalidaMaquila,
 )
 
-MOTIVO_MAX = 500
 CERO = Decimal("0")
 
 
@@ -32,7 +32,7 @@ def motivo_de(data):
     motivo = data.get("motivo") if hasattr(data, "get") else None
     if not isinstance(motivo, str) or not motivo.strip():
         raise ValidationError({"motivo": "Indica el motivo de la cancelación."})
-    return motivo.strip()[:MOTIVO_MAX]
+    return exigir_largo_motivo(motivo.strip())
 
 
 def _meta(request):

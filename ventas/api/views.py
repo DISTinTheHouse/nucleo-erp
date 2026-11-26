@@ -1,4 +1,5 @@
 from nucleo.middleware import ip_auditoria
+from nucleo.motivo import exigir_largo_motivo
 import json
 import logging
 import operator
@@ -3703,9 +3704,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
         ``motivo``. En una transacción devuelve el inventario que se descontó al autorizar,
         libera sus reservas activas y deja el motivo en la auditoría."""
         self._require_mesa_control(request.user)
-        motivo = str(request.data.get("motivo") or "").strip()[:500] if hasattr(request.data, "get") else ""
+        motivo = str(request.data.get("motivo") or "").strip() if hasattr(request.data, "get") else ""
         if not motivo:
             raise ValidationError({"motivo": "Indica el motivo de la cancelación."})
+        exigir_largo_motivo(motivo)
         pedido = self.get_object()
         with transaction.atomic():
             pedido = Pedido.objects.select_for_update(of=("self",)).get(pk=pedido.pk)
@@ -3834,9 +3836,10 @@ class PedidoViewSet(viewsets.ModelViewSet):
         ni despacha, ni se crean OP/OB/OR/OCM sobre él. Solo mesa de control; ``motivo``
         obligatorio. Lo que ya está abierto sigue; se cancela con su propio endpoint."""
         self._require_mesa_control(request.user)
-        motivo = str(request.data.get("motivo") or "").strip()[:500] if hasattr(request.data, "get") else ""
+        motivo = str(request.data.get("motivo") or "").strip() if hasattr(request.data, "get") else ""
         if not motivo:
             raise ValidationError({"motivo": "Indica el motivo de la retención."})
+        exigir_largo_motivo(motivo)
         base = self.get_object()
         with transaction.atomic():
             pedido = Pedido.objects.select_for_update(of=("self",)).get(pk=base.pk)
