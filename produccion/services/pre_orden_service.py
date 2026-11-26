@@ -57,6 +57,27 @@ def motivo_omision(estatus, activo, sucursal_id, sucursal_pre_id):
     return None
 
 
+# ``pedidos_omitidos_fuente`` de la pre-orden (EC-980): de dónde sale ``motivo_omision``.
+FUENTE_VISTA_PREVIA = "vista_previa"  # abierta: con el estado de hoy de cada pedido
+FUENTE_REGISTRADA = "registrada"  # lo que guardó ``crear-op`` (``pedidos_omitidos``)
+FUENTE_SIN_REGISTRO = "sin_registro"  # se convirtió antes de que se guardara
+
+
+def fuente_omisiones(pre, convertida_alguna_vez):
+    """``FUENTE_*`` o ``None`` si no aplica (origen pedido, rechazada, cancelada sin
+    haberse convertido). ``convertida_alguna_vez``: tuvo evento ``op_creada`` (el
+    ``op`` se pierde si la OP se da de baja); solo se consulta en la cancelada sin registro."""
+    if pre.origen != PreOrdenProduccion.Origen.RESURTIDO:
+        return None
+    if pre.pedidos_omitidos is not None:
+        return FUENTE_REGISTRADA
+    if pre.estatus in CANCELABLES:
+        return FUENTE_VISTA_PREVIA
+    if pre.estatus == E.CONVERTIDA or (pre.estatus == E.CANCELADA and convertida_alguna_vez):
+        return FUENTE_SIN_REGISTRO
+    return None
+
+
 # --------------------------------------------------------------------------- utilidades
 
 # Áreas a avisar por evento (rol de departamento -> ``crear_notificacion_por_rol``).
