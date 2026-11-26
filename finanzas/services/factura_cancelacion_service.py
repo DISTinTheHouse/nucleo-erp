@@ -16,7 +16,7 @@ from finanzas.services.factura_timbrado_service import (
 
 class FacturaCancelacionService:
     @staticmethod
-    def cancelar(factura, usuario=None, motivo="", motivo_sat=None):
+    def cancelar(factura, usuario=None, motivo="", motivo_sat=None, al_cancelar=None):
         """Regresa la contrapóliza, o ``None`` si no hubo (Borrador, ya cancelada o sin póliza).
 
         Los cobros aplicados no se tocan: su póliza sigue y en Clientes queda el
@@ -30,6 +30,13 @@ class FacturaCancelacionService:
 
         ``motivo_sat`` (02/03) es obligatorio solo si hay que cancelar el CFDI ante el
         SAT; ``motivo`` es la nota interna que va a ``observaciones`` (EC-806).
+
+        No se llama dentro de un ``atomic``: la cancelación ante el SAT necesita sus propias
+        transacciones cortas, y una exterior desharía la reserva y el resultado (EC-972).
+
+        ``al_cancelar(bloqueada, estatus_antes, contrapoliza)``: corre en la transacción de la
+        cancelación en el ERP, con la fila bloqueada, solo si la factura pasó a Cancelada (no
+        en un reintento ante el SAT de una ya cancelada). Si falla, la factura no se cancela.
         """
         motivo_sat = normalizar_motivo_sat(motivo_sat)
         actual = Factura.objects.get(pk=factura.pk)
@@ -49,7 +56,7 @@ class FacturaCancelacionService:
             raise ErrorDeNegocio({"cfdi": PENDIENTE_CFDI})
         if actual.cfdi_uuid and not actual.cfdi_cancelado:
             FacturaTimbradoService.cancelar_cfdi(factura, motivo_sat)
-        return FacturaCancelacionService._cancelar_en_erp(factura, usuario, motivo)
+        return FacturaCancelacionService._cancelar_en_erp(factura, usuario, motivo, al_cancelar)
 
     @staticmethod
     def _exigir_sin_notas_emitidas(factura):
@@ -60,7 +67,7 @@ class FacturaCancelacionService:
 
     @staticmethod
     @transaction.atomic
-    def _cancelar_en_erp(factura, usuario, motivo):
+    def _cancelar_en_erp(factura, usuario, motivo, al_cancelar=None):
         bloqueada = Factura.objects.select_for_update().get(pk=factura.pk)
         if not bloqueada.activo:
             raise ErrorDeNegocio({"estatus": "La factura está eliminada y no se puede cancelar."})
@@ -71,7 +78,8 @@ class FacturaCancelacionService:
             raise ErrorDeNegocio({"cfdi": PENDIENTE_CFDI})
         FacturaCancelacionService._exigir_sin_notas_emitidas(bloqueada)
 
-        era_emitida = bloqueada.estatus == Factura.FacturaStatus.EMITIDA
+        antes = bloqueada.estatus
+        era_emitida = antes == Factura.FacturaStatus.EMITIDA
         bloqueada.estatus = Factura.FacturaStatus.CANCELADA
         bloqueada.observaciones = agregar_observacion(bloqueada.observaciones, f"Cancelada: {motivo}" if motivo else "")
         bloqueada.save(update_fields=["estatus", "observaciones", "updated_at"])
@@ -84,4 +92,7 @@ class FacturaCancelacionService:
         FacturaInventarioService.reintegrar(
             bloqueada, usuario, solo_redescontado=not era_emitida
         )
-        return FacturaPolizaService.cancelar(bloqueada, usuario) if era_emitida else None
+        contrapoliza = FacturaPolizaService.cancelar(bloqueada, usuario) if era_emitida else None
+        if al_cancelar is not None:
+            al_cancelar(bloqueada, antes, contrapoliza)
+        return contrapoliza
