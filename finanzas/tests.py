@@ -8361,6 +8361,7 @@ class F5CancelarFacturaTests(MotorPolizasBase):
         return Factura.objects.get(pk=resp.data["factura"]["id"]), resp.data["poliza"]
 
     def _cancelar(self, factura, user=None, **datos):
+        datos.setdefault("motivo", "Prueba de cancelación")  # obligatorio desde #1356
         return self._client(user or self.a["usuario"]).post(
             f"/api/v1/finanzas/facturas/{factura.pk}/cancelar/", datos, format="json"
         )
@@ -9196,7 +9197,7 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.facturama.create_cfdi_emision.side_effect = None
         resp = self._timbrar(factura)
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("cfdi_pendiente", str(resp.data["cfdi"]))
+        self.assertIn("conciliar-cfdi/", str(resp.data["cfdi"]))  # c61b6e06: apunta a la acción
 
     def test_rechazo_de_facturama_responde_400_con_su_mensaje(self):
         factura = self._borrador()
@@ -9217,9 +9218,10 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         return factura
 
     def _cancelar(self, factura, motivo_sat="02", **datos):
-        """``motivo_sat=None`` no lo manda en el body."""
+        """``motivo_sat=None`` no lo manda en el body. ``motivo`` es obligatorio desde #1356."""
         if motivo_sat is not None:
             datos["motivo_sat"] = motivo_sat
+        datos.setdefault("motivo", "Prueba de cancelación")
         return self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/cancelar/", datos, format="json")
 
     def test_cancelar_una_timbrada_cancela_el_cfdi_y_la_factura(self):
