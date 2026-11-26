@@ -1,5 +1,8 @@
 """``/api/v1/compras/devoluciones-proveedor/``: devolución a proveedor de lo que
 calidad rechazó o puso en cuarentena. Lógica en ``compras.services.devolucion_proveedor``."""
+from decimal import Decimal
+
+from django.db.models import Prefetch
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -15,14 +18,23 @@ from nucleo.middleware import ip_auditoria
 
 PERMISO_LEER = "R-WMS-RECEPCIONES"
 PERMISO_ESCRIBIR = "C-WMS-RECEPCIONES"
+CUATRO = Decimal("0.0001")
 
 
 class DevolucionProveedorDetalleSerializer(serializers.ModelSerializer):
-    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True, default=None)
+    # Artículo del renglón como en ``pendientes/`` y en la recepción (#1409): nombre
+    # (también de muestras), SKU, talla y color. Vienen en el ``Prefetch`` del viewset.
+    producto_nombre = serializers.CharField(source="recepcion_detalle.articulo_nombre", read_only=True, default=None)
+    producto_variante_sku = serializers.CharField(source="recepcion_detalle.articulo_sku", read_only=True, default=None)
+    producto_variante_talla = serializers.CharField(
+        source="recepcion_detalle.articulo_talla", read_only=True, default=None)
+    producto_variante_color = serializers.CharField(
+        source="recepcion_detalle.articulo_color", read_only=True, default=None)
 
     class Meta:
         model = DevolucionProveedorDetalle
         fields = ["id", "calidad_detalle", "recepcion_detalle", "producto", "producto_nombre", "producto_variante",
+                  "producto_variante_sku", "producto_variante_talla", "producto_variante_color",
                   "variante_produccion", "cantidad", "costo_unitario", "importe"]
 
 
@@ -71,9 +83,11 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
         *[b for b in viewsets.ReadOnlyModelViewSet.filter_backends if b is not OrderingFilter],
         OrdenamientoEstableFilter,
     ]
-    # Lista blanca de ``?ordering=`` (#863); sin él, ``-fecha, -id``.
+    # Lista blanca de ``?ordering=`` (#863); sin él, ``-fecha, -id``. La columna
+    # ``proveedor_nombre`` es la razón social: se ordena con ``proveedor__razon_social`` (#1419).
     ordering_fields = [
-        "id", "folio", "fecha", "estatus", "total", "proveedor__nombre", "recepcion__folio", "orden_compra__folio",
+        "id", "folio", "fecha", "estatus", "total", "proveedor__nombre", "proveedor__razon_social",
+        "recepcion__folio", "orden_compra__folio",
     ]
 
     def get_queryset(self):
@@ -84,7 +98,8 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
         qs = (
             DevolucionProveedor.objects.filter(empresa=empresa)
             .select_related("proveedor", "recepcion", "orden_compra", "usuario", "cancelado_por")
-            .prefetch_related("detalles__producto")
+            .prefetch_related(Prefetch("detalles", queryset=DevolucionProveedorDetalle.objects.select_related(
+                *servicio.ARTICULO_RELACIONADOS).order_by("id")))
             .order_by("-fecha", "-id")
         )
         # Ids no enteros → 400 como los demás listados (#1402); antes, 500.
@@ -158,6 +173,7 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
                 "producto": rd.producto_id, "producto_nombre": rd.articulo_nombre,
                 # Mismos nombres que los renglones de la recepción y de la OC.
                 "producto_variante_sku": rd.articulo_sku, "producto_variante_talla": rd.articulo_talla,
-                "producto_variante_color": rd.articulo_color, "cantidad_pendiente": str(v),
+                # Escala fija de 4 decimales, como ``cantidad`` del detalle (#1409).
+                "producto_variante_color": rd.articulo_color, "cantidad_pendiente": f"{v.quantize(CUATRO):f}",
             })
         return Response(filas)
