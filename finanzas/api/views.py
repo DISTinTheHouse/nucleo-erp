@@ -1870,6 +1870,14 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
         if not empresa:
             return qs.none()
         qs = qs.filter(empresa=empresa)
+        if self.action in ("list", "retrieve"):
+            # EC-974: ``tiene_pagos`` con la misma regla que ``perform_destroy``.
+            qs = CuentaPorPagarService.annotate_has_linked_payments(qs)
+            # Proveedor, factura y moneda del serializer en la misma consulta (antes
+            # eran tres por fila); el PDF binario de la factura no viaja.
+            qs = qs.select_related("proveedor", "factura_proveedor__moneda").defer(
+                "factura_proveedor__pdf_adjunto"
+            )
         qp = self.request.query_params
         proveedor = qp.get("proveedor") or qp.get("proveedor_id")
         estatus = (qp.get("estatus") or "").strip()
@@ -2007,7 +2015,7 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
         user = self.request.user
         _exigir_de_la_empresa_del_usuario(user, instance.empresa_id)
         CuentaPorPagarService.ensure_account_deletable(instance)
-        if instance.pago_detalles.exists():
+        if CuentaPorPagarService.has_linked_payments(instance):
             # Con pagos cancelados o en borrador hay histórico (FK PROTECT): la
             # CxP se cancela en vez de borrarse, con motivo y rastro.
             if instance.estatus == CuentaPorPagar.EstatusCxP.CANCELADA:

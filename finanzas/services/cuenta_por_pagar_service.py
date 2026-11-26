@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from decimal import Decimal
 
 from django.db import IntegrityError, OperationalError, transaction
+from django.db.models import Exists, OuterRef
 
 from finanzas.exceptions import (
     LOCK_NOT_AVAILABLE,
@@ -56,6 +57,25 @@ FROZEN_FIELD_LABELS = {
 
 
 class CuentaPorPagarService:
+    # EC-974: una sola regla de «pagos ligados» para el ``DELETE`` (borra sin
+    # ellos, cancela con ellos) y para el campo ``tiene_pagos`` de la CxP. Cuenta
+    # cualquier renglón de pago, sin importar el estatus del pago: un pago
+    # Cancelado o en Borrador también deja histórico (FK PROTECT).
+    @staticmethod
+    def _linked_payment_lines(cxp):
+        return PagoDetalle.objects.filter(cxp=cxp)
+
+    @staticmethod
+    def has_linked_payments(cxp):
+        return CuentaPorPagarService._linked_payment_lines(cxp.pk).exists()
+
+    @staticmethod
+    def annotate_has_linked_payments(queryset, name="_tiene_pagos"):
+        """La misma regla como ``EXISTS`` por fila: sin consultas extra en el listado."""
+        return queryset.annotate(
+            **{name: Exists(CuentaPorPagarService._linked_payment_lines(OuterRef("pk")))}
+        )
+
     @staticmethod
     def has_applied_payments(cxp_ids):
         return PagoDetalle.objects.filter(

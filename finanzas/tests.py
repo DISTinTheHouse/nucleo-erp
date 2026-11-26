@@ -12,6 +12,7 @@ import time
 from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from urllib.parse import urlencode
 from unittest.mock import MagicMock, patch
 
 from django.apps import apps as django_apps
@@ -12388,3 +12389,158 @@ class CanceladoPorNombreFinanzasTests(TestCase):
         with CaptureQueriesContext(connection) as lectura:
             self._get(f"facturas-proveedor/{fp.pk}/")
         self.assertTrue([q["sql"] for q in lectura.captured_queries if union in q["sql"]])
+
+
+class CxPTienePagosEC974Tests(FinanzasBase):
+    """EC-974: ``tiene_pagos`` dice, con la misma regla que el ``DELETE``, si la CxP
+    se borra (``false``) o se cancela con motivo (``true``). Cuenta cualquier pago
+    ligado, sin importar su estatus."""
+
+    URL = CUENTAS_POR_PAGAR_URL
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        permiso = Permiso.objects.get_or_create(
+            clave="CANCELAR-FIN-PAGOS", defaults={"nombre": "CANCELAR-FIN-PAGOS"}
+        )[0]
+        for t in (cls.a, cls.b):
+            UsuarioPermiso.objects.create(
+                usuario=t["usuario"], permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=t["empresa"],
+            )
+
+    def _cxp(self, tenant=None, total="1000.00"):
+        t = tenant or self.a
+        proveedor, _, _, _, _, _, factura = self._crear_oc_recepcion_y_factura_proveedor(
+            t["empresa"], t["sucursal"], t["usuario"],
+        )
+        factura.total = Decimal(total)
+        factura.estatus = FacturaProveedor.FacturaProveedorStatus.REGISTRADA
+        factura.save()
+        cxp = CuentaPorPagar.objects.create(
+            empresa=t["empresa"], proveedor=proveedor, factura_proveedor=factura,
+            total=Decimal(total), saldo=Decimal(total),
+        )
+        return proveedor, cxp
+
+    def _pagar(self, proveedor, cxp, estatus=None, importe="400.00"):
+        payload = {
+            "proveedor": proveedor.pk,
+            "cuenta_bancaria": self._crear_cuenta_bancaria(self.a["empresa"]).pk,
+            "total_pagado": importe,
+            "pago_detalles": [{"cxp": cxp.pk, "importe_aplicado": importe}],
+        }
+        if estatus is not None:
+            payload["estatus"] = estatus
+        resp = self._client(self.a["usuario"]).post(PAGOS_URL, payload, format="json")
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return Pago.objects.get(pk=resp.data["id"])
+
+    def _cxp_con_pago(self, estatus):
+        proveedor, cxp = self._cxp()
+        if estatus == Pago.Estatus.CANCELADO:
+            pago = self._pagar(proveedor, cxp)
+            resp = self._client(self.a["usuario"]).post(
+                f"{PAGOS_URL}{pago.pk}/cancelar/", {"motivo": "Error de captura"}, format="json"
+            )
+            self.assertEqual(resp.status_code, 200, resp.data)
+        else:
+            pago = self._pagar(proveedor, cxp, estatus=estatus)
+        pago.refresh_from_db()
+        self.assertEqual(pago.estatus, estatus)
+        return cxp
+
+    def _detalle(self, cxp):
+        resp = self._client(self.a["usuario"]).get(f"{self.URL}{cxp.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.data)
+        return resp.data["tiene_pagos"]
+
+    def _en_listado(self, cxp):
+        resp = self._client(self.a["usuario"]).get(self.URL)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        filas = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+        return {f["id"]: f["tiene_pagos"] for f in filas}[cxp.pk]
+
+    def _delete(self, cxp, motivo=None):
+        url = f"{self.URL}{cxp.pk}/" + (f"?{urlencode({'motivo': motivo})}" if motivo else "")
+        return self._client(self.a["usuario"]).delete(url)
+
+    def test_false_sin_pagos(self):
+        _, cxp = self._cxp()
+        self.assertIs(self._detalle(cxp), False)
+        self.assertIs(self._en_listado(cxp), False)
+
+    def test_true_con_pago_aplicado_cancelado_o_borrador(self):
+        for estatus in (Pago.Estatus.APLICADO, Pago.Estatus.CANCELADO, Pago.Estatus.BORRADOR):
+            with self.subTest(estatus=estatus):
+                cxp = self._cxp_con_pago(estatus)
+                self.assertIs(self._detalle(cxp), True)
+                self.assertIs(self._en_listado(cxp), True)
+
+    def test_respuesta_de_escritura_trae_el_campo(self):
+        _, cxp = self._cxp()
+        resp = self._client(self.a["usuario"]).patch(
+            f"{self.URL}{cxp.pk}/", {"fecha_vencimiento": "2026-12-31"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIs(resp.data["tiene_pagos"], False)
+
+    def test_false_coincide_con_delete_que_borra(self):
+        _, cxp = self._cxp()
+        self.assertIs(self._detalle(cxp), False)
+        resp = self._delete(cxp)
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
+
+    def test_true_coincide_con_delete_que_pide_motivo_y_cancela(self):
+        for estatus in (Pago.Estatus.CANCELADO, Pago.Estatus.BORRADOR):
+            with self.subTest(estatus=estatus):
+                cxp = self._cxp_con_pago(estatus)
+                self.assertIs(self._detalle(cxp), True)
+                resp = self._delete(cxp)
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIn("motivo", resp.data)
+                cxp.refresh_from_db()
+                self.assertNotEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+
+                resp = self._delete(cxp, motivo="Proveedor equivocado")
+                self.assertEqual(resp.status_code, 204)
+                cxp.refresh_from_db()
+                self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+                self.assertIs(self._detalle(cxp), True)
+
+    def test_true_con_pago_aplicado_el_delete_sigue_rechazado(self):
+        """Sin cambio de comportamiento: con un pago Aplicado el ``DELETE`` responde
+        400 (hay que cancelar el pago primero), ni borra ni cancela."""
+        cxp = self._cxp_con_pago(Pago.Estatus.APLICADO)
+        resp = self._delete(cxp, motivo="x")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        cxp.refresh_from_db()
+        self.assertNotEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.CANCELADA)
+
+    def test_listado_con_consultas_constantes(self):
+        cliente = self._client(self.a["usuario"])
+        proveedor, cxp = self._cxp()
+        self._pagar(proveedor, cxp, estatus=Pago.Estatus.BORRADOR)
+        with CaptureQueriesContext(connection) as una:
+            self.assertEqual(cliente.get(self.URL).status_code, 200)
+        for _ in range(3):
+            proveedor, cxp = self._cxp()
+            self._pagar(proveedor, cxp, estatus=Pago.Estatus.BORRADOR)
+        self._cxp()
+        with CaptureQueriesContext(connection) as cinco:
+            resp = cliente.get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(cinco), len(una), [q["sql"] for q in cinco])
+
+    def test_otra_empresa_no_se_lista_y_su_detalle_es_404(self):
+        _, ajena = self._cxp(tenant=self.b)
+        cliente = self._client(self.a["usuario"])
+        resp = cliente.get(self.URL)
+        filas = resp.data["results"] if isinstance(resp.data, dict) else resp.data
+        self.assertNotIn(ajena.pk, [f["id"] for f in filas])
+        self.assertEqual(cliente.get(f"{self.URL}{ajena.pk}/").status_code, 404)
+        self.assertEqual(cliente.delete(f"{self.URL}{ajena.pk}/?motivo=x").status_code, 404)
+        self.assertTrue(CuentaPorPagar.objects.filter(pk=ajena.pk).exists())
