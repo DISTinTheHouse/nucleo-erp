@@ -1,4 +1,5 @@
 import logging
+from nucleo.motivo import exigir_largo_motivo
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -588,7 +589,7 @@ class OrdenCompraViewSet(viewsets.ReadOnlyModelViewSet):
         motivo = request.data.get("motivo") if hasattr(request.data, "get") else None
         if not isinstance(motivo, str) or not motivo.strip():
             raise ValidationError({"motivo": "Indica por qué se cierra el saldo."})
-        motivo = motivo.strip()[:500]
+        motivo = exigir_largo_motivo(motivo.strip())
         with transaction.atomic():
             oc = OrdenCompra.objects.select_for_update().filter(pk=oc.pk, activo=True).first()
             if oc is None:
@@ -3387,7 +3388,7 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
         motivo = request.data.get("motivo") if hasattr(request.data, "get") else None
         if not isinstance(motivo, str) or not motivo.strip():
             raise ValidationError({"motivo": "Indica el motivo de la reversa."})
-        motivo = motivo.strip()[:500]
+        motivo = exigir_largo_motivo(motivo.strip())
         inspeccion = self.get_object()  # otra empresa: 404
 
         with transaction.atomic():
@@ -4099,7 +4100,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         motivo = request.data.get("motivo") if hasattr(request.data, "get") else None
         if not isinstance(motivo, str) or not motivo.strip():
             raise ValidationError({"motivo": "Indica el motivo de la cancelación."})
-        motivo = motivo.strip()[:500]
+        motivo = exigir_largo_motivo(motivo.strip())
         E = RecepcionRFIDEncuadre.Estatus
         with transaction.atomic():
             fila = RecepcionRFIDEncuadre.objects.select_for_update().get(pk=encuadre.pk)

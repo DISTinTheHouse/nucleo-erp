@@ -34,6 +34,7 @@ from wms.models import Despacho, Estado, Packing, Picking, PickingDetalle, Trans
 from wms.services.existencia_service import ExistenciaService
 # Texto con que el código crea las TR de un picking (alta y traslados, EC-916).
 from wms.services.transferencia_picking_service import PATRON as PATRON_TR_DE_PICKING
+from nucleo.motivo import exigir_largo_motivo
 
 PERMISO_CANCELAR = "WMS-CANCELAR"
 
@@ -52,10 +53,10 @@ def exigir_permiso(user):
 
 
 def motivo_de(data):
-    motivo = str(data.get("motivo") or "").strip()[:500] if hasattr(data, "get") else ""
+    motivo = str(data.get("motivo") or "").strip() if hasattr(data, "get") else ""
     if not motivo:
         raise ValidationError({"motivo": "Indica el motivo de la cancelación."})
-    return motivo
+    return exigir_largo_motivo(motivo)
 
 
 def _marcar(doc, campo_estado, estado, user, motivo):

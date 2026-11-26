@@ -9,6 +9,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from auditoria.models import AuditoriaEvento
 from nucleo.middleware import ip_auditoria
+from nucleo.motivo import exigir_largo_motivo
 
 PERMISO_FACTURAS = "E-FIN-FACTURAS"
 PERMISO_POLIZAS = "CANCELAR-FIN-POLIZAS"
@@ -16,7 +17,6 @@ PERMISO_COBROS = "CANCELAR-FIN-COBROS"
 PERMISO_PAGOS = "CANCELAR-FIN-PAGOS"
 PERMISO_BANCOS = "CANCELAR-FIN-BANCOS"
 
-MOTIVO_MAX = 500
 
 
 def motivo_requerido(request):
@@ -25,10 +25,7 @@ def motivo_requerido(request):
     if not isinstance(motivo, str) or not motivo.strip():
         raise ValidationError({"motivo": "Indica el motivo de la cancelación."})
     motivo = motivo.strip()
-    # #1399: antes se cortaba en silencio y el rastro guardaba otro texto.
-    if len(motivo) > MOTIVO_MAX:
-        raise ValidationError({"motivo": f"El motivo admite hasta {MOTIVO_MAX} caracteres (tiene {len(motivo)})."})
-    return motivo
+    return exigir_largo_motivo(motivo)  # #1399: más de 500 → 400
 
 
 def exigir_permiso(user, clave):

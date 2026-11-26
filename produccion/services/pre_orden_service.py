@@ -25,6 +25,7 @@ from inventarios.models import Existencia
 from produccion.models import BomDetalle, OrdenProduccion, PreOrdenEvento, PreOrdenProduccion, PreOrdenProduccionDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
 from ventas.services.sku_produccion_service import detalles_de_muestra
+from nucleo.motivo import exigir_largo_motivo
 
 E = PreOrdenProduccion.Estatus
 EV = PreOrdenEvento.Evento
@@ -714,10 +715,11 @@ def rechazar(pre_id, user, motivo):
     motivo = (motivo or "").strip()
     if not motivo:
         raise ValidationError({"motivo": "Indica el motivo del rechazo."})
+    exigir_largo_motivo(motivo)
     pre = PreOrdenProduccion.objects.select_for_update(of=("self",)).select_related("empresa", "producto").get(pk=pre_id)
     if pre.estatus != E.PENDIENTE_ACEPTAR:
         raise ValidationError({"estatus": f"Solo se rechaza una pre-orden Pendiente de aceptar (está {pre.get_estatus_display().lower()})."})
-    pre.motivo_rechazo = motivo[:500]
+    pre.motivo_rechazo = motivo
     campos = _cambiar_estatus(pre, E.RECHAZADA, ["motivo_rechazo"])
     pre.save(update_fields=[*campos, "updated_at"])
     evento(pre, EV.RECHAZADA, user, pre.motivo_rechazo)

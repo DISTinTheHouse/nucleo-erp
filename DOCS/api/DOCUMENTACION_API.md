@@ -2569,7 +2569,7 @@ Mismo `PATCH /api/v1/ventas/pedidos/{id}/` y mismo `DELETE` de siempre; solo cam
 
 #### Cancelar: pre-orden y OC ligadas — `POST /api/v1/ventas/pedidos/{id}/cancelar/`
 
-Body `{"motivo": "..."}` (obligatorio → `400 {"motivo"}`). Además de devolver inventario y liberar reservas, en la misma transacción:
+Body `{"motivo": "..."}` (obligatorio; falta o más de 500 caracteres → `400 {"motivo"}`). Además de devolver inventario y liberar reservas, en la misma transacción:
 
 - **OC ligadas** (`pedido` o `pedidos`): si alguna está en `1` Borrador o `2` Por autorizar → `400 {"ordenes_compra": "Tiene OC en borrador o por autorizar: OC-1, #2. Cancélalas o autorízalas primero.", "ordenes_compra_bloqueantes": [{"id": 1, "folio": "OC-1", "estatus": 1}, {"id": 2, "folio": null, "estatus": 2}]}` (EC-973: el texto no cambia; la lista trae cada OC bloqueante, `folio` `null` si no tiene, ordenadas por id); compras la cancela o autoriza primero. Las autorizadas / parcialmente recibidas **no se cancelan solas**: quedan con `pedido_cancelado: true`, `fecha_pedido_cancelado`, `pedido_cancelado_origen` (id del pedido que la causó; con OC multi-pedido, cuál se canceló) y `pedido_cancelado_origen_folio` (visibles en `GET /api/v1/compras/ordenes/`, sin consultas extra) para que compras decida. La marca deja historial en la OC (`HistoricalOrdenCompra`, con el usuario y el motivo "Pedido X cancelado") y un renglón en su bitácora (`tipo=orden_compra`: de su estatus a "Pedido cancelado", `estatus_codigo` `PEDIDO_CANCELADO`, origen el pedido) (#1404).
 - **Pre-orden abierta** del pedido: se cancela (evento `cancelada` con el motivo). Necesidades `pendiente` → `cancelada`; las ya en una OC → `huerfana`.
@@ -2619,7 +2619,7 @@ Mesa de control (departamento `MESACONTROL`, admin de empresa o superuser) decid
 
 Congela el pedido **sin cancelarlo** (crédito vencido, el cliente pidió esperar, cambio por confirmar).
 
-- Body `{"motivo": "Crédito vencido"}` (obligatorio, máx. 500). Sin motivo → `400 {"motivo": "Indica el motivo de la retención."}`.
+- Body `{"motivo": "Crédito vencido"}` (obligatorio; más de 500 caracteres → `400 {"motivo"}`, ya no se corta). Sin motivo → `400 {"motivo": "Indica el motivo de la retención."}`.
 - Ya retenido → `400 {"pedido": "El pedido ya está retenido."}`; cancelado → `400`. Sin ser mesa de control → `403`. Otra empresa → `404`.
 - `200 {"id", "folio", "retenido": true, "motivo_retencion", "fecha_retencion", "retenido_por"}`.
 - **Mientras está retenido nadie inicia trabajo nuevo sobre él** y cada intento responde `400` con el mismo texto (`"El pedido P-00178-2026 está retenido por mesa de control: Crédito vencido. Pide a mesa de control que lo libere."`):
@@ -4404,6 +4404,8 @@ Encontrados en la revisión de seguridad de octubre 2026. El acceso ya se cerró
 ---
 
 ## 🚫 Finanzas - Cancelaciones (motivo, permiso y auditoría)
+
+> **Motivo en todo el ERP (#1399):** cancelar, rechazar, retener, revertir o cerrar saldo en compras, ventas, WMS, producción y finanzas responde `400 {"motivo": "El motivo admite hasta 500 caracteres (tiene N)."}` si pasa de 500 caracteres (antes se cortaba en silencio). Un solo helper: `nucleo/motivo.py`.
 
 Toda cancelación de finanzas exige **`motivo`** (body JSON o `?motivo=` en DELETE) → `400 {"motivo": ...}` si falta o si pasa de 500 caracteres tras quitar espacios de los extremos (antes se cortaba en silencio, #1399). Repetir una cancelación da `400` (no reescribe el rastro), salvo factura, cuyo reintento ante el SAT se acepta sin tocar el motivo original.
 
@@ -6618,7 +6620,7 @@ Cancelar **no borra**: el documento conserva su folio, queda en estado cancelado
 
 **Comunes a los cuatro endpoints**
 
-- Método `POST`, body `{"motivo": "texto"}` (obligatorio, máx. 500). Sin motivo → `400 {"motivo": "Indica el motivo de la cancelación."}`.
+- Método `POST`, body `{"motivo": "texto"}` (obligatorio; más de 500 caracteres → `400 {"motivo"}`, ya no se corta). Sin motivo → `400 {"motivo": "Indica el motivo de la cancelación."}`.
 - Permiso: superuser, admin de empresa, departamento de **mesa de control** (`MESACONTROL`) o la clave `WMS-CANCELAR` (rol o GRANT). Sin permiso → `403`.
 - Documento de otra empresa o sucursal no visible → `404`.
 - **Orden obligatorio, de atrás hacia adelante:** despacho → packing → picking. Si hay un documento posterior vivo, `400` con su folio (p. ej. `{"packing": "Tiene despachos activos: 54. Cancélalos primero."}`).
