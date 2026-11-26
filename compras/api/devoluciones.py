@@ -15,6 +15,7 @@ from compras.services import devolucion_proveedor as servicio
 from nucleo.kpis import entero_param
 from nucleo.listados import OrdenamientoEstableFilter, PaginacionOpcionalLimitOffset
 from nucleo.middleware import ip_auditoria
+from nucleo.motivo import exigir_largo_motivo
 
 PERMISO_LEER = "R-WMS-RECEPCIONES"
 PERMISO_ESCRIBIR = "C-WMS-RECEPCIONES"
@@ -67,7 +68,7 @@ def _motivo(request, mensaje):
     motivo = request.data.get("motivo") if hasattr(request.data, "get") else None
     if not isinstance(motivo, str) or not motivo.strip():
         raise ValidationError({"motivo": mensaje})
-    return motivo.strip()[:500]
+    return exigir_largo_motivo(motivo.strip())
 
 
 class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
