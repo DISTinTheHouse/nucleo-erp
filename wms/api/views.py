@@ -1207,7 +1207,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         url_name="scans_clear",
     )
     def scans_clear(self, request):
-        """Purge list: borra las lecturas de la empresa activa del usuario.
+        """Purge list: borra las lecturas de la empresa activa del usuario
+        (opcional: ``lector`` y/o ``hasta_id``, #1455).
         Respuesta: {"status": "success", "deleted": N}
 
         Solo superusuario o administrador de empresa. El superusuario también
@@ -1218,5 +1219,20 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
             raise PermissionDenied("No tiene permisos para realizar esta acción.")
 
-        deleted, _ = RfidScan.objects.visibles_para(user).delete()
-        return Response({"status": "success", "deleted": deleted})
+        # #1455: acotable. ``lector`` = solo ese lector; ``hasta_id`` = solo las
+        # lecturas con id <= N (lo leído antes de empezar una captura). Sin filtros
+        # sigue siendo el mantenimiento de toda la empresa.
+        qs = RfidScan.objects.visibles_para(user)
+        datos = request.data if hasattr(request.data, "get") else {}
+        filtros = {}
+        for campo, lookup in (("lector", "lector_id"), ("hasta_id", "pk__lte")):
+            valor = datos.get(campo, request.query_params.get(campo))
+            if valor in (None, ""):
+                continue
+            try:
+                filtros[lookup] = int(valor)
+            except (TypeError, ValueError):
+                raise ValidationError({campo: "Debe ser un número entero."})
+        deleted, _ = qs.filter(**filtros).delete()
+        return Response({"status": "success", "deleted": deleted, "filtros": {
+            "lector": filtros.get("lector_id"), "hasta_id": filtros.get("pk__lte")}})

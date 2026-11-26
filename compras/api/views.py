@@ -1976,6 +1976,11 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 "estatus", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por", "updated_at",
             ])
             despues = {"estatus": recepcion.estatus, "motivo": motivo}
+            # #1441: el encuadre ligado queda libre para recibir de nuevo o cancelarse.
+            liberados = list(RecepcionRFIDEncuadre.objects.filter(recepcion=recepcion).values_list("pk", flat=True))
+            if liberados:
+                RecepcionRFIDEncuadre.objects.filter(pk__in=liberados).update(recepcion=None, updated_at=timezone.now())
+                despues["encuadres_rfid_liberados"] = liberados
             if facturas:
                 despues["facturas_proveedor_canceladas"] = [f.pk for f in facturas]
             if sm is not None and sm.estatus == SalidaMaquila.Estatus.RECIBIDA:
@@ -2005,6 +2010,26 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 user_agent=request.META.get("HTTP_USER_AGENT"),
             )
         return Response(RecepcionSerializer(recepcion).data, status=status.HTTP_200_OK)
+
+    def _ligar_encuadre_rfid(self, encuadre_id, recepcion, empresa):
+        """#1441: liga el encuadre RFID con el que se recibe. Debe ser de la empresa,
+        estar ACEPTADO, sin recepción y ser de la misma OC/OP. Bajo lock del encuadre."""
+        encuadre = (
+            RecepcionRFIDEncuadre.objects.select_for_update()
+            .filter(pk=encuadre_id, empresa=empresa).first()
+        )
+        if encuadre is None:
+            raise _error_detalle({"encuadre_rfid": "Encuadre RFID no encontrado."})
+        if encuadre.estatus != RecepcionRFIDEncuadre.Estatus.ACEPTADO:
+            raise _error_detalle({"encuadre_rfid": "Solo se recibe con un encuadre aceptado."})
+        if encuadre.recepcion_id:
+            raise _error_detalle({"encuadre_rfid": "El encuadre ya está ligado a otra recepción."})
+        if (encuadre.orden_compra_id or None) != (recepcion.orden_compra_id or None) or (
+            (encuadre.op_id or None) != (recepcion.op_id or None)
+        ):
+            raise _error_detalle({"encuadre_rfid": "El encuadre es de otra orden."})
+        encuadre.recepcion = recepcion
+        encuadre.save(update_fields=["recepcion", "updated_at"])
 
     def _serie_folio_recepcion(self, empresa, sucursal, serie_codigo):
         """Serie elegida (``serie_codigo``) en la sucursal, o ``None`` si no está activa:
@@ -2914,6 +2939,8 @@ class RecepcionViewSet(viewsets.ReadOnlyModelViewSet):
                 )
                 self._asignar_folio_recepcion(recepcion, serie_codigo)
                 recepcion.save()
+                if header.get("encuadre_rfid"):
+                    self._ligar_encuadre_rfid(header["encuadre_rfid"], recepcion, empresa)
 
                 renglones = self._crear_renglones_recepcion(recepcion, detalle_payload)
                 sm_completa = None
@@ -4258,6 +4285,8 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             codigo_tag = resolved["codigo_tag"]
             if encuadre.lecturas.filter(resolved["repetido"]).exists():
                 raise ValidationError({campo: self.TAG_REPETIDO})
+            if campo == "epc":
+                self._exigir_epc_libre_en_la_orden(encuadre, resolved["repetido"])
 
             try:
                 with transaction.atomic():
@@ -4327,6 +4356,27 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             ])
             self._auditar(request, encuadre, "CANCELAR", antes, {"estatus": encuadre.estatus, "motivo": motivo})
         return Response(RecepcionRFIDEncuadreSerializer(encuadre).data)
+
+    def _exigir_epc_libre_en_la_orden(self, encuadre, repetido):
+        """#1453: una pieza (EPC) cuenta en un solo encuadre vigente (pendiente o
+        aceptado) de la misma OC u OP. Se bloquea la orden para que dos encuadres
+        escaneando a la vez se formen. 2 consultas, solo para lecturas por EPC."""
+        if encuadre.orden_compra_id:
+            OrdenCompra.objects.select_for_update().filter(pk=encuadre.orden_compra_id).values_list("pk").first()
+            misma_orden = Q(encuadre__orden_compra_id=encuadre.orden_compra_id)
+        elif encuadre.op_id:
+            OrdenProduccion.objects.select_for_update().filter(pk=encuadre.op_id).values_list("pk").first()
+            misma_orden = Q(encuadre__op_id=encuadre.op_id)
+        else:
+            return
+        otro = (
+            RecepcionRFIDLectura.objects.filter(misma_orden, repetido)
+            .exclude(encuadre_id=encuadre.pk)
+            .filter(encuadre__estatus__in=[RecepcionRFIDEncuadre.Estatus.PENDIENTE, RecepcionRFIDEncuadre.Estatus.ACEPTADO])
+            .values_list("encuadre_id", flat=True).first()
+        )
+        if otro:
+            raise ValidationError({"epc": f"Esta pieza ya se leyó en el encuadre {otro} de la misma orden."})
 
     @classmethod
     def _es_tag_repetido(cls, exc):

@@ -701,6 +701,8 @@ class RecepcionOnboardingHeaderSerializer(serializers.Serializer):
     cerrar_salida_maquila = serializers.BooleanField(required=False, default=False)
     almacen = serializers.IntegerField()
     serie_codigo = serializers.CharField(required=False, allow_blank=True)
+    # #1441: encuadre RFID aceptado con el que se recibe; queda ligado a la recepción.
+    encuadre_rfid = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     fecha_recepcion = serializers.DateTimeField(required=False, allow_null=True)
     remision = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     factura_referencia = serializers.CharField(required=False, allow_null=True, allow_blank=True)

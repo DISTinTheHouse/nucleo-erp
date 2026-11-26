@@ -3255,6 +3255,7 @@ Manda **exactamente uno** de `epc` o `codigo_tag`; ambos o ninguno → `400 {"ep
 - Etiqueta solo con producto → la regla por producto de siempre (el primer renglón del producto).
 - EPC no registrado, o de otra empresa → se guarda **sin asignar** (suma a `total_sin_asignar`) con `metadata.motivo = "epc_no_registrado"`. Etiqueta registrada cuya impresión no tiene producto ni variante → también sin asignar, con `metadata.motivo = "etiqueta_sin_producto"`.
 - `codigo_tag` se guarda con el EPC de la etiqueta (o el EPC normalizado si no está registrado); lo que mandó el lector queda en `metadata.epc_leido`. Es repetida (`400 {"epc": "Este tag ya fue leído en este encuadre."}`) si el encuadre ya tiene esa pieza en cualquier forma: con o sin relleno a 128 bits o ceros a la izquierda, leída antes o después de registrar su impresión, o ligada a la misma etiqueta.
+- **Una pieza, un encuadre (#1453):** si esa pieza (cualquier forma del EPC o la misma etiqueta) ya está en **otro** encuadre `PENDIENTE` o `ACEPTADO` de la misma OC/OP → `400 {"epc": "Esta pieza ya se leyó en el encuadre N de la misma orden."}`. Las de encuadres cancelados no cuentan. Solo aplica a lecturas por `epc` (un `codigo_tag` de SKU no identifica la pieza).
 
 Respuesta `201` (la lectura): los campos de siempre más `epc` (el EPC, `null` si llegó por `codigo_tag`) y `etiqueta` (id de `EtiquetaRFIDDetalle`, `null` si no está registrado o llegó por `codigo_tag`):
 ```json
@@ -3343,6 +3344,7 @@ Para cuando el proveedor surtió parcial y ya no mandará el resto.
 ### Encuadre RFID: cancelar y auditoría
 
 - `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/cancelar/` con `{"motivo": "Escaneo duplicado"}` (obligatorio). Aplica a un encuadre Pendiente, o Aceptado que aún no generó recepción. `400` si ya está cancelado o ya tiene recepción (en ese caso se cancela la recepción). No mueve inventario.
+- **Ligar el encuadre a la recepción (#1441):** `POST /api/v1/compras/recepciones/onboarding/` acepta `recepcion.encuadre_rfid` (opcional). Debe ser de la empresa, estar `ACEPTADO`, sin recepción y de la misma OC/OP; si no → `400 {"encuadre_rfid"}`. Queda `encuadre.recepcion` = la nueva recepción, y desde ahí `cancelar/` del encuadre responde `400 {"recepcion"}`. Al cancelar la recepción, el encuadre se libera (`recepcion = null`, en la auditoría `encuadres_rfid_liberados`).
 - Campos nuevos (solo lectura): `aceptado_por`, `aceptado_por_nombre`, `fecha_aceptacion`, `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`, `cancelado_por_nombre` (#1373), y `usuario_nombre` junto a `usuario` (quien creó el encuadre: nombre o correo; en detalle, listado, create, `aceptar/` y `cancelar/`, sin consultas extra, #1440).
 - `aceptar/` y `cancelar/` dejan `AuditoriaEvento` (`compras/ACEPTAR`, `compras/CANCELAR`, tabla `recepcion_rfid_encuadre`).
 - Concurrencia (EC-981): `aceptar/`, `cancelar/` y `lecturas/` bloquean la fila del encuadre y deciden con su estatus ya bloqueado. Un `cancelar/` que se confirma mientras otro usuario acepta hace que ese `aceptar/` responda `400 {"estatus"}` (antes quedaba `ACEPTADO` conservando los datos de la cancelación), y no entra una lectura a un encuadre que se acaba de aceptar o cancelar. `cancelar/` responde y audita el estado real de la fila (p. ej. `aceptado_por` si se aceptó en medio).
@@ -7415,11 +7417,11 @@ GET /api/v1/wms/etiquetas-rfid/scanner-stats/?epc=000012E32827000147C0C5F5
 ### 4) Purge List (vaciar lecturas antes de una prueba)
 
 - **Endpoint**: `POST /api/v1/wms/etiquetas-rfid/scans/clear/`
-- **Body**: ninguno (vacío)
+- **Body** (opcional, #1455): `{"lector": 9, "hasta_id": 96458}`. `lector` borra solo las de ese lector; `hasta_id` solo las de `id <= N` (lo leído antes de empezar una captura). No numérico → `400`. Sin filtros: todo lo de la empresa (mantenimiento). Para ignorar lecturas previas sin borrar nada, las pantallas de captura deben preferir `?despues_de_id=` del feed.
 - **Alcance**: solo superusuario o admin de empresa (otro usuario → `403`). Borra las lecturas de la empresa activa, todas sus sucursales; el superusuario no borra las de otras empresas (EC-884). Sin empresa activa → `deleted: 0`.
 - **Respuesta**:
   ```json
-  { "status": "success", "deleted": 42 }
+  { "status": "success", "deleted": 42, "filtros": {"lector": null, "hasta_id": null} }
   ```
 
 ---
