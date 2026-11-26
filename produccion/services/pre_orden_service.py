@@ -661,11 +661,22 @@ def cancelar(pre_id, user, motivo=""):
     return pre
 
 
-def marcar_convertida(pre, op, user):
+def texto_omitidos(pedidos_omitidos):
+    """``"P-1 (cancelado), #12 (dado de baja)"``: folio, o ``#id`` si no tiene."""
+    return ", ".join(f"{o['folio'] or '#' + str(o['id'])} ({o['motivo']})" for o in pedidos_omitidos)
+
+
+def marcar_convertida(pre, op, user, pedidos_omitidos):
+    """Convertida en OP. Guarda ``pedidos_omitidos`` tal como lo devuelve ``crear-op``
+    (EC-980) y los lista en el evento ``op_creada``; misma transacción que la OP."""
     campos = _cambiar_estatus(pre, E.CONVERTIDA)
     pre.op = op
-    pre.save(update_fields=[*campos, "op", "updated_at"])
-    evento(pre, EV.OP_CREADA, user, f"OP {op.folio_op}.")
+    pre.pedidos_omitidos = list(pedidos_omitidos)
+    pre.save(update_fields=[*campos, "op", "pedidos_omitidos", "updated_at"])
+    descripcion = f"OP {op.folio_op}."
+    if pre.pedidos_omitidos:
+        descripcion += f" Pedidos omitidos: {texto_omitidos(pre.pedidos_omitidos)}."
+    evento(pre, EV.OP_CREADA, user, descripcion)
 
 
 # --------------------------------------------------------------------------- resurtido

@@ -3555,7 +3555,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
                 request, data=data, sucursal=pre.sucursal,
                 # Los pedidos del resurtido van directo a la OP, revisados arriba (no son
                 # pedidos de muestra: no pasan por ``_validar_pedido``).
-                post_crear=lambda op: (marcar_convertida(pre, op, request.user),
+                post_crear=lambda op: (marcar_convertida(pre, op, request.user, pedidos_omitidos),
                                        ligar_pedidos_op(op, pedidos_ligados)),
             )
         if respuesta.status_code != status.HTTP_201_CREATED:
