@@ -13,6 +13,14 @@ from finanzas.services.factura_timbrado_service import (
     normalizar_motivo_sat,
 )
 
+# Lo que cambia al cancelar en el ERP y ante el SAT; se copia de la fila bloqueada a la factura
+# de la vista cuando otra petición ya la canceló.
+CAMPOS_FILA_CANCELADA = (
+    "estatus", "observaciones", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por",
+    "cfdi_cancelado", "cfdi_cancelacion_solicitada", "cfdi_cancelacion_motivo",
+    "cfdi_cancelacion_en_curso_desde", "updated_at",
+)
+
 
 class FacturaCancelacionService:
     @staticmethod
@@ -84,7 +92,12 @@ class FacturaCancelacionService:
         if not bloqueada.activo:
             raise ErrorDeNegocio({"estatus": "La factura está eliminada y no se puede cancelar."})
         if bloqueada.estatus == Factura.FacturaStatus.CANCELADA:
-            return None
+            # Otra petición la canceló entre ``get_object()`` y el lock: 200 sin efecto, como
+            # cancelar una ya cancelada (no guarda este motivo ni rastro), pero con la fila real
+            # y no con lo que se leyó antes (EC-972).
+            for campo in CAMPOS_FILA_CANCELADA:
+                setattr(factura, campo, getattr(bloqueada, campo))
+            return FacturaPolizaService.contrapoliza_de(bloqueada)
         # Un ``timbrar/`` pudo reservar entre la lectura sin lock y ésta (#902).
         if bloqueada.cfdi_pendiente:
             raise ErrorDeNegocio({"cfdi": PENDIENTE_CFDI})

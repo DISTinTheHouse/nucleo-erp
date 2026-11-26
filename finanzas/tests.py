@@ -9782,6 +9782,40 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         rastro, _ = self._rastro(factura)
         self.assertEqual(rastro, ("", None, None))  # no reescribe el rastro de la cancelación en el ERP
 
+    def test_cancelada_por_otra_peticion_antes_del_lock_responde_200_con_la_fila_real(self):  # EC-972
+        from finanzas.services.factura_cancelacion_service import FacturaCancelacionService
+
+        factura = self._timbrada()
+        self.assertEqual(self._emitir(factura).status_code, 200)
+        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
+        original = FacturaCancelacionService._exigir_sin_notas_emitidas
+        primera = {}
+
+        def otra_peticion_en_medio(f):
+            # Primera validación, sin lock: otra petición cancela la factura completa en ese hueco.
+            if not primera:
+                primera["en_curso"] = True  # antes de la llamada: la primera petición pasa por aquí
+                primera["resp"] = self._cancelar(factura, motivo_sat="03", motivo="Primera")
+            return original(f)
+
+        with patch.object(FacturaCancelacionService, "_exigir_sin_notas_emitidas", side_effect=otra_peticion_en_medio):
+            resp = self._cancelar(factura, motivo_sat="03", motivo="Segunda")
+
+        self.assertEqual(primera["resp"].status_code, 200, primera["resp"].data)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self.facturama.cancel_cfdi.call_count, 1)  # solo la primera llegó al SAT
+        factura.refresh_from_db()
+        for campo in ("estatus", "observaciones", "motivo_cancelacion", "cfdi_cancelado", "cfdi_cancelacion_motivo"):
+            self.assertEqual(resp.data[campo], getattr(factura, campo), campo)
+        self.assertEqual(resp.data["estatus"], Factura.FacturaStatus.CANCELADA)
+        self.assertEqual(resp.data["motivo_cancelacion"], "Primera")
+        self.assertEqual(resp.data["cancelado_por"], self.a["usuario"].pk)
+        self.assertEqual(resp.data["contrapoliza_id"], primera["resp"].data["contrapoliza_id"])
+        self.assertIsNotNone(resp.data["contrapoliza_id"])
+        self.assertNotIn("Segunda", factura.observaciones)
+        _, eventos = self._rastro(factura)
+        self.assertEqual(eventos.count(), 1)  # el de la primera; la segunda no deja rastro
+
     def test_cfdi_cancelado_y_aun_emitida_no_admite_nota_ni_rep(self):  # EC-972
         """Estado de reintento: el SAT canceló y la parte del ERP falló. Nada se cuelga de la
         factura hasta que el reintento la cancela."""
