@@ -1153,10 +1153,13 @@ class CuentaPorPagarSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
         return str(t.quantize(Decimal("0.01")))
 
     def get_tiene_pagos(self, obj) -> bool:
+        """Todo uso de varias filas (listados, ``many=True``) debe pasar por
+        ``CuentaPorPagarService.annotate_has_linked_payments``: sin la anotación,
+        el respaldo de abajo hace una consulta por objeto. Ese respaldo es sólo
+        para las respuestas de escritura (alta/edición), de una sola fila."""
         anotado = getattr(obj, "_tiene_pagos", None)
         if anotado is not None:
             return anotado
-        # Respuestas de escritura (alta/edición): una sola fila, una consulta.
         return CuentaPorPagarService.has_linked_payments(obj)
 
     def validate(self, attrs):
