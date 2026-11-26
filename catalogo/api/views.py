@@ -23,6 +23,7 @@ from nucleo.listados import (
     booleano_param,
     filtrar_rango,
 )
+from nucleo.permisos import permisos_de_la_peticion
 from produccion.models import ListaMaterialBom
 
 # Solo Producto Terminado exige talla en el onboarding de variante; materia
@@ -272,6 +273,25 @@ class SoloAdminEmpresaEscribe(BasePermission):
         )
 
 
+# Dar de alta producto o variante (alta normal y alta rápida ``onboarding``):
+# crear OP o configuración. ``R-PRODUCCION`` sola ya no alcanza.
+CODIGOS_ALTA_PRODUCTO = ("C-PRODUCCION-OP", "C-CONFIGURACION")
+
+
+class AltaProductoRequiereCodigo(BasePermission):
+    """``create`` y ``onboarding`` exigen uno de ``CODIGOS_ALTA_PRODUCTO``
+    (superusuario y admin de empresa pasan, ``permisos_efectivos``). Lo demás
+    sigue igual."""
+
+    message = "No tienes permiso para dar de alta productos o variantes."
+
+    def has_permission(self, request, view):
+        if getattr(view, "action", None) not in ("create", "onboarding"):
+            return True
+        permisos = permisos_de_la_peticion(request)
+        return any(c in permisos for c in CODIGOS_ALTA_PRODUCTO)
+
+
 class TipoProductoViewSet(viewsets.ModelViewSet):
     """Tipos (MP, PT, ...). Global; ``DELETE`` = baja lógica (``activo=False``).
 
@@ -411,6 +431,7 @@ class TallaViewSet(viewsets.ModelViewSet):
 class ProductoViewSet(viewsets.ModelViewSet):
     queryset = Producto.objects.all()
     serializer_class = ProductoSerializer
+    permission_classes = [IsAuthenticated, AltaProductoRequiereCodigo]
     # Sin ``?limit=`` regresa la lista completa, como antes (EC-886).
     pagination_class = PaginacionOpcionalCatalogo
     filter_backends = FILTROS_CON_NULLS_AL_FINAL
@@ -621,6 +642,7 @@ class ProductoVarianteViewSet(viewsets.ModelViewSet):
     # mismo JOIN -> una sola consulta, sin alterar la forma de la respuesta.
     queryset = ProductoVariante.objects.all().select_related("producto", "color", "talla")
     serializer_class = ProductoVarianteSerializer
+    permission_classes = [IsAuthenticated, AltaProductoRequiereCodigo]
     # Sin ``?limit=`` regresa la lista completa, como antes (EC-886).
     pagination_class = PaginacionOpcionalCatalogo
     filter_backends = [*FILTROS_CON_ORDEN_ESTABLE[:-1], OrdenamientoTallaCanonica]

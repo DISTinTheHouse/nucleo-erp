@@ -140,6 +140,15 @@ class ColorViewSetOrdenTests(TestCase):
         )
 
 
+def _conceder_sin_empresa(usuario, *claves):
+    """GRANT directo de ``claves``, válido en cualquier empresa (``empresa=None``)."""
+    from seguridad.models import Permiso, UsuarioPermiso
+
+    for clave in claves:
+        permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+        UsuarioPermiso.objects.create(usuario=usuario, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT)
+
+
 class AislamientoEmpresaCatalogoTests(TestCase):
     """Categoria, Producto y ProductoVariante acotados a la empresa del usuario.
 
@@ -197,6 +206,8 @@ class AislamientoEmpresaCatalogoTests(TestCase):
             username="a@cat.test", email="a@cat.test", empresa=cls.empresa_a, is_admin_empresa=True,
         )
         cls.sin_empresa = Usuario.objects.create(username="n@cat.test", email="n@cat.test")
+        # Con permiso de alta (sin él, 403 antes de la guarda de empresa que se prueba).
+        _conceder_sin_empresa(cls.sin_empresa, "C-CONFIGURACION")
         cls.superuser = Usuario.objects.create(
             username="s@cat.test", email="s@cat.test", is_superuser=True, is_staff=True,
         )
@@ -1981,3 +1992,68 @@ class SchemaProductoCategoriaTests(SimpleTestCase):
                 self.assertTrue(
                     {"categoria_producto_nombre", "categoria_producto_linea"}.isdisjoint(peticion), peticion,
                 )
+
+
+class AltaProductoPermisoTests(TestCase):
+    """Alta de producto y variante (normal y ``onboarding``): ``C-PRODUCCION-OP`` o
+    ``C-CONFIGURACION``. ``R-PRODUCCION`` sola ya no alcanza; leer y editar no cambian."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        cls.empresa = Empresa.objects.create(codigo="alta-perm", razon_social="Alta")
+        cls.tipo = TipoProducto.objects.create(codigo="PT")
+        cls.cat = CategoriaProducto.objects.create(empresa=cls.empresa, nombre="Playera", codigo="PLA")
+        cls.color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        cls.prod = Producto.objects.create(
+            empresa=cls.empresa, categoria_producto=cls.cat, tipo=cls.tipo, nombre="Base", codigo="PLA00",
+        )
+
+        def usuario(nombre, *claves, **extra):
+            u = Usuario.objects.create(username=nombre, email=f"{nombre}@alta.test", empresa=cls.empresa, **extra)
+            for clave in claves:
+                permiso, _ = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})
+                UsuarioPermiso.objects.create(
+                    usuario=u, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=cls.empresa,
+                )
+            return u
+
+        cls.solo_lectura = usuario("lectura", "R-PRODUCCION")
+        cls.con_op = usuario("con-op", "R-PRODUCCION", "C-PRODUCCION-OP")
+        cls.con_config = usuario("con-config", "C-CONFIGURACION")
+        cls.admin = usuario("admin", is_admin_empresa=True)
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _altas(self, user):
+        c = self._client(user)
+        producto = {"nombre": "Nuevo", "tipo": self.tipo.pk, "categoria_producto": self.cat.pk, "precio_base": "1"}
+        variante = {"producto": self.prod.pk, "color": self.color.pk, "precio_base": "1"}
+        return {
+            "producto": c.post(PRODUCTOS_URL, producto, format="json").status_code,
+            "producto_onboarding": c.post(f"{PRODUCTOS_URL}onboarding/", producto, format="json").status_code,
+            "variante": c.post(VARIANTES_URL, variante, format="json").status_code,
+            "variante_onboarding": c.post(f"{VARIANTES_URL}onboarding/", variante, format="json").status_code,
+        }
+
+    def test_solo_r_produccion_no_da_de_alta(self):
+        self.assertEqual(set(self._altas(self.solo_lectura).values()), {403})
+
+    def test_con_c_produccion_op_si(self):
+        self.assertNotIn(403, self._altas(self.con_op).values())
+
+    def test_con_c_configuracion_si(self):
+        self.assertNotIn(403, self._altas(self.con_config).values())
+
+    def test_admin_de_empresa_si(self):
+        self.assertNotIn(403, self._altas(self.admin).values())
+
+    def test_solo_r_produccion_sigue_leyendo_y_editando(self):
+        c = self._client(self.solo_lectura)
+        self.assertEqual(c.get(PRODUCTOS_URL).status_code, 200)
+        self.assertEqual(c.get(VARIANTES_URL).status_code, 200)
+        self.assertEqual(c.patch(f"{PRODUCTOS_URL}{self.prod.pk}/", {"nombre": "Base 2"}, format="json").status_code, 200)

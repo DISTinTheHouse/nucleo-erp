@@ -1205,6 +1205,13 @@ Gestiona las combinaciones específicas (SKU, color, talla, precio).
 
 Flujo guiado para que producción dé de alta un Producto y su(s) variante(s) (SKU) con el mínimo de campos posible — el resto se infiere en el servidor. Dos pasos.
 
+**Permiso para dar de alta**: aplica a `POST producto/`, `POST producto/onboarding/`, `POST producto-variante/` y `POST producto-variante/onboarding/`.
+
+- Se exige `C-PRODUCCION-OP` **o** `C-CONFIGURACION`. El superusuario y el admin de empresa pasan siempre.
+- Sin ninguno de los dos, responde `403`. `R-PRODUCCION` sola ya no alcanza.
+- Leer, editar y dar de baja no cambian.
+- El alta de catálogo desde pedidos especiales (planeación) sigue su propio permiso.
+
 **Paso 1 — Producto**: `POST /api/v1/catalogo/producto/onboarding/`
 - Body: `{ "nombre", "tipo", "categoria_producto", "precio_base" }` — sin `descripcion`.
 - El servidor infiere `codigo` (correlativo por categoría: prefijo = `categoria_producto.codigo` + consecutivo con ceros a la izquierda hasta llenar 5 caracteres, ej. categoría `"100"` → `"10000"`, `"10001"`, `"10002"`...) y `unidad_medida` (la que tenga configurada la categoría, si tiene).
