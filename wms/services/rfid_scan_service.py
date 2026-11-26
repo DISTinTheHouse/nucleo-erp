@@ -120,7 +120,13 @@ def ligar_lecturas_previas(impresion):
     detalles = {d.epc: d for d in impresion.etiquetas.only("id", "epc")}
     if not detalles:
         return 0
-    buscar = set(detalles) | {e.lower() for e in detalles}
+    # #1456: el lector puede reportar el EPC con relleno a 128 bits o sin ceros a la
+    # izquierda; se busca por todas sus formas y cada lectura se mapea a su detalle.
+    por_forma = {}
+    for epc, detalle in detalles.items():
+        for forma in formas_equivalentes_epc(epc):
+            por_forma.setdefault(forma, detalle)
+    buscar = set(por_forma)
     scans = list(
         RfidScan.objects.filter(
             Q(empresa_id=impresion.empresa_id) | Q(empresa__isnull=True, lector__isnull=True),
@@ -130,18 +136,21 @@ def ligar_lecturas_previas(impresion):
     )
     if not scans:
         return 0
-    primera = {}
+    primera, ligadas = {}, []
     for scan in scans:
-        detalle = detalles[normalizar_epc(scan.epc)]
+        detalle = por_forma.get(normalizar_epc(scan.epc))
+        if detalle is None:
+            continue
         scan.etiqueta_id = detalle.pk
         # Lecturas sin token: toman la empresa de la etiqueta.
         scan.empresa_id = impresion.empresa_id
         if detalle.pk not in primera or scan.created_at < primera[detalle.pk]:
             primera[detalle.pk] = scan.created_at
-    RfidScan.objects.bulk_update(scans, ["etiqueta", "empresa"], batch_size=500)
+        ligadas.append(scan)
+    RfidScan.objects.bulk_update(ligadas, ["etiqueta", "empresa"], batch_size=500)
     for detalle_id, cuando in primera.items():
         marcar_leidas([detalle_id], cuando=cuando)
-    return len(scans)
+    return len(ligadas)
 
 
 def _es_hexadecimal_epc(value):
