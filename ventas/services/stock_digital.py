@@ -16,12 +16,16 @@ OC. Por variante de catálogo (SKU):
   producción, Revisión, Detenido); por renglón ``max(cantidad − recibido, 0)``.
 - **En compra**: OC activas Autorizadas o Parcialmente recibidas; por renglón
   ``max(cantidad − recibido, 0)``.
-  "Recibido" = renglones de recepciones activas y no canceladas, como en compras.
+  "Recibido" = renglones de recepciones activas y no canceladas menos lo que
+  Calidad rechazó en ellas (sin inspecciones anuladas), como en compras e
+  inventarios (#1424): lo rechazado no entró y la OC/OP lo sigue debiendo.
 - **Disponible hoy** = real − comprometido.
 - **Disponibilidad digital** = real + en producción + en compra − comprometido.
   Negativa = faltante: lo comprometido no alcanza ni con lo que viene.
 
 Fechas: ``fecha_entrega_estimada`` de cada OP y OC (nula si no se capturó).
+``estatus_display`` del detalle, en tipo oración y con acentos para pedidos, OP y
+OC por igual (#1426); ``estatus`` sigue siendo el código.
 Fuera de alcance: muestras (sin SKU de catálogo) y tallas de pedido sin variante.
 
 Costo: ``totales`` hace 4 consultas agrupadas sin importar cuántas variantes;
@@ -34,7 +38,9 @@ from types import SimpleNamespace
 from django.db.models import DecimalField, F, Min, Sum, Value
 from django.db.models.functions import Greatest
 
-from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+from compras.models import (
+    CalidadInspeccion, CalidadInspeccionDetalle, OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle,
+)
 from inventarios.models import Existencia
 from produccion.models import OrdenProduccion, OrdenProduccionDetalle
 from ventas.models import Pedido, PedidoDetalleTalla
@@ -67,6 +73,30 @@ _CERO = Value(CERO, output_field=NUM)
 def _recepciones_vivas():
     return RecepcionDetalle.objects.filter(recepcion__activo=True).exclude(
         recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA)
+
+
+def _rechazos_vivos():
+    """Rechazos de Calidad de esas mismas recepciones, sin inspecciones anuladas."""
+    return CalidadInspeccionDetalle.objects.filter(recepcion_detalle__recepcion__activo=True).exclude(
+        recepcion_detalle__recepcion__estatus=Recepcion.EstatusRecepcion.CANCELADA).exclude(
+        calidad_inspeccion__estado=CalidadInspeccion.ESTADO_ANULADA)
+
+
+def _recibido_neto(campo):
+    """Recibido − rechazado del renglón (``campo``: FK de ``RecepcionDetalle`` al
+    renglón de la OP/OC), en subconsultas por FK indexada (#1424)."""
+    return (_suma(_recepciones_vivas(), "cantidad_recibida", campo)
+            - _suma(_rechazos_vivos(), "cantidad_rechazada", f"recepcion_detalle__{campo}"))
+
+
+#: ``estatus_display`` del detalle en tipo oración y con acentos (#1426): los
+#: catálogos de origen traen mayúsculas (pedido) o no llevan acentos (OP).
+_ACENTOS = {"Preparacion": "Preparación", "En produccion": "En producción", "Revision": "Revisión"}
+
+
+def _etiqueta(texto):
+    texto = (texto or "").capitalize()
+    return _ACENTOS.get(texto, texto) or None
 
 
 def existencias(empresa_id, sucursal_id=None):
@@ -103,7 +133,7 @@ def renglones_op(empresa_id, sucursal_id=None):
     if sucursal_id:
         qs = qs.filter(op__sucursal_id=sucursal_id)
     return qs.annotate(
-        recibido=_suma(_recepciones_vivas(), "cantidad_recibida", "orden_produccion_detalle_id"),
+        recibido=_recibido_neto("orden_produccion_detalle_id"),
     ).annotate(pendiente=Greatest(F("cantidad") - F("recibido"), _CERO, output_field=NUM)).filter(pendiente__gt=0)
 
 
@@ -117,7 +147,7 @@ def renglones_oc(empresa_id, sucursal_id=None):
     if sucursal_id:
         qs = qs.filter(orden_compra__sucursal_id=sucursal_id)
     return qs.annotate(
-        recibido=_suma(_recepciones_vivas(), "cantidad_recibida", "orden_compra_detalle_id"),
+        recibido=_recibido_neto("orden_compra_detalle_id"),
     ).annotate(pendiente=Greatest(F("cantidad") - F("recibido"), _CERO, output_field=NUM)).filter(pendiente__gt=0)
 
 
@@ -202,7 +232,7 @@ def detalle(empresa_id, variante_id, sucursal_id=None):
             "pedido_id": r[f"{p}id"], "folio": r[f"{p}folio"], "cliente_nombre": r[f"{p}cliente_nombre"],
             "vendedor": _nombre(r[f"{p}cotizacion__vendedor__first_name"], r[f"{p}cotizacion__vendedor__last_name"]),
             "sucursal_id": r[f"{p}sucursal_id"],
-            "estatus": r[f"{p}estatus"], "estatus_display": estatus_pedido.get(r[f"{p}estatus"]),
+            "estatus": r[f"{p}estatus"], "estatus_display": _etiqueta(estatus_pedido.get(r[f"{p}estatus"])),
             "clasificacion": r[f"{p}clasificacion"], "retenido": r[f"{p}retenido"],
             "fecha_confirmacion": r[f"{p}fecha_confirmacion"],
             "entrega_desde": desde, "entrega_hasta": hasta,
@@ -214,7 +244,7 @@ def detalle(empresa_id, variante_id, sucursal_id=None):
     entradas_op = [
         {
             "op_id": r["op_id"], "folio": r["op__folio_op"], "sucursal_id": r["op__sucursal_id"],
-            "estatus": r["op__estatus_op"], "estatus_display": _EOP(r["op__estatus_op"]).label,
+            "estatus": r["op__estatus_op"], "estatus_display": _etiqueta(_EOP(r["op__estatus_op"]).label),
             "pedido_folio": r["op__pedido__folio"], "fecha_entrega_estimada": r["op__fecha_entrega_estimada"],
             "cantidad": r["piezas"], "recibido": r["recibidas"], "pendiente": r["pendientes"],
         }
@@ -227,7 +257,7 @@ def detalle(empresa_id, variante_id, sucursal_id=None):
         {
             "orden_compra_id": r["orden_compra_id"], "folio": r["orden_compra__folio"],
             "sucursal_id": r["orden_compra__sucursal_id"], "proveedor": r["orden_compra__proveedor__nombre"],
-            "estatus": r["orden_compra__estatus"], "estatus_display": _EOC(r["orden_compra__estatus"]).label,
+            "estatus": r["orden_compra__estatus"], "estatus_display": _etiqueta(_EOC(r["orden_compra__estatus"]).label),
             "fecha_entrega_estimada": r["orden_compra__fecha_entrega_estimada"],
             "cantidad": Decimal(r["piezas"] or 0), "recibido": r["recibidas"], "pendiente": r["pendientes"],
         }
