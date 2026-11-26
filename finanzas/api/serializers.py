@@ -1141,6 +1141,8 @@ class CuentaPorPagarSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
     moneda_id = serializers.IntegerField(source="factura_proveedor.moneda_id", read_only=True)
     moneda_codigo = serializers.CharField(source="factura_proveedor.moneda.codigo_iso", read_only=True)
     total_pagado = serializers.SerializerMethodField()
+    # EC-974: si el ``DELETE`` la borra (``false``) o la cancela con motivo (``true``).
+    tiene_pagos = serializers.SerializerMethodField()
 
     class Meta:
         model = CuentaPorPagar
@@ -1149,6 +1151,13 @@ class CuentaPorPagarSerializer(EmpresaResueltaEnServidorMixin, serializers.Model
     def get_total_pagado(self, obj):
         t = Decimal(str(obj.total or 0)) - Decimal(str(obj.saldo or 0))
         return str(t.quantize(Decimal("0.01")))
+
+    def get_tiene_pagos(self, obj) -> bool:
+        anotado = getattr(obj, "_tiene_pagos", None)
+        if anotado is not None:
+            return anotado
+        # Respuestas de escritura (alta/edición): una sola fila, una consulta.
+        return CuentaPorPagarService.has_linked_payments(obj)
 
     def validate(self, attrs):
         req = self.context.get("request")
