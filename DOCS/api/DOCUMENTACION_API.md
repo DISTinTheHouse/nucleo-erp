@@ -7106,7 +7106,7 @@ No hay endpoint especial tipo onboarding. El modal consta de 3 partes:
   - `solo_match=1`: solo lecturas de etiquetas impresas por el ERP.
   - `unicos=1`: la última lectura de cada EPC (el FX repite el mismo tag cada pocos segundos).
   - `limite=N`: máximo de lecturas (1-200, default 50).
-  - `despues_de_id=N` (EC-982): cursor, solo lecturas con `id` mayor que `N` (entero ≥ 0; inválido → `400 {"despues_de_id"}`). Se aplica antes de `unicos` y `limite`. Para ignorar lo leído antes de empezar una captura: al iniciarla guarda el `id` más alto que regrese el feed (o `0` si viene vacío) y manda ese valor fijo en cada polling; con `unicos=1&limite=200` cubre hasta 200 piezas distintas por captura. Sin el parámetro, la misma respuesta de siempre.
+  - `despues_de_id=N` (EC-982): cursor, solo lecturas con `id` mayor que `N` (entero ≥ 0; inválido → `400 {"despues_de_id"}`). Con `unicos=1`, la última lectura de cada EPC (por lector, de `RfidLecturaUltima`) sale solo si es posterior al cursor; `limite` se aplica después y se combina con `lector` y `solo_match`. Para ignorar lo leído antes de empezar una captura: al iniciarla toma el `id` más alto que regrese el feed (o `0` si viene vacío) y en cada polling manda como `despues_de_id` el `id` más alto visto hasta ese momento. `receive` descarta la misma etiqueta del mismo lector durante 30 s, así que una pieza que ya estaba frente a la antena antes de empezar puede tardar hasta 30 s en reaparecer. Sin el parámetro, la misma respuesta de siempre.
   - `epc=XXXX` (hex, debug): busca directo este EPC en el payload y devuelve `debug_get.query_epc_search.found_in_scans` (booleano rápido sin iterar).
 
 **Ejemplo URL de debug (recién impresa una etiqueta)**:
@@ -7449,7 +7449,7 @@ Pantalla **WMS → RFID → Lectores RFID**. Alta, lista y baja de los lectores 
     "ubicacion": "",
     "sucursal": 1,
     "sucursal_nombre": "Toneles",
-    "url_fx": "https://nucleo-erp.vercel.app/api/receive-scan/?token=<token>",
+    "url_fx": "https://nucleo-erp.vercel.app/api/receive-scan/?token=••••WZXk",
     "estado": "SIN_CONEXION",
     "ultima_conexion": "2026-11-23T14:04:23.497935-06:00",
     "ultima_lectura": "2026-11-23T13:25:13.669896-06:00",
@@ -7458,7 +7458,7 @@ Pantalla **WMS → RFID → Lectores RFID**. Alta, lista y baja de los lectores 
 ]
 ```
 
-- `url_fx` es la URL completa que se pega en el **IoT Connector** del FX (HTTP POST). Lleva el token y la base del servidor que atendió la petición: en local, `http://localhost:8003/...`; en producción, `https://nucleo-erp.vercel.app/...`.
+- `url_fx` es la URL completa que se pega en el **IoT Connector** del FX (HTTP POST). En el `GET` va con el token enmascarado (`••••` + últimos 4); completa solo al crear o regenerar. Lleva la base del servidor que atendió la petición: en local, `http://localhost:8003/...`; en producción, `https://nucleo-erp.vercel.app/...`.
 - `estado` sale de las dos marcas del lector, con una ventana de 300 s:
   - `LEYENDO`: entraron tags en esa ventana.
   - `CONECTADO_SIN_TAGS`: el FX sí se reportó, pero sin tags.
@@ -7480,7 +7480,7 @@ Pantalla **WMS → RFID → Lectores RFID**. Alta, lista y baja de los lectores 
 - `ubicacion` es opcional, texto libre.
 - `sucursal` es opcional. Si no viene, se usa la sucursal por defecto del usuario; debe ser de la empresa activa, si no responde `400 {"sucursal": [...]}`. La sucursal decide quién ve las lecturas del lector.
 - Un usuario sin empresa activa recibe `400`.
-- **Respuesta**: `201` con el lector completo, `url_fx` incluida. El token se genera al crear el lector y no se puede editar.
+- **Respuesta**: `201` con el lector completo, `url_fx` incluida. El token se genera al crear el lector; esta respuesta es la única que trae `url_fx` completa (para otra, `regenerar-token`).
 
 ### Eliminar
 
@@ -7494,7 +7494,7 @@ Pantalla **WMS → RFID → Lectores RFID**. Alta, lista y baja de los lectores 
 ### Cambio en `/api/receive-scan/`
 
 - **Con token** (`?token=`, `X-RFID-Token`, Bearer o Basic): la lectura queda ligada a su lector. Si el token no es de ningún lector activo (porque se eliminó o porque es inventado), responde `401` y ya no se guarda como lectura sin token.
-- **Sin token**: sigue igual que antes.
+- **Sin token**: `401` (ver "Seguridad y escala de lectores RFID").
 
 El lector de hoy, en `192.168.1.249`, ya estaba registrado como `fx-toneles` con su propio token. Sigue funcionando sin reconfigurar el FX.
 
@@ -7524,6 +7524,35 @@ El lector de hoy, en `192.168.1.249`, ya estaba registrado como `fx-toneles` con
   - No agrega consultas al listado.
 
 `scanner-stats.lectores[]` ya usa los mismos `id` del catálogo de lectores.
+
+### Seguridad y escala de lectores RFID
+
+**Token.**
+
+- En la base solo se guarda el SHA-256 del token y sus últimos 4 caracteres.
+- `url_fx` va completa una sola vez: en la respuesta del `POST` que crea el lector y en `POST lectores/{id}/regenerar-token/`. Regenerar es solo para admin, y el token anterior deja de valer de inmediato.
+- En el `GET`, para todos los usuarios, `url_fx` va enmascarada: `...?token=••••WZXk`.
+- Los lectores que ya existían conservan su token: el FX no se reconfigura.
+
+**`/api/receive-scan/` y `scans/receive/`.**
+
+- Sin token, o con un token inventado o de un lector eliminado: `401`. Ya no existe el modo sin token.
+- El token se puede mandar en `?token=`, en el header `X-RFID-Token`, con Bearer o con Basic (contraseña = token). Lo recomendable es Basic o el header, para que el token no quede en los logs de Vercel ni de proxies, que guardan la URL completa.
+- **Rate limit:** 600 peticiones por minuto por token; arriba de eso, `429`. Se lleva en la base, en el mismo `UPDATE` del heartbeat, así que vale igual entre instancias de Vercel.
+- **Tamaño:** más de 1 MB o más de 2000 lecturas en una petición → `413`.
+- **Validación:**
+  - El EPC debe ser hexadecimal, de 8 a 64 caracteres; si no, se ignora.
+  - Una antena fuera de 0–64, o un RSSI fuera de −150 a 20 dBm, se guardan como `null`, pero la lectura se guarda.
+  - La hora es siempre la del servidor: no se usa el timestamp del FX.
+- **Deduplicación:** la misma etiqueta frente al mismo lector se guarda a lo más una vez cada 30 s.
+- **Respuesta:** `{status, count, duplicadas}`, donde `duplicadas` son las lecturas omitidas por esa ventana. El detalle del parseo solo sale con `?debug=1`.
+
+**Lecturas.**
+
+- **Retención:** las lecturas de más de 30 días se borran solas, en lotes de 5000, a lo más una vez por hora. Las etiquetas conservan su estado `LEIDO` y su `leida_at`.
+- **`scans/?unicos=1`:** sale de una tabla con la última lectura por lector y EPC. Su costo depende de cuántas etiquetas distintas hay, no del tamaño del historial.
+- **`scans/?lector=<id>`** de otra empresa, o de una sucursal ajena: `404`.
+- **`scanner-stats`:** `total_rfidscan_rows` cuenta hasta 10 000. Si hay más, regresa 10 000 con `total_es_tope: true`.
 
 ---
 

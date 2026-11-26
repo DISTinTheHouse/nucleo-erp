@@ -1,4 +1,5 @@
 from django.conf import settings
+import hashlib
 import secrets
 
 from django.contrib.postgres.indexes import OpClass
@@ -675,7 +676,14 @@ class EtiquetaRFIDDetalle(models.Model):
 
 
 def _generar_token_lector():
+    # Lo importan las migraciones viejas (default del antiguo ``token``).
     return secrets.token_urlsafe(32)
+
+
+def hash_token_lector(token):
+    """SHA-256 del token del lector. El token es aleatorio de 256 bits, así que
+    no hace falta un hash lento (no se puede adivinar por diccionario)."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 class LectorRFID(models.Model):
@@ -695,7 +703,14 @@ class LectorRFID(models.Model):
     nombre = models.CharField(max_length=100)
     # Dónde está físicamente (andén, puerta...). Texto libre, opcional.
     ubicacion = models.CharField(max_length=150, blank=True, default="")
-    token = models.CharField(max_length=64, unique=True, default=_generar_token_lector)
+    # Solo el hash: el token en claro se muestra una vez, al crear el lector o al
+    # regenerarlo (``asignar_token``). ``token_sufijo`` sirve para enmascararlo.
+    token_hash = models.CharField(max_length=64, unique=True)
+    token_sufijo = models.CharField(max_length=4, blank=True, default="")
+    # Rate limit por token (#receive-scan): peticiones en la ventana de 1 min
+    # que empezó en ``rl_ventana``. Lo lleva el mismo UPDATE del heartbeat.
+    rl_ventana = models.DateTimeField(null=True, blank=True)
+    rl_conteo = models.PositiveIntegerField(default=0)
     # ``False`` = eliminado desde el ERP: su token deja de valer y sus lecturas
     # se conservan (soft delete).
     activo = models.BooleanField(default=True)
@@ -736,6 +751,20 @@ class LectorRFID(models.Model):
 
     def __str__(self):
         return f"{self.nombre} ({self.empresa_id})"
+
+    def asignar_token(self):
+        """Genera un token nuevo, guarda su hash y lo deja en ``self.token`` (solo
+        en memoria) para mostrarlo esa única vez. No guarda: lo hace quien llama."""
+        token = _generar_token_lector()
+        self.token = token
+        self.token_hash = hash_token_lector(token)
+        self.token_sufijo = token[-4:]
+        return token
+
+    def save(self, *args, **kwargs):
+        if not self.token_hash:
+            self.asignar_token()
+        super().save(*args, **kwargs)
 
     def clean(self):
         if self.sucursal_id and self.empresa_id and self.sucursal.empresa_id != self.empresa_id:
@@ -806,6 +835,48 @@ class RfidScan(models.Model):
         verbose_name = "Lectura RFID"
         verbose_name_plural = "Lecturas RFID"
         ordering = ["-created_at", "-id"]
+        indexes = [
+            # Polling de ``scans/`` (lo más nuevo primero), por empresa y por lector.
+            models.Index(fields=["empresa", "-created_at", "-id"], name="rfid_scan_emp_fecha_idx"),
+            models.Index(fields=["lector", "-created_at", "-id"], name="rfid_scan_lector_fecha_idx"),
+            # Retención: borra por antigüedad.
+            models.Index(fields=["created_at"], name="rfid_scan_fecha_idx"),
+        ]
 
     def __str__(self):
         return f"{self.epc} @ {self.created_at.isoformat()}"
+
+
+class RfidLecturaUltima(models.Model):
+    """Última lectura guardada de cada EPC por lector (una fila por par).
+
+    Mantiene ``scans/?unicos=1`` acotado al número de tags distintos, no al de
+    lecturas, y deja deduplicar la ingesta (``DEDUP_SEGUNDOS``) con una sola
+    consulta por índice único. Se borra en cascada con su ``RfidScan``.
+    """
+
+    empresa = models.ForeignKey(
+        "nucleo.Empresa", on_delete=models.CASCADE, related_name="+",
+    )
+    lector = models.ForeignKey(
+        LectorRFID, on_delete=models.CASCADE, related_name="ultimas_lecturas",
+    )
+    epc = models.CharField(max_length=255)
+    scan = models.OneToOneField(
+        RfidScan, on_delete=models.CASCADE, related_name="es_ultima",
+    )
+    visto = models.DateTimeField()
+
+    class Meta:
+        db_table = "rfid_lecturas_ultimas"
+        verbose_name = "Última lectura RFID"
+        verbose_name_plural = "Últimas lecturas RFID"
+        constraints = [
+            models.UniqueConstraint(fields=["lector", "epc"], name="uq_rfid_ultima_lector_epc"),
+        ]
+        indexes = [
+            models.Index(fields=["empresa", "epc", "-visto"], name="rfid_ultima_emp_epc_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.epc} @ {self.lector_id}"

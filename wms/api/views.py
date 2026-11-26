@@ -5,7 +5,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import mixins, status
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -35,12 +35,14 @@ from wms.models import (
     Picking,
     PickingDetalle,
     PickingOrdenTrabajo,
+    RfidLecturaUltima,
     RfidScan,
     Transferencia,
     TransferenciaDetalle,
 )
 from nucleo.kpis import entero_param
 from nucleo.listados import PaginacionOpcionalLimitOffset
+from wms.api.lectores_rfid import lectores_visibles
 from wms.api import pickings_listado
 from wms.scope import documentos_wms_visibles
 from wms.services import cancelacion_service
@@ -590,6 +592,9 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
         return Response(DespachoSerializer(self.get_queryset().get(pk=despacho.pk)).data)
 
 
+TOPE_CONTEO_STATS = 10000
+
+
 class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
     queryset = EtiquetaRFIDImpresion.objects.all()
     serializer_class = EtiquetaRFIDSerializer
@@ -913,8 +918,9 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                              description="Máximo de lecturas (1-200, default 50)."),
             OpenApiParameter("despues_de_id", OpenApiTypes.INT, description=(
                 "Cursor (EC-982): solo lecturas con `id` mayor. Para ignorar lo leído antes de "
-                "empezar una captura, guarda el `id` más alto al iniciarla. Se aplica antes de "
-                "`unicos` y `limite`. Entero >= 0; inválido → 400."
+                "empezar una captura, manda el `id` más alto que ya viste. Con `unicos`, la última "
+                "lectura de cada EPC sale solo si es posterior al cursor; `limite` se aplica "
+                "después. Entero >= 0; inválido → 400."
             )),
             OpenApiParameter("epc", OpenApiTypes.STR,
                              description="Debug: busca este EPC entre las lecturas devueltas."),
@@ -962,24 +968,31 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         # ajenos cerca del lector llenaban las 50 en un minuto.
         if str(params.get("solo_match", "")).lower() in {"1", "true", "si"}:
             base = base.filter(etiqueta__isnull=False)
-        # ``despues_de_id`` (EC-982): antes de ``unicos``, así la última lectura de
-        # cada EPC se busca solo entre las nuevas (y el DISTINCT recorre menos filas).
+        # ``despues_de_id`` (EC-982): solo lecturas con ``id`` mayor. Con ``unicos``
+        # sale la última lectura de cada EPC (``RfidLecturaUltima``) solo si es
+        # posterior al cursor; ``limite`` se aplica después.
         despues_de_id = entero_param(request, "despues_de_id")
         if despues_de_id is not None:
             base = base.filter(pk__gt=despues_de_id)
         # ``lector=<id>``: solo las lecturas de ese lector (combinable con los
         # otros dos). Sin él, todas las de la empresa, como antes.
         lector_param = str(params.get("lector", "")).strip()
+        lector_id = None
         if lector_param:
             if not lector_param.isdigit():
                 raise ValidationError({"lector": "Debe ser el id numérico de un lector."})
-            base = base.filter(lector_id=int(lector_param))
-        # ``unicos=1``: la última lectura de cada EPC (el FX repite el mismo tag
-        # varias veces por segundo).
+            lector_id = int(lector_param)
+            base = base.filter(lector_id=lector_id)
+        # ``unicos=1``: la última lectura de cada EPC, desde ``RfidLecturaUltima``
+        # (una fila por lector y EPC): el costo depende de cuántos tags distintos
+        # hay, no de cuántas lecturas acumula la tabla.
         if str(params.get("unicos", "")).lower() in {"1", "true", "si"}:
-            base = base.filter(
-                pk__in=base.order_by("epc", "-created_at", "-id").distinct("epc").values("pk")
-            )
+            ultimas = RfidLecturaUltima.objects.filter(empresa_id=getattr(user, "empresa_id", None))
+            if lector_id is not None:
+                ultimas = ultimas.filter(lector_id=lector_id)
+            else:
+                ultimas = ultimas.order_by("epc", "-visto").distinct("epc")
+            base = base.filter(pk__in=ultimas.values("scan_id"))
         try:
             limite = min(max(int(params.get("limite", 50)), 1), 200)
         except (TypeError, ValueError):
@@ -996,6 +1009,12 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             )
             .order_by("-created_at", "-id")[:limite]
         )
+        # ``lector`` de otra empresa o de una sucursal ajena → 404, como el detalle
+        # del lector. Solo se consulta si no hubo lecturas: con lecturas, el
+        # lector ya es visible (mismo alcance que ``visibles_para``).
+        if lector_id is not None and not scans:
+            if not lectores_visibles(user).filter(pk=lector_id).exists():
+                raise NotFound({"lector": "No existe ese lector."})
         # Mismo alcance que get_queryset: un no admin solo ve el detalle de las
         # etiquetas impresas en sus sucursales.
         sucursales = None
@@ -1101,7 +1120,11 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             raise PermissionDenied("No tiene permisos para realizar esta acción.")
 
         scans_qs = RfidScan.objects.visibles_para(user)
-        total = scans_qs.count()
+        # Conteo acotado: no recorre toda la tabla en cada llamada. Arriba de
+        # ``TOPE_CONTEO_STATS`` reporta el tope y ``total_es_tope: true``.
+        total = scans_qs[:TOPE_CONTEO_STATS + 1].count()
+        total_es_tope = total > TOPE_CONTEO_STATS
+        total = min(total, TOPE_CONTEO_STATS)
         last_5 = list(
             scans_qs.order_by("-created_at", "-id")[:5].values(
                 "id", "epc", "antenna", "rssi", "reader_ip", "created_at"
@@ -1153,6 +1176,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             "status": "ok",
             "lectores": lectores_estado(user),
             "total_rfidscan_rows": total,
+            "total_es_tope": total_es_tope,
             "last_scan_ts": last_scan_ts,
             "last_scan_seconds_ago": last_scan_how_old_secs,
             "last_5_scans": last_5_serializable,

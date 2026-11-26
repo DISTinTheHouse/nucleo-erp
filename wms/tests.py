@@ -21,7 +21,14 @@ from catalogo.models import Producto, TipoProducto
 from nucleo.models import Empresa, Sucursal
 from usuarios.models import Usuario
 from wms.api.serializers import EtiquetaRFIDCreateSerializer
-from wms.models import EtiquetaRFIDDetalle, EtiquetaRFIDImpresion, LectorRFID, RfidScan
+from wms.models import (
+    EtiquetaRFIDDetalle,
+    EtiquetaRFIDImpresion,
+    LectorRFID,
+    RfidLecturaUltima,
+    RfidScan,
+    hash_token_lector,
+)
 from wms.services.rfid_label_service import (
     MAX_INTENTOS_EPC,
     EtiquetaRFIDColision409,
@@ -663,18 +670,40 @@ class ScannerRFIDSeguridadTests(TestCase):
         self.assertEqual(self._ids_scans(self.admin_a, despues_de_id=corte, limite=3), nuevas[:3])
 
     def test_cursor_con_unicos_busca_la_ultima_lectura_entre_las_nuevas(self):
-        # El mismo EPC antes y después del corte, y uno que solo se leyó antes.
-        viejo = RfidScan.objects.create(empresa=self.empresa_a, lector=self.lector_a, epc="AAAA0001")
-        RfidScan.objects.create(empresa=self.empresa_a, lector=self.lector_a, epc="BBBB0001")
+        # Por ``scans/receive/`` con el token del lector: así se llena
+        # ``RfidLecturaUltima``, de donde sale ``unicos`` (#1460). Entre lotes se
+        # envejece ``visto`` para pasar la ventana de dedupe de 30 s.
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        def recibir(*epcs):
+            RfidLecturaUltima.objects.update(visto=timezone.now() - timedelta(seconds=31))
+            resp = self._post_receive([{"epcId": e} for e in epcs], HTTP_X_RFID_TOKEN=self.lector_a.token)
+            self.assertEqual(resp.status_code, 200, resp.content)
+
+        def ultima(epc):
+            return RfidScan.objects.filter(epc=epc).order_by("-id").values_list("id", flat=True).first()
+
+        # AAAA antes y después del corte; BBBB solo antes; CCCC solo después.
+        recibir("AAAABBBBCCCCDDDD0001", "BBBBCCCCDDDDEEEE0001")
+        viejo = ultima("AAAABBBBCCCCDDDD0001")
         corte = RfidScan.objects.order_by("-id").values_list("id", flat=True).first()
-        r1 = RfidScan.objects.create(empresa=self.empresa_a, lector=self.lector_a, epc="AAAA0001")
-        r2 = RfidScan.objects.create(empresa=self.empresa_a, lector=self.lector_a, epc="AAAA0001")
-        r3 = RfidScan.objects.create(empresa=self.empresa_a, lector=self.lector_a, epc="CCCC0001")
+        recibir("AAAABBBBCCCCDDDD0001")
+        r1 = ultima("AAAABBBBCCCCDDDD0001")
+        recibir("AAAABBBBCCCCDDDD0001", "CCCCDDDDEEEEFFFF0001")
+        r2, r3 = ultima("AAAABBBBCCCCDDDD0001"), ultima("CCCCDDDDEEEEFFFF0001")
+        self.assertEqual(len({viejo, r1, r2, r3}), 4)
 
         ids = self._ids_scans(self.admin_a, despues_de_id=corte, unicos=1)
-        self.assertEqual(sorted(ids), sorted([r2.pk, r3.pk]))
-        self.assertNotIn(r1.pk, ids)
-        self.assertNotIn(viejo.pk, ids)
+        self.assertEqual(sorted(ids), sorted([r2, r3]))
+        # Combinado con ``lector``: lo mismo; con otro lector de la empresa, nada.
+        self.assertEqual(
+            sorted(self._ids_scans(self.admin_a, despues_de_id=corte, unicos=1, lector=self.lector_a.pk)),
+            sorted([r2, r3]),
+        )
+        # Cursor más allá de la última lectura de cada EPC: vacío.
+        self.assertEqual(self._ids_scans(self.admin_a, despues_de_id=max(r2, r3), unicos=1), [])
         # Con solo_match: solo las ligadas a etiqueta (ninguna aquí).
         self.assertEqual(self._ids_scans(self.admin_a, despues_de_id=corte, unicos=1, solo_match=1), [])
 
@@ -825,9 +854,10 @@ class ScannerRFIDSeguridadTests(TestCase):
             HTTP_X_RFID_TOKEN=self.lector_a.token,
         )
         ndjson = "\n".join(json.dumps(self._evento_simple(e)) for e in (detalle.epc, ajeno))
+        # Otro lector: con el mismo, la segunda vuelta caería en la deduplicación.
         resp = self.client.post(
             self.RECEIVE_URL, data=ndjson, content_type="application/json",
-            HTTP_X_RFID_TOKEN=self.lector_a.token,
+            HTTP_X_RFID_TOKEN=self.lector_a2.token,
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(RfidScan.objects.filter(etiqueta=detalle).count(), 2)
@@ -4110,7 +4140,9 @@ class LectoresRFIDApiTests(TestCase):
         filas = resp.json()
         self.assertEqual([f["nombre"] for f in filas], ["FX A", "FX A2"])
         fila = filas[0]
-        self.assertTrue(fila["url_fx"].endswith(f"/api/receive-scan/?token={self.lector_a.token}"))
+        # El token solo existe como hash: en la lista va enmascarado.
+        self.assertTrue(fila["url_fx"].endswith(f"/api/receive-scan/?token=••••{self.lector_a.token[-4:]}"))
+        self.assertNotIn(self.lector_a.token, json.dumps(filas))
         self.assertEqual(fila["estado"], "SIN_CONEXION")
         self.assertIsNone(fila["ultima_conexion"])
 
@@ -4156,11 +4188,13 @@ class LectoresRFIDApiTests(TestCase):
         resp = self._api(self.admin_a).post(self.URL, {"nombre": "Anden 2", "ubicacion": "Puerta 2"}, format="json")
         self.assertEqual(resp.status_code, 201)
         lector = LectorRFID.objects.get(pk=resp.json()["id"])
-        self.assertTrue(lector.token)
         self.assertEqual(lector.empresa_id, self.empresa_a.pk)
         self.assertEqual(lector.sucursal_id, self.sucursal_a.pk)  # sucursal por defecto del usuario
         self.assertEqual(resp.json()["ubicacion"], "Puerta 2")
-        self.assertIn(f"token={lector.token}", resp.json()["url_fx"])
+        # Al crear, la única vez que se ve completo; en la BD solo queda su hash.
+        token = resp.json()["url_fx"].split("token=")[1]
+        self.assertEqual(lector.token_hash, hash_token_lector(token))
+        self.assertEqual(self._post_fx(token).status_code, 200)
 
     def test_alta_nombre_duplicado_400_sin_importar_mayusculas(self):
         resp = self._api(self.admin_a).post(self.URL, {"nombre": "fx a"}, format="json")
@@ -4201,13 +4235,14 @@ class LectoresRFIDApiTests(TestCase):
         cliente.delete(f"{self.URL}{self.lector_a.pk}/")
         self.assertEqual(cliente.post(self.URL, {"nombre": "FX A"}, format="json").status_code, 201)
 
-    def test_receive_scan_token_inventado_401_y_sin_token_sigue(self):
+    def test_receive_scan_token_inventado_o_sin_token_401(self):
         self.assertEqual(self._post_fx("no-existe").status_code, 401)
         resp = self.client.post(
             "/api/receive-scan/", data=json.dumps([{"epcId": "AAAABBBBCCCCDDDDEEEE7778"}]),
             content_type="application/json",
         )
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(RfidScan.objects.count(), 0)
 
 
 class LectorRFIDEscaneoPorLectorTests(TestCase):
@@ -4314,3 +4349,148 @@ class LectorRFIDEscaneoPorLectorTests(TestCase):
 
     def test_en_uso_pantalla_larga_400(self):
         self.assertEqual(self._en_uso(self.admin_a, self.lector_a, pantalla="x" * 51).status_code, 400)
+
+
+class LectorRFIDBlindajeTests(TestCase):
+    """Token con hash, límites de ``receive-scan``, dedupe, ``unicos`` y retención."""
+
+    URL = LectoresRFIDApiTests.URL
+    SCANS_URL = "/api/v1/wms/etiquetas-rfid/scans/"
+    setUpTestData = classmethod(LectoresRFIDApiTests.setUpTestData.__func__)
+    _api = LectoresRFIDApiTests._api
+
+    def _post(self, token, payload):
+        return self.client.post(
+            f"/api/receive-scan/?token={token}",
+            data=payload if isinstance(payload, str) else json.dumps(payload),
+            content_type="application/json",
+        )
+
+    # ── Token ─────────────────────────────────────────────────────────
+
+    def test_bd_no_guarda_el_token_en_claro(self):
+        fila = LectorRFID.objects.filter(pk=self.lector_a.pk).values().get()
+        self.assertNotIn(self.lector_a.token, json.dumps(fila, default=str))
+        self.assertEqual(fila["token_hash"], hash_token_lector(self.lector_a.token))
+
+    def test_regenerar_token_invalida_el_anterior(self):
+        viejo = self.lector_a.token
+        resp = self._api(self.admin_a).post(f"{self.URL}{self.lector_a.pk}/regenerar-token/")
+        self.assertEqual(resp.status_code, 200)
+        nuevo = resp.json()["url_fx"].split("token=")[1]
+        self.assertNotEqual(nuevo, viejo)
+        self.assertEqual(self._post(viejo, [{"epc": "AAAABBBBCCCC0001"}]).status_code, 401)
+        self.assertEqual(self._post(nuevo, [{"epc": "AAAABBBBCCCC0001"}]).status_code, 200)
+
+    def test_regenerar_token_solo_admin(self):
+        resp = self._api(self.lector_usuario).post(f"{self.URL}{self.lector_a.pk}/regenerar-token/")
+        self.assertEqual(resp.status_code, 403)
+
+    # ── Límites de receive-scan ───────────────────────────────────────
+
+    def test_payload_grande_413(self):
+        resp = self._post(self.lector_a.token, "x" * (1024 * 1024 + 1))
+        self.assertEqual(resp.status_code, 413)
+
+    def test_demasiados_tags_413(self):
+        resp = self._post(self.lector_a.token, [{"epc": f"AAAA{i:012X}"} for i in range(2001)])
+        self.assertEqual(resp.status_code, 413)
+
+    def test_rate_limit_429(self):
+        from django.utils import timezone
+
+        LectorRFID.objects.filter(pk=self.lector_a.pk).update(rl_conteo=600, rl_ventana=timezone.now())
+        self.assertEqual(self._post(self.lector_a.token, []).status_code, 429)
+
+    def test_rate_limit_se_reinicia_pasado_el_minuto(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        LectorRFID.objects.filter(pk=self.lector_a.pk).update(
+            rl_conteo=600, rl_ventana=timezone.now() - timedelta(minutes=2)
+        )
+        self.assertEqual(self._post(self.lector_a.token, []).status_code, 200)
+
+    def test_antena_y_rssi_fuera_de_rango_se_guardan_nulos(self):
+        self._post(self.lector_a.token, [{"epc": "AAAABBBBCCCC0002", "antenna": 500, "rssi": 999}])
+        scan = RfidScan.objects.get()
+        self.assertIsNone(scan.antenna)
+        self.assertIsNone(scan.rssi)
+
+    def test_respuesta_sin_debug(self):
+        data = self._post(self.lector_a.token, [{"epc": "AAAABBBBCCCC0003"}]).json()
+        self.assertEqual(set(data), {"status", "count", "duplicadas"})
+
+    # ── Dedupe y unicos ───────────────────────────────────────────────
+
+    def test_misma_etiqueta_en_la_ventana_no_se_guarda_dos_veces(self):
+        lote = [{"epc": "AAAABBBBCCCC0004"}, {"epc": "AAAABBBBCCCC0005"}]
+        self.assertEqual(self._post(self.lector_a.token, lote).json()["count"], 2)
+        segundo = self._post(self.lector_a.token, lote).json()
+        self.assertEqual((segundo["count"], segundo["duplicadas"]), (0, 2))
+        self.assertEqual(RfidScan.objects.count(), 2)
+        self.assertEqual(RfidLecturaUltima.objects.count(), 2)
+
+    def test_otro_lector_si_guarda_la_misma_etiqueta(self):
+        lote = [{"epc": "AAAABBBBCCCC0006"}]
+        self._post(self.lector_a.token, lote)
+        self.assertEqual(self._post(self.lector_a2.token, lote).json()["count"], 1)
+
+    def test_pasada_la_ventana_se_vuelve_a_guardar(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        lote = [{"epc": "AAAABBBBCCCC0007"}]
+        self._post(self.lector_a.token, lote)
+        RfidLecturaUltima.objects.update(visto=timezone.now() - timedelta(seconds=31))
+        self.assertEqual(self._post(self.lector_a.token, lote).json()["count"], 1)
+        self.assertEqual(RfidLecturaUltima.objects.count(), 1)  # upsert, no otra fila
+
+    def test_unicos_por_lector_usa_la_ultima_lectura(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        lote = [{"epc": "AAAABBBBCCCC0008"}]
+        self._post(self.lector_a.token, lote)
+        RfidLecturaUltima.objects.update(visto=timezone.now() - timedelta(seconds=31))
+        self._post(self.lector_a.token, lote)
+        url = f"{self.SCANS_URL}?lector={self.lector_a.pk}&unicos=1"
+        scans = self._api(self.admin_a).get(url).json()["scans"]
+        self.assertEqual(len(scans), 1)
+        self.assertEqual(scans[0]["id"], RfidLecturaUltima.objects.get().scan_id)
+
+    # ── Aislamiento ───────────────────────────────────────────────────
+
+    def test_scans_lector_de_otra_empresa_404(self):
+        resp = self._api(self.admin_a).get(f"{self.SCANS_URL}?lector={self.lector_b.pk}")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_scans_lector_de_sucursal_ajena_404(self):
+        resp = self._api(self.lector_usuario).get(f"{self.SCANS_URL}?lector={self.lector_a2.pk}")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_scans_lector_propio_sin_lecturas_200(self):
+        resp = self._api(self.admin_a).get(f"{self.SCANS_URL}?lector={self.lector_a.pk}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["scans"], [])
+
+    # ── Retención ─────────────────────────────────────────────────────
+
+    def test_purga_lecturas_de_mas_de_30_dias(self):
+        from datetime import timedelta
+
+        from django.core.cache import cache
+        from django.utils import timezone
+
+        from wms.services.rfid_scan_service import purgar_lecturas_viejas
+
+        self._post(self.lector_a.token, [{"epc": "AAAABBBBCCCC0009"}, {"epc": "AAAABBBBCCCC0010"}])
+        vieja = RfidScan.objects.get(epc="AAAABBBBCCCC0009")
+        RfidScan.objects.filter(pk=vieja.pk).update(created_at=timezone.now() - timedelta(days=31))
+        cache.delete("wms:rfid:purga_lecturas")
+        self.assertEqual(purgar_lecturas_viejas(), 1)
+        self.assertEqual(list(RfidScan.objects.values_list("epc", flat=True)), ["AAAABBBBCCCC0010"])
+        self.assertEqual(RfidLecturaUltima.objects.count(), 1)
