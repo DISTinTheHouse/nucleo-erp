@@ -114,7 +114,7 @@ from compras.services.cancelacion_recepcion import (
     validar_cancelacion_recepcion,
 )
 from terceros.models import Proveedor, Transportista
-from wms.services.rfid_scan_service import etiquetas_por_epc, normalizar_epc
+from wms.services.rfid_scan_service import etiquetas_por_epc, formas_equivalentes_epc, normalizar_epc
 
 logger = logging.getLogger(__name__)
 
@@ -3780,7 +3780,8 @@ def _resolver_tag_rfid(encuadre, codigo_tag):
 
     Parte el texto por espacios y comas y busca con cualquiera de las partes
     (así el frontend mandaba ``"EPC SKU"``). Si varias partes coinciden, gana
-    la de ``id`` menor: orden explícito, no el que diera el plan de Postgres.
+    la de ``id`` menor (``first()`` ya ordena por pk sin ``Meta.ordering``; el
+    ``order_by`` lo deja explícito).
     """
     tokens = [t.strip() for t in codigo_tag.replace(",", " ").split() if t.strip()] or [codigo_tag]
 
@@ -3801,6 +3802,7 @@ def _resolver_tag_rfid(encuadre, codigo_tag):
         "codigo_tag": codigo_tag,
         "etiqueta": None,
         "metadata": {"resolved": bool(producto), "tokens": tokens, "source": "API-RFID"},
+        "repetido": Q(codigo_tag=codigo_tag),
     }
 
 
@@ -3812,8 +3814,10 @@ def _resolver_epc_rfid(encuadre, epc):
     desconocido. Sin filtro de sucursal. Etiqueta con variante: variante y
     producto salen de la impresión; solo con producto, la regla por producto de
     siempre. ``codigo_tag`` = el EPC de la etiqueta (forma canónica) o, si no
-    está registrado, el EPC normalizado: el único por encuadre deduplica la pieza
-    aunque el lector la reporte con o sin relleno.
+    está registrado, el EPC normalizado. ``repetido`` = filtro de las lecturas del
+    encuadre que ya son esta pieza: cualquier forma equivalente del EPC (con o
+    sin relleno, leído antes o después de registrar la impresión) o la misma
+    etiqueta.
     """
     epc_normalizado = normalizar_epc(epc)
     etiqueta = etiquetas_por_epc([epc_normalizado], encuadre.empresa_id, con_producto=True).get(epc_normalizado)
@@ -3824,11 +3828,18 @@ def _resolver_epc_rfid(encuadre, epc):
     metadata = {"resolved": bool(producto), "source": RecepcionRFIDLectura.FUENTE_EPC, "epc_leido": epc_normalizado}
     if etiqueta is None:
         metadata["motivo"] = "epc_no_registrado"
+    elif producto is None:
+        metadata["motivo"] = "etiqueta_sin_producto"
+    codigo_tag = etiqueta.epc if etiqueta is not None else epc_normalizado
+    repetido = Q(codigo_tag__in=formas_equivalentes_epc(epc_normalizado) | formas_equivalentes_epc(codigo_tag))
+    if etiqueta is not None:
+        repetido |= Q(etiqueta=etiqueta)
     return {
         **_renglon_tag_rfid(encuadre, producto, producto_variante),
-        "codigo_tag": etiqueta.epc if etiqueta is not None else epc_normalizado,
+        "codigo_tag": codigo_tag,
         "etiqueta": etiqueta,
         "metadata": metadata,
+        "repetido": repetido,
     }
 
 
@@ -4245,7 +4256,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             else:
                 resolved = _resolver_tag_rfid(encuadre, datos["codigo_tag"])
             codigo_tag = resolved["codigo_tag"]
-            if encuadre.lecturas.filter(codigo_tag=codigo_tag).exists():
+            if encuadre.lecturas.filter(resolved["repetido"]).exists():
                 raise ValidationError({campo: self.TAG_REPETIDO})
 
             try:

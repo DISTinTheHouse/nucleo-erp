@@ -43,6 +43,16 @@ def variantes_epc(epc):
     return {v for v in out if len(v) >= 8}
 
 
+def formas_equivalentes_epc(epc):
+    """``variantes_epc`` más el propio EPC y, de cada forma de 24 hex, su relleno a
+    128 bits: así la relación es simétrica (``X`` encuentra ``X00000000`` y al
+    revés). Para deduplicar la misma pieza leída en formas distintas (EC-982)."""
+    base = normalizar_epc(epc)
+    formas = variantes_epc(base) | ({base} if base else set())
+    de_24 = [f for f in formas if len(f) == 24]
+    return formas | {f.ljust(32, "0") for f in de_24} | {f.rjust(32, "0") for f in de_24}
+
+
 def etiquetas_por_epc(epcs, empresa_id=None, con_producto=False):
     """``{epc_leido: EtiquetaRFIDDetalle}`` en una sola consulta.
 

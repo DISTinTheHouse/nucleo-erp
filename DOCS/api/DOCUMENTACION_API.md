@@ -3238,7 +3238,7 @@ Manda `orden_compra` **u** `op` (nunca ambos). `empresa`/`sucursal`/`proveedor`/
 
 **2) Escanear una pieza** — `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/lecturas/`
 
-Manda **exactamente uno** de `epc` o `codigo_tag`; ambos o ninguno → `400 {"epc"}`. Los dos campos tienen tope de 120 caracteres (más largo → `400` en ese campo, antes era `500`). Solo funciona si el encuadre sigue `PENDIENTE` (`400 {"estatus"}`).
+Manda **exactamente uno** de `epc` o `codigo_tag`; ambos o ninguno → `400 {"epc": "Envía exactamente uno de epc o codigo_tag."}` (el error va en `epc` también si no mandaste ninguno; antes de EC-982 un cuerpo vacío daba `400 {"codigo_tag"}`). Los dos campos tienen tope de 120 caracteres (más largo → `400` en ese campo, antes era `500`). Solo funciona si el encuadre sigue `PENDIENTE` (`400 {"estatus"}`).
 
 ```json
 { "epc": "11112222333344445555AAAA" }
@@ -3246,8 +3246,8 @@ Manda **exactamente uno** de `epc` o `codigo_tag`; ambos o ninguno → `400 {"ep
 **Por EPC (recomendado, EC-982).** Una lectura = una pieza. El EPC se normaliza (hex en mayúsculas, sin espacios, `:` ni `-`) y se busca la etiqueta que imprimió el ERP con él **en la empresa del encuadre** (cualquier sucursal); también se reconoce reportado con relleno a 128 bits o sin ceros a la izquierda.
 - Etiqueta con variante → producto y variante de la etiqueta, al renglón de esa variante (o, en OC, a un renglón del producto sin variante; si tampoco, sin asignar).
 - Etiqueta solo con producto → la regla por producto de siempre (el primer renglón del producto).
-- EPC no registrado, o de otra empresa → se guarda **sin asignar** (suma a `total_sin_asignar`) con `metadata.motivo = "epc_no_registrado"`.
-- `codigo_tag` se guarda con el EPC de la etiqueta (o el EPC normalizado si no está registrado): la misma pieza con o sin relleno es la misma lectura. Repetida → `400 {"epc": "Este tag ya fue leído en este encuadre."}`.
+- EPC no registrado, o de otra empresa → se guarda **sin asignar** (suma a `total_sin_asignar`) con `metadata.motivo = "epc_no_registrado"`. Etiqueta registrada cuya impresión no tiene producto ni variante → también sin asignar, con `metadata.motivo = "etiqueta_sin_producto"`.
+- `codigo_tag` se guarda con el EPC de la etiqueta (o el EPC normalizado si no está registrado); lo que mandó el lector queda en `metadata.epc_leido`. Es repetida (`400 {"epc": "Este tag ya fue leído en este encuadre."}`) si el encuadre ya tiene esa pieza en cualquier forma: con o sin relleno a 128 bits o ceros a la izquierda, leída antes o después de registrar su impresión, o ligada a la misma etiqueta.
 
 Respuesta `201` (la lectura): los campos de siempre más `epc` (el EPC, `null` si llegó por `codigo_tag`) y `etiqueta` (id de `EtiquetaRFIDDetalle`, `null` si no está registrado o llegó por `codigo_tag`):
 ```json

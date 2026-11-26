@@ -15,6 +15,7 @@ from decimal import Decimal
 from unittest import mock
 
 from django.db import connection
+from django.db.models import F
 from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -3176,22 +3177,88 @@ class EncuadreRFIDLecturaEPCTests(TestCase):
                 self.assertIn(campo, resp.json())
         self.assertEqual(self._leer({"codigo_tag": "Z" * 120}).status_code, 201)
 
+    @staticmethod
+    def _al_final_del_heap(modelo, pk):
+        # Un UPDATE escribe una tupla nueva al final: un seq scan o un bitmap scan
+        # sin orden por pk devuelve primero la otra fila aunque esta tenga el id menor.
+        modelo.objects.filter(pk=pk).update(nombre=F("nombre"))
+
     def test_codigo_tag_con_varias_coincidencias_es_determinista(self):
-        # Gana la variante de id menor (CH), sin importar el orden de las partes.
-        ch = self.t["a"]["variantes"]["CH"]
-        for i, codigo in enumerate(("C982a-G C982a-CH", "C982a-CH,C982a-G")):
+        # Gana la variante de id menor, sin importar el orden de las partes. La que
+        # pierde va primero en el heap y en el índice de ``sku`` (``AA`` < ``ZZ``):
+        # cualquier orden que no sea por pk la elegiría a ella.
+        t = self.t["a"]
+        gana = ProductoVariante.objects.create(
+            producto=t["producto"], empresa=t["empresa"], sku="ZZ982", nombre="gana", precio_base="1", color=t["variantes"]["CH"].color,
+        )
+        ProductoVariante.objects.create(
+            producto=t["producto"], empresa=t["empresa"], sku="AA982", nombre="pierde", precio_base="1", color=t["variantes"]["CH"].color,
+        )
+        self._al_final_del_heap(ProductoVariante, gana.pk)
+        for i, codigo in enumerate(("AA982 ZZ982", "ZZ982,AA982")):
             with self.subTest(codigo=codigo):
                 data = self._leer_ok({"codigo_tag": f"{codigo} T{i}"})
-                self.assertEqual((data["producto_variante"], data["orden_compra_detalle"]),
-                                 (ch.pk, self.renglon_ch.pk))
+                self.assertEqual(data["producto_variante"], gana.pk)
 
     def test_codigo_de_producto_repetido_en_dos_productos_es_determinista(self):
         t = self.t["a"]
         tipo = t["producto"].tipo
         primero = Producto.objects.create(empresa=t["empresa"], nombre="Tela 1", tipo=tipo, codigo="T982")
         Producto.objects.create(empresa=t["empresa"], nombre="Tela 2", tipo=tipo, cod_proscai="T982")
+        self._al_final_del_heap(Producto, primero.pk)
         data = self._leer_ok({"codigo_tag": "T982"})
         self.assertEqual(data["producto"], primero.pk)
+
+    def test_epc_desconocido_con_y_sin_relleno_es_la_misma_pieza(self):
+        epc = "ABCDEF0123456789ABCDEF01"
+        for primero, segundo in ((f"{epc}00000000", epc), (epc, f"{epc}00000000"), (epc, f"00000000{epc}")):
+            with self.subTest(primero=primero, segundo=segundo):
+                self.encuadre.lecturas.all().delete()
+                self._leer_ok({"epc": primero})
+                resp = self._leer({"epc": segundo})
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {"epc": "Este tag ya fue leído en este encuadre."})
+                self.assertEqual(self.encuadre.lecturas.count(), 1)
+
+    def test_epc_leido_antes_de_registrar_su_impresion_no_cuenta_doble(self):
+        from wms.models import EtiquetaRFIDDetalle, EtiquetaRFIDImpresion
+
+        t = self.t["a"]
+        epc = "0123456789ABCDEF01234567"
+        # El FX lo reporta con relleno a 128 bits antes de que exista la impresión.
+        primera = self._leer_ok({"epc": f"{epc}00000000"})
+        self.assertEqual(primera["metadata"]["motivo"], "epc_no_registrado")
+        impresion = EtiquetaRFIDImpresion.objects.create(
+            empresa=t["empresa"], sucursal=t["sucursal"], producto=t["producto"],
+            producto_variante=t["variantes"]["G"],
+        )
+        EtiquetaRFIDDetalle.objects.create(impresion=impresion, epc=epc, barcode_value="X")
+        resp = self._leer({"epc": epc})
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"epc": "Este tag ya fue leído en este encuadre."})
+        self.assertEqual(self.encuadre.lecturas.count(), 1)
+
+    def test_epc_de_una_etiqueta_ya_ligada_es_repetido(self):
+        # La lectura ya ligada a la etiqueta cuenta aunque su codigo_tag no sea el EPC.
+        RecepcionRFIDLectura.objects.create(
+            encuadre=self.encuadre, codigo_tag="ligada-a-mano", etiqueta=self.etiqueta_g, cantidad_leida=Decimal("1"),
+        )
+        resp = self._leer({"epc": self.EPC_G})
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("epc", resp.json())
+
+    def test_etiqueta_sin_producto_se_guarda_sin_asignar_con_motivo(self):
+        from wms.models import EtiquetaRFIDDetalle, EtiquetaRFIDImpresion
+
+        t = self.t["a"]
+        impresion = EtiquetaRFIDImpresion.objects.create(empresa=t["empresa"], sucursal=t["sucursal"])
+        etiqueta = EtiquetaRFIDDetalle.objects.create(impresion=impresion, epc="FEDCBA9876543210FEDCBA98", barcode_value="X")
+        data = self._leer_ok({"epc": etiqueta.epc})
+        self.assertEqual(
+            (data["etiqueta"], data["producto"], data["orden_compra_detalle"],
+             data["metadata"]["resolved"], data["metadata"]["motivo"]),
+            (etiqueta.pk, None, None, False, "etiqueta_sin_producto"),
+        )
 
     def test_lectura_por_epc_no_crece_en_consultas(self):
         with CaptureQueriesContext(connection) as por_codigo:
