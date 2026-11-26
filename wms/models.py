@@ -703,6 +703,19 @@ class LectorRFID(models.Model):
     # Último POST autenticado del FX, traiga tags o no (heartbeat incluido): con
     # ``ultima_lectura`` distingue "lector apagado" de "encendido sin tags".
     ultima_conexion = models.DateTimeField(null=True, blank=True)
+    # "En uso" (informativo, no bloquea): último latido de la pantalla que está
+    # escaneando con este lector. Pasados ``SEGUNDOS_EN_USO`` sin latido, libre.
+    en_uso_usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        null=True,
+        blank=True,
+    )
+    en_uso_pantalla = models.CharField(max_length=50, blank=True, default="")
+    en_uso_documento = models.CharField(max_length=100, blank=True, default="")
+    en_uso_desde = models.DateTimeField(null=True, blank=True)
+    en_uso_latido = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
