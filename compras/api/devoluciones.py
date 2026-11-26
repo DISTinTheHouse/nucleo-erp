@@ -44,6 +44,10 @@ class DevolucionProveedorSerializer(serializers.ModelSerializer):
     proveedor_nombre = serializers.CharField(source="proveedor.razon_social", read_only=True, default=None)
     recepcion_folio = serializers.CharField(source="recepcion.folio", read_only=True, default=None)
     orden_compra_folio = serializers.CharField(source="orden_compra.folio", read_only=True, default=None)
+    # Como en recepciones (EC-975, para el PDF de EC-976): ambas FK son NOT NULL y
+    # van en el ``select_related`` del viewset, sin consultas extra.
+    sucursal_nombre = serializers.CharField(source="sucursal.nombre", read_only=True)
+    almacen_nombre = serializers.CharField(source="almacen.nombre", read_only=True)
     # #1406: nombre completo o correo, como ``cancelado_por_nombre``.
     usuario_nombre = serializers.SerializerMethodField()
 
@@ -56,7 +60,8 @@ class DevolucionProveedorSerializer(serializers.ModelSerializer):
     class Meta:
         model = DevolucionProveedor
         fields = ["id", "folio", "estatus", "calidad_inspeccion", "recepcion", "recepcion_folio", "orden_compra",
-                  "orden_compra_folio", "proveedor", "proveedor_nombre", "almacen", "motivo", "fecha", "usuario",
+                  "orden_compra_folio", "proveedor", "proveedor_nombre", "sucursal_nombre", "almacen",
+                  "almacen_nombre", "motivo", "fecha", "usuario",
                   "usuario_nombre", "total", "movimiento_inventario", "motivo_cancelacion", "fecha_cancelacion",
                   "cancelado_por", "cancelado_por_nombre", "detalles"]
 
@@ -98,7 +103,9 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
             return DevolucionProveedor.objects.none()
         qs = (
             DevolucionProveedor.objects.filter(empresa=empresa)
-            .select_related("proveedor", "recepcion", "orden_compra", "usuario", "cancelado_por")
+            .select_related(
+                "proveedor", "recepcion", "orden_compra", "usuario", "cancelado_por", "sucursal", "almacen",
+            )
             .prefetch_related(Prefetch("detalles", queryset=DevolucionProveedorDetalle.objects.select_related(
                 *servicio.ARTICULO_RELACIONADOS).order_by("id")))
             .order_by("-fecha", "-id")

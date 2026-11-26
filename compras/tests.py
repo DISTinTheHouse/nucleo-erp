@@ -4960,3 +4960,52 @@ class DevolucionProveedorContratoTests(TestCase):
                 resp = self._client().get(self.URL, {"ordering": orden})
                 self.assertEqual(resp.status_code, 200, resp.content[:300])
                 self.assertEqual([d["proveedor_nombre"] for d in resp.json()], esperado)
+
+    # --- EC-975: almacén y sucursal por nombre; otra empresa ------------------------
+
+    def _consultas(self, url):
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self._client().get(url)
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return resp.json(), len(ctx.captured_queries)
+
+    def test_detalle_y_listado_traen_almacen_y_sucursal_sin_consultas_extra(self):
+        """EC-975 (para el PDF de EC-976): ``almacen_nombre`` y ``sucursal_nombre`` como
+        en recepciones, del ``select_related``: las consultas del detalle y del listado
+        no cambian ni crecen con las filas."""
+        dev = self._devolucion(self._inspeccion(), "1")
+        esperado = {"almacen": self.a["almacen"].pk, "almacen_nombre": self.a["almacen"].nombre,
+                    "sucursal_nombre": self.a["sucursal"].nombre}
+
+        data, detalle = self._consultas(f"{self.URL}{dev.pk}/")
+        self.assertEqual({k: data[k] for k in esperado}, esperado)
+        filas, una = self._consultas(self.URL)
+        self.assertEqual({k: filas[0][k] for k in esperado}, esperado)
+        # Permiso de lectura aparte (mismo usuario, la misma llamada que ``initial``): el
+        # endpoint hace las mismas 2 de antes de EC-975 (documentos + renglones); sin
+        # ``sucursal``/``almacen`` en el ``select_related`` serían 2 más por documento.
+        with CaptureQueriesContext(connection) as permiso:
+            self.assertTrue(self.a["usuario"].tiene_permiso("R-WMS-RECEPCIONES"))
+        propias = 2
+        self.assertEqual((detalle, una), (len(permiso) + propias, len(permiso) + propias))
+
+        self._devolucion(self._inspeccion(), "1")
+        self._devolucion(self._inspeccion(variante=False), "2")
+        filas, tres = self._consultas(self.URL)
+        self.assertEqual(len(filas), 3)
+        self.assertEqual({(f["almacen_nombre"], f["sucursal_nombre"]) for f in filas},
+                         {(esperado["almacen_nombre"], esperado["sucursal_nombre"])})
+        self.assertEqual(tres, una)
+
+    def test_detalle_de_otra_empresa_es_404(self):
+        """La devolución de otra empresa no se ve ni se cancela (404) y no cambia."""
+        from compras.models import DevolucionProveedor
+
+        ajena = self._devolucion(self._inspeccion(tenant="b"), "1", tenant="b")
+        self.assertEqual(self._client().get(f"{self.URL}{ajena.pk}/").status_code, 404)
+        self.assertEqual(self._client().get(self.URL).json(), [])
+        resp = self._client().post(f"{self.URL}{ajena.pk}/cancelar/", {"motivo": "No"}, format="json")
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(DevolucionProveedor.objects.get(pk=ajena.pk).estatus, DevolucionProveedor.Estatus.APLICADA)
+        # Su empresa sí la ve.
+        self.assertEqual(self._client(self.b["usuario"]).get(f"{self.URL}{ajena.pk}/").status_code, 200)
