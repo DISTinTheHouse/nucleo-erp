@@ -4,17 +4,25 @@ import base64
 import binascii
 import json
 import logging
+import math
 
 from datetime import timedelta
 
 from django.core.cache import cache
-from django.db.models import F, Q
+from django.db import connection
+from django.db.models import F, Q, Subquery
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from django.utils import timezone
 
-from wms.models import EtiquetaRFIDDetalle, LectorRFID, RfidScan
+from wms.models import (
+    EtiquetaRFIDDetalle,
+    LectorRFID,
+    RfidLecturaUltima,
+    RfidScan,
+    hash_token_lector,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -406,7 +414,23 @@ def _extract_antenna_rssi(item, fallback_antenna=None, fallback_rssi=None):
         antenna = _antenna_from_value(fallback_antenna)
     if rssi is None:
         rssi = _extract_float(fallback_rssi)
-    return antenna, rssi
+    return _antena_valida(antenna), _rssi_valido(rssi)
+
+
+# Fuera de rango se guarda ``None`` (la lectura del EPC sí vale): un FX tiene a
+# lo más 8 puertos (32 con multiplexor) y el RSSI es en dBm, negativo.
+ANTENA_MAX = 64
+RSSI_MIN, RSSI_MAX = -150.0, 20.0
+
+
+def _antena_valida(antenna):
+    return antenna if isinstance(antenna, int) and 0 <= antenna <= ANTENA_MAX else None
+
+
+def _rssi_valido(rssi):
+    if rssi is None or not math.isfinite(rssi) or not RSSI_MIN <= rssi <= RSSI_MAX:
+        return None
+    return rssi
 
 
 def _token_de_authorization(auth):
@@ -444,12 +468,16 @@ def token_desde_request(request):
     return token
 
 
+def lector_por_token(token):
+    """Lector activo dueño de ``token`` (se busca por su hash), o ``None``."""
+    if not token or len(token) > 200:
+        return None
+    return LectorRFID.objects.filter(token_hash=hash_token_lector(token), activo=True).first()
+
+
 def lector_desde_request(request):
     """Lector activo dueño del token (``None`` sin token o si no vale)."""
-    token = token_desde_request(request)
-    if not token:
-        return None
-    return LectorRFID.objects.filter(token=token, activo=True).first()
+    return lector_por_token(token_desde_request(request))
 
 
 # Sin POST del FX en este lapso, el lector se da por apagado/desconectado.
@@ -509,6 +537,27 @@ def huerfanas_viejas(dias=DIAS_RETENCION_HUERFANAS):
     )
 
 
+# Retención general: el FX repite cada pocos segundos y la tabla crecía sin
+# límite. Las etiquetas conservan su estado ``LEIDO``/``leida_at``; lo que se
+# borra son las lecturas crudas.
+DIAS_RETENCION_LECTURAS = 30
+LOTE_PURGA = 5000
+
+
+def purgar_lecturas_viejas(dias=DIAS_RETENCION_LECTURAS, lote=LOTE_PURGA):
+    """Borra hasta ``lote`` lecturas de más de ``dias`` (las más viejas primero).
+    A lo más una vez por hora por proceso, así que no pesa en la ingesta."""
+    if not cache.add("wms:rfid:purga_lecturas", 1, 3600):
+        return 0
+    corte = timezone.now() - timedelta(days=dias)
+    ids = RfidScan.objects.filter(created_at__lt=corte).order_by("created_at").values("pk")[:lote]
+    _, por_modelo = RfidScan.objects.filter(pk__in=Subquery(ids)).delete()
+    borradas = por_modelo.get(RfidScan._meta.label, 0)
+    if borradas:
+        logger.info("RFID: %s lecturas de más de %s días borradas", borradas, dias)
+    return borradas
+
+
 def purgar_huerfanas(dias=DIAS_RETENCION_HUERFANAS):
     """Borra las lecturas huérfanas de más de ``dias``. A lo más una vez por hora
     por proceso (``cache.add``), así que no pesa en cada lectura. Regresa cuántas."""
@@ -520,17 +569,67 @@ def purgar_huerfanas(dias=DIAS_RETENCION_HUERFANAS):
     return borradas
 
 
+# Límites de ``receive-scan``. El FX manda un lote cada pocos segundos: 600
+# peticiones por minuto por token es 10 veces el ritmo normal (1 por segundo).
+MAX_PETICIONES_POR_MINUTO = 600
+MAX_BYTES_PAYLOAD = 1024 * 1024
+MAX_TAGS_POR_PETICION = 2000
+# Misma etiqueta frente al mismo lector: se guarda a lo más una lectura en esta
+# ventana (el FX la repite cada pocos segundos mientras sigue enfrente).
+DEDUP_SEGUNDOS = 30
+
+
+def latido_y_rate_limit(lector, ahora=None):
+    """Heartbeat (``ultima_conexion``) y conteo de la ventana de 1 minuto en UN
+    ``UPDATE ... RETURNING``, igual de global que la BD (Vercel no comparte
+    caché entre instancias). Regresa cuántas peticiones lleva en la ventana."""
+    ahora = ahora or timezone.now()
+    inicio = ahora - timedelta(minutes=1)
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE lectores_rfid
+               SET ultima_conexion = %s,
+                   rl_conteo = CASE WHEN rl_ventana IS NOT NULL AND rl_ventana > %s
+                                    THEN rl_conteo + 1 ELSE 1 END,
+                   rl_ventana = CASE WHEN rl_ventana IS NOT NULL AND rl_ventana > %s
+                                     THEN rl_ventana ELSE %s END
+             WHERE id = %s
+         RETURNING rl_conteo
+            """,
+            [ahora, inicio, inicio, ahora, lector.pk],
+        )
+        fila = cur.fetchone()
+    return fila[0] if fila else 0
+
+
+def _error(mensaje, status):
+    return JsonResponse({"status": "error", "message": mensaje}, status=status)
+
+
 def recibir_lecturas(request, lector):
     """Parsea el payload del FX (JSON, form o texto) y guarda un ``RfidScan`` por EPC.
 
     ``request`` es el ``HttpRequest`` de Django (lee ``body`` y ``POST`` crudos).
+    Exige lector (token válido): rate limit, tope de tamaño y deduplicación
+    por (lector, EPC) en ``DEDUP_SEGUNDOS``.
     """
+    if lector is None:
+        return _error("Lector no autorizado.", 401)
+    try:
+        largo = int(request.META.get("CONTENT_LENGTH") or 0)
+    except (TypeError, ValueError):
+        largo = 0
+    if largo > MAX_BYTES_PAYLOAD:
+        return _error(f"Payload de más de {MAX_BYTES_PAYLOAD} bytes.", 413)
+    # Heartbeat: cualquier POST autenticado, aunque no traiga tags.
+    if latido_y_rate_limit(lector) > MAX_PETICIONES_POR_MINUTO:
+        return _error("Demasiadas peticiones para este lector; intenta en un minuto.", 429)
+    # ``?debug=1``: regresa el detalle del parseo (para configurar un FX nuevo).
+    con_debug = request.GET.get("debug") == "1"
     # Declarado FUERA del try para que los logger.info/warning de abajo
     # (fuera del bloque try) no causen NameError si algo falló en medio.
     body = ""
-    if lector is not None:
-        # Heartbeat: cualquier POST autenticado, aunque no traiga tags.
-        LectorRFID.objects.filter(pk=lector.pk).update(ultima_conexion=timezone.now())
     debug_payload = {
         "content_type": request.content_type or "",
         "method": request.method,
@@ -538,11 +637,13 @@ def recibir_lecturas(request, lector):
     }
     try:
         remote_addr = request.META.get("REMOTE_ADDR")
+        if len(request.body) > MAX_BYTES_PAYLOAD:  # sin Content-Length (chunked)
+            return _error(f"Payload de más de {MAX_BYTES_PAYLOAD} bytes.", 413)
         raw_body = request.body.decode("utf-8", errors="replace")
         body = raw_body
         debug_payload["body_len"] = len(raw_body)
         debug_payload["body_prefix"] = raw_body[:512]
-        logger.info(
+        logger.debug(
             "RFID receive from %s ct=%s body[:4096]=%s",
             remote_addr,
             request.content_type,
@@ -688,6 +789,8 @@ def recibir_lecturas(request, lector):
 
         if not isinstance(items, list):
             items = []
+        if len(items) > MAX_TAGS_POR_PETICION:
+            return _error(f"Más de {MAX_TAGS_POR_PETICION} lecturas en una petición.", 413)
         debug_payload["fallback_antenna_final"] = (
             str(fallback_antenna)[:200] if fallback_antenna is not None else None
         )
@@ -697,11 +800,7 @@ def recibir_lecturas(request, lector):
         debug_payload["items_raw_len"] = len(items)
 
         if not isinstance(items, list):
-            debug_payload["error"] = "Invalid data format"
-            return JsonResponse(
-                {"status": "error", "message": "Invalid data format", "debug": debug_payload},
-                status=400,
-            )
+            return _error("Invalid data format", 400)
 
         tags_to_create = []
         debug_items = []
@@ -778,7 +877,7 @@ def recibir_lecturas(request, lector):
                 excerpt_json = json.dumps(excerpt, ensure_ascii=False, default=str)
             except Exception:
                 excerpt_json = f"<excerpt_unserializable keys={list(excerpt.keys())}>"
-            logger.info(
+            logger.debug(
                 "RFID receive tag[%s] epc=%s len=%s antenna=%s rssi=%s excerpt=%s",
                 idx,
                 epc_norm,
@@ -802,6 +901,13 @@ def recibir_lecturas(request, lector):
 
         debug_payload["items"] = debug_items
 
+        duplicadas = 0
+        if tags_to_create:
+            ahora = timezone.now()
+            tags_to_create, duplicadas = _sin_repetidas(lector, tags_to_create, ahora)
+            # Hubo tags enfrente aunque todos fueran repetidos: el lector está LEYENDO.
+            LectorRFID.objects.filter(pk=lector.pk).update(ultima_lectura=ahora)
+
         if tags_to_create:
             # Log resumen DEL REQUEST ENTERO (nivel INFO).
             summary = {
@@ -811,7 +917,7 @@ def recibir_lecturas(request, lector):
                 "antenna_values": sorted({s.antenna for s in tags_to_create if s.antenna is not None}),
                 "rssi_values_sample": sorted([float(s.rssi) for s in tags_to_create if s.rssi is not None])[:10],
             }
-            logger.info(
+            logger.debug(
                 "RFID receive request: created=%s summary=%s body_sample=%s",
                 len(tags_to_create),
                 json.dumps(summary, ensure_ascii=False, default=str),
@@ -832,16 +938,14 @@ def recibir_lecturas(request, lector):
                     scan.etiqueta_id = detalle.pk
                     scan.empresa_id = detalle.empresa_id_
             RfidScan.objects.bulk_create(tags_to_create, batch_size=200)
+            _registrar_ultimas(lector, tags_to_create, ahora)
             marcar_leidas({d.pk for d in match.values()})
-            if lector is None and len(match) < len(tags_to_create):
-                purgar_huerfanas()  # sólo cuando entran huérfanas nuevas (#1155)
-            if lector is not None:
-                LectorRFID.objects.filter(pk=lector.pk).update(ultima_lectura=timezone.now())
+            purgar_lecturas_viejas()
             debug_payload["etiquetas_ligadas"] = len(match)
             debug_payload["created_epcs_sample"] = summary["unique_epcs_sample"]
             debug_payload["antenna_values"] = summary["antenna_values"]
             debug_payload["rssi_values_sample"] = summary["rssi_values_sample"]
-        else:
+        elif not duplicadas:
             logger.warning(
                 "RFID receive request: 0 tags creadas. Tipo items=%s len_items=%s body_sample=%s",
                 type(items).__name__,
@@ -853,23 +957,16 @@ def recibir_lecturas(request, lector):
                 % (type(items).__name__, len(items) if hasattr(items, "__len__") else "n/a")
             )
 
-        return JsonResponse(
-            {"status": "success", "count": len(tags_to_create), "debug": debug_payload}
-        )
+        # Respuesta corta: el FX no la lee y el debug pesaba 50-125 KB por lote.
+        respuesta = {"status": "success", "count": len(tags_to_create), "duplicadas": duplicadas}
+        if con_debug:
+            respuesta["debug"] = debug_payload
+        return JsonResponse(respuesta)
     except json.JSONDecodeError as e:
-        debug_payload["error"] = f"JSON invalido: {str(e)}"
-        return JsonResponse(
-            {"status": "error", "message": f"JSON invalido: {str(e)}", "debug": debug_payload},
-            status=400,
-        )
-    except Exception as e:
+        return _error(f"JSON invalido: {str(e)}", 400)
+    except Exception:
         logger.exception("RFID receive error")
-        debug_payload["error"] = str(e)
-        debug_payload["error_type"] = type(e).__name__
-        return JsonResponse(
-            {"status": "error", "message": str(e), "debug": debug_payload},
-            status=500,
-        )
+        return _error("Error al procesar las lecturas.", 500)
 
 
 @csrf_exempt
@@ -881,13 +978,41 @@ def receive_scan_sin_token(request):
     ``X-RFID-Token`` o Basic) usa su lector y marca su heartbeat; sin token,
     cada lectura toma la empresa de la etiqueta impresa con su EPC.
 
-    Un token que no es de ningún lector activo (eliminado desde el ERP o
-    inventado) se rechaza con 401: no cae al modo sin token.
+    Exige el token de un lector activo; sin token, o con uno eliminado o
+    inventado, ``401``. Antes aceptaba lecturas sin token, y cualquiera que
+    conociera un EPC podía inyectar lecturas y marcar etiquetas como leídas.
     """
-    token = token_desde_request(request)
-    lector = None
-    if token:
-        lector = LectorRFID.objects.filter(token=token, activo=True).first()
-        if lector is None:
-            return JsonResponse({"status": "error", "message": "Lector no autorizado."}, status=401)
-    return recibir_lecturas(request, lector)
+    return recibir_lecturas(request, lector_desde_request(request))
+
+
+def _sin_repetidas(lector, scans, ahora):
+    """Quita los EPC que este lector ya guardó en los últimos ``DEDUP_SEGUNDOS``
+    (una consulta por el índice único de ``RfidLecturaUltima``)."""
+    recientes = set(
+        RfidLecturaUltima.objects.filter(
+            lector_id=lector.pk,
+            epc__in=[s.epc for s in scans],
+            visto__gte=ahora - timedelta(seconds=DEDUP_SEGUNDOS),
+        ).values_list("epc", flat=True)
+    )
+    nuevas = [s for s in scans if s.epc not in recientes]
+    return nuevas, len(scans) - len(nuevas)
+
+
+def _registrar_ultimas(lector, scans, ahora):
+    """Upsert de la última lectura por (lector, EPC), en una consulta."""
+    RfidLecturaUltima.objects.bulk_create(
+        [
+            RfidLecturaUltima(
+                empresa_id=s.empresa_id or lector.empresa_id,
+                lector_id=lector.pk,
+                epc=s.epc,
+                scan_id=s.pk,
+                visto=ahora,
+            )
+            for s in scans
+        ],
+        update_conflicts=True,
+        unique_fields=["lector", "epc"],
+        update_fields=["scan", "visto", "empresa"],
+    )
