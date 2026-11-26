@@ -56,6 +56,25 @@ def url_fx(request, token):
     return f"{base}?token={quote(token, safe='')}"
 
 
+def url_fx_enmascarada(request, sufijo):
+    """La misma URL con el token oculto salvo sus últimos 4 caracteres: el token
+    en claro ya no se guarda (solo su hash) y se ve una vez, al crearlo o al
+    regenerarlo."""
+    return url_fx(request, "").replace("?token=", f"?token=••••{sufijo}")
+
+
+def lectores_visibles(user):
+    """Lectores (vigentes o eliminados) que ``user`` puede ver: su empresa activa,
+    superusuario incluido; un no admin, solo los de sus sucursales."""
+    empresa_id = getattr(user, "empresa_id", None)
+    if not empresa_id:
+        return LectorRFID.objects.none()
+    qs = LectorRFID.objects.filter(empresa_id=empresa_id)
+    if not _es_admin(user):
+        qs = qs.filter(sucursal_id__in=user.sucursales_permitidas())
+    return qs
+
+
 class SoloAdminEscribe(BasePermission):
     message = "Solo un administrador de la empresa puede dar de alta o eliminar lectores."
 
@@ -119,7 +138,11 @@ class LectorRFIDSerializer(serializers.ModelSerializer):
         read_only_fields = ["ultima_conexion", "ultima_lectura", "created_at"]
 
     def get_url_fx(self, obj) -> str:
-        return url_fx(self.context.get("request"), obj.token)
+        # Completa solo recién generada (alta o regenerar-token); si no, enmascarada.
+        token = getattr(obj, "token", None)
+        if token:
+            return url_fx(self.context.get("request"), token)
+        return url_fx_enmascarada(self.context.get("request"), obj.token_sufijo)
 
     def get_estado(self, obj) -> str:
         return estado_lector(obj.ultima_conexion, obj.ultima_lectura, self.context.get("ahora"))
@@ -178,21 +201,24 @@ class LectorRFIDViewSet(
     http_method_names = ["get", "post", "delete", "head", "options"]
 
     def get_queryset(self):
-        user = self.request.user
-        empresa_id = getattr(user, "empresa_id", None)
-        if not empresa_id:
-            return LectorRFID.objects.none()
-        qs = (
-            LectorRFID.objects.filter(empresa_id=empresa_id, activo=True)
+        return (
+            lectores_visibles(self.request.user)
+            .filter(activo=True)
             .select_related("sucursal", "en_uso_usuario")
             .order_by("nombre", "id")
         )
-        if not _es_admin(user):
-            qs = qs.filter(sucursal_id__in=user.sucursales_permitidas())
-        return qs
 
     def get_serializer_context(self):
         return {**super().get_serializer_context(), "ahora": timezone.now()}
+
+    @action(detail=True, methods=["post"], url_path="regenerar-token", url_name="regenerar_token")
+    def regenerar_token(self, request, pk=None):
+        """Token nuevo (solo admin): el anterior deja de valer de inmediato. La
+        respuesta trae ``url_fx`` completa; es la única vez que se ve."""
+        lector = self.get_object()
+        lector.asignar_token()
+        lector.save(update_fields=["token_hash", "token_sufijo", "updated_at"])
+        return Response(self.get_serializer(lector).data)
 
     def destroy(self, request, *args, **kwargs):
         """Soft delete: el token deja de valer en ese momento (``receive-scan``

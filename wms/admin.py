@@ -359,7 +359,9 @@ class LectorRFIDAdmin(admin.ModelAdmin):
     list_display = ("id", "nombre", "ubicacion", "empresa", "sucursal", "activo", "ultima_lectura")
     list_filter = ("activo", "empresa")
     search_fields = ("nombre",)
-    readonly_fields = ("token", "ultima_lectura", "created_at", "updated_at")
+    # El token solo existe como hash; se genera o regenera desde el ERP (Lectores RFID).
+    readonly_fields = ("token_sufijo", "ultima_lectura", "created_at", "updated_at")
+    exclude = ("token_hash", "rl_ventana", "rl_conteo")
 
 
 @admin.register(RfidScan)
