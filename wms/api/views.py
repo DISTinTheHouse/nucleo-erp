@@ -518,6 +518,13 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
         estado = (self.request.query_params.get("estado") or "").upper()
         if self.action == "list" and estado in Despacho.Estado.values:
             qs = qs.filter(estado=estado)
+        # ``?entregado=true|false``: con o sin ``fecha_entrega`` (#1436); otro valor -> 400.
+        entregado = self.request.query_params.get("entregado")
+        if self.action == "list" and entregado is not None:
+            entregado = entregado.strip().lower()
+            if entregado not in {"true", "false"}:
+                raise ValidationError({"entregado": "Usa true o false."})
+            qs = qs.filter(fecha_entrega__isnull=entregado == "false")
         if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(packing__sucursal_id__in=user.sucursales_permitidas())

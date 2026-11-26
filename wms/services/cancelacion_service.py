@@ -195,11 +195,22 @@ def entregar_despacho(despacho, request, recibio="", fecha=None):
         raise ValidationError({"despacho": "El despacho está cancelado."})
     if despacho.fecha_entrega:
         raise ValidationError({"despacho": "El despacho ya está marcado como entregado."})
+    recibio = recibio or ""
+    largo = Despacho._meta.get_field("recibio").max_length
+    if len(recibio) > largo:  # #1434: antes se cortaba en silencio
+        raise ValidationError({"recibio": f"Admite hasta {largo} caracteres (tiene {len(recibio)})."})
     ahora = timezone.now()
     fecha = fecha or ahora
     if fecha > ahora:
         raise ValidationError({"fecha_entrega": "La fecha de entrega no puede ser futura."})
-    despacho.fecha_entrega, despacho.entregado_por, despacho.recibio = fecha, request.user, (recibio or "")[:150]
+    # #1435: ni antes del alta del despacho (o de su packing, en los antiguos sin ``created_at``).
+    alta = despacho.created_at or despacho.packing.created_at
+    if alta and fecha < alta:
+        raise ValidationError({"fecha_entrega": (
+            "La fecha de entrega no puede ser anterior al alta del despacho "
+            f"({timezone.localtime(alta):%Y-%m-%d %H:%M})."
+        )})
+    despacho.fecha_entrega, despacho.entregado_por, despacho.recibio = fecha, request.user, recibio
     despacho.save(update_fields=["fecha_entrega", "entregado_por", "recibio"])
     meta = getattr(request, "META", None) or {}
     AuditoriaEvento.objects.create(
