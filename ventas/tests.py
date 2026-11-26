@@ -11647,3 +11647,212 @@ class PedidoPreOrdenOpEstatusTests(TestCase):
                 consultas.add(n)
         # Mismas consultas con y sin OP (la OP va en la misma subconsulta/consulta).
         self.assertEqual(len(consultas), 1, consultas)
+
+
+STOCK_DIGITAL_URL = "/api/v1/ventas/stock-digital/"
+
+
+class StockDigitalTests(TestCase):
+    """``/ventas/stock-digital/``: solo lectura para Vendedores y Mesa de Control.
+
+    ``PLA-SD-M``: 10 en ALM-00 (los 99 de otro almacén PT no cuentan); pedido
+    autorizado de 4 con 1 surtida por picking (comprometido 3); pedido cancelado
+    de 50 (no compromete); OP pendiente de 6 con 2 recibidas (en producción 4) y
+    OC autorizada de 5 (en compra 5). Disponible hoy = 10 − 3 = 7; disponibilidad
+    digital = 10 + 4 + 5 − 3 = 16. ``PLA-SD-L``: sin existencia y 2 comprometidas
+    → faltante de 2. ``PLA-SD-XL``: sin movimientos, todo en 0.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from compras.models import OrdenCompra, OrdenCompraDetalle, Recepcion, RecepcionDetalle
+        from nucleo.models import SatFormaPago, SatMetodoPago, SatRegimenFiscal, UnidadMedida
+        from produccion.models import ListaMaterialBom, OrdenProduccionDetalle
+        from terceros.models import Proveedor
+
+        cls.empresa = Empresa.objects.create(codigo="acme-sd", razon_social="ACME SD SA")
+        empresa_b = Empresa.objects.create(codigo="globex-sd", razon_social="Globex SD SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="SD1", nombre="Matriz")
+        cls.sucursal_b = Sucursal.objects.create(empresa=empresa_b, codigo="SDB", nombre="Globex")
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cliente = Cliente.objects.create(empresa=cls.empresa, nombre="Cliente SD", razon_social="Cliente SD SA")
+        alm_00 = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM-00", nombre="Producto terminado",
+            tipo_almacen=TipoAlmacen.PRODUCTO_TERMINADO, permite_salida=True,
+        )
+        apartados = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, codigo="ALM-APT", nombre="Apartados",
+            tipo_almacen=TipoAlmacen.PRODUCTO_TERMINADO,
+        )
+        color = Color.objects.create(nombre="Negro", codigo="NEG", codigo_hex="#000000")
+        producto = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera SD", codigo="PLASD",
+        )
+
+        def variante(talla, empresa=cls.empresa, prod=producto):
+            return ProductoVariante.objects.create(
+                producto=prod, empresa=empresa, color=color, talla=Talla.objects.create(nombre=talla),
+                sku=f"PLA-SD-{talla}", precio_base="100",
+            )
+
+        cls.var_m, cls.var_l, cls.var_xl = variante("M"), variante("L"), variante("XL")
+        cls.var_b = variante(
+            "B", empresa_b, Producto.objects.create(tipo=_tipo_producto(), empresa=empresa_b, nombre="Ajena"),
+        )
+        Existencia.objects.create(almacen=alm_00, producto_variante=cls.var_m, cantidad="10")
+        Existencia.objects.create(almacen=apartados, producto_variante=cls.var_m, cantidad="99")
+
+        cls.admin = Usuario.objects.create(
+            username="admin_sd", email="admin_sd@acme.test", empresa=cls.empresa, is_admin_empresa=True,
+        )
+        cls.vendedor = Usuario.objects.create(username="vend_sd", email="vend_sd@acme.test", empresa=cls.empresa)
+        cls.almacenista = Usuario.objects.create(username="wms_sd", email="wms_sd@acme.test", empresa=cls.empresa)
+        for usuario, codigo, claves in (
+            (cls.vendedor, "VENTAS-SD", CLAVES_LECTURA_VENTAS),
+            (cls.almacenista, "WMS-SD", ("R-WMS-PICKING",)),
+        ):
+            rol = Rol.objects.create(empresa=cls.empresa, codigo=codigo, nombre=codigo, estatus=Rol.Estatus.ACTIVO)
+            UsuarioRol.objects.create(usuario=usuario, rol=_con_claves(rol, claves), empresa=cls.empresa)
+
+        def pedido(folio, estatus, tallas):
+            p = Pedido.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, cliente=cliente, moneda=moneda,
+                estatus=estatus, folio=folio, fecha_confirmacion=timezone.now(),
+            )
+            det = PedidoDetalle.objects.create(pedido=p, producto=producto)
+            return p, [
+                PedidoDetalleTalla.objects.create(pedido_detalle=det, talla=v.talla, variante=v, cantidad=c)
+                for v, c in tallas
+            ]
+
+        cls.pedido, (talla_m, _) = pedido("P-SD-1", Pedido.ESTATUS_AUTORIZADA, [(cls.var_m, 4), (cls.var_l, 2)])
+        pedido("P-SD-2", Pedido.ESTATUS_CANCELADO, [(cls.var_m, 50)])
+        picking = Picking.objects.create(
+            folio="PK-SD-1", empresa=cls.empresa, sucursal=cls.sucursal, pedido=cls.pedido,
+            operador=cls.admin, almacen=alm_00, usuario=cls.admin,
+        )
+        cls.linea_m = PickingDetalle.objects.create(
+            picking=picking, pedido_detalle=talla_m.pedido_detalle, pedido_detalle_talla=talla_m,
+            producto_variante=cls.var_m, cantidad_solicitada=4, cantidad_asignada=1, cantidad_surtida=1,
+        )
+
+        unidad = UnidadMedida.objects.create(clave="PZA-SD", nombre="Pieza")
+        bom = ListaMaterialBom.objects.create(empresa=cls.empresa, producto_variante=cls.var_m, activo=True)
+        op = OrdenProduccion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-SD-1",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.PENDIENTE, fecha_entrega_estimada=date(2026, 12, 15),
+        )
+        op_det = OrdenProduccionDetalle.objects.create(
+            op=op, bom=bom, cantidad=6, unidad=unidad, producto_variante=cls.var_m,
+        )
+        completada = OrdenProduccion.objects.create(  # ya entró: no cuenta
+            empresa=cls.empresa, sucursal=cls.sucursal, folio_op="OP-SD-2",
+            estatus_op=OrdenProduccion.EstatusOrdenProduccion.COMPLETADO,
+        )
+        OrdenProduccionDetalle.objects.create(
+            op=completada, bom=bom, cantidad=500, unidad=unidad, producto_variante=cls.var_m,
+        )
+        recepcion = Recepcion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, almacen=alm_00, usuario=cls.admin, folio="RC-SD-1",
+            fecha_recepcion=timezone.now(), tipo_origen=Recepcion.TipoOrigen.ORDEN_PRODUCCION, op=op,
+            estatus=Recepcion.EstatusRecepcion.PARCIAL,
+        )
+        RecepcionDetalle.objects.create(
+            recepcion=recepcion, producto_variante=cls.var_m, orden_produccion_detalle=op_det, cantidad_recibida=2,
+        )
+
+        proveedor = Proveedor.objects.create(
+            empresa=cls.empresa, nombre="Proveedor SD", moneda=moneda,
+            sat_regimen_fiscal=SatRegimenFiscal.objects.create(codigo="601", descripcion="General de Ley"),
+            sat_forma_pago=SatFormaPago.objects.create(codigo="03", descripcion="Transferencia"),
+            sat_metodo_pago=SatMetodoPago.objects.create(codigo="PUE", descripcion="Pago en una sola exhibición"),
+            codigo="PROV-SD", razon_social="Proveedor SD SA", telefono="8100000000",
+            contacto_principal="Contacto", rfc="XAXX010101000", email="p@acme-sd.test",
+        )
+        # Autorizada cuenta; el borrador todavía no es una compra.
+        for estatus, cantidad in (
+            (OrdenCompra.EstatusOrdenCompra.AUTORIZADA, 5), (OrdenCompra.EstatusOrdenCompra.BORRADOR, 80),
+        ):
+            oc = OrdenCompra.objects.create(
+                empresa=cls.empresa, sucursal=cls.sucursal, proveedor=proveedor, moneda=moneda, usuario=cls.admin,
+                fecha_oc=timezone.now().date(), estatus=estatus, fecha_entrega_estimada=date(2026, 12, 1),
+            )
+            OrdenCompraDetalle.objects.create(
+                orden_compra=oc, producto=producto, producto_variante=cls.var_m, sucursal=cls.sucursal,
+                cantidad=cantidad,
+            )
+
+    def _get(self, url, user=None):
+        client = APIClient()
+        client.force_authenticate(user or self.vendedor)
+        return client.get(url)
+
+    def _filas(self, url, user=None):
+        resp = self._get(url, user)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return {f["variante_id"]: f for f in resp.data["results"]}
+
+    def test_totales_por_sku(self):
+        filas = self._filas(STOCK_DIGITAL_URL)
+        self.assertEqual(list(filas), [self.var_l.pk, self.var_m.pk, self.var_xl.pk])  # por SKU; sin la otra empresa
+        m = filas[self.var_m.pk]
+        self.assertEqual(
+            {k: m[k] for k in ("existencia_real", "comprometido", "en_produccion", "en_compra",
+                               "disponible_hoy", "disponible_digital")},
+            {"existencia_real": 10, "comprometido": 3, "en_produccion": 4, "en_compra": 5,
+             "disponible_hoy": 7, "disponible_digital": 16},
+        )
+        self.assertEqual(m["proxima_entrada"], date(2026, 12, 1))  # la más cercana de OP y OC
+        l = filas[self.var_l.pk]
+        self.assertEqual((l["existencia_real"], l["comprometido"], l["disponible_digital"]), (0, 2, -2))
+        self.assertEqual(filas[self.var_xl.pk]["disponible_digital"], 0)
+
+    def test_detalle_explica_de_donde_sale(self):
+        resp = self._get(f"{STOCK_DIGITAL_URL}{self.var_m.pk}/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual([e["almacen"] for e in resp.data["existencias"]], ["ALM-00"])
+        (comp,) = resp.data["compromisos"]
+        self.assertEqual((comp["folio"], comp["pedida"], comp["surtida"], comp["pendiente"]), ("P-SD-1", 4, 1, 3))
+        (op,) = resp.data["entradas_produccion"]
+        self.assertEqual((op["folio"], op["recibido"], op["pendiente"]), ("OP-SD-1", 2, 4))
+        (oc,) = resp.data["entradas_compra"]
+        self.assertEqual((oc["proveedor"], oc["pendiente"]), ("Proveedor SD", 5))
+        fila = self._filas(f"{STOCK_DIGITAL_URL}?variantes={self.var_m.pk}")[self.var_m.pk]
+        for clave in ("existencia_real", "comprometido", "en_produccion", "en_compra", "disponible_digital"):
+            self.assertEqual(resp.data[clave], fila[clave], clave)
+
+    def test_surtir_o_cancelar_libera_el_compromiso(self):
+        PickingDetalle.objects.filter(pk=self.linea_m.pk).update(cantidad_asignada=4, cantidad_surtida=4)
+        resp = self._get(f"{STOCK_DIGITAL_URL}{self.var_m.pk}/")
+        self.assertEqual((resp.data["comprometido"], resp.data["compromisos"]), (0, []))
+        Pedido.objects.filter(pk=self.pedido.pk).update(estatus=Pedido.ESTATUS_CANCELADO)
+        self.assertEqual(self._get(f"{STOCK_DIGITAL_URL}{self.var_l.pk}/").data["comprometido"], 0)
+
+    def test_filtros(self):
+        def ids(params):
+            return list(self._filas(f"{STOCK_DIGITAL_URL}?{params}"))
+
+        self.assertEqual(ids("solo=faltantes"), [self.var_l.pk])
+        self.assertEqual(ids("solo=comprometidos"), [self.var_l.pk, self.var_m.pk])
+        self.assertEqual(ids("solo=entradas"), [self.var_m.pk])
+        self.assertEqual(ids("q=sd-xl"), [self.var_xl.pk])
+        self.assertEqual(ids(f"sucursal={self.sucursal.pk}&solo=existencia"), [self.var_m.pk])
+        for params in ("solo=otro", f"sucursal={self.sucursal_b.pk}", "variantes=1,x", "talla=abc"):
+            self.assertEqual(self._get(f"{STOCK_DIGITAL_URL}?{params}").status_code, 400, params)
+
+    def test_permisos_alcance_y_solo_lectura(self):
+        self.assertEqual(self._get(STOCK_DIGITAL_URL, self.almacenista).status_code, 403)
+        self.assertEqual(self._get(f"{STOCK_DIGITAL_URL}{self.var_m.pk}/", self.almacenista).status_code, 403)
+        self.assertEqual(self._get(STOCK_DIGITAL_URL, self.admin).status_code, 200)
+        self.assertEqual(self._get(f"{STOCK_DIGITAL_URL}{self.var_b.pk}/").status_code, 404)  # otra empresa
+        client = APIClient()
+        client.force_authenticate(self.admin)
+        self.assertEqual(client.post(STOCK_DIGITAL_URL, {}).status_code, 405)
+
+    def test_consultas_no_crecen_con_los_skus(self):
+        def consultas(n):
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(self._get(f"{STOCK_DIGITAL_URL}?page_size={n}").status_code, 200)
+            return len(ctx.captured_queries)
+
+        self.assertEqual(consultas(1), consultas(3))

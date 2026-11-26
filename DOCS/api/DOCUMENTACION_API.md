@@ -2224,6 +2224,48 @@ Cada documento que nació del pedido, para la pestaña "Documentos" del detalle.
 - **`movimientos_inventario`**: los ligados al pedido (p. ej. la salida del despacho) y los de las transferencias (TR) de sus pickings, alta y cada traslado, por `Transferencia.picking` (EC-916). Una TR manual nunca aparece aunque su texto mencione un picking.
 - **`envios`**: el modelo no guarda guía ni fecha, y `Transportista` no tiene nombre (solo `empresa`), así que solo va `transportista_id`; la guía está en `despachos[].guia`.
 
+### Stock digital (Vendedores y Mesa de Control)
+
+Por SKU: cuánto hay, cuánto está comprometido y cuánto viene en camino. **Solo informativo**: no aparta piezas, no mueve inventario y no cambia cómo se autoriza ni cómo se surte un pedido.
+
+- **Listado**: `GET /api/v1/ventas/stock-digital/` — SKUs activos de producto terminado de la empresa activa, ordenados por SKU, paginado (`page`; `page_size` 50 por omisión, máximo 200).
+  - Filtros: `q` (SKU, nombre de la variante o del producto), `producto`, `categoria`, `color`, `talla` (ids), `variantes=1,2,3` (hasta 200 ids exactos, aunque estén inactivos; p. ej. los renglones de una cotización), `sucursal` (solo existencias, pedidos, OP y OC de esa sucursal), `solo=disponibles|faltantes|comprometidos|entradas|existencia`. Un valor inválido → `400`.
+- **Detalle**: `GET /api/v1/ventas/stock-digital/{variante_id}/` — los mismos totales y de dónde salen. Acepta `sucursal`. De otra empresa o inexistente → `404`.
+- **Permisos**: `R-CRM`, `R-CRM-COTIZACIONES`, `R-CRM-PEDIDOS`, `R-MESACONTROL`, `R-MESACONTROL-COTI` o `R-MESACONTROL-PEDIDOS` (admin de empresa y superusuario pasan); sin ninguno → `403`.
+- **Cálculo** (por SKU):
+
+  | Campo | Regla |
+  |---|---|
+  | `existencia_real` | Existencia en `ALM-00`, de donde sale todo pedido. Lo que el picking ya pasó a apartados o embarque ya no cuenta. |
+  | `comprometido` | Pedidos activos Autorizados (3) o En proceso (4): por talla, `pedida − surtida por picking` (nunca negativo). Se libera al surtir o al cancelar el pedido. |
+  | `en_produccion` | OP activas abiertas (Pendiente, Preparación, En producción, Revisión, Detenido): `cantidad − recibido`. |
+  | `en_compra` | OC activas Autorizadas o Parcialmente recibidas: `cantidad − recibido`. |
+  | `disponible_hoy` | `existencia_real − comprometido`. |
+  | `disponible_digital` | `existencia_real + en_produccion + en_compra − comprometido`. Negativa = faltante. |
+  | `proxima_entrada` | La `fecha_entrega_estimada` más cercana de esas OP/OC (`null` si no se capturó). |
+
+- **Respuesta del listado** (`200`):
+  ```json
+  {
+    "count": 1, "next": null, "previous": null,
+    "results": [
+      {
+        "variante_id": 10, "sku": "PLAY-ROJ-CH", "nombre": "Playera Polo Roja",
+        "producto_id": 4, "producto_nombre": "Playera Polo", "categoria_id": 2, "categoria_nombre": "Playera",
+        "color_id": 1, "color": "Rojo", "talla_id": 3, "talla": "CH", "activo": true,
+        "existencia_real": 120.0, "comprometido": 30.0, "en_produccion": 50.0, "en_compra": 0.0,
+        "disponible_hoy": 90.0, "disponible_digital": 140.0, "proxima_entrada": "2026-12-15"
+      }
+    ]
+  }
+  ```
+- **Detalle** (`200`): la misma fila, más:
+  - `existencias[]`: `almacen_id`, `almacen`, `sucursal_id`, `sucursal`, `cantidad`.
+  - `compromisos[]` (primero el que se entrega antes): `pedido_id`, `folio`, `cliente_nombre`, `vendedor`, `sucursal_id`, `estatus`, `estatus_display`, `clasificacion`, `retenido`, `fecha_confirmacion`, `entrega_desde`, `entrega_hasta`, `pedida`, `surtida`, `pendiente`.
+  - `entradas_produccion[]`: `op_id`, `folio`, `sucursal_id`, `estatus`, `estatus_display`, `pedido_folio`, `fecha_entrega_estimada`, `cantidad`, `recibido`, `pendiente`.
+  - `entradas_compra[]`: `orden_compra_id`, `folio`, `sucursal_id`, `proveedor`, `estatus`, `estatus_display`, `fecha_entrega_estimada`, `cantidad`, `recibido`, `pendiente`.
+- Fuera de alcance: muestras sin SKU de catálogo y tallas de pedido sin variante.
+
 ---
 
 ## 🧮 Mesa de Control

@@ -1,6 +1,7 @@
 from django.urls import path, include
 from rest_framework import routers
 from ventas.api.oportunidades import OportunidadViewSet, SeguimientoViewSet
+from ventas.api.stock_digital import StockDigitalViewSet
 from ventas.api.views import (
     CotizacionViewSet, 
     CotizacionDetalleViewSet, 
@@ -19,6 +20,7 @@ router.register(r'cotizacion-detalle', CotizacionDetalleViewSet, basename='cotiz
 router.register(r'pedidos', PedidoViewSet, basename='pedidos')
 router.register(r'pedido-detalle', PedidoDetalleViewSet, basename='pedidodetalle')
 router.register(r'pedido-detalle-talla', PedidoDetalleTallaViewSet, basename='pedidodetalletalla')
+router.register(r'stock-digital', StockDigitalViewSet, basename='stock-digital')
 
 urlpatterns = [
     path('', include(router.urls)),

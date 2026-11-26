@@ -252,6 +252,11 @@ CODIGOS_PEDIDO_NEUTRO = (
     "R-COMPRAS-OC", "R-WMS-PICKING", "R-WMS-PACKING", "R-WMS-ENVIO",
 )
 CODIGOS_COTIZACIONES = ("R-CRM", "R-CRM-COTIZACIONES", "R-MESACONTROL", "R-MESACONTROL-COTI")
+# Stock digital (``/ventas/stock-digital/``): solo Vendedores (CRM) y Mesa de Control.
+CODIGOS_STOCK_DIGITAL = (
+    "R-CRM", "R-CRM-COTIZACIONES", "R-CRM-PEDIDOS",
+    "R-MESACONTROL", "R-MESACONTROL-COTI", "R-MESACONTROL-PEDIDOS",
+)
 CODIGOS_OPORTUNIDADES = ("R-CRM", "R-CRM-OPORTUNIDADES")
 CODIGOS_CLIENTES = (
     # CRM (clientes, y el selector de las cotizaciones/oportunidades), Mesa de Control
