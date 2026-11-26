@@ -124,6 +124,7 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
     tipo_compra_label = serializers.CharField(source='get_tipo_compra_display', read_only=True)
     pedidos = serializers.SerializerMethodField()
     pedidos_vinculados = serializers.SerializerMethodField()
+    pedido_cancelado_origen_folio = serializers.SerializerMethodField()
     # Progreso de recepción contra ``total_piezas``: ``progreso_recibido`` lo
     # anota ``anotar_progreso_oc`` en list/retrieve; en las demás respuestas sale ``null``.
     piezas_recibidas = serializers.SerializerMethodField()
@@ -166,6 +167,13 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
 
     def get_pedidos(self, obj):
         return [p.pk for p in self._pedidos_de(obj)]
+
+    def get_pedido_cancelado_origen_folio(self, obj) -> str | None:
+        """Folio del pedido que puso la marca ``pedido_cancelado`` (#1404). Es uno de los
+        pedidos de la OC, ya cargados para ``pedidos_vinculados``: sin consultas."""
+        if not obj.pedido_cancelado_origen_id:
+            return None
+        return next((p.folio for p in self._pedidos_de(obj) if p.pk == obj.pedido_cancelado_origen_id), None)
 
     def get_pedidos_vinculados(self, obj):
         # ``estatus``/``activo``/``cliente_nombre`` (EC-782): la OC avisa si un pedido
@@ -239,12 +247,14 @@ class OrdenCompraSerializer(serializers.ModelSerializer):
             'cerrada_por_nombre',
             'pedido_cancelado',
             'fecha_pedido_cancelado',
+            'pedido_cancelado_origen',
+            'pedido_cancelado_origen_folio',
             'activo',
             'created_at',
             'updated_at',
         ]
         # Solo los escriben ``cancelar`` y ``cerrar-saldo``.
-        read_only_fields = ['motivo_cancelacion', 'pedido_cancelado', 'fecha_pedido_cancelado', 'saldo_cerrado', 'motivo_cierre', 'fecha_cierre', 'cerrada_por']
+        read_only_fields = ['motivo_cancelacion', 'pedido_cancelado', 'fecha_pedido_cancelado', 'pedido_cancelado_origen', 'saldo_cerrado', 'motivo_cierre', 'fecha_cierre', 'cerrada_por']
         extra_kwargs = {
             'folio': {'required': False, 'allow_null': True},
             'solicitud_compra': {'required': False, 'allow_null': True},

@@ -29,6 +29,48 @@ RESULTADOS_DEVOLVIBLES = ("rechazo", "cuarentena")
 TIPO_DOCUMENTO_FOLIO = "DEVOLUCION_PROVEEDOR"
 CERO = Decimal("0")
 CENT = Decimal("0.01")
+# Artículo del renglón (``RecepcionDetalle.articulo_*``: nombre, SKU, talla y color) en
+# el mismo ``select_related``. Vale desde ``CalidadInspeccionDetalle`` y desde
+# ``DevolucionProveedorDetalle``: ambos cuelgan de ``recepcion_detalle``.
+ARTICULO = (
+    "recepcion_detalle__producto",
+    "recepcion_detalle__producto_variante__talla", "recepcion_detalle__producto_variante__color",
+    "recepcion_detalle__variante_produccion__talla", "recepcion_detalle__variante_produccion__color",
+    "recepcion_detalle__salida_maquila_detalle",
+)
+
+
+def articulo(fila):
+    """Cómo ve el usuario el renglón (#1421): su artículo con SKU, talla y color, como
+    ``pendientes/``; no el id interno de ``CalidadInspeccionDetalle``. Sin consultas
+    si ``fila`` viene con ``ARTICULO``."""
+    rd = fila.recepcion_detalle
+    datos = ", ".join(
+        f"{etiqueta} {valor}"
+        for etiqueta, valor in (("SKU", rd.articulo_sku), ("talla", rd.articulo_talla), ("color", rd.articulo_color))
+        if valor
+    )
+    nombre = rd.articulo_nombre or "Artículo sin nombre"
+    return f"{nombre} ({datos})" if datos else nombre
+
+
+def _no_devolvible(inspeccion_id, cd_id):
+    """Por qué un renglón pedido no se devuelve (#1421). Solo en el error: 1 consulta,
+    acotada a la inspección (que ya es de la empresa del usuario)."""
+    fila = (
+        CalidadInspeccionDetalle.objects.filter(pk=cd_id, calidad_inspeccion_id=inspeccion_id)
+        .select_related(*ARTICULO).first()
+    )
+    if fila is None:
+        return "Uno de los renglones no es de esta inspección."
+    return (
+        f"{articulo(fila)}: calidad lo dejó como {fila.get_resultado_display()}; "
+        "solo se devuelve lo rechazado o en cuarentena."
+    )
+
+
+def _num(valor):
+    return f"{valor.normalize():f}"
 
 
 def _folio(empresa_id, sucursal_id):
@@ -100,16 +142,7 @@ def pendientes(inspeccion_id):
 
     Inspección anulada → vacío. El renglón trae su artículo (nombre, SKU, talla y
     color: ``RecepcionDetalle.articulo_*``) en el mismo ``select_related``."""
-    filas = (
-        renglones_devolvibles().filter(calidad_inspeccion_id=inspeccion_id)
-        .select_related(
-            "recepcion_detalle__producto",
-            "recepcion_detalle__producto_variante__talla", "recepcion_detalle__producto_variante__color",
-            "recepcion_detalle__variante_produccion__talla", "recepcion_detalle__variante_produccion__color",
-            "recepcion_detalle__salida_maquila_detalle",
-        )
-        .order_by("id")
-    )
+    filas = renglones_devolvibles().filter(calidad_inspeccion_id=inspeccion_id).select_related(*ARTICULO).order_by("id")
     return {f.pk: (f, f.cantidad_pendiente) for f in filas}
 
 
@@ -160,33 +193,41 @@ def crear(*, inspeccion, motivo, renglones, user, ip=None, user_agent=None):
             raise ValidationError({"detalles": "Cada renglón lleva calidad_detalle y cantidad."})
     for cd_id, cantidad in pedidos.items():
         if cd_id not in disponibles:
-            raise ValidationError({"detalles": f"El renglón {cd_id} no es rechazo ni cuarentena de esta inspección."})
-        if cantidad <= 0 or cantidad > disponibles[cd_id][1]:
+            raise ValidationError({"detalles": _no_devolvible(inspeccion.pk, cd_id)})
+        fila, disponible = disponibles[cd_id]
+        if cantidad <= 0:
+            raise ValidationError({"detalles": f"{articulo(fila)}: la cantidad debe ser mayor a 0."})
+        if disponible <= 0:
+            raise ValidationError({"detalles": f"{articulo(fila)}: ya se devolvió completo."})
+        if cantidad > disponible:
             raise ValidationError({"detalles": (
-                f"Renglón {cd_id}: se pueden devolver hasta {disponibles[cd_id][1].normalize():f}.")})
+                f"{articulo(fila)}: se pueden devolver hasta {_num(disponible)} (pediste {_num(cantidad)}).")})
 
     filas = {k: disponibles[k][0] for k in pedidos}
     costos = _costo_oc([f.recepcion_detalle for f in filas.values()])
+    detalles = []
+    for cd_id, cantidad in pedidos.items():
+        rd = filas[cd_id].recepcion_detalle
+        unitario = costos.get(rd.pk, CERO)
+        detalles.append(DevolucionProveedorDetalle(
+            calidad_detalle_id=cd_id, recepcion_detalle=rd, producto_id=rd.producto_id,
+            producto_variante_id=rd.producto_variante_id, variante_produccion_id=rd.variante_produccion_id,
+            cantidad=cantidad, costo_unitario=unitario, importe=(cantidad * unitario).quantize(CENT),
+        ))
+    # #1420: el total va en el alta; el "Creado" de la bitácora sale del ``create``.
     dev = DevolucionProveedor.objects.create(
         empresa_id=recepcion.empresa_id, sucursal_id=recepcion.sucursal_id,
         folio=_folio(recepcion.empresa_id, recepcion.sucursal_id),
         calidad_inspeccion=inspeccion, recepcion=recepcion, orden_compra_id=recepcion.orden_compra_id,
         proveedor_id=recepcion.proveedor_id or getattr(recepcion.orden_compra, "proveedor_id", None),
         almacen_id=recepcion.almacen_id, motivo=motivo, usuario=user,
+        total=sum((d.importe for d in detalles), CERO),
     )
-    detalles = []
-    for cd_id, cantidad in pedidos.items():
-        rd = filas[cd_id].recepcion_detalle
-        unitario = costos.get(rd.pk, CERO)
-        detalles.append(DevolucionProveedorDetalle(
-            devolucion=dev, calidad_detalle_id=cd_id, recepcion_detalle=rd, producto_id=rd.producto_id,
-            producto_variante_id=rd.producto_variante_id, variante_produccion_id=rd.variante_produccion_id,
-            cantidad=cantidad, costo_unitario=unitario, importe=(cantidad * unitario).quantize(CENT),
-        ))
+    for d in detalles:
+        d.devolucion = dev
     DevolucionProveedorDetalle.objects.bulk_create(detalles)
     dev.movimiento_inventario = _movimiento(dev, "SALIDA", detalles, f"Devolución a proveedor {dev.folio}: {motivo}", user)
-    dev.total = sum((d.importe for d in detalles), CERO)
-    dev.save(update_fields=["movimiento_inventario", "total", "updated_at"])
+    dev.save(update_fields=["movimiento_inventario", "updated_at"])
     AuditoriaEvento.objects.create(
         empresa_id=dev.empresa_id, usuario=user, modulo="compras", accion="CREAR",
         tabla=DevolucionProveedor._meta.db_table, id_registro=str(dev.pk), ip=ip, user_agent=user_agent,

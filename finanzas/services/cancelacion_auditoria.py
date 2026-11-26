@@ -24,7 +24,11 @@ def motivo_requerido(request):
     motivo = data.get("motivo") or request.query_params.get("motivo")
     if not isinstance(motivo, str) or not motivo.strip():
         raise ValidationError({"motivo": "Indica el motivo de la cancelación."})
-    return motivo.strip()[:MOTIVO_MAX]
+    motivo = motivo.strip()
+    # #1399: antes se cortaba en silencio y el rastro guardaba otro texto.
+    if len(motivo) > MOTIVO_MAX:
+        raise ValidationError({"motivo": f"El motivo admite hasta {MOTIVO_MAX} caracteres (tiene {len(motivo)})."})
+    return motivo
 
 
 def exigir_permiso(user, clave):

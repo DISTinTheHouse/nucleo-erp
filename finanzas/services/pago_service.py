@@ -13,6 +13,7 @@ from finanzas.models import (
     PagoDetalle,
 )
 from finanzas.scope import exigir_sucursal_unica
+from finanzas.services.conciliacion_service import ConciliacionService
 from finanzas.services.cuenta_por_pagar_service import CuentaPorPagarService
 from finanzas.services.pago_poliza_service import PagoPolizaService
 
@@ -159,6 +160,8 @@ class PagoService:
     def cancelar_pago(pago: Pago, usuario=None):
         if pago.estatus == Pago.Estatus.CANCELADO:
             return
+        # #1417: su movimiento no se cancela mientras lo ampare una conciliación Cerrada.
+        ConciliacionService.exigir_fuera_de_cerrada(MovimientoBancario.objects.filter(pago=pago).values("pk"))
         if pago.estatus != Pago.Estatus.APLICADO:
             # Un Borrador nunca descontó saldos ni tocó el banco: revertirlos
             # inflaría la CxP y el saldo bancario con dinero que no salió.

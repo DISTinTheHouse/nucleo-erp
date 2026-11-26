@@ -1,5 +1,6 @@
 """``/api/v1/compras/devoluciones-proveedor/``: devolución a proveedor de lo que
 calidad rechazó o puso en cuarentena. Lógica en ``compras.services.devolucion_proveedor``."""
+from django.db.models import Prefetch
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -18,11 +19,19 @@ PERMISO_ESCRIBIR = "C-WMS-RECEPCIONES"
 
 
 class DevolucionProveedorDetalleSerializer(serializers.ModelSerializer):
-    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True, default=None)
+    # #1409: el artículo con los mismos nombres y la misma regla que ``pendientes/``
+    # (``RecepcionDetalle.articulo_*``). Viaja en el ``Prefetch`` del viewset.
+    producto_nombre = serializers.CharField(source="recepcion_detalle.articulo_nombre", read_only=True, default=None)
+    producto_variante_sku = serializers.CharField(source="recepcion_detalle.articulo_sku", read_only=True, default=None)
+    producto_variante_talla = serializers.CharField(
+        source="recepcion_detalle.articulo_talla", read_only=True, default=None)
+    producto_variante_color = serializers.CharField(
+        source="recepcion_detalle.articulo_color", read_only=True, default=None)
 
     class Meta:
         model = DevolucionProveedorDetalle
         fields = ["id", "calidad_detalle", "recepcion_detalle", "producto", "producto_nombre", "producto_variante",
+                  "producto_variante_sku", "producto_variante_talla", "producto_variante_color",
                   "variante_produccion", "cantidad", "costo_unitario", "importe"]
 
 
@@ -51,11 +60,20 @@ class DevolucionProveedorSerializer(serializers.ModelSerializer):
         return _nombre_usuario(obj.cancelado_por) if obj.cancelado_por_id else None
 
 
+MOTIVO_MAX = 500
+# ``cantidad_pendiente`` con la escala fija de ``cantidad`` del detalle (#1409).
+_CANTIDAD = serializers.DecimalField(max_digits=None, decimal_places=4)
+
+
 def _motivo(request, mensaje):
     motivo = request.data.get("motivo") if hasattr(request.data, "get") else None
     if not isinstance(motivo, str) or not motivo.strip():
         raise ValidationError({"motivo": mensaje})
-    return motivo.strip()[:500]
+    motivo = motivo.strip()
+    # Como la cancelación de recepciones: más largo es 400, no se corta en silencio.
+    if len(motivo) > MOTIVO_MAX:
+        raise ValidationError({"motivo": f"El motivo admite hasta {MOTIVO_MAX} caracteres (tiene {len(motivo)})."})
+    return motivo
 
 
 class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
@@ -71,9 +89,11 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
         *[b for b in viewsets.ReadOnlyModelViewSet.filter_backends if b is not OrderingFilter],
         OrdenamientoEstableFilter,
     ]
-    # Lista blanca de ``?ordering=`` (#863); sin él, ``-fecha, -id``.
+    # Lista blanca de ``?ordering=`` (#863); sin él, ``-fecha, -id``. ``proveedor__razon_social``
+    # es lo que muestra ``proveedor_nombre`` (#1419); ``proveedor__nombre`` sigue por compatibilidad.
     ordering_fields = [
-        "id", "folio", "fecha", "estatus", "total", "proveedor__nombre", "recepcion__folio", "orden_compra__folio",
+        "id", "folio", "fecha", "estatus", "total", "proveedor__razon_social", "proveedor__nombre",
+        "recepcion__folio", "orden_compra__folio",
     ]
 
     def get_queryset(self):
@@ -84,7 +104,11 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
         qs = (
             DevolucionProveedor.objects.filter(empresa=empresa)
             .select_related("proveedor", "recepcion", "orden_compra", "usuario", "cancelado_por")
-            .prefetch_related("detalles__producto")
+            # Renglones con su artículo en una sola consulta (#1409).
+            .prefetch_related(Prefetch(
+                "detalles",
+                queryset=DevolucionProveedorDetalle.objects.select_related(*servicio.ARTICULO).order_by("id"),
+            ))
             .order_by("-fecha", "-id")
         )
         # Ids no enteros → 400 como los demás listados (#1402); antes, 500.
@@ -158,6 +182,6 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
                 "producto": rd.producto_id, "producto_nombre": rd.articulo_nombre,
                 # Mismos nombres que los renglones de la recepción y de la OC.
                 "producto_variante_sku": rd.articulo_sku, "producto_variante_talla": rd.articulo_talla,
-                "producto_variante_color": rd.articulo_color, "cantidad_pendiente": str(v),
+                "producto_variante_color": rd.articulo_color, "cantidad_pendiente": _CANTIDAD.to_representation(v),
             })
         return Response(filas)

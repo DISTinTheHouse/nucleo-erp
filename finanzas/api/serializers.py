@@ -25,6 +25,7 @@ from finanzas.models import (
     FacturaDetalle,
     FacturaProveedor,
     FacturaProveedorDetalle,
+    MotivoCancelacionSat,
     MovimientoBancario,
     NotaCredito,
     NotaCreditoDetalle,
@@ -99,6 +100,27 @@ class CanceladoPorNombreMixin(serializers.Serializer):
     @extend_schema_field({"type": "string", "nullable": True})
     def get_cancelado_por_nombre(self, obj):
         return nombre_cancelado_por(obj)
+
+
+# Bodies de las cancelaciones (#1399). Solo documentan el esquema OpenAPI: la vista
+# lee ``motivo`` con ``cancelacion_auditoria.motivo_requerido`` y ``motivo_sat`` con
+# ``FacturaTimbradoService``, que validan lo mismo.
+
+class CancelacionInputSerializer(serializers.Serializer):
+    motivo = serializers.CharField(max_length=500, help_text="Obligatorio, hasta 500 caracteres.")
+
+
+class CancelacionFacturaInputSerializer(CancelacionInputSerializer):
+    motivo_sat = serializers.ChoiceField(
+        choices=MotivoCancelacionSat.choices, required=False,
+        help_text="Motivo ante el SAT (02/03). Obligatorio si la factura tiene CFDI vigente.",
+    )
+
+
+class CancelacionRepInputSerializer(CancelacionInputSerializer):
+    motivo_sat = serializers.ChoiceField(
+        choices=MotivoCancelacionSat.choices, help_text="Motivo ante el SAT (02/03).",
+    )
 
 
 class EmpresaResueltaEnServidorMixin:
@@ -1135,7 +1157,9 @@ class CuentaBancariaSerializer(
         return attrs
 
 
-class CuentaPorPagarSerializer(EmpresaResueltaEnServidorMixin, serializers.ModelSerializer):
+class CuentaPorPagarSerializer(
+    CancelacionSoloLecturaMixin, CanceladoPorNombreMixin, EmpresaResueltaEnServidorMixin, serializers.ModelSerializer
+):
     proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
     factura_proveedor_folio = serializers.CharField(source="factura_proveedor.folio", read_only=True)
     moneda_id = serializers.IntegerField(source="factura_proveedor.moneda_id", read_only=True)

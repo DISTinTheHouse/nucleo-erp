@@ -649,7 +649,7 @@ class CuentaPorCobrar(models.Model):
             | models.Q(factura__cfdi_cancelacion_en_curso_desde__isnull=False)
         )
 
-class CuentaPorPagar(models.Model):
+class CuentaPorPagar(CancelacionFinanzasMixin, models.Model):
     class EstatusCxP(models.TextChoices):
         PENDIENTE = 'Pendiente', 'Pendiente'
         PARCIAL = 'Parcial', 'Parcial'

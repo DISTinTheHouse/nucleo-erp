@@ -182,6 +182,10 @@ class OrdenCompra(StatusLifecycleModel):
     # queda marcada para que compras decida (cancelarla o quedarse el material).
     pedido_cancelado = models.BooleanField(default=False)
     fecha_pedido_cancelado = models.DateTimeField(null=True, blank=True)
+    # Qué pedido puso la marca (#1404): con OC multi-pedido, cuál de ellos se canceló.
+    pedido_cancelado_origen = models.ForeignKey(
+        Pedido, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
 
     activo = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
