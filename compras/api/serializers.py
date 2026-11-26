@@ -1,5 +1,8 @@
 from decimal import Decimal
 
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
+
 from rest_framework import serializers
 from nucleo.listados import nombre_para_mostrar_usuario as _nombre_usuario
 from compras.models import (
@@ -926,15 +929,19 @@ class RecepcionRFIDEncuadreListSerializer(RecepcionRFIDEncuadreSerializer):
     def _esperado(self, obj):
         return self.context["totales_esperados"].get(obj.pk, Decimal("0"))
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_total_esperado(self, obj):
         return str(self._esperado(obj))
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_total_leido(self, obj):
         return str(obj.total_leido)
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_total_sin_asignar(self, obj):
         return str(obj.total_sin_asignar)
 
+    @extend_schema_field(OpenApiTypes.BOOL)
     def get_completo(self, obj):
         esperado = self._esperado(obj)
         return bool(esperado > 0 and obj.total_leido >= esperado)

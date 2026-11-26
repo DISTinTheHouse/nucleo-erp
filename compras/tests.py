@@ -3731,6 +3731,43 @@ class RecepcionRFIDEncuadreBloqueoTests(_EncuadresRFIDFixture, TestCase):
         # La transacción sigue sana: la siguiente lectura entra.
         self.assertEqual(self._post(encuadre, "lecturas", {"codigo_tag": "PLA-a-M"}).status_code, 201)
 
+    def test_tag_repetido_se_reconoce_por_diag_y_por_texto_de_respaldo(self):
+        """Con psycopg 3 manda ``diag.constraint_name``, sin depender del idioma del
+        mensaje; sin ``diag`` (otro driver) se busca el nombre en el texto."""
+        from types import SimpleNamespace
+
+        from django.db import IntegrityError
+
+        from compras.api.views import RecepcionRFIDEncuadreViewSet as VS
+
+        def error(texto, constraint=None):
+            exc = IntegrityError(texto)
+            if constraint is not None:
+                causa = Exception(texto)
+                causa.diag = SimpleNamespace(constraint_name=constraint)
+                exc.__cause__ = causa
+            return exc
+
+        casos = [
+            (error("llave duplicada viola restricción de unicidad", VS.UNIQUE_TAG), True),
+            (error(f"menciona {VS.UNIQUE_TAG} pero es otra", "fk_lectura_producto"), False),
+            (error(f'duplicate key value violates unique constraint "{VS.UNIQUE_TAG}"'), True),
+            (error("violates foreign key constraint"), False),
+        ]
+        for exc, esperado in casos:
+            with self.subTest(exc=str(exc)):
+                self.assertIs(VS._es_tag_repetido(exc), esperado)
+
+    def test_integrityerror_real_trae_diag_con_la_constraint(self):
+        from django.db import IntegrityError, transaction
+
+        from compras.api.views import RecepcionRFIDEncuadreViewSet as VS
+
+        RecepcionRFIDLectura.objects.create(encuadre=self.e_oc_vacio, codigo_tag="DUP", cantidad_leida=Decimal("1"))
+        with self.assertRaises(IntegrityError) as ctx, transaction.atomic():
+            RecepcionRFIDLectura.objects.create(encuadre=self.e_oc_vacio, codigo_tag="DUP", cantidad_leida=Decimal("1"))
+        self.assertEqual(ctx.exception.__cause__.diag.constraint_name, VS.UNIQUE_TAG)
+
     def test_otra_integrityerror_no_se_disfraza_de_tag_repetido(self):
         from django.db import IntegrityError
 
@@ -3797,6 +3834,17 @@ class RecepcionRFIDEncuadreListadoTests(_EncuadresRFIDFixture, TestCase):
         with CaptureQueriesContext(connection) as muchas:
             self.assertEqual(api.get(self.URL_ENCUADRES, {"limit": 50}).json()["count"], 8)
         self.assertEqual(len(muchas), len(pocas))
+
+    def test_renglones_del_listado_sin_joins(self):
+        """El total esperado del listado lee solo ``id``/orden/``cantidad`` de los
+        renglones (EC-981); el detalle conserva su consulta completa."""
+        with CaptureQueriesContext(connection) as ctx:
+            self._api().get(self.URL_ENCUADRES)
+        renglones = [q["sql"] for q in ctx.captured_queries
+                     if 'FROM "orden_compra_detalle"' in q["sql"] or 'FROM "ordenes_produccion_detalles"' in q["sql"]]
+        self.assertEqual(len(renglones), 2, renglones)
+        for sql in renglones:
+            self.assertNotIn("JOIN", sql.upper())
 
     def test_filtro_estatus(self):
         RecepcionRFIDEncuadre.objects.filter(pk=self.e_oc_vacio.pk).update(estatus="ACEPTADO")

@@ -230,6 +230,15 @@ PARAMETROS_LISTADO_RECEPCIONES = PARAMETROS_LISTADO_COMPRAS + [
     OpenApiParameter("almacen", OpenApiTypes.INT, description="Id del almacén destino."),
     OpenApiParameter("orden_compra", OpenApiTypes.INT, description="Id de la OC de origen."),
 ]
+# Listado de encuadres RFID (EC-981): ``estatus`` es texto, no el entero de OC/recepciones.
+PARAMETROS_LISTADO_ENCUADRES_RFID = [
+    OpenApiParameter("estatus", OpenApiTypes.STR,
+                     description="PENDIENTE, ACEPTADO o CANCELADO; uno o varios separados por coma."),
+    OpenApiParameter("tipo_origen", OpenApiTypes.STR, enum=["OC", "OP"], description="OC u OP."),
+    *(p for p in PARAMETROS_LISTADO_RECEPCIONES if p.name in {"proveedor", "sucursal", "almacen", "orden_compra"}),
+    OpenApiParameter("op", OpenApiTypes.INT, description="Id de la OP de origen."),
+    *(p for p in PARAMETROS_LISTADO_COMPRAS if p.name in {"fecha_desde", "fecha_hasta"}),
+]
 PARAMETROS_KPIS_RECEPCIONES = [
     p for p in PARAMETROS_LISTADO_COMPRAS if p.name in {"sucursal", "proveedor", "fecha_desde", "fecha_hasta"}
 ]
@@ -3838,11 +3847,13 @@ def _renglones_op_rfid(op_ids):
     )
 
 
-def mapas_resumen_encuadres_rfid(encuadres):
+def mapas_resumen_encuadres_rfid(encuadres, ligero=False):
     """Renglones y recibido de todos los encuadres de un listado, en bloque.
 
     Constante en consultas: renglones de OC, renglones de OP y recibido +
-    rechazado de cada lado, en lugar de tres consultas por encuadre. Mismos
+    rechazado de cada lado, en lugar de tres consultas por encuadre.
+    ``ligero`` (listado, EC-981): los renglones sin JOINs y solo con ``pk``, la
+    orden y ``cantidad``, lo único que usa ``total_esperado_encuadre_rfid``. Mismos
     filtros y orden que ``resumen_encuadre_rfid`` encuadre por encuadre: el
     recibido se agrupa por renglón, así que juntar los renglones de varias
     órdenes en un ``IN`` da el mismo total por renglón.
@@ -3851,10 +3862,16 @@ def mapas_resumen_encuadres_rfid(encuadres):
     op_ids = {e.op_id for e in encuadres if not e.orden_compra_id and e.op_id}
     renglones_oc, renglones_op = {}, {}
     if oc_ids:
-        for detalle in _renglones_oc_rfid(oc_ids):
+        qs_oc = _renglones_oc_rfid(oc_ids)
+        if ligero:
+            qs_oc = qs_oc.select_related(None).only("orden_compra", "cantidad")
+        for detalle in qs_oc:
             renglones_oc.setdefault(detalle.orden_compra_id, []).append(detalle)
     if op_ids:
-        for detalle in _renglones_op_rfid(op_ids):
+        qs_op = _renglones_op_rfid(op_ids)
+        if ligero:
+            qs_op = qs_op.select_related(None).only("op", "cantidad")
+        for detalle in qs_op:
             renglones_op.setdefault(detalle.op_id, []).append(detalle)
     recepcion_vs = RecepcionViewSet()
     return {
@@ -3956,6 +3973,7 @@ def resumen_encuadre_rfid(encuadre, mapas=None):
     }
 
 
+@extend_schema_view(list=extend_schema(parameters=PARAMETROS_LISTADO_ENCUADRES_RFID))
 class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
     """API REST del encuadre RFID de recepción (OC u OP).
 
@@ -4059,7 +4077,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
         encuadres = list(page if page is not None else queryset)
-        mapas = mapas_resumen_encuadres_rfid(encuadres)
+        mapas = mapas_resumen_encuadres_rfid(encuadres, ligero=True)
         context = self.get_serializer_context()
         context["totales_esperados"] = {e.pk: total_esperado_encuadre_rfid(e, mapas) for e in encuadres}
         serializer = self.get_serializer(encuadres, many=True, context=context)
@@ -4178,7 +4196,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
                 # El mismo tag escrito por otro camino entre el exists() y el
                 # INSERT: el 400 de un tag repetido, no un 500. Cualquier otra
                 # violación (FK, NOT NULL...) sigue su curso.
-                if self.UNIQUE_TAG not in str(exc):
+                if not self._es_tag_repetido(exc):
                     raise
                 raise ValidationError({"codigo_tag": self.TAG_REPETIDO}) from exc
         return Response(RecepcionRFIDLecturaSerializer(lectura).data, status=status.HTTP_201_CREATED)
@@ -4229,6 +4247,17 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             ])
             self._auditar(request, encuadre, "CANCELAR", antes, {"estatus": encuadre.estatus, "motivo": motivo})
         return Response(RecepcionRFIDEncuadreSerializer(encuadre).data)
+
+    @classmethod
+    def _es_tag_repetido(cls, exc):
+        """La violación es de ``uq_recepcion_rfid_lectura_encuadre_tag``: por el
+        nombre que psycopg 3 da en ``diag.constraint_name``; el texto del error
+        solo como respaldo (otro driver o un error sin ``diag``)."""
+        diag = getattr(exc.__cause__, "diag", None)
+        nombre = getattr(diag, "constraint_name", None)
+        if nombre:
+            return nombre == cls.UNIQUE_TAG
+        return cls.UNIQUE_TAG in str(exc)
 
     @staticmethod
     def _auditar(request, encuadre, accion, antes, despues):
