@@ -4981,15 +4981,21 @@ class DevolucionProveedorContratoTests(TestCase):
         self.assertEqual({k: data[k] for k in esperado}, esperado)
         filas, una = self._consultas(self.URL)
         self.assertEqual({k: filas[0][k] for k in esperado}, esperado)
+        # Permiso de lectura aparte (mismo usuario, la misma llamada que ``initial``): el
+        # endpoint hace las mismas 2 de antes de EC-975 (documentos + renglones); sin
+        # ``sucursal``/``almacen`` en el ``select_related`` serían 2 más por documento.
+        with CaptureQueriesContext(connection) as permiso:
+            self.assertTrue(self.a["usuario"].tiene_permiso("R-WMS-RECEPCIONES"))
+        propias = 2
+        self.assertEqual((detalle, una), (len(permiso) + propias, len(permiso) + propias))
 
         self._devolucion(self._inspeccion(), "1")
         self._devolucion(self._inspeccion(variante=False), "2")
         filas, tres = self._consultas(self.URL)
         self.assertEqual(len(filas), 3)
+        self.assertEqual({(f["almacen_nombre"], f["sucursal_nombre"]) for f in filas},
+                         {(esperado["almacen_nombre"], esperado["sucursal_nombre"])})
         self.assertEqual(tres, una)
-        # Las mismas que antes de EC-975 (permiso de lectura + documentos + renglones);
-        # sin ``sucursal``/``almacen`` en el ``select_related`` serían 2 más por documento.
-        self.assertEqual((detalle, una), (3, 3))
 
     def test_detalle_de_otra_empresa_es_404(self):
         """La devolución de otra empresa no se ve ni se cancela (404) y no cambia."""
