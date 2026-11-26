@@ -16,7 +16,7 @@ from finanzas.services.factura_timbrado_service import (
 
 class FacturaCancelacionService:
     @staticmethod
-    def cancelar(factura, usuario=None, motivo="", motivo_sat=None, al_cancelar=None):
+    def cancelar(factura, usuario=None, motivo="", motivo_sat=None, al_cancelar=None, al_cancelar_cfdi=None):
         """Regresa la contrapóliza, o ``None`` si no hubo (Borrador, ya cancelada o sin póliza).
 
         Los cobros aplicados no se tocan: su póliza sigue y en Clientes queda el
@@ -37,6 +37,10 @@ class FacturaCancelacionService:
         ``al_cancelar(bloqueada, estatus_antes, contrapoliza)``: corre en la transacción de la
         cancelación en el ERP, con la fila bloqueada, solo si la factura pasó a Cancelada (no
         en un reintento ante el SAT de una ya cancelada). Si falla, la factura no se cancela.
+
+        ``al_cancelar_cfdi(factura)``: en una factura ya Cancelada en el ERP con CFDI vigente
+        (#567), corre después de que el SAT respondió ``canceled`` (con cualquier otro resultado
+        ``cancelar_cfdi`` levanta antes de llegar ahí).
         """
         motivo_sat = normalizar_motivo_sat(motivo_sat)
         actual = Factura.objects.get(pk=factura.pk)
@@ -50,6 +54,8 @@ class FacturaCancelacionService:
                 FacturaTimbradoService.cancelar_cfdi(
                     factura, motivo_sat, nota=f"CFDI cancelado ante el SAT: {motivo}" if motivo else ""
                 )
+                if al_cancelar_cfdi is not None:
+                    al_cancelar_cfdi(factura)
             return None
         FacturaCancelacionService._exigir_sin_notas_emitidas(actual)
         if actual.cfdi_pendiente:  # #562, #904

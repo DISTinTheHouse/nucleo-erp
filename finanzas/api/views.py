@@ -948,12 +948,20 @@ class FacturaViewSet(FinanzasBaseViewSet):
             factura.fecha_cancelacion = bloqueada.fecha_cancelacion
             factura.cancelado_por = bloqueada.cancelado_por
 
+        def auditar_cancelacion_cfdi(cancelada):
+            # #567: ya Cancelada en el ERP, el CFDI se canceló ahora ante el SAT. No reescribe el
+            # rastro de la cancelación en el ERP; deja quién, cuándo y por qué, como ``cancelar-rep/``.
+            canc.auditar_evento(cancelada, request, 'CANCELAR_CFDI', {
+                'cfdi_uuid': cancelada.cfdi_uuid,
+                'motivo_sat': cancelada.cfdi_cancelacion_motivo, 'motivo': motivo,
+            })
+
         # ``motivo`` es la nota interna; ``motivo_sat`` (02/03) el que va al SAT (EC-806). Sin
         # ``atomic`` aquí: Facturama se llama fuera de toda transacción y la reserva, el motivo
         # fijado y ``cfdi_cancelado`` se guardan aunque la parte del ERP falle (EC-972).
         contrapoliza = FacturaCancelacionService.cancelar(
             factura, request.user, motivo[:200], motivo_sat=request.data.get('motivo_sat'),
-            al_cancelar=registrar_rastro,
+            al_cancelar=registrar_rastro, al_cancelar_cfdi=auditar_cancelacion_cfdi,
         )
         data = dict(FacturaSerializer(factura).data)
         data['contrapoliza_id'] = contrapoliza.pk if contrapoliza else None

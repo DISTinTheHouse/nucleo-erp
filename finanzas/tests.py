@@ -9746,6 +9746,28 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.assertEqual(rastro[0], "Reintento")
         self.assertEqual(eventos.count(), 1)
 
+    def test_cancelar_el_cfdi_de_una_ya_cancelada_lo_audita_solo_con_canceled(self):  # EC-972, #567
+        from auditoria.models import AuditoriaEvento
+
+        factura = self._timbrada()
+        Factura.objects.filter(pk=factura.pk).update(estatus=Factura.FacturaStatus.CANCELADA)
+        eventos = AuditoriaEvento.objects.filter(tabla="facturas", id_registro=str(factura.pk))
+
+        self.facturama.cancel_cfdi.return_value = {"Status": "pending"}
+        self.assertIn("cancelacion_pendiente", self._cancelar(factura, motivo_sat="03", motivo="Duplicada").data)
+        self.assertFalse(eventos.exists())
+
+        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
+        self.assertEqual(self._cancelar(factura, motivo_sat=None, motivo="Duplicada").status_code, 200)
+
+        (evento,) = eventos
+        self.assertEqual((evento.accion, evento.usuario_id), ("CANCELAR_CFDI", self.a["usuario"].pk))
+        self.assertEqual(evento.despues_json["motivo"], "Duplicada")
+        self.assertEqual(evento.despues_json["motivo_sat"], "03")  # el fijado, aunque el reintento no lo mande
+        self.assertEqual(evento.despues_json["cfdi_uuid"], "fe3c73d5-7881-49e0-80a3-e6c7e2eece40")
+        rastro, _ = self._rastro(factura)
+        self.assertEqual(rastro, ("", None, None))  # no reescribe el rastro de la cancelación en el ERP
+
     def test_cfdi_cancelado_y_aun_emitida_no_admite_nota_ni_rep(self):  # EC-972
         """Estado de reintento: el SAT canceló y la parte del ERP falló. Nada se cuelga de la
         factura hasta que el reintento la cancela."""
