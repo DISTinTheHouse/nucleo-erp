@@ -213,6 +213,8 @@ class OrdenBordadoService:
 
         resultado = {}
         for orden in ordenes:
+            # #1390: una orden cancelada nunca sale ``completa``, cubra lo que cubra.
+            cancelada = orden.estatus_bordado == OrdenesBordado.EstatusBordado.CANCELADO_LEGACY
             cubierto = cubierto_por_ob.get(orden.pk, 0.0)
             total = contratado.get(orden.pedido_id, 0.0)
             # PISO, no redondeo. Con redondeo, un cubierto=9.6 sobre
@@ -247,7 +249,7 @@ class OrdenBordadoService:
                 # Un pedido sin piezas contratadas de bordado no se declara
                 # "cubierto al 100%": no hay nada que cubrir y afirmarlo
                 # confundiría más que el ``false``.
-                "completa": contratado_int > 0 and cubierto_int >= contratado_int,
+                "completa": contratado_int > 0 and cubierto_int >= contratado_int and not cancelada,
             }
         return resultado
 
