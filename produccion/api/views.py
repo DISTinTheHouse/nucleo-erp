@@ -3494,7 +3494,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
         respuesta trae ``pedidos_omitidos``: pedidos del resurtido que no se ligaron (#1367)."""
         from nucleo.models import UnidadMedida
         from produccion.api.serializers import ligar_pedidos_op
-        from produccion.services.pre_orden_service import marcar_convertida, materiales, recalcular
+        from produccion.services.pre_orden_service import marcar_convertida, materiales, motivo_omision, recalcular
         pre = self.get_object()
         from ventas.services.retencion_service import mensaje_retenido
         with transaction.atomic():
@@ -3523,9 +3523,7 @@ class PreOrdenProduccionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin
             for p in bloqueados:
                 if p.pk not in ligados or p.pk == pre.pedido_id:
                     continue
-                motivo = ("cancelado" if p.estatus == Pedido.ESTATUS_CANCELADO else
-                          "dado de baja" if not p.activo else
-                          "de otra sucursal" if p.sucursal_id != pre.sucursal_id else None)
+                motivo = motivo_omision(p.estatus, p.activo, p.sucursal_id, pre.sucursal_id)
                 if motivo:
                     pedidos_omitidos.append({"id": p.pk, "folio": p.folio, "motivo": motivo})
             omitidos = {o["id"] for o in pedidos_omitidos}

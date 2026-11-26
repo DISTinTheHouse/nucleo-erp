@@ -38,6 +38,24 @@ EPS = Decimal("0.0001")
 CERO = Decimal("0")
 DIAS_AMARILLO = 3
 
+# Motivos por los que ``crear-op`` no liga a la OP un pedido del resurtido (#1367).
+OMISION_CANCELADO = "cancelado"
+OMISION_BAJA = "dado de baja"
+OMISION_OTRA_SUCURSAL = "de otra sucursal"
+
+
+def motivo_omision(estatus, activo, sucursal_id, sucursal_pre_id):
+    """Por qué ``crear-op`` no liga un pedido del resurtido a la OP, o ``None`` si
+    se liga. En este orden: cancelado, dado de baja, de otra sucursal. La usan
+    ``crear-op`` y la vista previa de ``pedidos_vinculados`` (EC-980); sin consultas."""
+    if estatus == Pedido.ESTATUS_CANCELADO:
+        return OMISION_CANCELADO
+    if not activo:
+        return OMISION_BAJA
+    if sucursal_id != sucursal_pre_id:
+        return OMISION_OTRA_SUCURSAL
+    return None
+
 
 # --------------------------------------------------------------------------- utilidades
 
