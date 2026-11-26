@@ -1283,11 +1283,15 @@ class OrdenBordadoSerializer(CanceladoPorNombreMixin, serializers.ModelSerialize
                     raise serializers.ValidationError({
                         "detalles_override": "Falta `pedido_detalle_talla_id`."
                     })
-                if pdt_id in seen_ids:
+                # ``5`` y ``"5"`` son la misma talla (el service las coacciona con
+                # ``int``): se compara el id normalizado para no fusionarlas en
+                # silencio (#1447). Un id no entero cae abajo en "no existe".
+                clave = _entero_o_none(pdt_id)
+                if clave is not None and clave in seen_ids:
                     raise serializers.ValidationError({
                         "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` repetido."
                     })
-                seen_ids.add(pdt_id)
+                seen_ids.add(clave)
 
                 try:
                     cantidad_num = float(cantidad)
@@ -2342,11 +2346,15 @@ class OrdenReflejanteSerializer(CanceladoPorNombreMixin, serializers.ModelSerial
                     raise serializers.ValidationError({
                         "detalles_override": "Falta `pedido_detalle_talla_id`."
                     })
-                if pdt_id in seen_ids:
+                # ``5`` y ``"5"`` son la misma talla (el service las coacciona con
+                # ``int``): se compara el id normalizado para no fusionarlas en
+                # silencio (#1447). Un id no entero cae abajo en "no existe".
+                clave = _entero_o_none(pdt_id)
+                if clave is not None and clave in seen_ids:
                     raise serializers.ValidationError({
                         "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` repetido."
                     })
-                seen_ids.add(pdt_id)
+                seen_ids.add(clave)
                 try:
                     cantidad_num = float(cantidad)
                 except (TypeError, ValueError):
@@ -2825,11 +2833,15 @@ class OrdenesCorteMangaSerializer(CanceladoPorNombreMixin, serializers.ModelSeri
                     raise serializers.ValidationError({
                         "detalles_override": "Falta `pedido_detalle_talla_id`."
                     })
-                if pdt_id in seen_ids:
+                # ``5`` y ``"5"`` son la misma talla (el service las coacciona con
+                # ``int``): se compara el id normalizado para no fusionarlas en
+                # silencio (#1447). Un id no entero cae abajo en "no existe".
+                clave = _entero_o_none(pdt_id)
+                if clave is not None and clave in seen_ids:
                     raise serializers.ValidationError({
                         "detalles_override": f"`pedido_detalle_talla_id={pdt_id}` repetido."
                     })
-                seen_ids.add(pdt_id)
+                seen_ids.add(clave)
                 try:
                     cantidad_num = float(cantidad)
                 except (TypeError, ValueError):

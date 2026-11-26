@@ -166,6 +166,16 @@ def _programado_para_destino(pedido, destino):
     }
 
 
+def _sucursales_onboarding(user):
+    """Sucursales cuyos pedidos ofrece el GET de onboarding de OB/OR/OCM, con la
+    misma regla que su POST (``_pedido_en_alcance``) y que ``produccion/scope.py``
+    (EC-880): ``None`` = todas las de la empresa activa para superusuario e
+    ``is_admin_empresa``; ``sucursales_permitidas()`` para el resto (#1446)."""
+    if user.is_superuser or user.is_admin_empresa:
+        return None
+    return user.sucursales_permitidas()
+
+
 def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn,
                                 incluir_config_crudo=False, destino_programacion=None,
                                 incluir_sku=False, sucursal_ids_existencias=(),
@@ -204,6 +214,13 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
     # Retenido por mesa de control: no se ofrece (el alta lo rechazaría).
     pedidos_lista = list(pedidos_qs.filter(retenido=False))
     por_linea, sin_talla = cantidades_asignadas_fn([p.id for p in pedidos_lista])
+    # Lo asignado por ``pedido_detalle`` con TODAS sus tallas, elegibles o no:
+    # el tope del POST (``exigir_tope_programado``) suma todo lo que hay en
+    # órdenes activas, aunque después se desmarque el ``lleva_*`` de una talla
+    # (#1444).
+    asignado_por_detalle = dict(sin_talla)
+    for (det_id, _talla_id), cantidad in por_linea.items():
+        asignado_por_detalle[det_id] = asignado_por_detalle.get(det_id, 0.0) + cantidad
 
     existencias = {}
     if incluir_sku and incluir_existencias:
@@ -226,7 +243,9 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
                     # prenda terminada disponible: almacenes PT ACTIVOS (#518). No cuentan MP,
                     # proceso, cuarentena, devolución ni tránsito.
                     almacen__empresa_id=pedidos_lista[0].empresa_id,
-                    almacen__sucursal_id__in=sucursal_ids_existencias,
+                    # ``None``: todas las sucursales de la empresa (superusuario/admin).
+                    **({} if sucursal_ids_existencias is None
+                       else {"almacen__sucursal_id__in": sucursal_ids_existencias}),
                     almacen__estatus="ACTIVO",
                     almacen__tipo_almacen="PT",
                 ).values("producto_variante_id").annotate(total=Sum("cantidad"))
@@ -255,9 +274,7 @@ def _payload_pedidos_onboarding(pedidos_qs, config_attr, cantidades_asignadas_fn
         if programado is not None:
             # Lo programado a este destino que aún no está en órdenes activas (todo
             # el pedido, piezas sin talla incluidas). Cubierto -> el pedido sale.
-            det_ids = {det.id for det in p.detalles.all()}
-            claves = {(det.id, dt.talla_id) for det in p.detalles.all() for dt in det.tallas.all()}
-            ya = sum(por_linea.get(k, 0.0) for k in claves) + sum(sin_talla.get(d, 0.0) for d in det_ids)
+            ya = sum(asignado_por_detalle.get(det.id, 0.0) for det in p.detalles.all())
             disponible = max(0.0, programado["cantidad"] - ya)
             if disponible <= EPS_CANTIDAD:
                 continue
@@ -1629,15 +1646,15 @@ class OrdenBordadoViewSet(_EscrituraConCodigoMixin, mixins.ListModelMixin, mixin
             if empresa is None:
                 return Response(empty)
 
-            sucursal_ids = user.sucursales_permitidas()
-            if not sucursal_ids:
+            sucursal_ids = _sucursales_onboarding(user)
+            if sucursal_ids is not None and not sucursal_ids:
                 return Response(empty)
 
             pedidos_qs = (
                 Pedido.objects.filter(
                     empresa=empresa,
-                    sucursal_id__in=sucursal_ids,
                     activo=True,
+                    **({} if sucursal_ids is None else {"sucursal_id__in": sucursal_ids}),
                 )
                 .filter(_con_talla_que("lleva_bordado"))
                 .select_related("cliente", "sucursal")
@@ -2085,15 +2102,15 @@ class OrdenReflejanteViewSet(
             if empresa is None:
                 return Response(empty)
 
-            sucursal_ids = user.sucursales_permitidas()
-            if not sucursal_ids:
+            sucursal_ids = _sucursales_onboarding(user)
+            if sucursal_ids is not None and not sucursal_ids:
                 return Response(empty)
 
             pedidos_qs = (
                 Pedido.objects.filter(
                     empresa=empresa,
-                    sucursal_id__in=sucursal_ids,
                     activo=True,
+                    **({} if sucursal_ids is None else {"sucursal_id__in": sucursal_ids}),
                 )
                 .filter(_con_talla_que("lleva_reflejante"))
                 .select_related("cliente", "sucursal")
@@ -2482,15 +2499,15 @@ class OrdenesCorteMangaViewSet(
             if empresa is None:
                 return Response(empty)
 
-            sucursal_ids = user.sucursales_permitidas()
-            if not sucursal_ids:
+            sucursal_ids = _sucursales_onboarding(user)
+            if sucursal_ids is not None and not sucursal_ids:
                 return Response(empty)
 
             pedidos_qs = (
                 Pedido.objects.filter(
                     empresa=empresa,
-                    sucursal_id__in=sucursal_ids,
                     activo=True,
+                    **({} if sucursal_ids is None else {"sucursal_id__in": sucursal_ids}),
                 )
                 .filter(_con_talla_que("lleva_corte_manga"))
                 .select_related("cliente", "sucursal")

@@ -266,7 +266,7 @@ class OrdenCorteMangaService:
         # ``select_for_update`` es no-op; en Postgres es el bloqueo real.
         # Sobre la fila bloqueada se revisa además que el pedido siga vivo y sin
         # retener (cancelado, dado de baja o retenido -> 400).
-        bloquear_pedido_vivo(pedido.pk)
+        pedido_bloqueado = bloquear_pedido_vivo(pedido.pk)
 
         detalle_tallas_raw = list(
             tallas_para_alta(OrdenCorteMangaService._tallas_corte_manga_qs(pedido.id))
@@ -392,8 +392,10 @@ class OrdenCorteMangaService:
             })
 
         # Tope de lo que mesa de control programó a CORTE_MANGA (todo el pedido).
+        # Con el pedido leído bajo el candado: ``programar/`` toma la misma fila,
+        # así que su ``programacion_conf`` es el vigente (#1445).
         exigir_tope_programado(
-            pedido, "CORTE_MANGA", asignado_por_linea, asignado_sin_talla,
+            pedido_bloqueado, "CORTE_MANGA", asignado_por_linea, asignado_sin_talla,
             sum(float(dt.cantidad or 0) for dt in detalle_tallas), "corte de manga",
         )
 

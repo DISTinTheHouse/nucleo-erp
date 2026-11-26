@@ -359,7 +359,7 @@ class OrdenBordadoService:
         # False) y la suite corre igual; en Postgres es el bloqueo real.
         # Sobre la fila bloqueada se revisa además que el pedido siga vivo y sin
         # retener (cancelado, dado de baja o retenido -> 400).
-        bloquear_pedido_vivo(pedido.pk)
+        pedido_bloqueado = bloquear_pedido_vivo(pedido.pk)
 
         detalle_tallas_raw = list(
             tallas_para_alta(OrdenBordadoService._tallas_bordado_qs(pedido.id))
@@ -487,8 +487,10 @@ class OrdenBordadoService:
             })
 
         # Tope de lo que mesa de control programó a BORDADO (todo el pedido).
+        # Con el pedido leído bajo el candado: ``programar/`` toma la misma fila,
+        # así que su ``programacion_conf`` es el vigente (#1445).
         exigir_tope_programado(
-            pedido, "BORDADO", asignado_por_linea, asignado_sin_talla,
+            pedido_bloqueado, "BORDADO", asignado_por_linea, asignado_sin_talla,
             sum(float(dt.cantidad or 0) for dt in detalle_tallas), "bordado",
         )
 
