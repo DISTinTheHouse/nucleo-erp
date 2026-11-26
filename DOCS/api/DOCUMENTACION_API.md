@@ -4380,6 +4380,13 @@ Al cancelar quedan en el documento (solo lectura en el serializer) `motivo_cance
 | Conciliación | `POST conciliaciones-bancarias/{id}/cancelar/` | `CANCELAR-FIN-BANCOS` |
 | Cuenta por pagar | `DELETE cuentas-por-pagar/{id}/` con pagos ligados (la cancela) | `CANCELAR-FIN-PAGOS` |
 
+**`tiene_pagos` en la CxP (EC-974):** el listado y el detalle de `cuentas-por-pagar/` (y las respuestas de `POST`/`PUT`/`PATCH`) traen `tiene_pagos`, booleano de solo lectura: `true` si algún pago tiene un renglón (`pago_detalles[].cxp`) hacia esa CxP, **sea cual sea el estatus del pago** (Aplicado, Borrador o Cancelado). Es la misma regla con la que decide el `DELETE cuentas-por-pagar/{id}/` (comparten `CuentaPorPagarService.has_linked_payments`):
+
+- `false` → el `DELETE` la borra (`204`): ofrecer «Eliminar».
+- `true` → el `DELETE` la cancela en vez de borrarla: exige `?motivo=` (`400 {"motivo": ...}` sin él) y `CANCELAR-FIN-PAGOS`; ofrecer «Cancelar cuenta». Si alguno de esos pagos está **Aplicado**, el `DELETE` responde `400` hasta cancelar el pago primero; una CxP ya `Cancelada` responde `400 {"estatus": ...}`.
+
+Sin consultas extra por fila: sale de un `EXISTS` en la misma consulta del listado.
+
 Los cuatro `CANCELAR-FIN-*` se crearon con la migración `finanzas 0052` y se otorgaron a todo rol que ya tenía `E-FIN-FACTURAS` (hoy: Contabilidad): nadie pierde acceso; el admin los separa por rol. Superusuario y admin de empresa siempre pasan.
 
 Cambios de comportamiento:
