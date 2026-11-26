@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from finanzas.exceptions import ErrorDeNegocio
 from finanzas.services.cobro_poliza_service import CobroPolizaService
+from finanzas.services.conciliacion_service import ConciliacionService
 from finanzas.scope import exigir_sucursal_unica
 from finanzas.utils.folios import generate_cobro_folio
 from finanzas.models import (
@@ -180,6 +181,8 @@ class CobroService:
             return
         if bloqueado.rep_uuid or bloqueado.rep_pendiente:  # #577, #597
             raise ErrorDeNegocio({"rep": "El cobro tiene REP timbrado: cancélalo ante el SAT antes de cancelar el cobro."})
+        # #1417: su movimiento no se cancela mientras lo ampare una conciliación Cerrada.
+        ConciliacionService.exigir_fuera_de_cerrada(MovimientoBancario.objects.filter(cobro=cobro).values("pk"))
         if cobro.estatus != Cobro.Estatus.APLICADO:
             # Un Borrador nunca descontó saldos ni tocó el banco: revertirlos
             # inflaría la CxC y el saldo bancario con dinero que no entró.

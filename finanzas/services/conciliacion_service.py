@@ -16,6 +16,33 @@ from finanzas.models import (
 
 class ConciliacionService:
     @staticmethod
+    def exigir_fuera_de_cerrada(movimientos):
+        """#1417: un movimiento que ampara una conciliación Cerrada no se cancela (ni
+        por su endpoint ni con su cobro/pago): revertiría el saldo del banco y la
+        conciliación seguiría Cerrada con un ``saldo_libros`` que ya no cuadra.
+        Primero se cancela la conciliación, que lo regresa a Pendiente (#827).
+
+        ``movimientos``: ids o queryset de ``MovimientoBancario``. 1 consulta."""
+        cerrada = (
+            ConciliacionBancaria.objects.filter(
+                estatus=ConciliacionBancaria.Estatus.CERRADA,
+                conciliacion_detalles__movimiento_bancario__in=movimientos,
+            )
+            .order_by("fecha_final", "id")
+            .values("id", "fecha_inicio", "fecha_final")
+            .first()
+        )
+        if cerrada:
+            periodo = (
+                f" (del {cerrada['fecha_inicio']} al {cerrada['fecha_final']})"
+                if cerrada["fecha_inicio"] and cerrada["fecha_final"] else ""
+            )
+            raise ErrorDeNegocio({"conciliacion": (
+                f"El movimiento bancario está en la conciliación cerrada #{cerrada['id']}{periodo}: "
+                "cancela primero la conciliación."
+            )})
+
+    @staticmethod
     @transaction.atomic
     def preparar_conciliacion(
         *,
@@ -213,6 +240,20 @@ class ConciliacionService:
             raise ErrorDeNegocio(
                 {"estatus": "No se puede cerrar una conciliación cancelada."}
             )
+        detalles = list(
+            ConciliacionDetalle.objects.filter(conciliacion=conciliacion).values_list(
+                "movimiento_bancario_id", "movimiento_bancario__estatus"
+            )
+        )
+        # #1417: un movimiento cancelado después de preparar no se concilia (antes
+        # volvía a Conciliado) y el ``saldo_libros`` guardado ya no es el de la cuenta.
+        # ``preparar/`` del mismo periodo quita esas líneas y lo recalcula.
+        cancelados = sum(1 for _, est in detalles if est == MovimientoBancario.Estatus.CANCELADO)
+        if cancelados:
+            raise ErrorDeNegocio({"conciliacion": (
+                f"Se cancelaron {cancelados} movimiento(s) de esta conciliación después de prepararla: "
+                "vuelve a prepararla antes de cerrarla."
+            )})
         diferencia = conciliacion.saldo_estado_cuenta - conciliacion.saldo_libros
         if abs(diferencia) > Decimal("0.01"):
             raise ErrorDeNegocio(
@@ -223,11 +264,8 @@ class ConciliacionService:
                     )
                 }
             )
-        detalles = list(
-            ConciliacionDetalle.objects.filter(conciliacion=conciliacion).all()
-        )
         if detalles:
-            mov_ids = [d.movimiento_bancario_id for d in detalles]
+            mov_ids = [mov_id for mov_id, _ in detalles]
             MovimientoBancario.objects.filter(pk__in=mov_ids).update(
                 estatus=MovimientoBancario.Estatus.CONCILIADO
             )

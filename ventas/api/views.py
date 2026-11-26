@@ -3712,7 +3712,7 @@ class PedidoViewSet(viewsets.ModelViewSet):
             if pedido.estatus == Pedido.ESTATUS_CANCELADO:
                 raise ValidationError({"pedido": "El pedido ya está cancelado."})
             self._exigir_pedido_sin_documentos_vivos(pedido)
-            ocs_marcadas = self._ocs_del_pedido_cancelado(pedido)
+            ocs_marcadas = self._ocs_del_pedido_cancelado(pedido, request.user)
             pre_ordenes = self._cancelar_pre_ordenes_del_pedido(pedido, request.user, motivo)
             entradas = self._devolver_inventario_pedido(pedido)
             # Movimiento y auditoría de inventario: los mismos helpers de autorizar.
@@ -3753,11 +3753,15 @@ class PedidoViewSet(viewsets.ModelViewSet):
             "pre_ordenes_canceladas": pre_ordenes, "ordenes_compra_marcadas": ocs_marcadas,
         })
 
-    def _ocs_del_pedido_cancelado(self, pedido):
+    def _ocs_del_pedido_cancelado(self, pedido, user):
         """400 si alguna OC ligada sigue en borrador o por autorizar (compras la cancela
         o la autoriza primero). Las autorizadas o en recepción no se cancelan solas:
-        quedan con ``pedido_cancelado`` para que compras decida. 2 consultas."""
+        quedan con ``pedido_cancelado`` para que compras decida. Consultas fijas, no
+        por OC (5 como máximo)."""
+        from auditoria.bitacora import etiqueta_uniforme
+        from auditoria.models import BitacoraDocumento
         from compras.models import OrdenCompra as OC
+        from simple_history.utils import bulk_update_with_history
         E = OC.EstatusOrdenCompra
         ocs = list(
             OC.objects.filter(Q(pedido=pedido) | Q(pedidos=pedido), activo=True)
@@ -3777,12 +3781,34 @@ class PedidoViewSet(viewsets.ModelViewSet):
         Liga = OC.pedidos.through
         otro_vivo = Exists(Pedido.objects.filter(vivo, pk=OuterRef("pedido_id"))) | Exists(
             Liga.objects.filter(ordencompra_id=OuterRef("pk"), pedido__in=Pedido.objects.filter(vivo)))
-        marcar = list(
-            OC.objects.filter(pk__in=[o["pk"] for o in ocs]).exclude(otro_vivo).values_list("pk", flat=True))
+        marcar = list(OC.objects.filter(pk__in=[o["pk"] for o in ocs]).exclude(otro_vivo).order_by("pk"))
         if marcar:
-            OC.objects.filter(pk__in=marcar).update(
-                pedido_cancelado=True, fecha_pedido_cancelado=timezone.now(), updated_at=timezone.now())
-        return [{"id": o["pk"], "folio": o["folio"]} for o in ocs if o["pk"] in marcar]
+            # #1404: con historial (``QuerySet.update`` no deja ``HistoricalOrdenCompra``) y
+            # con el pedido que la causó. Un UPDATE y un INSERT de historial para todas.
+            ahora = timezone.now()
+            usuario = user if getattr(user, "pk", None) else None
+            for oc in marcar:
+                oc.pedido_cancelado, oc.fecha_pedido_cancelado, oc.updated_at = True, ahora, ahora
+                oc.pedido_cancelado_origen = pedido
+            bulk_update_with_history(
+                marcar, OC, ["pedido_cancelado", "fecha_pedido_cancelado", "pedido_cancelado_origen", "updated_at"],
+                default_user=usuario, default_change_reason=f"Pedido {pedido.folio or pedido.pk} cancelado"[:100],
+            )
+            # El estatus de la OC no cambia, así que la señal de la bitácora no lo ve: el
+            # renglón se escribe aquí, con el pedido como origen (como retener/cerrar saldo).
+            BitacoraDocumento.objects.bulk_create([
+                BitacoraDocumento(
+                    empresa_id=oc.empresa_id, sucursal_id=oc.sucursal_id, tipo_documento="orden_compra",
+                    documento_id=str(oc.pk), folio=(oc.folio or "")[:60], accion=BitacoraDocumento.Accion.ESTATUS,
+                    estatus_anterior=etiqueta_uniforme(oc.get_estatus_display())[:40],
+                    estatus_nuevo="Pedido cancelado", estatus_codigo="PEDIDO_CANCELADO",
+                    total=oc.gran_total, moneda_id=oc.moneda_id, origen_tipo="pedido", origen_id=pedido.pk,
+                    usuario=usuario,
+                )
+                for oc in marcar
+            ])
+        marcadas = {oc.pk for oc in marcar}
+        return [{"id": o["pk"], "folio": o["folio"]} for o in ocs if o["pk"] in marcadas]
 
     def _cancelar_pre_ordenes_del_pedido(self, pedido, user, motivo):
         """Cancela la pre-orden abierta del pedido y libera sus necesidades (las ya en OC

@@ -152,6 +152,9 @@ class CuentaPorPagarService:
             existing.fecha_vencimiento = factura.fecha_vencimiento
             existing.estatus = CuentaPorPagar.EstatusCxP.PENDIENTE
             existing.fecha_ultimo_pago = None
+            # #1399: viva otra vez, sin el motivo/quién/cuándo de la cancelación
+            # (ese rastro queda en su ``AuditoriaEvento``).
+            existing.motivo_cancelacion, existing.fecha_cancelacion, existing.cancelado_por = "", None, None
             existing.save()
             return existing
         with CuentaPorPagarService.duplicate_invoice_as_business_error(factura.pk):
@@ -338,13 +341,14 @@ class CuentaPorPagarService:
 
     @staticmethod
     @transaction.atomic
-    def ensure_invoice_deletable(factura):
+    def ensure_invoice_deletable(factura, accion="eliminar"):
+        """``accion``: el verbo del mensaje (``"cancelar"`` desde ``cancelar/``, #1399)."""
         cxp_ids = list(
             CuentaPorPagar.objects.filter(factura_proveedor=factura).values_list("pk", flat=True)
         )
         CuentaPorPagarService._lock_and_ensure_without_applied_payments(
             cxp_ids,
-            "No se puede eliminar una factura de proveedor cuya cuenta por pagar "
+            f"No se puede {accion} una factura de proveedor cuya cuenta por pagar "
             "tiene pagos aplicados. Cancele los pagos primero.",
         )
 

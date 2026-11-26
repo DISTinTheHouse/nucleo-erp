@@ -22,7 +22,7 @@ from finanzas.services.facturama.service import FacturamaService
 from finanzas.services.facturama.exceptions import FacturamaAPIException
 from finanzas.services.pdf_fusion_service import fusionar_pdf_factura_proveedor
 from finanzas.services.factura_proveedor_montos import completar_linea, recalcular_encabezado
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from finanzas.services.syncfy.client import SyncfyClient
 from finanzas.services.syncfy.exceptions import SyncfyAPIException
 from finanzas.exceptions import (
@@ -64,6 +64,9 @@ from finanzas.api.serializers import (
     AjusteMaquilaSerializer,
     AlertaMoraSerializer,
     BancoSerializer,
+    CancelacionFacturaInputSerializer,
+    CancelacionInputSerializer,
+    CancelacionRepInputSerializer,
     CentroCostoSerializer,
     CobroLecturaSerializer,
     CobroSerializer,
@@ -429,6 +432,14 @@ class PermisoFinanzas(BasePermission):
             return lee_seccion_finanzas(permisos, seccion)
         self.message = getattr(view, "mensaje_sin_permiso_escritura", "No tienes permiso para modificar datos de finanzas.")
         return PERMISO_CANCELAR_FACTURA in permisos
+
+
+# El ``DELETE`` que cancela en vez de borrar (cobro/pago Aplicado, movimiento bancario,
+# CxP con pagos) exige el motivo en la URL (#1399).
+_DESTROY_CON_MOTIVO = extend_schema(parameters=[OpenApiParameter(
+    "motivo", str, OpenApiParameter.QUERY, required=False,
+    description="Motivo de la cancelación (hasta 500 caracteres). Obligatorio cuando el DELETE cancela.",
+)])
 
 
 class FinanzasBaseViewSet(
@@ -927,6 +938,7 @@ class FacturaViewSet(FinanzasBaseViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    @extend_schema(request=CancelacionFacturaInputSerializer, responses=FacturaSerializer)  # #1399
     @action(detail=True, methods=['post'], url_path='cancelar', url_name='cancelar')
     def cancelar(self, request, pk=None):
         """Cancela la factura y su CxC y crea la contrapóliza del día. Los cobros aplicados no se tocan."""
@@ -1461,6 +1473,7 @@ class PolizaViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         PolizaService.contabilizar(poliza)
         return Response(PolizaSerializer(poliza).data)
 
+    @extend_schema(request=CancelacionInputSerializer, responses=PolizaSerializer)  # #1399
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         poliza = self.get_object()
@@ -1681,6 +1694,7 @@ class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         cuentas.delete()
         locked.delete()
 
+    @extend_schema(request=CancelacionInputSerializer, responses=FacturaProveedorLecturaSerializer)  # #1399
     @action(detail=True, methods=["post"], url_path="cancelar")
     @transaction.atomic
     def cancelar(self, request, pk=None):
@@ -1693,10 +1707,16 @@ class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         antes = locked.estatus
         if antes == FacturaProveedor.FacturaProveedorStatus.CANCELADA:
             raise ValidationError({"estatus": "La factura ya está cancelada."})
-        CuentaPorPagarService.ensure_invoice_deletable(locked)
+        CuentaPorPagarService.ensure_invoice_deletable(locked, accion="cancelar")  # #1399: no "eliminar"
         FacturaProveedorPolizaService.cancelar(locked, request.user)
-        CuentaPorPagar.objects.filter(factura_proveedor=locked).update(
-            estatus=CuentaPorPagar.EstatusCxP.CANCELADA, updated_at=timezone.now())
+        # La CxP queda con el mismo motivo/quién/cuándo que su factura (#1399).
+        ahora = timezone.now()
+        CuentaPorPagar.objects.filter(factura_proveedor=locked).exclude(
+            estatus=CuentaPorPagar.EstatusCxP.CANCELADA
+        ).update(
+            estatus=CuentaPorPagar.EstatusCxP.CANCELADA, updated_at=ahora, motivo_cancelacion=motivo,
+            fecha_cancelacion=ahora, cancelado_por=request.user if getattr(request.user, "pk", None) else None,
+        )
         locked.estatus = FacturaProveedor.FacturaProveedorStatus.CANCELADA
         locked.save(update_fields=["estatus", "updated_at"])
         canc.registrar_cancelacion(locked, request, motivo, antes)
@@ -1879,6 +1899,7 @@ class CuentaBancariaViewSet(FinanzasBaseViewSet):
         return Response(MovimientoBancarioService.resumen_cuenta(cuenta))
 
 
+@extend_schema_view(destroy=_DESTROY_CON_MOTIVO)  # #1399
 class CuentaPorPagarViewSet(FinanzasBaseViewSet):
     queryset = CuentaPorPagar.objects.all()
     serializer_class = CuentaPorPagarSerializer
@@ -1895,7 +1916,7 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             qs = CuentaPorPagarService.annotate_has_linked_payments(qs)
             # Proveedor, factura y moneda del serializer en la misma consulta (antes
             # eran tres por fila); el PDF binario de la factura no viaja.
-            qs = qs.select_related("proveedor", "factura_proveedor__moneda").defer(
+            qs = qs.select_related("proveedor", "factura_proveedor__moneda", "cancelado_por").defer(
                 "factura_proveedor__pdf_adjunto"
             )
         qp = self.request.query_params
@@ -2001,6 +2022,17 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
         if locked is None:
             raise NotFound("La cuenta por pagar ya no existe.")
         serializer.instance = locked
+        antes = locked.estatus
+        nuevo = serializer.validated_data.get("estatus", antes)
+        cancela = nuevo == CuentaPorPagar.EstatusCxP.CANCELADA and antes != nuevo
+        extra = {}
+        if cancela:
+            # #1399: cancelarla por aquí también exige permiso y motivo, como el DELETE.
+            canc.exigir_permiso(user, canc.PERMISO_PAGOS)
+            motivo = canc.motivo_requerido(self.request)
+        elif antes == CuentaPorPagar.EstatusCxP.CANCELADA and nuevo != antes:
+            # Revivida: sin el rastro de la cancelación (queda en su AuditoriaEvento).
+            extra = {"motivo_cancelacion": "", "fecha_cancelacion": None, "cancelado_por": None}
         CuentaPorPagarService.ensure_frozen_fields_unchanged(locked, serializer.validated_data)
         if factura is not None and locked_invoice.pk != locked.factura_proveedor_id:
             # Re-apuntar la CxP: la factura destino todavía no tiene CxP, así que
@@ -2028,7 +2060,9 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
         with CuentaPorPagarService.duplicate_invoice_as_business_error(
             factura_id, excluding_account_id=locked.pk
         ):
-            serializer.save()
+            serializer.save(**extra)
+        if cancela:
+            canc.registrar_cancelacion(serializer.instance, self.request, motivo, antes, {"via": "PATCH"})
 
     @transaction.atomic
     def perform_destroy(self, instance):
@@ -2046,8 +2080,7 @@ class CuentaPorPagarViewSet(FinanzasBaseViewSet):
             with transaction.atomic():
                 instance.estatus = CuentaPorPagar.EstatusCxP.CANCELADA
                 instance.save(update_fields=["estatus", "updated_at"])
-                canc.auditar_evento(instance, self.request, "CANCELAR", {
-                    "estatus_anterior": antes, "estatus": instance.estatus, "motivo": motivo})
+                canc.registrar_cancelacion(instance, self.request, motivo, antes, {"via": "DELETE"})
             return
         with transaction.atomic():
             canc.auditar_baja(instance, self.request)
@@ -2072,6 +2105,7 @@ def _validar_transicion_estatus_cobro_pago(Estatus, anterior, nuevo, documento):
         )
 
 
+@extend_schema_view(destroy=_DESTROY_CON_MOTIVO)  # #1399
 class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
     codigo_lectura_seccion = "R-CONTABILIDAD-CXC"  # EC-746: CxC y Cobros son una sección
     queryset = Cobro.objects.all()
@@ -2298,6 +2332,7 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             else:
                 instance.delete()
 
+    @extend_schema(request=CancelacionInputSerializer, responses=CobroSerializer)  # #1399
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         cobro = self.get_object()
@@ -2333,19 +2368,23 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         except FacturamaAPIException as exc:
             return Response({"rep": f"Facturama no entregó el archivo: {exc.message}"}, status=status.HTTP_502_BAD_GATEWAY)
 
+    @extend_schema(request=CancelacionRepInputSerializer, responses=CobroSerializer)  # #1399
     @action(detail=True, methods=["post"], url_path="cancelar-rep", url_name="cancelar-rep")
     def cancelar_rep(self, request, pk=None):
         """Cancela el REP del cobro ante el SAT (Facturama) con ``motivo_sat`` 02 o 03 (EC-806)."""
         cobro = self.get_object()  # otra empresa -> 404; sin E-FIN-FACTURAS ya es 403 (check_permissions)
         canc.exigir_permiso(request.user, canc.PERMISO_COBROS)
         motivo = canc.motivo_requerido(request)
-        FacturaTimbradoService.cancelar_rep(cobro, request.data.get("motivo_sat"))
+        # #1399: el motivo también queda en el cobro, como el del CFDI de una factura.
+        FacturaTimbradoService.cancelar_rep(
+            cobro, request.data.get("motivo_sat"), nota=f"REP cancelado ante el SAT: {motivo}")
         canc.auditar_evento(cobro, request, "CANCELAR_REP", {
             "rep_uuid": getattr(cobro, "rep_uuid", None),
             "motivo_sat": request.data.get("motivo_sat"), "motivo": motivo})
         return Response(CobroSerializer(cobro).data)
 
 
+@extend_schema_view(destroy=_DESTROY_CON_MOTIVO)  # #1399
 class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
     queryset = Pago.objects.all()
     serializer_class = PagoSerializer
@@ -2455,6 +2494,7 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             else:
                 instance.delete()
 
+    @extend_schema(request=CancelacionInputSerializer, responses=PagoSerializer)  # #1399
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         pago = self.get_object()
@@ -2468,6 +2508,7 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         return Response(PagoSerializer(pago).data)
 
 
+@extend_schema_view(destroy=_DESTROY_CON_MOTIVO)  # #1399
 class MovimientoBancarioViewSet(FinanzasBaseViewSet):
     queryset = MovimientoBancario.objects.all()
     serializer_class = MovimientoBancarioSerializer
@@ -2547,6 +2588,7 @@ class MovimientoBancarioViewSet(FinanzasBaseViewSet):
         MovimientoBancarioService.revertir_movimiento(instance, user)
         canc.registrar_cancelacion(instance, self.request, motivo, antes, {"via": "DELETE"})
 
+    @extend_schema(request=CancelacionInputSerializer, responses=MovimientoBancarioSerializer)  # #1399
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         mb = self.get_object()
@@ -2652,6 +2694,7 @@ class ConciliacionBancariaViewSet(FinanzasBaseViewSet):
             ConciliacionService.cerrar_conciliacion(conciliacion)
         return Response(ConciliacionBancariaSerializer(conciliacion).data)
 
+    @extend_schema(request=CancelacionInputSerializer, responses=ConciliacionBancariaSerializer)  # #1399
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         conciliacion = self.get_object()
@@ -2928,6 +2971,7 @@ class NotaCreditoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
         canc.auditar_baja(bloqueada, self.request)
         bloqueada.delete()
 
+    @extend_schema(request=CancelacionInputSerializer, responses=NotaCreditoSerializer)  # #1399
     @action(detail=True, methods=["post"], url_path="cancelar")
     def cancelar(self, request, pk=None):
         nota = self.get_object()
