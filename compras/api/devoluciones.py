@@ -1,5 +1,7 @@
 """``/api/v1/compras/devoluciones-proveedor/``: devolución a proveedor de lo que
 calidad rechazó o puso en cuarentena. Lógica en ``compras.services.devolucion_proveedor``."""
+from decimal import Decimal
+
 from django.db.models import Prefetch
 from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
@@ -16,11 +18,12 @@ from nucleo.middleware import ip_auditoria
 
 PERMISO_LEER = "R-WMS-RECEPCIONES"
 PERMISO_ESCRIBIR = "C-WMS-RECEPCIONES"
+CUATRO = Decimal("0.0001")
 
 
 class DevolucionProveedorDetalleSerializer(serializers.ModelSerializer):
-    # #1409: el artículo con los mismos nombres y la misma regla que ``pendientes/``
-    # (``RecepcionDetalle.articulo_*``). Viaja en el ``Prefetch`` del viewset.
+    # Artículo del renglón como en ``pendientes/`` y en la recepción (#1409): nombre
+    # (también de muestras), SKU, talla y color. Vienen en el ``Prefetch`` del viewset.
     producto_nombre = serializers.CharField(source="recepcion_detalle.articulo_nombre", read_only=True, default=None)
     producto_variante_sku = serializers.CharField(source="recepcion_detalle.articulo_sku", read_only=True, default=None)
     producto_variante_talla = serializers.CharField(
@@ -60,20 +63,11 @@ class DevolucionProveedorSerializer(serializers.ModelSerializer):
         return _nombre_usuario(obj.cancelado_por) if obj.cancelado_por_id else None
 
 
-MOTIVO_MAX = 500
-# ``cantidad_pendiente`` con la escala fija de ``cantidad`` del detalle (#1409).
-_CANTIDAD = serializers.DecimalField(max_digits=None, decimal_places=4)
-
-
 def _motivo(request, mensaje):
     motivo = request.data.get("motivo") if hasattr(request.data, "get") else None
     if not isinstance(motivo, str) or not motivo.strip():
         raise ValidationError({"motivo": mensaje})
-    motivo = motivo.strip()
-    # Como la cancelación de recepciones: más largo es 400, no se corta en silencio.
-    if len(motivo) > MOTIVO_MAX:
-        raise ValidationError({"motivo": f"El motivo admite hasta {MOTIVO_MAX} caracteres (tiene {len(motivo)})."})
-    return motivo
+    return motivo.strip()[:500]
 
 
 class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
@@ -89,10 +83,10 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
         *[b for b in viewsets.ReadOnlyModelViewSet.filter_backends if b is not OrderingFilter],
         OrdenamientoEstableFilter,
     ]
-    # Lista blanca de ``?ordering=`` (#863); sin él, ``-fecha, -id``. ``proveedor__razon_social``
-    # es lo que muestra ``proveedor_nombre`` (#1419); ``proveedor__nombre`` sigue por compatibilidad.
+    # Lista blanca de ``?ordering=`` (#863); sin él, ``-fecha, -id``. La columna
+    # ``proveedor_nombre`` es la razón social: se ordena con ``proveedor__razon_social`` (#1419).
     ordering_fields = [
-        "id", "folio", "fecha", "estatus", "total", "proveedor__razon_social", "proveedor__nombre",
+        "id", "folio", "fecha", "estatus", "total", "proveedor__nombre", "proveedor__razon_social",
         "recepcion__folio", "orden_compra__folio",
     ]
 
@@ -104,11 +98,8 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
         qs = (
             DevolucionProveedor.objects.filter(empresa=empresa)
             .select_related("proveedor", "recepcion", "orden_compra", "usuario", "cancelado_por")
-            # Renglones con su artículo en una sola consulta (#1409).
-            .prefetch_related(Prefetch(
-                "detalles",
-                queryset=DevolucionProveedorDetalle.objects.select_related(*servicio.ARTICULO).order_by("id"),
-            ))
+            .prefetch_related(Prefetch("detalles", queryset=DevolucionProveedorDetalle.objects.select_related(
+                *servicio.ARTICULO_RELACIONADOS).order_by("id")))
             .order_by("-fecha", "-id")
         )
         # Ids no enteros → 400 como los demás listados (#1402); antes, 500.
@@ -182,6 +173,7 @@ class DevolucionProveedorViewSet(viewsets.ReadOnlyModelViewSet):
                 "producto": rd.producto_id, "producto_nombre": rd.articulo_nombre,
                 # Mismos nombres que los renglones de la recepción y de la OC.
                 "producto_variante_sku": rd.articulo_sku, "producto_variante_talla": rd.articulo_talla,
-                "producto_variante_color": rd.articulo_color, "cantidad_pendiente": _CANTIDAD.to_representation(v),
+                # Escala fija de 4 decimales, como ``cantidad`` del detalle (#1409).
+                "producto_variante_color": rd.articulo_color, "cantidad_pendiente": f"{v.quantize(CUATRO):f}",
             })
         return Response(filas)
