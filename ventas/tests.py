@@ -5144,6 +5144,70 @@ class PedidoReglasEstatusTests(TestCase):
             with self.assertRaises(ErrorDeNegocio):
                 llamada()
 
+    def test_oc_abiertas_400_con_mensaje_y_lista_estructurada(self):
+        """EC-973: el 400 por OC en borrador/por autorizar conserva ``ordenes_compra``
+        (texto) y agrega ``ordenes_compra_bloqueantes`` ``[{id, folio, estatus}]``, con
+        ``folio`` ``null`` si la OC no lo tiene. Las ligadas por FK y por M2M ``pedidos``
+        cuentan; las autorizadas no bloquean ni se listan. No cambia nada."""
+        from compras.models import OrdenCompra
+
+        E = OrdenCompra.EstatusOrdenCompra
+        base = {"empresa": self.empresa, "sucursal": self.sucursal, "moneda": self.moneda,
+                "usuario": self.mesa, "fecha_oc": timezone.localdate()}
+        borrador = OrdenCompra.objects.create(pedido=self.pedido, folio="OC-973", estatus=E.BORRADOR, **base)
+        sin_folio = OrdenCompra.objects.create(estatus=E.POR_AUTORIZAR, **base)
+        sin_folio.pedidos.set([self.pedido])
+        OrdenCompra.objects.create(pedido=self.pedido, folio="OC-973-A", estatus=E.AUTORIZADA, **base)
+
+        resp = self._cancelar(self.mesa)
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {
+            "ordenes_compra": (
+                f"Tiene OC en borrador o por autorizar: OC-973, #{sin_folio.pk}. "
+                "Cancélalas o autorízalas primero."),
+            "ordenes_compra_bloqueantes": [
+                {"id": borrador.pk, "folio": "OC-973", "estatus": 1},
+                {"id": sin_folio.pk, "folio": None, "estatus": 2},
+            ],
+        })
+        self.pedido.refresh_from_db()
+        self.assertEqual((self.pedido.estatus, self.pedido.activo), (3, True))
+        self.assertFalse(OrdenCompra.objects.filter(pedido_cancelado=True).exists())
+
+        # Sin OC abiertas procede y la respuesta de éxito no cambia.
+        OrdenCompra.objects.filter(pk__in=[borrador.pk, sin_folio.pk]).update(estatus=E.CANCELADA)
+        resp = self._cancelar(self.mesa)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(set(resp.json()), {
+            "id", "folio", "estatus", "activo", "motivo", "inventario_devuelto", "reservas_liberadas",
+            "pre_ordenes_canceladas", "ordenes_compra_marcadas",
+        })
+        self.assertEqual([o["folio"] for o in resp.json()["ordenes_compra_marcadas"]], ["OC-973-A"])
+
+    def test_oc_abiertas_folio_vacio_sale_null_y_codigos_seguros(self):
+        """EC-973: un folio ``""`` sale ``null`` en la lista (y ``#id`` en el texto), y
+        ``get_codes``/``get_full_details`` no truenan con el ``detail`` crudo."""
+        from compras.models import OrdenCompra
+        from ventas.api.views import PedidoConOcAbiertas
+
+        oc = OrdenCompra.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, moneda=self.moneda, usuario=self.mesa,
+            fecha_oc=timezone.localdate(), pedido=self.pedido, folio="",
+            estatus=OrdenCompra.EstatusOrdenCompra.BORRADOR,
+        )
+        resp = self._cancelar(self.mesa)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json()["ordenes_compra_bloqueantes"], [{"id": oc.pk, "folio": None, "estatus": 1}])
+        self.assertIn(f"#{oc.pk}", resp.json()["ordenes_compra"])
+
+        exc = PedidoConOcAbiertas([{"id": oc.pk, "folio": None, "estatus": 1}])
+        self.assertEqual(exc.get_codes(), {
+            "ordenes_compra": "ordenes_compra_abiertas", "ordenes_compra_bloqueantes": "ordenes_compra_abiertas"})
+        completos = exc.get_full_details()
+        self.assertEqual(completos["ordenes_compra"]["message"], exc.detail["ordenes_compra"])
+        self.assertEqual(completos["ordenes_compra_bloqueantes"]["message"], [{"id": oc.pk, "folio": None, "estatus": 1}])
+
 
 def pedido_trazabilidad_url(pedido_id):
     return f"/api/v1/ventas/pedidos/{pedido_id}/trazabilidad/"

@@ -756,6 +756,18 @@ class CalidadInspeccionSerializer(serializers.ModelSerializer):
     pedido_id = serializers.SerializerMethodField()
     pedido_folio = serializers.SerializerMethodField()
     pedidos = serializers.SerializerMethodField()
+    # EC-973: algo rechazado/en cuarentena aún sin devolver al proveedor (la regla de
+    # ``devoluciones-proveedor/pendientes/``). El viewset lo anota; sin anotación
+    # (respuesta de ``onboarding/``) se calcula con 1 consulta.
+    tiene_devolucion_pendiente = serializers.SerializerMethodField()
+
+    def get_tiene_devolucion_pendiente(self, obj):
+        anotado = getattr(obj, "tiene_devolucion_pendiente", None)
+        if anotado is not None:
+            return anotado
+        from compras.services.devolucion_proveedor import renglones_devolvibles
+
+        return renglones_devolvibles().filter(calidad_inspeccion=obj.pk, cantidad_pendiente__gt=0).exists()
 
     def get_pedidos(self, obj):
         """Pedido(s) maestro(s) de la recepción; el listado los calcula en bloque."""
@@ -794,6 +806,7 @@ class CalidadInspeccionSerializer(serializers.ModelSerializer):
             "fecha_anulacion",
             "anulada_por",
             "anulada_por_nombre",
+            "tiene_devolucion_pendiente",
         ]
         read_only_fields = ["motivo_anulacion", "fecha_anulacion", "anulada_por"]
 

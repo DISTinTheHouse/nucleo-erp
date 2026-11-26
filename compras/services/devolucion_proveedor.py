@@ -12,7 +12,8 @@ from collections import defaultdict
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Case, DecimalField, F, OuterRef, Subquery, Sum, Value, When
+from django.db.models.functions import Coalesce, Greatest
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
@@ -63,22 +64,53 @@ def _costo_oc(detalles_recepcion):
     return costos
 
 
-def pendientes(inspeccion_id):
-    """``{calidad_detalle_id: cantidad aún devolvible}`` (2 consultas)."""
-    filas = list(
-        CalidadInspeccionDetalle.objects.filter(calidad_inspeccion_id=inspeccion_id, resultado__in=RESULTADOS_DEVOLVIBLES)
-        .select_related("recepcion_detalle")
-    )
-    devuelto = dict(
+def renglones_devolvibles():
+    """Renglones ``rechazo``/``cuarentena`` de inspecciones no anuladas, con
+    ``cantidad_pendiente`` anotada: la rechazada (o inspeccionada − aprobada) menos
+    lo ya devuelto en devoluciones aplicadas, nunca negativa.
+
+    Única regla de "pendiente de devolver" (EC-973): la usan ``pendientes`` (y por
+    él el POST), la bandera ``tiene_devolucion_pendiente`` de la inspección y el
+    filtro ``?devolucion_pendiente=`` de su listado. Sin acotar por empresa: quien
+    la usa filtra por la inspección o la anida en un queryset ya acotado."""
+    decimal = DecimalField(max_digits=18, decimal_places=4)
+    devuelto = (
         DevolucionProveedorDetalle.objects.filter(
-            calidad_detalle__in=[f.pk for f in filas], devolucion__estatus=DevolucionProveedor.Estatus.APLICADA,
-        ).values_list("calidad_detalle_id").annotate(t=Sum("cantidad"))
+            calidad_detalle=OuterRef("pk"), devolucion__estatus=DevolucionProveedor.Estatus.APLICADA,
+        )
+        .values("calidad_detalle").annotate(t=Sum("cantidad")).values("t")
     )
-    salida = {}
-    for f in filas:
-        base = f.cantidad_rechazada if f.cantidad_rechazada > 0 else (f.cantidad_inspeccionada - f.cantidad_aprobada)
-        salida[f.pk] = (f, max(Decimal(str(base)) - (devuelto.get(f.pk) or CERO), CERO))
-    return salida
+    base = Case(
+        When(cantidad_rechazada__gt=0, then=F("cantidad_rechazada")),
+        default=F("cantidad_inspeccionada") - F("cantidad_aprobada"),
+        output_field=decimal,
+    )
+    return (
+        CalidadInspeccionDetalle.objects.filter(resultado__in=RESULTADOS_DEVOLVIBLES)
+        .exclude(calidad_inspeccion__estado=CalidadInspeccion.ESTADO_ANULADA)
+        .annotate(cantidad_pendiente=Greatest(
+            base - Coalesce(Subquery(devuelto, output_field=decimal), Value(CERO), output_field=decimal),
+            Value(CERO), output_field=decimal,
+        ))
+    )
+
+
+def pendientes(inspeccion_id):
+    """``{calidad_detalle_id: (renglón, cantidad aún devolvible)}`` (1 consulta).
+
+    Inspección anulada → vacío. El renglón trae su artículo (nombre, SKU, talla y
+    color: ``RecepcionDetalle.articulo_*``) en el mismo ``select_related``."""
+    filas = (
+        renglones_devolvibles().filter(calidad_inspeccion_id=inspeccion_id)
+        .select_related(
+            "recepcion_detalle__producto",
+            "recepcion_detalle__producto_variante__talla", "recepcion_detalle__producto_variante__color",
+            "recepcion_detalle__variante_produccion__talla", "recepcion_detalle__variante_produccion__color",
+            "recepcion_detalle__salida_maquila_detalle",
+        )
+        .order_by("id")
+    )
+    return {f.pk: (f, f.cantidad_pendiente) for f in filas}
 
 
 def _movimiento(dev, tipo, renglones, observaciones, user):
@@ -120,7 +152,10 @@ def crear(*, inspeccion, motivo, renglones, user, ip=None, user_agent=None):
     pedidos = defaultdict(lambda: CERO)
     for r in renglones:
         try:
-            pedidos[int(r["calidad_detalle"])] += Decimal(str(r["cantidad"]))
+            cantidad = Decimal(str(r["cantidad"]))
+            if not cantidad.is_finite():  # NaN/Infinity: 500 al comparar (#1402)
+                raise ValueError
+            pedidos[int(r["calidad_detalle"])] += cantidad
         except Exception:
             raise ValidationError({"detalles": "Cada renglón lleva calidad_detalle y cantidad."})
     for cd_id, cantidad in pedidos.items():
