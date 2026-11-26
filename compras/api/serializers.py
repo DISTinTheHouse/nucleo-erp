@@ -878,7 +878,8 @@ class RecepcionRFIDEncuadreSerializer(_CancelacionRecepcionMixin, serializers.Mo
     estatus_label = serializers.CharField(source="get_estatus_display", read_only=True)
     lecturas = RecepcionRFIDLecturaSerializer(many=True, read_only=True)
     resumen = serializers.SerializerMethodField()
-    # ``aceptado_por``/``cancelado_por`` van en el ``select_related`` del viewset (#1373).
+    # ``usuario``/``aceptado_por``/``cancelado_por`` van en el ``select_related`` del viewset (#1373, #1440).
+    usuario_nombre = serializers.SerializerMethodField()
     aceptado_por_nombre = serializers.SerializerMethodField()
 
     class Meta:
@@ -886,7 +887,7 @@ class RecepcionRFIDEncuadreSerializer(_CancelacionRecepcionMixin, serializers.Mo
         fields = [
             "id", "tipo_origen", "orden_compra", "orden_compra_folio", "op", "op_folio",
             "recepcion", "empresa", "sucursal", "proveedor", "proveedor_nombre",
-            "almacen", "almacen_nombre", "usuario", "serie_codigo", "fecha_recepcion",
+            "almacen", "almacen_nombre", "usuario", "usuario_nombre", "serie_codigo", "fecha_recepcion",
             "remision", "factura_referencia", "observaciones", "estatus", "estatus_label",
             "activo", "created_at", "updated_at", "lecturas", "resumen",
             "aceptado_por", "aceptado_por_nombre", "fecha_aceptacion", "motivo_cancelacion", "fecha_cancelacion",
@@ -896,6 +897,9 @@ class RecepcionRFIDEncuadreSerializer(_CancelacionRecepcionMixin, serializers.Mo
             "empresa", "sucursal", "proveedor", "usuario", "recepcion", "estatus", "activo",
             "aceptado_por", "fecha_aceptacion", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por",
         ]
+
+    def get_usuario_nombre(self, obj):
+        return _nombre_usuario(obj.usuario) if obj.usuario_id else None
 
     def get_aceptado_por_nombre(self, obj):
         return _nombre_usuario(obj.aceptado_por) if obj.aceptado_por_id else None

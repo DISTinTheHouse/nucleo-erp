@@ -4002,10 +4002,17 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
     TAG_REPETIDO = "Este tag ya fue leído en este encuadre."
     UNIQUE_TAG = "uq_recepcion_rfid_lectura_encuadre_tag"
 
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        # Lecturas (listado, detalle y onboarding) con ``R-WMS-RECEPCIONES``, como
+        # ``recepciones/onboarding/`` (#1439); las escrituras piden ``C-`` en cada acción.
+        if request.method in SAFE_METHODS:
+            _exigir_permiso_oc(request, PERMISO_LEER_RECEPCIONES)
+
     def get_queryset(self):
         user = self.request.user
         qs = self.queryset.select_related(
-            "orden_compra", "op", "almacen", "proveedor", "sucursal", "aceptado_por", "cancelado_por",
+            "orden_compra", "op", "almacen", "proveedor", "sucursal", "usuario", "aceptado_por", "cancelado_por",
         )
         # Solo el detalle anida ``lecturas[]``; aceptar/ y cancelar/ las traen
         # al releer la fila bloqueada (``_bloquear``).
