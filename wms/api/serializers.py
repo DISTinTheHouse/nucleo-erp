@@ -850,9 +850,16 @@ class DespachoSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
     chofer_nombre = serializers.SerializerMethodField()
     fecha_creacion = serializers.DateTimeField(source="created_at", read_only=True, allow_null=True)
     usuario_nombre = serializers.SerializerMethodField()
+    # EC-979: quién registró la entrega, misma regla que ``cancelado_por_nombre``;
+    # ``null`` si no está entregado. ``entregado_por`` viaja en el ``select_related``.
+    entregado_por_nombre = serializers.SerializerMethodField()
 
     def get_usuario_nombre(self, obj):
         return _nombre_usuario(obj.usuario) if obj.usuario_id else None
+
+    @extend_schema_field({"type": "string", "nullable": True})
+    def get_entregado_por_nombre(self, obj):
+        return _nombre_usuario(obj.entregado_por) if obj.entregado_por_id else None
 
     def get_chofer_nombre(self, obj):
         return nombre_chofer(obj.chofer) if obj.chofer_id else None

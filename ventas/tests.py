@@ -5869,6 +5869,50 @@ class PedidoDocumentosTests(TestCase):
         self.assertEqual(data["despachos"][0]["packing_id"], packing.pk)  # EC-920
         self.assertEqual(data["despachos"][0]["packing_folio"], packing.folio)
 
+    def test_despachos_traen_fecha_entrega(self):
+        """EC-979: cada despacho trae ``fecha_entrega`` (null si no se entregó) para
+        que Mesa de Control sepa cuál ya no se cancela; el de otra empresa que apunta
+        al pedido no sale, entregado o no. Las consultas no crecen por despacho."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from django.utils.dateparse import parse_datetime
+
+        pedido = self._pedido()
+
+        def despacho(entregado, empresa=None):
+            b = empresa == self.empresa_b
+            packing = Packing.objects.create(
+                folio=self._siguiente("PA"), empresa=empresa or self.empresa,
+                sucursal=self.sucursal_b if b else self.sucursal, pedido=pedido,
+                picking=self._picking(pedido, empresa=empresa), operador=self.usuario, usuario=self.usuario,
+            )
+            entrega = {"fecha_entrega": timezone.now(), "entregado_por": self.admin} if entregado else {}
+            return Despacho.objects.create(packing=packing, guia=self._siguiente("G"), **entrega)
+
+        pendiente = despacho(False)
+        entregado = despacho(True)
+        despacho(True, empresa=self.empresa_b)
+        with CaptureQueriesContext(connection) as con_dos:
+            data = self._data(pedido)
+        filas = {d["id"]: d for d in data["despachos"]}
+        self.assertEqual(sorted(filas), [pendiente.pk, entregado.pk])
+        self.assertIsNone(filas[pendiente.pk]["fecha_entrega"])
+        self.assertIsNotNone(filas[entregado.pk]["fecha_entrega"])
+        self.assertEqual(
+            parse_datetime(filas[entregado.pk]["fecha_entrega"]),
+            entregado.fecha_entrega,
+        )
+        self.assertEqual(
+            set(filas[pendiente.pk]),
+            {"id", "guia", "envio_id", "packing_id", "estado", "motivo_cancelacion", "packing_folio", "fecha_entrega"},
+        )
+
+        for _ in range(3):
+            despacho(True)
+        with CaptureQueriesContext(connection) as con_cinco:
+            self.assertEqual(len(self._data(pedido)["despachos"]), 5)
+        self.assertEqual(len(con_cinco), len(con_dos))
+
     def test_detalle_del_pedido_no_lista_documentos_de_otra_empresa(self):
         """``documentos[]`` de ``GET /pedidos/{id}/`` (la lista que hoy pinta el
         front) sigue la misma regla: la factura, el envío y el movimiento de B que
