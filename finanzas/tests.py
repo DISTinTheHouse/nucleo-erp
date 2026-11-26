@@ -12,6 +12,7 @@ import time
 from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from urllib.parse import urlencode
 from unittest.mock import MagicMock, patch
 
 from django.apps import apps as django_apps
@@ -12463,7 +12464,7 @@ class CxPTienePagosEC974Tests(FinanzasBase):
         return {f["id"]: f["tiene_pagos"] for f in filas}[cxp.pk]
 
     def _delete(self, cxp, motivo=None):
-        url = f"{self.URL}{cxp.pk}/" + (f"?motivo={motivo}" if motivo else "")
+        url = f"{self.URL}{cxp.pk}/" + (f"?{urlencode({'motivo': motivo})}" if motivo else "")
         return self._client(self.a["usuario"]).delete(url)
 
     def test_false_sin_pagos(self):
