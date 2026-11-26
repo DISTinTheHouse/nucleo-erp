@@ -3839,3 +3839,151 @@ class GenerarOrdenesMuestraTests(TestCase):
         with patch("wms.services.picking_pipeline.work_orders.generate_folio_multi_tipo") as folio:
             self.assertEqual(generar_ordenes(self.picking, items, self.admin), [])
         folio.assert_not_called()
+
+
+class DespachoEntregadoPorNombreEC979Tests(TestCase):
+    """EC-979: ``entregado_por_nombre`` en listado, detalle y respuesta de
+    ``entregar/``, con la misma regla que ``cancelado_por_nombre`` (nombre, si no
+    el correo; ``null`` sin entrega). Otra empresa: ni la fila ni el 404 la filtran."""
+
+    URL = "/api/v1/wms/despachos/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from inventarios.models import Almacen
+        from nucleo.models import Moneda
+        from terceros.models import Cliente
+        from ventas.models import Pedido
+
+        cls.empresa = Empresa.objects.create(codigo="ec979", razon_social="EC979 SA")
+        cls.otra_empresa = Empresa.objects.create(codigo="ec979-x", razon_social="Otra SA")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="MTZ", nombre="Matriz")
+        cls.otra_sucursal = Sucursal.objects.create(empresa=cls.otra_empresa, codigo="GDL", nombre="GDL")
+        cls.admin = Usuario.objects.create(
+            username="ec979-admin", email="ec979-admin@example.com", first_name="Ana", last_name="López",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        # Sin nombre: ``entregado_por_nombre`` cae al correo.
+        cls.sin_nombre = Usuario.objects.create(
+            username="ec979-sn", email="ec979-sn@example.com",
+            empresa=cls.empresa, sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.intruso = Usuario.objects.create(
+            username="ec979-x", email="ec979-x@example.com", first_name="Intruso",
+            empresa=cls.otra_empresa, sucursal_default=cls.otra_sucursal, is_admin_empresa=True,
+        )
+        moneda = Moneda.objects.create(codigo_iso="MXN", nombre="Peso")
+        cls.contexto = {}
+        for empresa, sucursal, usuario in (
+            (cls.empresa, cls.sucursal, cls.admin), (cls.otra_empresa, cls.otra_sucursal, cls.intruso),
+        ):
+            almacen = Almacen.objects.create(empresa=empresa, sucursal=sucursal, codigo="PT", nombre="PT")
+            pedido = Pedido.objects.create(
+                empresa=empresa, sucursal=sucursal, moneda=moneda, folio=f"P-979-{empresa.codigo}",
+                cliente=Cliente.objects.create(empresa=empresa, nombre="Cliente"),
+            )
+            cls.contexto[empresa.pk] = (sucursal, almacen, pedido, usuario)
+
+    def _api(self, user=None):
+        api = APIClient()
+        api.force_authenticate(user or self.admin)
+        return api
+
+    def _despacho(self, empresa=None, entregado_por=None):
+        from django.utils import timezone
+
+        from wms.models import Despacho, Packing, Picking
+
+        empresa = empresa or self.empresa
+        sucursal, almacen, pedido, usuario = self.contexto[empresa.pk]
+        n = Despacho.objects.count() + 1
+        picking = Picking.objects.create(
+            folio=f"PK-979-{n}", empresa=empresa, sucursal=sucursal, pedido=pedido, operador=usuario,
+            almacen=almacen, usuario=usuario,
+        )
+        packing = Packing.objects.create(
+            folio=f"PACK-979-{n}", empresa=empresa, sucursal=sucursal, pedido=pedido, picking=picking,
+            operador=usuario, usuario=usuario,
+        )
+        entrega = {"fecha_entrega": timezone.now(), "entregado_por": entregado_por} if entregado_por else {}
+        return Despacho.objects.create(packing=packing, usuario=usuario, **entrega)
+
+    def _filas(self, resp):
+        self.assertEqual(resp.status_code, 200, resp.content)
+        datos = resp.json()
+        return datos.get("results", datos) if isinstance(datos, dict) else datos
+
+    def _entregar(self, despacho, user=None):
+        return self._api(user).post(f"{self.URL}{despacho.pk}/entregar/", {"recibio": "Juan"}, format="json")
+
+    def test_entregar_devuelve_entregado_por_nombre(self):
+        resp = self._entregar(self._despacho())
+        self.assertEqual(resp.status_code, 200, resp.content)
+        datos = resp.json()
+        self.assertEqual((datos["entregado_por"], datos["entregado_por_nombre"]), (self.admin.pk, "Ana López"))
+        self.assertIsNotNone(datos["fecha_entrega"])
+        self.assertEqual(datos["recibio"], "Juan")
+
+    def test_entregado_por_nombre_en_listado_y_detalle(self):
+        con_nombre = self._despacho()
+        sin_nombre = self._despacho()
+        pendiente = self._despacho()
+        self.assertEqual(self._entregar(con_nombre).status_code, 200)
+        self.assertEqual(self._entregar(sin_nombre, self.sin_nombre).status_code, 200)
+
+        filas = {f["id"]: f for f in self._filas(self._api().get(self.URL))}
+        casos = (
+            (con_nombre, self.admin.pk, "Ana López"),
+            (sin_nombre, self.sin_nombre.pk, "ec979-sn@example.com"),
+            (pendiente, None, None),
+        )
+        for despacho, usuario_id, nombre in casos:
+            with self.subTest(despacho=despacho.pk):
+                detalle = self._api().get(f"{self.URL}{despacho.pk}/").json()
+                for fila in (filas[despacho.pk], detalle):
+                    self.assertEqual((fila["entregado_por"], fila["entregado_por_nombre"]), (usuario_id, nombre))
+                    self.assertEqual(fila["fecha_entrega"] is None, usuario_id is None)
+
+    def test_otra_empresa_no_ve_ni_entrega(self):
+        """El despacho entregado de A no sale en el listado de B, su detalle y
+        ``entregar/`` son 404 para B, y A tampoco ve el de B."""
+        propio = self._despacho(entregado_por=self.admin)
+        pendiente = self._despacho()
+        ajeno = self._despacho(empresa=self.otra_empresa, entregado_por=self.intruso)
+
+        filas_b = self._filas(self._api(self.intruso).get(self.URL))
+        self.assertEqual([f["id"] for f in filas_b], [ajeno.pk])
+        self.assertEqual(filas_b[0]["entregado_por_nombre"], "Intruso")
+        self.assertEqual(self._api(self.intruso).get(f"{self.URL}{propio.pk}/").status_code, 404)
+        self.assertEqual(self._entregar(pendiente, self.intruso).status_code, 404)
+        pendiente.refresh_from_db()
+        self.assertIsNone(pendiente.fecha_entrega)
+
+        filas_a = {f["id"]: f for f in self._filas(self._api().get(self.URL))}
+        self.assertEqual(set(filas_a), {propio.pk, pendiente.pk})
+        self.assertNotIn("Intruso", json.dumps(filas_a))
+        self.assertEqual(self._api().get(f"{self.URL}{ajeno.pk}/").status_code, 404)
+
+    def test_listado_no_suma_consultas_por_despacho_entregado(self):
+        """Cada despacho lo entregó otro usuario: sin ``entregado_por`` en el
+        ``select_related`` cada fila sumaría una consulta."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        def sembrar(n):
+            quien = Usuario.objects.create(
+                username=f"ec979-u{n}", email=f"ec979-u{n}@example.com", first_name=f"U{n}",
+                empresa=self.empresa, sucursal_default=self.sucursal,
+            )
+            self._despacho(entregado_por=quien)
+
+        sembrar(0)
+        with CaptureQueriesContext(connection) as uno:
+            self.assertEqual(len(self._filas(self._api().get(self.URL))), 1)
+        for n in range(1, 4):
+            sembrar(n)
+        with CaptureQueriesContext(connection) as cuatro:
+            filas = self._filas(self._api().get(self.URL))
+        self.assertEqual(len(filas), 4)
+        self.assertEqual({f["entregado_por_nombre"] for f in filas}, {"U0", "U1", "U2", "U3"})
+        self.assertEqual(len(cuatro), len(uno))

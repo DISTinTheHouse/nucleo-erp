@@ -483,6 +483,7 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
                 "chofer",
                 "usuario",
                 "cancelado_por",
+                "entregado_por",
             )
             .prefetch_related(
                 Prefetch(

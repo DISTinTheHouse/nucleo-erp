@@ -706,6 +706,7 @@ def documentos_pedido(pedido, *, user, permisos=None):
     despachos = _lista(
         despachos_qs.order_by("id"),
         "id", "guia", "envio_id", "packing_id", "estado", "motivo_cancelacion",
+        "fecha_entrega",  # EC-979: entregado (null si no); entregado ya no se cancela
         packing_folio=F("packing__folio"),
     )
     envios = _lista(Envio.objects.filter(pedido_id=pk, empresa_id=empresa_id).order_by("id"), "id", "transportista_id")
