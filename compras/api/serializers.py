@@ -904,6 +904,42 @@ class RecepcionRFIDEncuadreSerializer(_CancelacionRecepcionMixin, serializers.Mo
         return resumen_encuadre_rfid(obj, self.context.get("resumen_mapas"))
 
 
+class RecepcionRFIDEncuadreListSerializer(RecepcionRFIDEncuadreSerializer):
+    """Fila del listado (EC-981): los campos del detalle sin ``lecturas[]`` ni
+    ``resumen``, con sus totales planos (mismos nombres y formato que en
+    ``resumen``). ``total_leido``/``total_sin_asignar`` vienen anotados por el
+    viewset; ``total_esperado``, en ``context["totales_esperados"]``."""
+
+    lecturas = None
+    resumen = None
+    total_esperado = serializers.SerializerMethodField()
+    total_leido = serializers.SerializerMethodField()
+    total_sin_asignar = serializers.SerializerMethodField()
+    completo = serializers.SerializerMethodField()
+
+    class Meta(RecepcionRFIDEncuadreSerializer.Meta):
+        fields = [
+            *(f for f in RecepcionRFIDEncuadreSerializer.Meta.fields if f not in ("lecturas", "resumen")),
+            "total_esperado", "total_leido", "total_sin_asignar", "completo",
+        ]
+
+    def _esperado(self, obj):
+        return self.context["totales_esperados"].get(obj.pk, Decimal("0"))
+
+    def get_total_esperado(self, obj):
+        return str(self._esperado(obj))
+
+    def get_total_leido(self, obj):
+        return str(obj.total_leido)
+
+    def get_total_sin_asignar(self, obj):
+        return str(obj.total_sin_asignar)
+
+    def get_completo(self, obj):
+        esperado = self._esperado(obj)
+        return bool(esperado > 0 and obj.total_leido >= esperado)
+
+
 class RecepcionRFIDEncuadreCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = RecepcionRFIDEncuadre

@@ -3240,7 +3240,15 @@ Manda `orden_compra` **u** `op` (nunca ambos). `empresa`/`sucursal`/`proveedor`/
 ```json
 { "codigo_tag": "9999-NEG" }
 ```
-Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto. Con SKU, la lectura va al renglón de esa variante (si la orden no la tiene, a un renglón del producto sin variante; si tampoco, queda sin asignar). Un tag repetido en el mismo encuadre regresa `400`. Solo funciona si el encuadre sigue `PENDIENTE`.
+Resuelve por `sku` de variante, o `codigo`/`cod_proscai` de producto. Con SKU, la lectura va al renglón de esa variante (si la orden no la tiene, a un renglón del producto sin variante; si tampoco, queda sin asignar). Un tag repetido en el mismo encuadre regresa `400 {"codigo_tag": "Este tag ya fue leído en este encuadre."}`, también si llegan dos envíos simultáneos del mismo tag (lector tipo teclado que manda doble; antes el segundo podía dar `500`, EC-981). Solo funciona si el encuadre sigue `PENDIENTE` (`400 {"estatus"}`).
+
+**Listado** — `GET /api/v1/compras/recepcion-rfid-encuadres/` (EC-981). Fila ligera: los mismos campos del detalle **sin `lecturas[]` ni `resumen`**, más sus totales planos con los mismos nombres y formato que en `resumen`: `total_esperado`, `total_leido`, `total_sin_asignar` (texto decimal) y `completo` (bool). Para ver las lecturas usa el detalle.
+
+- Paginación opcional, como OC, recepciones y calidad: sin `?limit=` el arreglo completo; con `?limit=&offset=` → `{count, next, previous, results}` (`limit` tope 500; inválido → `400`).
+- Filtros (inválidos → `400`): `estatus` (`PENDIENTE`, `ACEPTADO`, `CANCELADO`; uno o varios separados por coma, sin distinguir mayúsculas), `tipo_origen` (`OC`/`OP`), `proveedor`, `almacen`, `sucursal`, `orden_compra`, `op` (ids enteros), `fecha_desde`/`fecha_hasta` (`YYYY-MM-DD`, día local de `fecha_recepcion`).
+- `?search=` en folio de la OC, `folio_op` de la OP, nombre y razón social del proveedor, `remision` y `factura_referencia`.
+- `?ordering=` en `id`, `created_at`, `updated_at`, `fecha_recepcion`, `fecha_aceptacion`, `fecha_cancelacion`, `estatus`, `tipo_origen`, `orden_compra__folio`, `op__folio_op`, `proveedor__nombre`, `almacen__nombre` (NULL al final en ambas direcciones, `id` como desempate). Por defecto `-created_at, -id`.
+- Siempre la empresa activa del usuario (superusuario incluido; sin empresa → `[]`): un id o texto de otra empresa no trae filas. Filtros y búsqueda solo aplican al listado, nunca al detalle ni a sus acciones.
 
 **3) Ver detalle + resumen** — `GET /api/v1/compras/recepcion-rfid-encuadres/{id}/`
 
@@ -3309,6 +3317,7 @@ Para cuando el proveedor surtió parcial y ya no mandará el resto.
 - `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/cancelar/` con `{"motivo": "Escaneo duplicado"}` (obligatorio). Aplica a un encuadre Pendiente, o Aceptado que aún no generó recepción. `400` si ya está cancelado o ya tiene recepción (en ese caso se cancela la recepción). No mueve inventario.
 - Campos nuevos (solo lectura): `aceptado_por`, `aceptado_por_nombre`, `fecha_aceptacion`, `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`, `cancelado_por_nombre` (#1373).
 - `aceptar/` y `cancelar/` dejan `AuditoriaEvento` (`compras/ACEPTAR`, `compras/CANCELAR`, tabla `recepcion_rfid_encuadre`).
+- Concurrencia (EC-981): `aceptar/`, `cancelar/` y `lecturas/` bloquean la fila del encuadre y deciden con su estatus ya bloqueado. Un `cancelar/` que se confirma mientras otro usuario acepta hace que ese `aceptar/` responda `400 {"estatus"}` (antes quedaba `ACEPTADO` conservando los datos de la cancelación), y no entra una lectura a un encuadre que se acaba de aceptar o cancelar. `cancelar/` responde y audita el estado real de la fila (p. ej. `aceptado_por` si se aceptó en medio).
 
 ### Rastreo en auditoría (bitácora)
 

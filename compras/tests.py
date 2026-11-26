@@ -3513,10 +3513,10 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
     el número de encuadres ni de lecturas, y el resumen en bloque del listado es el
     mismo que el que el detalle calcula encuadre por encuadre."""
 
-    # Listado: encuadres; lecturas (con producto y variante por JOIN); renglones
+    # Listado (fila ligera, EC-981): encuadres con lo leído anotado; renglones
     # de OC y de OP; recibido + rechazado de cada lado. Detalle: encuadre,
     # lecturas, renglones, recibido y rechazado.
-    CONSULTAS_LISTADO = 8
+    CONSULTAS_LISTADO = 7
     CONSULTAS_DETALLE = 5
 
     def test_listado_no_crece_con_encuadres_ni_lecturas(self):
@@ -3545,19 +3545,27 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
         self.assertEqual(len(muchas), len(pocas))
 
     def test_listado_igual_al_detalle_de_cada_encuadre(self):
-        """OC y OP, con y sin lecturas; las lecturas en orden de captura (id)."""
+        """OC y OP, con y sin lecturas. La fila del listado es el detalle sin
+        ``lecturas[]`` ni ``resumen``, con los totales del resumen (EC-981); el
+        detalle trae las lecturas en orden de captura (id)."""
         self._agregar_lote(n_encuadres=3, n_lecturas=4)
         api = self._api()
         listado = api.get(self.URL_ENCUADRES).json()
         self.assertEqual(len(listado), 7)
+        totales = ("total_esperado", "total_leido", "total_sin_asignar", "completo")
         for fila in listado:
             with self.subTest(encuadre=fila["id"]):
-                ids_lecturas = [l["id"] for l in fila["lecturas"]]
+                detalle = api.get(f"{self.URL_ENCUADRES}{fila['id']}/").json()
+                ids_lecturas = [l["id"] for l in detalle["lecturas"]]
                 self.assertEqual(ids_lecturas, sorted(ids_lecturas))
-                self.assertEqual(fila, api.get(f"{self.URL_ENCUADRES}{fila['id']}/").json())
+                resumen = detalle.pop("resumen")
+                del detalle["lecturas"]
+                self.assertEqual({k: v for k, v in fila.items() if k not in totales}, detalle)
+                self.assertEqual({k: fila[k] for k in totales}, {k: resumen[k] for k in totales})
 
     def test_resumen_resta_recibido_y_rechazo_sin_cancelados(self):
-        listado = {e["id"]: e for e in self._api().get(self.URL_ENCUADRES).json()}
+        api = self._api()
+        listado = {e: api.get(f"{self.URL_ENCUADRES}{e}/").json() for e in self.ids_a}
         oc = listado[self.e_oc_varias.pk]["resumen"]
         self.assertEqual(
             [(d["ordenado"], d["ya_recibido"], d["esperado"], d["leido"], d["diferencia"]) for d in oc["detalle"]],
@@ -3603,6 +3611,244 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
         ))
         self.assertEqual([e["id"] for e in root_a.get(self.URL_ENCUADRES).json()], self.ids_a)
         self.assertEqual(root_a.get(f"{self.URL_ENCUADRES}{self.e_b.pk}/").status_code, 404)
+
+
+class RecepcionRFIDEncuadreBloqueoTests(_EncuadresRFIDFixture, TestCase):
+    """EC-981: ``aceptar/``, ``cancelar/`` y ``lecturas/`` deciden con el estatus de
+    la fila bloqueada, no con el que leyó ``get_object()``. La carrera se simula
+    como en ``test_aceptar_relee_el_estatus_bajo_el_lock`` de OC: ``get_object``
+    devuelve la copia vieja y la base ya tiene el cambio confirmado en medio."""
+
+    def _viejo(self, encuadre):
+        return copy.copy(RecepcionRFIDEncuadre.objects.select_related(
+            "orden_compra", "op", "almacen", "proveedor", "sucursal", "aceptado_por", "cancelado_por",
+        ).get(pk=encuadre.pk))
+
+    def _post(self, encuadre, accion, data=None, viejo=None):
+        from compras.api.views import RecepcionRFIDEncuadreViewSet
+
+        url = f"{self.URL_ENCUADRES}{encuadre.pk}/{accion}/"
+        if viejo is None:
+            return self._api().post(url, data or {}, format="json")
+        with mock.patch.object(RecepcionRFIDEncuadreViewSet, "get_object", return_value=viejo):
+            return self._api().post(url, data or {}, format="json")
+
+    def _cancelar_en_base(self, encuadre):
+        RecepcionRFIDEncuadre.objects.filter(pk=encuadre.pk).update(
+            estatus="CANCELADO", motivo_cancelacion="concurrente", fecha_cancelacion=timezone.now(),
+            cancelado_por=self.t["a"]["usuario"],
+        )
+
+    def test_aceptar_no_pisa_una_cancelacion_confirmada_en_medio(self):
+        encuadre = self.e_oc_una
+        viejo = self._viejo(encuadre)
+        self._cancelar_en_base(encuadre)
+        eventos = AuditoriaEvento.objects.filter(id_registro=str(encuadre.pk), accion="ACEPTAR")
+
+        resp = self._post(encuadre, "aceptar", viejo=viejo)
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"estatus": "Solo se puede aceptar un encuadre pendiente."})
+        encuadre.refresh_from_db()
+        self.assertEqual(
+            (encuadre.estatus, encuadre.motivo_cancelacion, encuadre.aceptado_por_id, encuadre.fecha_aceptacion),
+            ("CANCELADO", "concurrente", None, None),
+        )
+        self.assertFalse(eventos.exists())
+
+    def test_cancelar_escribe_y_responde_la_fila_bloqueada(self):
+        """Aceptado en medio (aceptado → cancelado sigue permitido sin recepción):
+        la respuesta y la auditoría traen el estado real, no el de ``get_object``."""
+        encuadre = self.e_oc_una
+        viejo = self._viejo(encuadre)
+        usuario = self.t["a"]["usuario"]
+        RecepcionRFIDEncuadre.objects.filter(pk=encuadre.pk).update(
+            estatus="ACEPTADO", aceptado_por=usuario, fecha_aceptacion=timezone.now(),
+        )
+
+        resp = self._post(encuadre, "cancelar", {"motivo": "Escaneo duplicado"}, viejo=viejo)
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual((data["estatus"], data["aceptado_por"], data["motivo_cancelacion"]),
+                         ("CANCELADO", usuario.pk, "Escaneo duplicado"))
+        self.assertEqual(len(data["lecturas"]), 1)
+        evento = AuditoriaEvento.objects.get(id_registro=str(encuadre.pk), accion="CANCELAR")
+        self.assertEqual(evento.antes_json, {"estatus": "ACEPTADO"})
+
+    def test_lecturas_rechaza_encuadre_aceptado_o_cancelado_en_medio(self):
+        for estatus in ("ACEPTADO", "CANCELADO"):
+            with self.subTest(estatus=estatus):
+                encuadre = self._encuadre("a", orden_compra=self.oc1)
+                viejo = self._viejo(encuadre)
+                RecepcionRFIDEncuadre.objects.filter(pk=encuadre.pk).update(estatus=estatus)
+
+                resp = self._post(encuadre, "lecturas", {"codigo_tag": "PLA-a-CH"}, viejo=viejo)
+
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {"estatus": "Solo se puede escanear un encuadre pendiente."})
+                self.assertFalse(encuadre.lecturas.exists())
+
+    def test_las_tres_acciones_bloquean_la_fila_antes_de_escribir(self):
+        casos = [
+            ("lecturas", {"codigo_tag": "PLA-a-CH"}, 'FOR UPDATE'),
+            ("aceptar", {}, 'FOR UPDATE OF "recepcion_rfid_encuadre"'),
+            ("cancelar", {"motivo": "x"}, 'FOR UPDATE OF "recepcion_rfid_encuadre"'),
+        ]
+        encuadre = self.e_oc_vacio
+        for accion, data, candado in casos:
+            with self.subTest(accion=accion):
+                with CaptureQueriesContext(connection) as ctx:
+                    resp = self._post(encuadre, accion, data)
+                self.assertIn(resp.status_code, (200, 201), resp.content)
+                sql = [q["sql"] for q in ctx.captured_queries]
+                bloqueo = next(i for i, q in enumerate(sql) if candado in q and "recepcion_rfid_encuadre" in q)
+                escritura = next(i for i, q in enumerate(sql) if q.lstrip().upper().startswith(("INSERT", "UPDATE")))
+                self.assertLess(bloqueo, escritura)
+
+    def test_tag_repetido_por_integrityerror_es_400_como_el_repetido(self):
+        """El mismo tag escrito entre el ``exists()`` y el INSERT (otro camino que no
+        toma el candado, o un doble envío del lector) llega a la constraint única:
+        el mismo 400 que un tag repetido, no un 500."""
+        from django.db.models.query import QuerySet
+
+        encuadre = self.e_oc_vacio
+        # El otro envío ya escribió el tag, pero el ``exists()`` de este no lo vio.
+        RecepcionRFIDLectura.objects.create(encuadre=encuadre, codigo_tag="PLA-a-CH", cantidad_leida=Decimal("1"))
+        real_exists = QuerySet.exists
+
+        def exists_sin_ver_la_otra_lectura(qs):
+            return False if qs.model is RecepcionRFIDLectura else real_exists(qs)
+
+        with mock.patch.object(QuerySet, "exists", autospec=True, side_effect=exists_sin_ver_la_otra_lectura):
+            resp = self._post(encuadre, "lecturas", {"codigo_tag": "PLA-a-CH"})
+        repetido = self._post(encuadre, "lecturas", {"codigo_tag": "PLA-a-CH"})
+
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.json(), {"codigo_tag": "Este tag ya fue leído en este encuadre."})
+        self.assertEqual((repetido.status_code, repetido.json()), (400, resp.json()))
+        self.assertEqual(encuadre.lecturas.filter(codigo_tag="PLA-a-CH").count(), 1)
+        # La transacción sigue sana: la siguiente lectura entra.
+        self.assertEqual(self._post(encuadre, "lecturas", {"codigo_tag": "PLA-a-M"}).status_code, 201)
+
+    def test_otra_integrityerror_no_se_disfraza_de_tag_repetido(self):
+        from django.db import IntegrityError
+
+        with mock.patch.object(RecepcionRFIDLectura.objects, "create", side_effect=IntegrityError("fk_x")):
+            with self.assertRaises(IntegrityError):
+                self._post(self.e_oc_vacio, "lecturas", {"codigo_tag": "PLA-a-CH"})
+
+    def test_aceptar_despues_de_cancelar_conserva_la_cancelacion(self):
+        encuadre = self.e_oc_una
+        self.assertEqual(self._post(encuadre, "cancelar", {"motivo": "Error"}).status_code, 200)
+        resp = self._post(encuadre, "aceptar")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        encuadre.refresh_from_db()
+        self.assertEqual((encuadre.estatus, encuadre.motivo_cancelacion, encuadre.aceptado_por_id),
+                         ("CANCELADO", "Error", None))
+
+
+class RecepcionRFIDEncuadreListadoTests(_EncuadresRFIDFixture, TestCase):
+    """EC-981: listado ligero, paginado, con filtros, búsqueda y orden, siempre
+    dentro de la empresa activa."""
+
+    def _ids(self, params=None, clave="a"):
+        resp = self._api(clave).get(self.URL_ENCUADRES, params or {})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        return [e["id"] for e in (data["results"] if isinstance(data, dict) else data)]
+
+    def _error(self, params):
+        resp = self._api().get(self.URL_ENCUADRES, params)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        return resp.json()
+
+    def test_fila_sin_lecturas_ni_resumen_y_detalle_intacto(self):
+        fila = next(e for e in self._api().get(self.URL_ENCUADRES).json() if e["id"] == self.e_oc_varias.pk)
+        self.assertNotIn("lecturas", fila)
+        self.assertNotIn("resumen", fila)
+        self.assertEqual(
+            (fila["orden_compra_folio"], fila["proveedor_nombre"], fila["almacen_nombre"], fila["estatus"]),
+            (self.oc1.folio, "Proveedor a", "Almacén a", "PENDIENTE"),
+        )
+        self.assertEqual(
+            (fila["total_esperado"], fila["total_leido"], fila["total_sin_asignar"], fila["completo"]),
+            ("17.0000", "4.0000", "1.0000", False),
+        )
+        vacio = next(e for e in self._api().get(self.URL_ENCUADRES).json() if e["id"] == self.e_oc_vacio.pk)
+        self.assertEqual((vacio["total_leido"], vacio["total_sin_asignar"]), ("0", "0"))
+        detalle = self._api().get(f"{self.URL_ENCUADRES}{self.e_oc_varias.pk}/").json()
+        self.assertEqual(len(detalle["lecturas"]), 4)
+        self.assertEqual(detalle["resumen"]["total_esperado"], "17.0000")
+
+    def test_paginacion_opcional(self):
+        self.assertEqual(self._ids(), self.ids_a)  # sin ?limit=, el arreglo de siempre
+        resp = self._api().get(self.URL_ENCUADRES, {"limit": 3}).json()
+        self.assertEqual((resp["count"], len(resp["results"])), (4, 3))
+        self.assertIsNotNone(resp["next"])
+        self.assertEqual(self._ids({"limit": 3, "offset": 3}), self.ids_a[3:])
+        self.assertIn("limit", self._error({"limit": 0}))
+
+    def test_paginado_no_crece_con_encuadres(self):
+        api = self._api()
+        with CaptureQueriesContext(connection) as pocas:
+            api.get(self.URL_ENCUADRES, {"limit": 50})
+        self._agregar_lote(n_encuadres=4, n_lecturas=6)
+        with CaptureQueriesContext(connection) as muchas:
+            self.assertEqual(api.get(self.URL_ENCUADRES, {"limit": 50}).json()["count"], 8)
+        self.assertEqual(len(muchas), len(pocas))
+
+    def test_filtro_estatus(self):
+        RecepcionRFIDEncuadre.objects.filter(pk=self.e_oc_vacio.pk).update(estatus="ACEPTADO")
+        RecepcionRFIDEncuadre.objects.filter(pk=self.e_op_una.pk).update(estatus="CANCELADO")
+        self.assertEqual(self._ids({"estatus": "PENDIENTE"}), [self.e_oc_una.pk, self.e_oc_varias.pk])
+        self.assertEqual(self._ids({"estatus": "aceptado,CANCELADO"}), [self.e_op_una.pk, self.e_oc_vacio.pk])
+        self.assertIn("estatus", self._error({"estatus": "BORRADOR"}))
+        self.assertIn("estatus", self._error({"estatus": ","}))
+
+    def test_filtros_de_origen_y_fecha(self):
+        self.assertEqual(self._ids({"tipo_origen": "op"}), [self.e_op_una.pk])
+        self.assertIn("tipo_origen", self._error({"tipo_origen": "SM"}))
+        self.assertEqual(self._ids({"orden_compra": self.oc1.pk}), [self.e_oc_vacio.pk, self.e_oc_varias.pk])
+        self.assertEqual(self._ids({"op": self.op1.pk}), [self.e_op_una.pk])
+        self.assertEqual(self._ids({"proveedor": self.t["a"]["proveedor"].pk}),
+                         [self.e_oc_una.pk, self.e_oc_vacio.pk, self.e_oc_varias.pk])
+        self.assertEqual(self._ids({"almacen": self.t["a"]["almacen"].pk}), self.ids_a)
+        self.assertIn("proveedor", self._error({"proveedor": "x"}))
+        hoy = timezone.localdate()
+        self.assertEqual(self._ids({"fecha_desde": hoy.isoformat(), "fecha_hasta": hoy.isoformat()}), self.ids_a)
+        self.assertEqual(self._ids({"fecha_desde": (hoy + timedelta(days=1)).isoformat()}), [])
+        self.assertIn("fecha_desde", self._error({"fecha_desde": "ayer"}))
+
+    def test_busqueda_por_folio_proveedor_y_remision(self):
+        RecepcionRFIDEncuadre.objects.filter(pk=self.e_oc_vacio.pk).update(remision="REM-981")
+        self.assertEqual(self._ids({"search": self.op1.folio_op}), [self.e_op_una.pk])
+        self.assertEqual(self._ids({"search": "proveedor a"}),
+                         [self.e_oc_una.pk, self.e_oc_vacio.pk, self.e_oc_varias.pk])
+        self.assertEqual(self._ids({"search": "rem-981"}), [self.e_oc_vacio.pk])
+        # ``?search=`` (y los filtros) no aplican al detalle ni a sus acciones.
+        detalle = self._api().get(f"{self.URL_ENCUADRES}{self.e_oc_una.pk}/", {"search": "zzz", "estatus": "CANCELADO"})
+        self.assertEqual(detalle.status_code, 200)
+
+    def test_ordenamiento(self):
+        self.assertEqual(self._ids({"ordering": "created_at"}), self.ids_a[::-1])
+        RecepcionRFIDEncuadre.objects.filter(pk=self.e_op_una.pk).update(fecha_aceptacion=timezone.now())
+        # NULL al final también en DESC.
+        self.assertEqual(self._ids({"ordering": "-fecha_aceptacion"})[0], self.e_op_una.pk)
+        self.assertEqual(self._ids({"ordering": "fecha_aceptacion"})[0], self.e_op_una.pk)
+        # Fuera de la lista blanca se ignora (orden por defecto).
+        self.assertEqual(self._ids({"ordering": "usuario__password"}), self.ids_a)
+
+    def test_filtros_y_busqueda_no_cruzan_empresas(self):
+        b = self.t["b"]
+        self.assertEqual(self._ids({"proveedor": b["proveedor"].pk}), [])
+        self.assertEqual(self._ids({"almacen": b["almacen"].pk}), [])
+        self.assertEqual(self._ids({"sucursal": b["sucursal"].pk}), [])
+        self.assertEqual(self._ids({"orden_compra": self.e_b.orden_compra_id}), [])
+        self.assertEqual(self._ids({"search": "Proveedor b"}), [])
+        self.assertEqual(self._api().get(self.URL_ENCUADRES, {"limit": 10, "search": "Proveedor"}).json()["count"], 3)
+        self.assertEqual(self._ids({"search": "Proveedor"}, clave="b"), [self.e_b.pk])
+        self.assertEqual(self._ids({"estatus": "PENDIENTE", "limit": 10}, clave="b"), [self.e_b.pk])
 
 
 class RecepcionRetrieveOrigenTallaTests(TestCase):

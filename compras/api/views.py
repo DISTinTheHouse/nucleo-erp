@@ -3,7 +3,7 @@ from nucleo.motivo import exigir_largo_motivo
 from decimal import Decimal
 from types import SimpleNamespace
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import (
     Count, DecimalField, Exists, ExpressionWrapper, F, OuterRef, Prefetch, Q, Subquery, Sum, Value, Window,
     prefetch_related_objects,
@@ -52,6 +52,7 @@ from nucleo.permisos import permisos_de_la_peticion
 from nucleo.kpis import TOPE_DRILL_DOWN, entero_param, marcar_tope, rango_fechas, validar_parametros
 from nucleo.listados import (
     OrdenamientoEstableFilter,
+    OrdenamientoNullsAlFinal,
     PaginacionOpcionalLimitOffset,
     booleano_param,
     filtrar_listado_compras,
@@ -74,6 +75,7 @@ from compras.api.serializers import (
     RecepcionSerializer,
     RecepcionRFIDEncuadreSerializer,
     RecepcionRFIDEncuadreCreateSerializer,
+    RecepcionRFIDEncuadreListSerializer,
     RecepcionRFIDLecturaSerializer,
     RecepcionRFIDLecturaInputSerializer,
 )
@@ -3867,6 +3869,29 @@ def mapas_resumen_encuadres_rfid(encuadres):
     }
 
 
+def _renglones_esperados_rfid(encuadre, mapas):
+    """``(renglón, ordenado, ya_recibido, esperado)`` de cada renglón de la OC u OP
+    del encuadre, con ``esperado = max(ordenado - ya recibido, 0)``. Única copia
+    de la regla: la usan el resumen del detalle y el total del listado."""
+    if encuadre.orden_compra_id:
+        detalle_qs = mapas["renglones_oc"].get(encuadre.orden_compra_id, [])
+        recibido_map = mapas["recibido_oc"]
+    elif encuadre.op_id:
+        detalle_qs = mapas["renglones_op"].get(encuadre.op_id, [])
+        recibido_map = mapas["recibido_op"]
+    else:
+        return
+    for detalle in detalle_qs:
+        ordenado = Decimal(str(detalle.cantidad or 0))
+        ya_recibido = recibido_map.get(detalle.pk, Decimal("0"))
+        yield detalle, ordenado, ya_recibido, max(ordenado - ya_recibido, Decimal("0"))
+
+
+def total_esperado_encuadre_rfid(encuadre, mapas):
+    """``resumen.total_esperado`` sin leer las lecturas (listado ligero, EC-981)."""
+    return sum((esperado for *_, esperado in _renglones_esperados_rfid(encuadre, mapas)), Decimal("0"))
+
+
 def resumen_encuadre_rfid(encuadre, mapas=None):
     """Esperado = ordenado - ya recibido (no solo lo contratado, ver B1 del audit).
 
@@ -3875,29 +3900,16 @@ def resumen_encuadre_rfid(encuadre, mapas=None):
     bloque: antes eran dos consultas por renglón de la orden.
 
     ``mapas`` (de ``mapas_resumen_encuadres_rfid``) trae los renglones y el
-    recibido ya calculados para un listado; sin él se calculan para este
+    recibido ya calculados para varios encuadres; sin él se calculan para este
     encuadre con la misma función, así listado y detalle no pueden divergir.
     """
     if mapas is None:
         mapas = mapas_resumen_encuadres_rfid([encuadre])
     lecturas = list(encuadre.lecturas.all())
 
-    if encuadre.orden_compra_id:
-        detalle_qs = mapas["renglones_oc"].get(encuadre.orden_compra_id, [])
-        recibido_map = mapas["recibido_oc"]
-    elif encuadre.op_id:
-        detalle_qs = mapas["renglones_op"].get(encuadre.op_id, [])
-        recibido_map = mapas["recibido_op"]
-    else:
-        detalle_qs = []
-        recibido_map = {}
-
     detalles = []
     total_esperado = Decimal("0")
-    for detalle in detalle_qs:
-        ordenado = Decimal(str(detalle.cantidad or 0))
-        ya_recibido = recibido_map.get(detalle.pk, Decimal("0"))
-        esperado = max(ordenado - ya_recibido, Decimal("0"))
+    for detalle, ordenado, ya_recibido, esperado in _renglones_esperados_rfid(encuadre, mapas):
         if encuadre.orden_compra_id:
             leido = sum(
                 (Decimal(str(l.cantidad_leida or 0)) for l in lecturas if l.orden_compra_detalle_id == detalle.pk),
@@ -3954,37 +3966,118 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
     queryset = RecepcionRFIDEncuadre.objects.all()
     serializer_class = RecepcionRFIDEncuadreSerializer
     http_method_names = ["get", "post"]
+    # Listado (EC-981) como recepciones y calidad: sin ``?limit=`` la lista
+    # completa; con él, ``{count, next, previous, results}``.
+    pagination_class = PaginacionOpcionalLimitOffset
+    search_fields = [
+        "orden_compra__folio", "op__folio_op", "proveedor__nombre", "proveedor__razon_social",
+        "remision", "factura_referencia",
+    ]
+    filter_backends = [
+        *[b for b in viewsets.ModelViewSet.filter_backends if b is not OrderingFilter],
+        OrdenamientoNullsAlFinal,  # fecha de aceptación/cancelación y proveedor pueden ser NULL
+    ]
+    ordering_fields = [
+        "id", "created_at", "updated_at", "fecha_recepcion", "fecha_aceptacion", "fecha_cancelacion",
+        "estatus", "tipo_origen", "orden_compra__folio", "op__folio_op", "proveedor__nombre", "almacen__nombre",
+    ]
+    TAG_REPETIDO = "Este tag ya fue leído en este encuadre."
+    UNIQUE_TAG = "uq_recepcion_rfid_lectura_encuadre_tag"
 
     def get_queryset(self):
         user = self.request.user
-        qs = (
-            self.queryset
-            .select_related("orden_compra", "op", "almacen", "proveedor", "sucursal", "aceptado_por", "cancelado_por")
-            .prefetch_related(prefetch_lecturas_rfid())
+        qs = self.queryset.select_related(
+            "orden_compra", "op", "almacen", "proveedor", "sucursal", "aceptado_por", "cancelado_por",
         )
+        # Solo el detalle anida ``lecturas[]``; aceptar/ y cancelar/ las traen
+        # al releer la fila bloqueada (``_bloquear``).
+        if self.action == "retrieve":
+            qs = qs.prefetch_related(prefetch_lecturas_rfid())
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
-        return qs.filter(empresa=empresa).order_by("-created_at", "-id")
+        qs = qs.filter(empresa=empresa).order_by("-created_at", "-id")
+        if self.action == "list":
+            qs = self._filtrar_listado(qs)
+        return qs
+
+    def _filtrar_listado(self, qs):
+        """Filtros del listado (EC-981), después del alcance por empresa: un id
+        ajeno no trae filas. Inválidos → 400."""
+        request = self.request
+        estatus = (request.query_params.get("estatus") or "").strip()
+        if estatus:
+            lista = [parte.strip().upper() for parte in estatus.split(",") if parte.strip()]
+            if not lista or any(e not in RecepcionRFIDEncuadre.Estatus.values for e in lista):
+                raise ValidationError({"estatus": "Estatus inexistente. Usa PENDIENTE, ACEPTADO o CANCELADO."})
+            qs = qs.filter(estatus__in=lista)
+        tipo_origen = (request.query_params.get("tipo_origen") or "").strip().upper()
+        if tipo_origen:
+            if tipo_origen not in (Recepcion.TipoOrigen.ORDEN_COMPRA, Recepcion.TipoOrigen.ORDEN_PRODUCCION):
+                raise ValidationError({"tipo_origen": "Valor inválido. Usa OC u OP."})
+            qs = qs.filter(tipo_origen=tipo_origen)
+        for nombre in ("proveedor", "almacen", "sucursal", "orden_compra", "op"):
+            valor = entero_param(request, nombre)
+            if valor is not None:
+                qs = qs.filter(**{f"{nombre}_id": valor})
+        # Día local del encuadre, como el listado de recepciones.
+        fecha_desde, fecha_hasta = rango_fechas(request)
+        if fecha_desde:
+            qs = qs.filter(fecha_recepcion__date__gte=fecha_desde)
+        if fecha_hasta:
+            qs = qs.filter(fecha_recepcion__date__lte=fecha_hasta)
+        # Lo leído, en la misma consulta (subconsulta por el FK indexado) y sin
+        # traer las lecturas.
+        lecturas = RecepcionRFIDLectura.objects.filter(encuadre=OuterRef("pk")).order_by().values("encuadre")
+        decimal = DecimalField(max_digits=18, decimal_places=4)
+        return qs.annotate(
+            total_leido=Coalesce(
+                Subquery(lecturas.annotate(t=Sum("cantidad_leida")).values("t")), Value(Decimal("0")),
+                output_field=decimal,
+            ),
+            total_sin_asignar=Coalesce(
+                Subquery(
+                    lecturas.filter(orden_compra_detalle__isnull=True, orden_produccion_detalle__isnull=True)
+                    .annotate(t=Sum("cantidad_leida")).values("t")
+                ),
+                Value(Decimal("0")),
+                output_field=decimal,
+            ),
+        )
 
     def get_serializer_class(self):
         if self.action == "create":
             return RecepcionRFIDEncuadreCreateSerializer
+        if self.action == "list":
+            return RecepcionRFIDEncuadreListSerializer
         return RecepcionRFIDEncuadreSerializer
 
     def list(self, request, *args, **kwargs):
-        # El resumen de cada encuadre se calcula con renglones y recibido ya
-        # traídos en bloque para toda la respuesta (antes, 3 consultas por
-        # encuadre). Mismos filtros, orden y paginación que ``ListModelMixin``.
+        # Fila ligera (EC-981): sin ``lecturas[]`` ni ``resumen``. ``total_esperado``
+        # sale de los renglones y el recibido de toda la página en bloque (las
+        # mismas consultas que el resumen del detalle); lo leído, de la anotación.
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
         encuadres = list(page if page is not None else queryset)
+        mapas = mapas_resumen_encuadres_rfid(encuadres)
         context = self.get_serializer_context()
-        context["resumen_mapas"] = mapas_resumen_encuadres_rfid(encuadres)
+        context["totales_esperados"] = {e.pk: total_esperado_encuadre_rfid(e, mapas) for e in encuadres}
         serializer = self.get_serializer(encuadres, many=True, context=context)
         if page is not None:
             return self.get_paginated_response(serializer.data)
         return Response(serializer.data)
+
+    def _bloquear(self, encuadre):
+        """Relee el encuadre con su fila bloqueada (EC-981), en el mismo alcance y
+        con sus lecturas al día. ``aceptar/``, ``cancelar/`` y ``lecturas/`` toman
+        este mismo candado y deciden con el estatus de la fila bloqueada, no con
+        el que leyó ``get_object()``: un cambio confirmado en medio ya no se pisa.
+        ``of=("self",)``: los JOIN de ``select_related`` son externos y Postgres no
+        bloquea su lado NULL-able."""
+        return generics.get_object_or_404(
+            self.get_queryset().select_for_update(of=("self",)).prefetch_related(prefetch_lecturas_rfid()),
+            pk=encuadre.pk,
+        )
 
     @action(detail=False, methods=["get"])
     def onboarding(self, request):
@@ -4045,44 +4138,59 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def lecturas(self, request, pk=None):
-        # Igual que get_object (mismo alcance, filtros y permisos) pero sin el
-        # prefetch de lecturas: solo se responde la lectura nueva.
-        encuadre = generics.get_object_or_404(
-            self.filter_queryset(self.get_queryset().prefetch_related(None)), pk=pk
-        )
-        self.check_object_permissions(request, encuadre)
+        # Sin el prefetch de lecturas (solo el retrieve lo hace): solo se
+        # responde la lectura nueva.
+        encuadre = self.get_object()
         _exigir_permiso_oc(request, PERMISO_CREAR_RECEPCIONES)
-        if encuadre.estatus != RecepcionRFIDEncuadre.Estatus.PENDIENTE:
-            raise ValidationError({"estatus": "Solo se puede escanear un encuadre pendiente."})
+        with transaction.atomic():
+            # Mismo candado que aceptar/ y cancelar/ (EC-981): no entra una lectura
+            # a un encuadre que se acaba de aceptar o cancelar, y dos envíos del
+            # mismo tag se forman en vez de chocar.
+            estatus = (
+                RecepcionRFIDEncuadre.objects.select_for_update()
+                .values_list("estatus", flat=True).get(pk=encuadre.pk)
+            )
+            if estatus != RecepcionRFIDEncuadre.Estatus.PENDIENTE:
+                raise ValidationError({"estatus": "Solo se puede escanear un encuadre pendiente."})
 
-        input_serializer = RecepcionRFIDLecturaInputSerializer(data=request.data)
-        input_serializer.is_valid(raise_exception=True)
-        codigo_tag = input_serializer.validated_data["codigo_tag"].strip()
-        if not codigo_tag:
-            raise ValidationError({"codigo_tag": "Requerido."})
-        if encuadre.lecturas.filter(codigo_tag=codigo_tag).exists():
-            raise ValidationError({"codigo_tag": "Este tag ya fue leído en este encuadre."})
+            input_serializer = RecepcionRFIDLecturaInputSerializer(data=request.data)
+            input_serializer.is_valid(raise_exception=True)
+            codigo_tag = input_serializer.validated_data["codigo_tag"].strip()
+            if not codigo_tag:
+                raise ValidationError({"codigo_tag": "Requerido."})
+            if encuadre.lecturas.filter(codigo_tag=codigo_tag).exists():
+                raise ValidationError({"codigo_tag": self.TAG_REPETIDO})
 
-        resolved = _resolver_tag_rfid(encuadre, codigo_tag)
-        lectura = RecepcionRFIDLectura.objects.create(
-            encuadre=encuadre,
-            codigo_tag=codigo_tag,
-            orden_compra_detalle=resolved["orden_compra_detalle"],
-            orden_produccion_detalle=resolved["orden_produccion_detalle"],
-            producto=resolved["producto"],
-            producto_variante=resolved["producto_variante"],
-            cantidad_leida=Decimal("1"),
-            metadata=resolved["metadata"],
-        )
+            resolved = _resolver_tag_rfid(encuadre, codigo_tag)
+            try:
+                with transaction.atomic():
+                    lectura = RecepcionRFIDLectura.objects.create(
+                        encuadre=encuadre,
+                        codigo_tag=codigo_tag,
+                        orden_compra_detalle=resolved["orden_compra_detalle"],
+                        orden_produccion_detalle=resolved["orden_produccion_detalle"],
+                        producto=resolved["producto"],
+                        producto_variante=resolved["producto_variante"],
+                        cantidad_leida=Decimal("1"),
+                        metadata=resolved["metadata"],
+                    )
+            except IntegrityError as exc:
+                # El mismo tag escrito por otro camino entre el exists() y el
+                # INSERT: el 400 de un tag repetido, no un 500. Cualquier otra
+                # violación (FK, NOT NULL...) sigue su curso.
+                if self.UNIQUE_TAG not in str(exc):
+                    raise
+                raise ValidationError({"codigo_tag": self.TAG_REPETIDO}) from exc
         return Response(RecepcionRFIDLecturaSerializer(lectura).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
     def aceptar(self, request, pk=None):
         encuadre = self.get_object()
         _exigir_permiso_oc(request, PERMISO_CREAR_RECEPCIONES)
-        if encuadre.estatus != RecepcionRFIDEncuadre.Estatus.PENDIENTE:
-            raise ValidationError({"estatus": "Solo se puede aceptar un encuadre pendiente."})
         with transaction.atomic():
+            encuadre = self._bloquear(encuadre)
+            if encuadre.estatus != RecepcionRFIDEncuadre.Estatus.PENDIENTE:
+                raise ValidationError({"estatus": "Solo se puede aceptar un encuadre pendiente."})
             encuadre.estatus = RecepcionRFIDEncuadre.Estatus.ACEPTADO
             encuadre.aceptado_por = request.user
             encuadre.fecha_aceptacion = timezone.now()
@@ -4103,14 +4211,16 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         motivo = exigir_largo_motivo(motivo.strip())
         E = RecepcionRFIDEncuadre.Estatus
         with transaction.atomic():
-            fila = RecepcionRFIDEncuadre.objects.select_for_update().get(pk=encuadre.pk)
-            if fila.estatus == E.CANCELADO:
+            # Se escribe y se responde la fila bloqueada: un aceptar/ confirmado en
+            # medio sale en la respuesta y en la bitácora (EC-981).
+            encuadre = self._bloquear(encuadre)
+            if encuadre.estatus == E.CANCELADO:
                 raise ValidationError({"estatus": "El encuadre ya está cancelado."})
-            if fila.recepcion_id:
+            if encuadre.recepcion_id:
                 raise ValidationError({"recepcion": (
                     "El encuadre ya generó una recepción: cancela la recepción (antes de calidad)."
                 )})
-            antes = {"estatus": fila.estatus}
+            antes = {"estatus": encuadre.estatus}
             encuadre.estatus = E.CANCELADO
             encuadre.motivo_cancelacion, encuadre.fecha_cancelacion = motivo, timezone.now()
             encuadre.cancelado_por = request.user
