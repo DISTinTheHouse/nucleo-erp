@@ -9954,6 +9954,8 @@ class PreOrdenPedidosOmitidosTests(TestCase):
         data = self._convertir(pre)
         self.assertEqual(data["pedidos_omitidos"],
                          [{"id": self.cancelado_retenido.pk, "folio": "P-980-CR", "motivo": "cancelado"}])
+        self.assertEqual(self._ligados_a_op(pre), {self.libre.pk})
+        self.assertEqual(pre.pedidos_omitidos, data["pedidos_omitidos"])
 
     def test_retenido_no_omitido_junto_a_un_omitido_400_sin_op_ni_registro(self):
         from ventas.services.retencion_service import mensaje_retenido
