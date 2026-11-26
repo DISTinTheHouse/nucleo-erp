@@ -3281,8 +3281,9 @@ Superuser y admin de empresa pasan siempre. Sin el permiso → `403 {"detail": "
 | Aceptar, cancelar y cerrar saldo de OC | `A-COMPRAS-OC` (sin cambio en aceptar y cancelar) |
 | Liberar calidad: `POST calidad-inspecciones/onboarding/` (es lo que mete la mercancía al inventario) | `C-WMS-RECEPCIONES` |
 | Encuadre RFID: crear, `lecturas/`, `aceptar/`, `cancelar/` | `C-WMS-RECEPCIONES` |
+| Encuadre RFID: listado, detalle y `onboarding/` (`GET`, #1439) | `R-WMS-RECEPCIONES` |
 
-Los `GET` no cambian.
+Los demás `GET` no cambian.
 
 ### Revertir una calidad liberada por error — `POST /api/v1/compras/calidad-inspecciones/{id}/revertir/`
 
@@ -3315,7 +3316,7 @@ Para cuando el proveedor surtió parcial y ya no mandará el resto.
 ### Encuadre RFID: cancelar y auditoría
 
 - `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/cancelar/` con `{"motivo": "Escaneo duplicado"}` (obligatorio). Aplica a un encuadre Pendiente, o Aceptado que aún no generó recepción. `400` si ya está cancelado o ya tiene recepción (en ese caso se cancela la recepción). No mueve inventario.
-- Campos nuevos (solo lectura): `aceptado_por`, `aceptado_por_nombre`, `fecha_aceptacion`, `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`, `cancelado_por_nombre` (#1373).
+- Campos nuevos (solo lectura): `aceptado_por`, `aceptado_por_nombre`, `fecha_aceptacion`, `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por`, `cancelado_por_nombre` (#1373), y `usuario_nombre` junto a `usuario` (quien creó el encuadre: nombre o correo; en detalle, listado, create, `aceptar/` y `cancelar/`, sin consultas extra, #1440).
 - `aceptar/` y `cancelar/` dejan `AuditoriaEvento` (`compras/ACEPTAR`, `compras/CANCELAR`, tabla `recepcion_rfid_encuadre`).
 - Concurrencia (EC-981): `aceptar/`, `cancelar/` y `lecturas/` bloquean la fila del encuadre y deciden con su estatus ya bloqueado. Un `cancelar/` que se confirma mientras otro usuario acepta hace que ese `aceptar/` responda `400 {"estatus"}` (antes quedaba `ACEPTADO` conservando los datos de la cancelación), y no entra una lectura a un encuadre que se acaba de aceptar o cancelar. `cancelar/` responde y audita el estado real de la fila (p. ej. `aceptado_por` si se aceptó en medio).
 
