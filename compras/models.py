@@ -559,12 +559,27 @@ class RecepcionRFIDEncuadre(models.Model):
 
 
 class RecepcionRFIDLectura(models.Model):
+    # ``metadata["source"]`` de una lectura que llegó por ``epc`` (EC-982).
+    FUENTE_EPC = "EPC"
+
     encuadre = models.ForeignKey(
         RecepcionRFIDEncuadre,
         on_delete=models.CASCADE,
         related_name="lecturas",
     )
+    # Con ``epc`` (EC-982) guarda el EPC de la etiqueta (forma canónica) si está
+    # registrada o, si no, el EPC normalizado; lo que mandó el lector queda en
+    # ``metadata.epc_leido``. Con ``codigo_tag`` (obsoleto), el texto tal cual.
     codigo_tag = models.CharField(max_length=120)
+    # Etiqueta impresa por el ERP con el EPC leído (EC-982). Nula = lectura por
+    # ``codigo_tag`` o EPC que no está registrado en la empresa del encuadre.
+    etiqueta = models.ForeignKey(
+        "wms.EtiquetaRFIDDetalle",
+        on_delete=models.SET_NULL,
+        related_name="lecturas_encuadre",
+        null=True,
+        blank=True,
+    )
     orden_compra_detalle = models.ForeignKey(
         OrdenCompraDetalle,
         on_delete=models.CASCADE,

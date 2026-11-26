@@ -2,7 +2,7 @@ from django.db.models import Prefetch
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import extend_schema, extend_schema_view
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from rest_framework import mixins, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -40,6 +40,7 @@ from wms.models import (
     Transferencia,
     TransferenciaDetalle,
 )
+from nucleo.kpis import entero_param
 from nucleo.listados import PaginacionOpcionalLimitOffset
 from wms.api.lectores_rfid import lectores_visibles
 from wms.api import pickings_listado
@@ -905,6 +906,27 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             )
         return recibir_lecturas(request._request, lector)
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("lector", OpenApiTypes.INT,
+                             description="Solo las lecturas de ese lector (id)."),
+            OpenApiParameter("solo_match", OpenApiTypes.BOOL,
+                             description="`1`: solo lecturas de etiquetas impresas por el ERP."),
+            OpenApiParameter("unicos", OpenApiTypes.BOOL,
+                             description="`1`: la última lectura de cada EPC."),
+            OpenApiParameter("limite", OpenApiTypes.INT,
+                             description="Máximo de lecturas (1-200, default 50)."),
+            OpenApiParameter("despues_de_id", OpenApiTypes.INT, description=(
+                "Cursor (EC-982): solo lecturas con `id` mayor. Para ignorar lo leído antes de "
+                "empezar una captura, manda el `id` más alto que ya viste. Con `unicos`, la última "
+                "lectura de cada EPC sale solo si es posterior al cursor; `limite` se aplica "
+                "después. Entero >= 0; inválido → 400."
+            )),
+            OpenApiParameter("epc", OpenApiTypes.STR,
+                             description="Debug: busca este EPC entre las lecturas devueltas."),
+        ],
+        responses=OpenApiTypes.OBJECT,
+    )
     @action(
         detail=False,
         methods=["get"],
@@ -916,7 +938,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
 
         Filtros opcionales: ``lector=<id>`` (solo ese lector),
         ``solo_match=1`` (solo etiquetas impresas por el ERP),
-        ``unicos=1`` (última lectura por EPC) y ``limite`` (1-200, default 50).
+        ``unicos=1`` (última lectura por EPC), ``limite`` (1-200, default 50) y
+        ``despues_de_id`` (EC-982: solo lecturas con ``id`` mayor; inválido → 400).
 
         Acotado a la empresa activa del usuario, superusuario incluido (EC-884,
         ``RfidScan.objects.visibles_para``); no admin: lectores de sus sucursales.
@@ -945,8 +968,12 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         # ajenos cerca del lector llenaban las 50 en un minuto.
         if str(params.get("solo_match", "")).lower() in {"1", "true", "si"}:
             base = base.filter(etiqueta__isnull=False)
-        # ``unicos=1``: la última lectura de cada EPC (el FX repite el mismo tag
-        # varias veces por segundo).
+        # ``despues_de_id`` (EC-982): solo lecturas con ``id`` mayor. Con ``unicos``
+        # sale la última lectura de cada EPC (``RfidLecturaUltima``) solo si es
+        # posterior al cursor; ``limite`` se aplica después.
+        despues_de_id = entero_param(request, "despues_de_id")
+        if despues_de_id is not None:
+            base = base.filter(pk__gt=despues_de_id)
         # ``lector=<id>``: solo las lecturas de ese lector (combinable con los
         # otros dos). Sin él, todas las de la empresa, como antes.
         lector_param = str(params.get("lector", "")).strip()

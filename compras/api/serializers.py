@@ -5,6 +5,7 @@ from drf_spectacular.utils import extend_schema_field
 
 from rest_framework import serializers
 from nucleo.listados import nombre_para_mostrar_usuario as _nombre_usuario
+from wms.services.rfid_scan_service import normalizar_epc
 from compras.models import (
     CalidadInspeccion,
     CalidadInspeccionDetalle,
@@ -856,18 +857,25 @@ class RecepcionRFIDLecturaSerializer(serializers.ModelSerializer):
     producto_variante_nombre = serializers.CharField(
         source="producto_variante.nombre", read_only=True, default=None
     )
+    # EC-982: el EPC de la pieza (= ``codigo_tag``) si la lectura llegó por
+    # ``epc``; ``null`` si llegó por ``codigo_tag``. Sin consultas extra.
+    epc = serializers.SerializerMethodField()
 
     class Meta:
         model = RecepcionRFIDLectura
         fields = [
-            "id", "codigo_tag", "orden_compra_detalle", "orden_produccion_detalle",
+            "id", "codigo_tag", "epc", "etiqueta", "orden_compra_detalle", "orden_produccion_detalle",
             "producto", "producto_nombre", "producto_variante", "producto_variante_nombre",
             "cantidad_leida", "metadata", "created_at",
         ]
         read_only_fields = [
-            "producto", "producto_variante", "orden_compra_detalle",
+            "etiqueta", "producto", "producto_variante", "orden_compra_detalle",
             "orden_produccion_detalle", "metadata",
         ]
+
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_epc(self, obj):
+        return obj.codigo_tag if (obj.metadata or {}).get("source") == RecepcionRFIDLectura.FUENTE_EPC else None
 
 
 class RecepcionRFIDEncuadreSerializer(_CancelacionRecepcionMixin, serializers.ModelSerializer):
@@ -961,7 +969,35 @@ class RecepcionRFIDEncuadreCreateSerializer(serializers.ModelSerializer):
 
 
 class RecepcionRFIDLecturaInputSerializer(serializers.Serializer):
-    codigo_tag = serializers.CharField()
+    """Una lectura del encuadre: exactamente uno de ``epc`` o ``codigo_tag`` (EC-982)."""
+
+    # Largo de ``RecepcionRFIDLectura.codigo_tag``: más largo era un 500 de la BD.
+    LARGO_MAXIMO = RecepcionRFIDLectura._meta.get_field("codigo_tag").max_length
+
+    epc = serializers.CharField(
+        required=False, max_length=LARGO_MAXIMO,
+        help_text=(
+            "EPC del tag (hex; se aceptan espacios, `:` y `-`, y el relleno a 128 bits). "
+            "Se resuelve por la etiqueta que imprimió el ERP en la empresa del encuadre."
+        ),
+    )
+    codigo_tag = serializers.CharField(
+        required=False, max_length=LARGO_MAXIMO,
+        help_text=(
+            "Obsoleto: usa `epc`. SKU de variante o código/cod_proscai de producto "
+            "(lector tipo teclado). Se parte por espacios y comas."
+        ),
+    )
+
+    def validate_epc(self, value):
+        if not normalizar_epc(value):
+            raise serializers.ValidationError("EPC vacío.")
+        return value
+
+    def validate(self, attrs):
+        if ("epc" in attrs) == ("codigo_tag" in attrs):
+            raise serializers.ValidationError({"epc": "Envía exactamente uno de epc o codigo_tag."})
+        return attrs
 
 
 

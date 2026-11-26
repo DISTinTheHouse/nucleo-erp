@@ -641,6 +641,91 @@ class ScannerRFIDSeguridadTests(TestCase):
         self.assertEqual(len(epcs), 3)
         self.assertTrue(all(e.startswith("aaaa") for e in epcs))
 
+    # ── Cursor ``despues_de_id`` (EC-982) ─────────────────────────────
+
+    def _ids_scans(self, user, **params):
+        resp = self._api(user).get(self.SCANS_URL, params)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return [s["id"] for s in resp.json()["scans"]]
+
+    def test_cursor_solo_lecturas_con_id_mayor(self):
+        self._sembrar(self.empresa_a, self.lector_a, 3, "viej")
+        corte = RfidScan.objects.order_by("-id").values_list("id", flat=True).first()
+        self._sembrar(self.empresa_a, self.lector_a, 2, "nuev")
+        nuevas = list(RfidScan.objects.filter(pk__gt=corte).order_by("-id").values_list("id", flat=True))
+
+        self.assertEqual(self._ids_scans(self.admin_a, despues_de_id=corte), nuevas)
+        # Sin cursor, igual que antes: las cinco.
+        self.assertEqual(len(self._ids_scans(self.admin_a)), 5)
+        # Cursor en 0 = sin recorte; cursor más allá de todo = vacío.
+        self.assertEqual(len(self._ids_scans(self.admin_a, despues_de_id=0)), 5)
+        self.assertEqual(self._ids_scans(self.admin_a, despues_de_id=nuevas[0]), [])
+
+    def test_cursor_con_limite_toma_las_mas_recientes_despues_del_corte(self):
+        self._sembrar(self.empresa_a, self.lector_a, 2, "viej")
+        corte = RfidScan.objects.order_by("-id").values_list("id", flat=True).first()
+        self._sembrar(self.empresa_a, self.lector_a, 5, "nuev")
+        nuevas = list(RfidScan.objects.filter(pk__gt=corte).order_by("-id").values_list("id", flat=True))
+
+        self.assertEqual(self._ids_scans(self.admin_a, despues_de_id=corte, limite=3), nuevas[:3])
+
+    def test_cursor_con_unicos_busca_la_ultima_lectura_entre_las_nuevas(self):
+        # Por ``scans/receive/`` con el token del lector: así se llena
+        # ``RfidLecturaUltima``, de donde sale ``unicos`` (#1460). Entre lotes se
+        # envejece ``visto`` para pasar la ventana de dedupe de 30 s.
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        def recibir(*epcs):
+            RfidLecturaUltima.objects.update(visto=timezone.now() - timedelta(seconds=31))
+            resp = self._post_receive([{"epcId": e} for e in epcs], HTTP_X_RFID_TOKEN=self.lector_a.token)
+            self.assertEqual(resp.status_code, 200, resp.content)
+
+        def ultima(epc):
+            return RfidScan.objects.filter(epc=epc).order_by("-id").values_list("id", flat=True).first()
+
+        # AAAA antes y después del corte; BBBB solo antes; CCCC solo después.
+        recibir("AAAABBBBCCCCDDDD0001", "BBBBCCCCDDDDEEEE0001")
+        viejo = ultima("AAAABBBBCCCCDDDD0001")
+        corte = RfidScan.objects.order_by("-id").values_list("id", flat=True).first()
+        recibir("AAAABBBBCCCCDDDD0001")
+        r1 = ultima("AAAABBBBCCCCDDDD0001")
+        recibir("AAAABBBBCCCCDDDD0001", "CCCCDDDDEEEEFFFF0001")
+        r2, r3 = ultima("AAAABBBBCCCCDDDD0001"), ultima("CCCCDDDDEEEEFFFF0001")
+        self.assertEqual(len({viejo, r1, r2, r3}), 4)
+
+        ids = self._ids_scans(self.admin_a, despues_de_id=corte, unicos=1)
+        self.assertEqual(sorted(ids), sorted([r2, r3]))
+        # Combinado con ``lector``: lo mismo; con otro lector de la empresa, nada.
+        self.assertEqual(
+            sorted(self._ids_scans(self.admin_a, despues_de_id=corte, unicos=1, lector=self.lector_a.pk)),
+            sorted([r2, r3]),
+        )
+        # Cursor más allá de la última lectura de cada EPC: vacío.
+        self.assertEqual(self._ids_scans(self.admin_a, despues_de_id=max(r2, r3), unicos=1), [])
+        # Con solo_match: solo las ligadas a etiqueta (ninguna aquí).
+        self.assertEqual(self._ids_scans(self.admin_a, despues_de_id=corte, unicos=1, solo_match=1), [])
+
+    def test_cursor_invalido_400(self):
+        for valor in ("x", "-1", "1.5", "99999999999999999999"):
+            with self.subTest(valor=valor):
+                resp = self._api(self.admin_a).get(self.SCANS_URL, {"despues_de_id": valor})
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn("despues_de_id", resp.json())
+        # Vacío = sin cursor, como los demás filtros enteros del repo.
+        self.assertEqual(self._api(self.admin_a).get(self.SCANS_URL, {"despues_de_id": ""}).status_code, 200)
+
+    def test_cursor_no_cruza_empresas(self):
+        self._sembrar(self.empresa_b, self.lector_b, 3, "bbbb")
+        self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
+        self._sembrar(self.empresa_b, self.lector_b, 3, "bbbb")
+        propia = RfidScan.objects.get(empresa=self.empresa_a).pk
+
+        self.assertEqual(self._ids_scans(self.admin_a, despues_de_id=0), [propia])
+        self.assertEqual(self._ids_scans(self.superuser, despues_de_id=0), [propia])
+        self.assertEqual(self._ids_scans(self.admin_a, despues_de_id=propia), [])
+
     def test_scans_no_admin_solo_ve_lectores_de_sus_sucursales(self):
         self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
         self._sembrar(self.empresa_a, self.lector_a2, 1, "a2a2")
