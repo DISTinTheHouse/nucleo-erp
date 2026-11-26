@@ -3769,10 +3769,20 @@ class PedidoViewSet(viewsets.ModelViewSet):
         ]
         if abiertas:
             raise PedidoConOcAbiertas(abiertas)
-        if ocs:
-            OC.objects.filter(pk__in=[o["pk"] for o in ocs]).update(
+        if not ocs:
+            return []
+        # #1403: una OC que también cubre otro pedido vivo no se marca; compras la
+        # sigue necesitando. Una consulta con dos EXISTS (FK ``pedido`` y M2M ``pedidos``).
+        vivo = Q(activo=True) & ~Q(estatus=Pedido.ESTATUS_CANCELADO) & ~Q(pk=pedido.pk)
+        Liga = OC.pedidos.through
+        otro_vivo = Exists(Pedido.objects.filter(vivo, pk=OuterRef("pedido_id"))) | Exists(
+            Liga.objects.filter(ordencompra_id=OuterRef("pk"), pedido__in=Pedido.objects.filter(vivo)))
+        marcar = list(
+            OC.objects.filter(pk__in=[o["pk"] for o in ocs]).exclude(otro_vivo).values_list("pk", flat=True))
+        if marcar:
+            OC.objects.filter(pk__in=marcar).update(
                 pedido_cancelado=True, fecha_pedido_cancelado=timezone.now(), updated_at=timezone.now())
-        return [{"id": o["pk"], "folio": o["folio"]} for o in ocs]
+        return [{"id": o["pk"], "folio": o["folio"]} for o in ocs if o["pk"] in marcar]
 
     def _cancelar_pre_ordenes_del_pedido(self, pedido, user, motivo):
         """Cancela la pre-orden abierta del pedido y libera sus necesidades (las ya en OC
@@ -3780,7 +3790,13 @@ class PedidoViewSet(viewsets.ModelViewSet):
         from produccion.models import PreOrdenProduccion as P
         from produccion.services import pre_orden_service
         canceladas = []
-        for pk in P.objects.filter(pedido=pedido, estatus__in=pre_orden_service.CANCELABLES).values_list("pk", flat=True):
+        # #1405: mismo criterio que ``pre_orden_service.cancelar``: también la convertida
+        # cuya OP se canceló o ya no existe.
+        convertida_sin_op = Q(estatus=P.Estatus.CONVERTIDA) & (
+            Q(op__isnull=True) | Q(op__estatus_op=OrdenProduccion.EstatusOrdenProduccion.CANCELADO))
+        for pk in P.objects.filter(
+            Q(estatus__in=pre_orden_service.CANCELABLES) | convertida_sin_op, pedido=pedido,
+        ).values_list("pk", flat=True):
             pre = pre_orden_service.cancelar(pk, user, motivo=f"pedido cancelado: {motivo}")
             canceladas.append({"id": pre.pk, "necesidades_liberadas": pre._liberadas,
                                "necesidades_huerfanas": pre._huerfanas})

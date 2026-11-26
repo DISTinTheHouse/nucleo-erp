@@ -1624,6 +1624,9 @@ class FacturaProveedorViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             # Sin cambio real tampoco se reescribe: el null guardado se queda.
             for field in blank_resends:
                 serializer.validated_data.pop(field)
+        elif serializer.validated_data.get("estatus") == FacturaProveedor.FacturaProveedorStatus.CANCELADA:
+            # #1395: cancelar exige motivo, permiso y auditoría; sólo por ``POST cancelar/``.
+            raise ValidationError({"estatus": "Para cancelar usa POST cancelar/ con motivo."})
         # Con CxP, la factura ya no cambia de total ni de proveedor ni vuelve a
         # Borrador/Cancelada: se compara contra la fila bloqueada, no la de get_object().
         CuentaPorPagarService.ensure_invoice_edit_keeps_account(locked, serializer.validated_data)
@@ -2266,8 +2269,10 @@ class CobroViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
                 motivo = canc.motivo_requerido(self.request)
                 CobroService.cancelar_cobro(instance, self.request.user)
                 canc.registrar_cancelacion(instance, self.request, motivo, antes, {"via": "DELETE"})
-            else:
-                canc.auditar_baja(instance, self.request)
+                # #1396: queda Cancelado y visible, como ``POST cancelar/``; ocultarlo
+                # o borrarlo perdía el motivo y quién canceló.
+                return
+            canc.auditar_baja(instance, self.request)
             if instance.movimientos_bancarios.exists():
                 # El movimiento bancario es la huella del documento (FK PROTECT):
                 # borrar de verdad daba 500. Queda cancelado y fuera del listado.
@@ -2421,8 +2426,10 @@ class PagoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
                 motivo = canc.motivo_requerido(self.request)
                 PagoService.cancelar_pago(instance, self.request.user)
                 canc.registrar_cancelacion(instance, self.request, motivo, antes, {"via": "DELETE"})
-            else:
-                canc.auditar_baja(instance, self.request)
+                # #1396: queda Cancelado y visible, como ``POST cancelar/``; ocultarlo
+                # o borrarlo perdía el motivo y quién canceló.
+                return
+            canc.auditar_baja(instance, self.request)
             if instance.movimientos_bancarios.exists():
                 # El movimiento bancario es la huella del documento (FK PROTECT):
                 # borrar de verdad daba 500. Queda cancelado y fuera del listado.
@@ -2739,7 +2746,8 @@ class NotaCreditoViewSet(LecturaConDatosPdfMixin, FinanzasBaseViewSet):
             qs = qs.filter(folio__icontains=folio)
         if factura:
             qs = qs.filter(factura_id=factura)
-        if motivo:
+        # #1397: sólo en el listado; en DELETE y ``cancelar/`` ``?motivo=`` es el de la cancelación.
+        if motivo and self.action == "list":
             qs = qs.filter(motivo__icontains=motivo)
         qs = _aplicar_filtros_fecha(qs, qp, fecha_campo="fecha_emision")
         return _aplicar_ordering(qs, qp, ["-fecha_emision", "-id"])

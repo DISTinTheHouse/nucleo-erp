@@ -31,7 +31,11 @@ class DevolucionProveedorSerializer(serializers.ModelSerializer):
     proveedor_nombre = serializers.CharField(source="proveedor.razon_social", read_only=True, default=None)
     recepcion_folio = serializers.CharField(source="recepcion.folio", read_only=True, default=None)
     orden_compra_folio = serializers.CharField(source="orden_compra.folio", read_only=True, default=None)
-    usuario_nombre = serializers.CharField(source="usuario.get_full_name", read_only=True, default=None)
+    # #1406: nombre completo o correo, como ``cancelado_por_nombre``.
+    usuario_nombre = serializers.SerializerMethodField()
+
+    def get_usuario_nombre(self, obj):
+        return _nombre_usuario(obj.usuario) if obj.usuario_id else None
     # Nombre completo o correo; ``null`` sin cancelar (EC-966, como ``_CancelacionRecepcionMixin``).
     # ``cancelado_por`` va en el ``select_related`` del viewset.
     cancelado_por_nombre = serializers.SerializerMethodField()
