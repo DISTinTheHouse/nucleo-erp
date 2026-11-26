@@ -56,6 +56,12 @@ class FacturaCancelacionService:
             raise ErrorDeNegocio({"cfdi": PENDIENTE_CFDI})
         if actual.cfdi_uuid and not actual.cfdi_cancelado:
             FacturaTimbradoService.cancelar_cfdi(factura, motivo_sat)
+        # Si ``_cancelar_en_erp`` (o ``al_cancelar``) falla de aquí en adelante, la factura queda
+        # Emitida con ``cfdi_cancelado=True``: es el estado de reintento esperado (EC-972), no
+        # una inconsistencia. ``cancelada_o_en_cancelacion`` ya la trata como cancelada, así que
+        # no admite nota de crédito ni REP (``NotaCreditoService.validar_factura``,
+        # ``construir_payload_rep``) ni cobros (``motivo_no_cobrable``); el reintento de
+        # ``cancelar/`` no vuelve a llamar al SAT y termina la parte del ERP.
         return FacturaCancelacionService._cancelar_en_erp(factura, usuario, motivo, al_cancelar)
 
     @staticmethod

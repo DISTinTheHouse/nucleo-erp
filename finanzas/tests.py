@@ -9746,6 +9746,39 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.assertEqual(rastro[0], "Reintento")
         self.assertEqual(eventos.count(), 1)
 
+    def test_cfdi_cancelado_y_aun_emitida_no_admite_nota_ni_rep(self):  # EC-972
+        """Estado de reintento: el SAT canceló y la parte del ERP falló. Nada se cuelga de la
+        factura hasta que el reintento la cancela."""
+        from finanzas.services.facturama import cfdi_payload
+        from finanzas.services.nota_credito_service import NotaCreditoService
+
+        factura = self._timbrada()
+        self.assertEqual(self._emitir(factura).status_code, 200)
+        cobro = Cobro.objects.create(
+            empresa=self.empresa, cliente=self.a["cliente"], cuenta_bancaria=self._crear_cuenta_bancaria(self.empresa),
+            metodo_pago="Transferencia", total_cobrado=Decimal("10.00"),
+        )
+        CobroDetalle.objects.create(cobro=cobro, cxc=CuentaPorCobrar.objects.get(factura=factura), importe_aplicado=Decimal("10.00"))
+        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
+        with patch(
+            "finanzas.services.factura_cancelacion_service.FacturaPolizaService.cancelar",
+            side_effect=RuntimeError("contrapóliza rota"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._cancelar(factura)
+        factura.refresh_from_db()
+        self.assertEqual((factura.estatus, factura.cfdi_cancelado), (Factura.FacturaStatus.EMITIDA, True))
+
+        with self.assertRaisesMessage(ErrorDeNegocio, "en proceso"):  # emitir y timbrar la nota
+            NotaCreditoService.validar_factura(factura)
+        with self.assertRaisesMessage(ErrorDeNegocio, "en proceso"):  # timbrar-rep/
+            cfdi_payload.construir_payload_rep(cobro)
+
+        self.assertEqual(self._cancelar(factura).status_code, 200)
+        self.assertEqual(self.facturama.cancel_cfdi.call_count, 1)
+        factura.refresh_from_db()
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+
     def test_envia_pdf_y_xml_del_cfdi_al_correo_de_la_factura(self):
         from django.core import mail
 
