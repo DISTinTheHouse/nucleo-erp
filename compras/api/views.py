@@ -3209,6 +3209,18 @@ class CalidadInspeccionViewSet(viewsets.ReadOnlyModelViewSet):
     )
     serializer_class = CalidadInspeccionSerializer
     http_method_names = ["get", "post"]
+    # #1411: como OC, recepciones y devoluciones. Sin ``?limit=`` la lista completa
+    # (compatible con el front actual); con él, ``{count, next, previous, results}``.
+    pagination_class = PaginacionOpcionalLimitOffset
+    search_fields = [
+        "recepcion__folio", "recepcion__orden_compra__folio", "recepcion__proveedor__nombre",
+        "recepcion__proveedor__razon_social",
+    ]
+    filter_backends = [
+        *[b for b in viewsets.ReadOnlyModelViewSet.filter_backends if b is not OrderingFilter],
+        OrdenamientoEstableFilter,
+    ]
+    ordering_fields = ["id", "fecha", "estado", "recepcion__folio"]
 
     def list(self, request, *args, **kwargs):
         # ``pedidos`` de todas las recepciones de la página en bloque (2 consultas).
