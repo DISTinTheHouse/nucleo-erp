@@ -174,6 +174,8 @@ class OrdenCorteMangaService:
 
         resultado = {}
         for orden in ordenes:
+            # #1390: una orden cancelada nunca sale ``completa``, cubra lo que cubra.
+            cancelada = orden.estatus_corte == OrdenesCorteManga.EstatusCorte.CANCELADO
             contratado_int = math.floor(contratado.get(orden.pedido_id, 0.0) + EPS_CANTIDAD)
             cubierto_int = min(
                 math.floor(cubierto_por_ocm.get(orden.pk, 0.0) + EPS_CANTIDAD),
@@ -182,7 +184,7 @@ class OrdenCorteMangaService:
             resultado[orden.pk] = {
                 "cubierto": cubierto_int,
                 "contratado": contratado_int,
-                "completa": contratado_int > 0 and cubierto_int >= contratado_int,
+                "completa": contratado_int > 0 and cubierto_int >= contratado_int and not cancelada,
             }
         return resultado
 
