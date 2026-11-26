@@ -9258,12 +9258,18 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         factura.refresh_from_db()
         self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)
         self.assertTrue(factura.cfdi_cancelado)
+        rastro, eventos = self._rastro(factura)  # EC-972: sin cancelación en el ERP, sin rastro
+        self.assertEqual(rastro, ("", None, None))
+        self.assertFalse(eventos.exists())
 
         self.assertEqual(self._cancelar(factura).status_code, 200)
 
         self.assertEqual(self.facturama.cancel_cfdi.call_count, 1)
         factura.refresh_from_db()
         self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+        rastro, eventos = self._rastro(factura)
+        self.assertEqual(rastro[0], "Prueba de cancelación")
+        self.assertEqual(eventos.count(), 1)
 
     def test_si_el_receptor_rechaza_la_cancelacion_se_libera_la_solicitud(self):
         factura = self._timbrada()
@@ -9653,6 +9659,92 @@ class TimbrarFacturaTests(EmitirFacturaTests):
         self.assertEqual(self._cancelar(factura).status_code, 200)
 
         self.assertEqual(profundidad["llamada"], profundidad["prueba"])
+
+    # EC-972: el rastro de #1356 (motivo/fecha/quién + AuditoriaEvento) va en la transacción
+    # de la cancelación en el ERP, no en una que envuelva la llamada a Facturama.
+
+    def _rastro(self, factura):
+        from auditoria.models import AuditoriaEvento
+
+        factura.refresh_from_db()
+        eventos = AuditoriaEvento.objects.filter(tabla="facturas", id_registro=str(factura.pk), accion="CANCELAR")
+        return (factura.motivo_cancelacion, factura.fecha_cancelacion, factura.cancelado_por_id), eventos
+
+    def test_pendiente_o_incierto_no_escribe_el_rastro(self):  # EC-972
+        factura = self._timbrada()
+        for resultado in ({"Status": "requested"}, {"Status": "pending"}, FacturamaAPIException("caído", status_code=503)):
+            with self.subTest(resultado=resultado):
+                if isinstance(resultado, Exception):
+                    self.facturama.cancel_cfdi.side_effect = resultado
+                else:
+                    self.facturama.cancel_cfdi.return_value = resultado
+
+                self.assertEqual(self._cancelar(factura, motivo="No se entregó").status_code, 400)
+
+                rastro, eventos = self._rastro(factura)
+                self.assertEqual(rastro, ("", None, None))
+                self.assertFalse(eventos.exists())
+                self.assertEqual(factura.estatus, Factura.FacturaStatus.BORRADOR)
+                self.assertNotIn("No se entregó", factura.observaciones or "")
+        # Lo que sí se guarda (EC-806): la solicitud ante el SAT, la reserva y el motivo fijado.
+        self.assertTrue(factura.cfdi_cancelacion_solicitada)
+        self.assertIsNotNone(factura.cfdi_cancelacion_en_curso_desde)
+        self.assertEqual(factura.cfdi_cancelacion_motivo, "02")
+
+    def test_cancelar_escribe_el_rastro_en_la_transaccion_del_erp(self):  # EC-972
+        factura = self._timbrada()
+        self.assertEqual(self._emitir(factura).status_code, 200)
+        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
+        base = len(connection.atomic_blocks)
+        visto = {}
+        original = finanzas_views.canc.registrar_cancelacion
+
+        def espiar(doc, *args, **kwargs):
+            visto["profundidad"] = len(connection.atomic_blocks)
+            visto["estatus"] = Factura.objects.get(pk=doc.pk).estatus  # ya cancelada, mismo atomic
+            visto["cxc"] = CuentaPorCobrar.objects.get(factura=doc).estatus
+            return original(doc, *args, **kwargs)
+
+        with patch.object(finanzas_views.canc, "registrar_cancelacion", side_effect=espiar):
+            resp = self._cancelar(factura, motivo_sat="03", motivo="No se entregó")
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertGreater(visto["profundidad"], base)
+        self.assertEqual(visto["estatus"], Factura.FacturaStatus.CANCELADA)
+        self.assertEqual(visto["cxc"], CuentaPorCobrar.EstatusCxC.CANCELADA)
+        (motivo, fecha, cancelado_por), eventos = self._rastro(factura)
+        self.assertEqual((motivo, cancelado_por), ("No se entregó", self.a["usuario"].pk))
+        self.assertIsNotNone(fecha)
+        self.assertIn("Cancelada: No se entregó", factura.observaciones)
+        (evento,) = eventos
+        self.assertEqual(evento.antes_json["estatus"], Factura.FacturaStatus.EMITIDA)
+        self.assertEqual(evento.despues_json["estatus"], Factura.FacturaStatus.CANCELADA)
+        self.assertEqual(evento.despues_json["motivo_sat"], "03")
+        self.assertEqual(evento.despues_json["contrapoliza_id"], resp.data["contrapoliza_id"])
+        self.assertEqual(resp.data["motivo_cancelacion"], "No se entregó")
+
+    def test_si_falla_el_rastro_tras_cancelar_en_el_sat_el_reintento_lo_completa(self):  # EC-972
+        factura = self._timbrada()
+        self.assertEqual(self._emitir(factura).status_code, 200)
+        self.facturama.cancel_cfdi.return_value = {"Status": "canceled"}
+        with patch.object(finanzas_views.canc, "registrar_cancelacion", side_effect=RuntimeError("rastro roto")):
+            with self.assertRaises(RuntimeError):
+                self._cancelar(factura)
+
+        rastro, eventos = self._rastro(factura)
+        self.assertTrue(factura.cfdi_cancelado)
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.EMITIDA)  # la cancelación en el ERP se deshizo
+        self.assertEqual(CuentaPorCobrar.objects.get(factura=factura).estatus, CuentaPorCobrar.EstatusCxC.PENDIENTE)
+        self.assertEqual(rastro, ("", None, None))
+        self.assertFalse(eventos.exists())
+
+        self.assertEqual(self._cancelar(factura, motivo="Reintento").status_code, 200)
+
+        self.assertEqual(self.facturama.cancel_cfdi.call_count, 1)
+        rastro, eventos = self._rastro(factura)
+        self.assertEqual(factura.estatus, Factura.FacturaStatus.CANCELADA)
+        self.assertEqual(rastro[0], "Reintento")
+        self.assertEqual(eventos.count(), 1)
 
     def test_envia_pdf_y_xml_del_cfdi_al_correo_de_la_factura(self):
         from django.core import mail
