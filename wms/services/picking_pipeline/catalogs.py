@@ -50,7 +50,7 @@ def folio_preview(empresa, sucursal, tipo_documento="Picking"):
 
 
 # Destino de la programación -> almacén por nombre (mismo criterio que APARTADOS).
-# EMBARQUE/REFLEJANTE/CORTE_MANGA no tienen almacén propio: van sin sugerencia.
+# EMBARQUE no tiene almacén propio: sale de APARTADOS.
 # Almacén sugerido por destino de programación.
 ALMACEN_POR_DESTINO = {
     "APARTADO": "APARTADOS",
