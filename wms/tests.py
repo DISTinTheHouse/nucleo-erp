@@ -5630,6 +5630,34 @@ class EtiquetasRFIDListadoServidorEC989Tests(TestCase):
             with self.subTest(ordering=ordering):
                 self.assertEqual(self._ids({"ordering": ordering}), esperado)
 
+    def test_ordering_con_el_desempate_del_front(self):
+        """``useServerTable`` manda ``ordering=<campo>,-id`` (``tiebreaker: "-id"``):
+        el ``-id`` se respeta en los empates, también en órdenes ascendentes."""
+        from catalogo.models import ProductoVariante
+
+        # i5 empata con i3 en cantidad y con i1/i3 en SKU.
+        i5 = EtiquetaRFIDImpresion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, producto=self.polo,
+            producto_variante=ProductoVariante.objects.get(pk=self.variante.pk),
+            status=EtiquetaRFIDImpresion.Estatus.EXITO, cantidad=3, rfid_mode=False,
+        )
+        i1, i2, i3, i4, i5 = self.i1.pk, self.i2.pk, self.i3.pk, self.i4.pk, i5.pk
+        casos = {
+            "cantidad,-id": [i2, i5, i3, i1, i4],
+            "-cantidad,-id": [i4, i1, i5, i3, i2],
+            "sku,-id": [i5, i3, i1, i4, i2],
+            "-sku,-id": [i5, i3, i1, i4, i2],
+            "folio,-id": [i1, i2, i3, i4, i5],
+            "-folio,-id": [i5, i4, i3, i2, i1],
+        }
+        for ordering, esperado in casos.items():
+            with self.subTest(ordering=ordering):
+                self.assertEqual(self._ids({"ordering": ordering}), esperado)
+        # Con paginación, el empate de ``cantidad`` (i5, i3) no se parte ni se repite.
+        primera = self._ids({"ordering": "cantidad,-id", "limit": 2, "offset": 0})
+        segunda = self._ids({"ordering": "cantidad,-id", "limit": 2, "offset": 2})
+        self.assertEqual(primera + segunda, [i2, i5, i3, i1])
+
     # ── combinados con paginación ─────────────────────────────────────
 
     def test_search_status_y_ordering_con_paginacion(self):
