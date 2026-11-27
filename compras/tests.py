@@ -3361,6 +3361,21 @@ class EncuadreRFIDLecturasLoteTests(_EncuadreRFIDEPCFixture, TestCase):
         )
         self.assertEqual(self.encuadre.lecturas.count(), 2)
 
+    def test_epc_con_espacios_se_resuelve_y_se_regresa_tal_cual(self):
+        epcs = [f"  {self.EPC_G}\t", f" {self.EPC_G} ", " - : ", self.EPC_PRODUCTO]
+        resp = self._lote(epcs)
+        # Solo espacios y separadores: EPC vacío, la tanda completa.
+        self.assertEqual(resp.json(), {"epcs": {"2": ["EPC vacío."]}})
+        epcs.pop(2)
+        data = self._lote_ok(epcs)
+        self.assertEqual([c["codigo_tag"] for c in data["creadas"]], [self.EPC_G, self.EPC_PRODUCTO])
+        self.assertEqual(data["creadas"][0]["metadata"]["epc_leido"], self.EPC_G)
+        self.assertEqual(data["rechazadas"], [
+            {"epc": f" {self.EPC_G} ", "motivo": "repetido_en_tanda", "mensaje": self.REPETIDO},
+        ])
+        data = self._lote_ok([f"\n{self.EPC_PRODUCTO} "])
+        self.assertEqual(data["rechazadas"][0]["epc"], f"\n{self.EPC_PRODUCTO} ")
+
     def test_ya_leidas_en_el_encuadre_se_rechazan_y_el_resto_se_guarda(self):
         self._leer_ok({"epc": self.EPC_G})
         self._leer_ok({"epc": f"{self.DESCONOCIDO}00000000"})

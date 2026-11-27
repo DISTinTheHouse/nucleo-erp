@@ -1047,7 +1047,11 @@ class RecepcionRFIDLecturasLoteInputSerializer(serializers.Serializer):
     TOPE = 200
 
     epcs = serializers.ListField(
-        child=serializers.CharField(max_length=RecepcionRFIDLecturaInputSerializer.LARGO_MAXIMO),
+        # Sin recortar: ``rechazadas[].epc`` regresa el texto tal como se mandó;
+        # ``normalizar_epc`` quita los espacios para resolver y deduplicar.
+        child=serializers.CharField(
+            max_length=RecepcionRFIDLecturaInputSerializer.LARGO_MAXIMO, trim_whitespace=False,
+        ),
         allow_empty=False,
         max_length=TOPE,
         error_messages={

@@ -3340,7 +3340,7 @@ Respuesta `200`:
   ]
 }
 ```
-- **Se rechaza por pieza y el resto se guarda** (`rechazadas[]`, en el orden en que llegaron; `epc` es el texto tal como se mandó):
+- **Se rechaza por pieza y el resto se guarda** (`rechazadas[]`, en el orden en que llegaron; `epc` es el texto tal como se mandó, sin recortar espacios):
   - `repetido_en_tanda`: la misma pieza ya venía antes en la tanda (cualquier forma equivalente del EPC o la misma etiqueta).
   - `repetido_en_encuadre`: el encuadre ya la tiene, con las mismas reglas que el `400` de `{"epc"}`.
   - `en_otro_encuadre`: ya está en otro encuadre `PENDIENTE` o `ACEPTADO` de la misma OC/OP (#1453); trae `encuadre`. Las de encuadres cancelados entran.
