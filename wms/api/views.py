@@ -918,9 +918,12 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                              description="Máximo de lecturas (1-200, default 50)."),
             OpenApiParameter("despues_de_id", OpenApiTypes.INT, description=(
                 "Cursor (EC-982): solo lecturas con `id` mayor. Para ignorar lo leído antes de "
-                "empezar una captura, manda el `id` más alto que ya viste. Con `unicos`, la última "
-                "lectura de cada EPC sale solo si es posterior al cursor; `limite` se aplica "
-                "después. Entero >= 0; inválido → 400."
+                "empezar una captura, manda el `id` más alto que ya viste. Con cursor el orden es "
+                "por `id` ascendente (lo más viejo primero, EC-984) y `limite` toma las primeras: "
+                "avanzar el cursor al `id` más alto de cada respuesta recorre todas las lecturas "
+                "aunque lleguen más de `limite` entre dos pollings. Sin cursor, lo más nuevo "
+                "primero. Con `unicos`, la última lectura de cada EPC sale solo si es posterior "
+                "al cursor. Entero >= 0; inválido → 400."
             )),
             OpenApiParameter("epc", OpenApiTypes.STR,
                              description="Debug: busca este EPC entre las lecturas devueltas."),
@@ -939,7 +942,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         Filtros opcionales: ``lector=<id>`` (solo ese lector),
         ``solo_match=1`` (solo etiquetas impresas por el ERP),
         ``unicos=1`` (última lectura por EPC), ``limite`` (1-200, default 50) y
-        ``despues_de_id`` (EC-982: solo lecturas con ``id`` mayor; inválido → 400).
+        ``despues_de_id`` (EC-982: solo lecturas con ``id`` mayor; inválido → 400;
+        con él, orden por ``id`` ascendente, EC-984).
 
         Acotado a la empresa activa del usuario, superusuario incluido (EC-884,
         ``RfidScan.objects.visibles_para``); no admin: lectores de sus sucursales.
@@ -1007,7 +1011,10 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 "etiqueta__impresion__producto_variante__color",
                 "etiqueta__impresion__producto_variante__talla",
             )
-            .order_by("-created_at", "-id")[:limite]
+            # Con cursor (EC-984), por ``id`` ascendente: si llegan más de ``limite``
+            # entre dos pollings, salen las más viejas y el siguiente cursor (el
+            # ``id`` más alto devuelto) recoge el resto sin saltarse ninguna.
+            .order_by(*(("id",) if despues_de_id is not None else ("-created_at", "-id")))[:limite]
         )
         # ``lector`` de otra empresa o de una sucursal ajena → 404, como el detalle
         # del lector. Solo se consulta si no hubo lecturas: con lecturas, el
