@@ -742,13 +742,13 @@ def _por_tipo_en_cero():
     return {k: {"registros": 0, "piezas": Decimal("0"), "costo": Decimal("0")} for k in TIPOS_RESUMEN}
 
 
-def _lados_transferencia(detalle, tipo, almacenes):
+def _lados_transferencia(detalle, tipo):
     """``almacen_origen_*``/``almacen_destino_*`` de una transferencia (null en otros tipos)."""
     datos = {}
     for lado in ("origen", "destino"):
-        aid = getattr(detalle, f"almacen_{lado}_res", None) if tipo == "TRANSFERENCIA" else None
-        datos[f"almacen_{lado}_id"] = aid
-        datos[f"almacen_{lado}_nombre"] = (almacenes.get(aid) or {}).get("nombre")
+        es_tr = tipo == "TRANSFERENCIA"
+        datos[f"almacen_{lado}_id"] = getattr(detalle, f"almacen_{lado}_res", None) if es_tr else None
+        datos[f"almacen_{lado}_nombre"] = getattr(detalle, f"tr_{lado}_nombre", None) if es_tr else None
     return datos
 
 
@@ -809,64 +809,79 @@ def categoria_inventario(tipo_almacen, tipo_producto):
     return {"PT": "PRODUCTO_TERMINADO", "MP": "MATERIA_PRIMA"}.get(tipo_almacen)
 
 
-def _documentos_contables(detalles):
-    """Facturas (proveedor por recepción, cliente por factura o pedido), sus
-    pólizas y el costo antes/después de cada renglón. Hasta 4 consultas fijas,
-    solo las que hagan falta."""
+def _sub(qs, campo):
+    return models.Subquery(qs.values(campo)[:1])
+
+
+def anotar_documentos(qs):
+    """Factura (de proveedor por recepción; de cliente por factura o, si no, la
+    más reciente del pedido), su póliza y el costo antes/después del renglón,
+    como subconsultas de la consulta del detalle: cero viajes extra a la BD.
+    Todas van por FK o índice (``ix_poliza_origen``)."""
     from finanzas.models import Factura, FacturaProveedor, Poliza
     from inventarios.models import HistorialCostoInventario
 
-    recepcion_ids = {d.o_recepcion_id for d in detalles if d.o_recepcion_id}
-    factura_ids = {d.o_factura_id for d in detalles if d.o_factura_id}
-    pedido_ids = {d.o_pedido_id for d in detalles if d.o_pedido_id}
+    vigente = ~models.Q(estatus="Cancelada")
+    fp = FacturaProveedor.objects.filter(vigente, recepcion_id=models.OuterRef(f"{M_}recepcion_id")).order_by("-id")
+    fc = Coalesce(
+        _sub(Factura.objects.filter(vigente, pk=models.OuterRef(f"{M_}factura_id")), "id"),
+        _sub(Factura.objects.filter(vigente, pedido_id=models.OuterRef(f"{M_}pedido_id")).order_by("-id"), "id"),
+    )
+    hist = HistorialCostoInventario.objects.filter(movimiento_detalle_id=models.OuterRef("pk")).order_by("-id")
+    qs = qs.annotate(
+        d_fp_id=_sub(fp, "id"), d_fp_folio=_sub(fp, "folio"), d_fc_id=fc,
+        d_costo_antes=_sub(hist, "costo_anterior"), d_costo_despues=_sub(hist, "costo_nuevo"),
+    )
+    fc_de = Factura.objects.filter(pk=models.OuterRef("d_fc_id"))
 
-    fact_prov = {}
-    if recepcion_ids:
-        for f in (
-            FacturaProveedor.objects.filter(recepcion_id__in=recepcion_ids)
-            .exclude(estatus="Cancelada").order_by("recepcion_id", "-id").values("id", "recepcion_id", "folio")
-        ):
-            fact_prov.setdefault(f["recepcion_id"], f)
-    fact_cli_id, fact_cli_pedido = {}, {}
-    if factura_ids or pedido_ids:
-        for f in (
-            Factura.objects.filter(models.Q(pk__in=factura_ids) | models.Q(pedido_id__in=pedido_ids))
-            .exclude(estatus="Cancelada").order_by("-id").values("id", "pedido_id", "folio", "cfdi_uuid")
-        ):
-            fact_cli_id[f["id"]] = f
-            if f["pedido_id"]:
-                fact_cli_pedido.setdefault(f["pedido_id"], f)
-    polizas = {}
-    origenes = models.Q(pk__in=[])
-    if fact_prov:
-        origenes |= models.Q(origen_tipo="FacturaProveedor", origen_id__in=[f["id"] for f in fact_prov.values()])
-    if fact_cli_id:
-        origenes |= models.Q(origen_tipo="Factura", origen_id__in=list(fact_cli_id))
-    if fact_prov or fact_cli_id:
-        for pz in Poliza.objects.filter(origenes).exclude(estatus="Cancelada").order_by("id").values(
-            "id", "folio", "origen_tipo", "origen_id",
-        ):
-            polizas[(pz["origen_tipo"], pz["origen_id"])] = pz
-    costos = {}
-    if detalles:
-        costos = {
-            h["movimiento_detalle_id"]: (h["costo_anterior"], h["costo_nuevo"])
-            for h in HistorialCostoInventario.objects.filter(
-                movimiento_detalle_id__in=[d.pk for d in detalles]
-            ).values("movimiento_detalle_id", "costo_anterior", "costo_nuevo")
-        }
+    def poliza(origen_tipo, ref):
+        return Poliza.objects.filter(
+            vigente, origen_tipo=origen_tipo, origen_id=models.OuterRef(ref),
+        ).order_by("-id")
 
-    def de(detalle, tipo):
-        """``(factura, poliza, factura_tipo)`` del renglón."""
-        if detalle.o_recepcion_id and detalle.o_recepcion_id in fact_prov:
-            f = fact_prov[detalle.o_recepcion_id]
-            return {**f, "cfdi_uuid": None}, polizas.get(("FacturaProveedor", f["id"])), "PROVEEDOR"
-        f = fact_cli_id.get(detalle.o_factura_id) or fact_cli_pedido.get(detalle.o_pedido_id)
-        if f:
-            return f, polizas.get(("Factura", f["id"])), "CLIENTE"
-        return None, None, None
+    return qs.annotate(
+        d_fc_folio=_sub(fc_de, "folio"), d_fc_uuid=_sub(fc_de, "cfdi_uuid"),
+        d_pz_fp_id=_sub(poliza("FacturaProveedor", "d_fp_id"), "id"),
+        d_pz_fp_folio=_sub(poliza("FacturaProveedor", "d_fp_id"), "folio"),
+        d_pz_fc_id=_sub(poliza("Factura", "d_fc_id"), "id"),
+        d_pz_fc_folio=_sub(poliza("Factura", "d_fc_id"), "folio"),
+    )
 
-    return de, costos
+
+def documentos_de(detalle):
+    """``(factura, poliza, factura_tipo)`` del renglón, de ``anotar_documentos``."""
+    if detalle.d_fp_id:
+        return (
+            {"id": detalle.d_fp_id, "folio": detalle.d_fp_folio, "cfdi_uuid": None},
+            {"id": detalle.d_pz_fp_id, "folio": detalle.d_pz_fp_folio} if detalle.d_pz_fp_id else None,
+            "PROVEEDOR",
+        )
+    if detalle.d_fc_id:
+        return (
+            {"id": detalle.d_fc_id, "folio": detalle.d_fc_folio, "cfdi_uuid": detalle.d_fc_uuid},
+            {"id": detalle.d_pz_fc_id, "folio": detalle.d_pz_fc_folio} if detalle.d_pz_fc_id else None,
+            "CLIENTE",
+        )
+    return None, None, None
+
+
+def _alcance_movimientos(user, query_params):
+    """Almacenes en alcance (con código, nombre y tipo) y el ``almacen`` pedido,
+    en una sola consulta: misma regla que ``almacen_ids_movimientos``."""
+    from nucleo.scope import empresa_ids_lectura
+
+    almacen_id = almacen_del_query(query_params)
+    qs = Almacen.objects.filter(empresa_id__in=empresa_ids_lectura(user))
+    if not user.is_superuser:
+        # = ``almacenes_en_alcance``, con las sucursales del usuario como
+        # subconsulta (M2M ∪ ``sucursal_default``): un viaje menos a la BD.
+        sucursales = models.Q(sucursal_id__in=user.sucursales.values("pk"))
+        if user.sucursal_default_id:
+            sucursales |= models.Q(sucursal_id=user.sucursal_default_id)
+        qs = qs.filter(sucursales)
+    if almacen_id:
+        qs = qs.filter(pk=almacen_id)
+    return {a["id_almacen"]: a for a in qs.values("id_almacen", "codigo", "nombre", "tipo_almacen")}, almacen_id
 
 
 def reporte_movimientos(user, query_params):
@@ -887,7 +902,8 @@ def reporte_movimientos(user, query_params):
     fecha_inicio, fecha_final, inicio_dt, final_dt = parse_fechas(query_params)
     filtros = _filtros_movimientos(query_params)
     ordenamiento = _ordenamiento(query_params)
-    allowed_almacen_ids, almacen_id = almacen_ids_movimientos(user, query_params)
+    almacenes, almacen_id = _alcance_movimientos(user, query_params)
+    allowed_almacen_ids = set(almacenes)
 
     reporte = {
         "tipo_movimiento": etiqueta,
@@ -902,10 +918,6 @@ def reporte_movimientos(user, query_params):
     if not allowed_almacen_ids:
         return reporte
 
-    almacenes = {
-        a["id_almacen"]: a
-        for a in Almacen.objects.filter(pk__in=allowed_almacen_ids).values("id_almacen", "codigo", "nombre", "tipo_almacen")
-    }
     empresa_ids = empresa_ids_lectura(user)
 
     detalles_qs = (
@@ -969,6 +981,17 @@ def reporte_movimientos(user, query_params):
         .annotate(**_ANOTACIONES_CONTABLES)
         .order_by(*ordenamiento)
     )
+    detalles_qs = anotar_documentos(detalles_qs)
+    if "TRANSFERENCIA" in tipos:
+        # Nombre del almacén de cada lado (el otro lado puede estar fuera del alcance).
+        tr = models.Q(movimiento_inventario__tipo_movimiento="TRANSFERENCIA")
+        detalles_qs = detalles_qs.annotate(**{
+            f"tr_{lado}_nombre": models.Case(
+                models.When(tr, then=_primer_almacen(RUTAS_ALMACEN_POR_LADO["TRANSFERENCIA"][lado], "nombre")),
+                default=None, output_field=models.CharField(),
+            )
+            for lado in ("origen", "destino")
+        })
 
     detalles = list(detalles_qs)
     # Ajustes viejos sin cantidad antes/después: delta de la bitácora (1 consulta).
@@ -978,7 +1001,6 @@ def reporte_movimientos(user, query_params):
         and (d.cantidad_antes is None or d.cantidad_despues is None)
     })
 
-    documentos_de, costos_historial = _documentos_contables(detalles)
     por_motivo = defaultdict(lambda: {"registros": 0, "piezas": Decimal("0"), "costo": Decimal("0")})
     por_categoria = defaultdict(lambda: {"registros": 0, "piezas": Decimal("0"), "costo": Decimal("0")})
 
@@ -990,19 +1012,6 @@ def reporte_movimientos(user, query_params):
         if almacen_id else None
     )
     movimiento_ids = set()
-
-    # Nombre de los almacenes de las transferencias fuera del alcance (el otro
-    # lado): una consulta, solo si hace falta.
-    faltan = {
-        getattr(d, f"almacen_{lado}_res", None)
-        for d in detalles if d.movimiento_inventario.tipo_movimiento == "TRANSFERENCIA"
-        for lado in ("origen", "destino")
-    } - set(almacenes) - {None}
-    if faltan:
-        almacenes.update({
-            a["id_almacen"]: a
-            for a in Almacen.objects.filter(pk__in=faltan).values("id_almacen", "codigo", "nombre", "tipo_almacen")
-        })
 
     for detalle in detalles:
         movimiento = detalle.movimiento_inventario
@@ -1074,11 +1083,14 @@ def reporte_movimientos(user, query_params):
                 grupo[llave]["registros"] += 1
                 grupo[llave]["piezas"] += signed
                 grupo[llave]["costo"] += costo_signed
-        factura, poliza, factura_tipo = documentos_de(detalle, tipo)
+        factura, poliza, factura_tipo = documentos_de(detalle)
         # Saldo de la fila afectada (ubicación, o el almacén si no hay ubicación)
         # guardado al mover; null en transferencias y movimientos anteriores.
         antes, despues = detalle.cantidad_antes, detalle.cantidad_despues
-        costo_antes, costo_despues = costos_historial.get(detalle.pk, (costo_unitario, costo_unitario))
+        if detalle.d_costo_antes is not None:
+            costo_antes, costo_despues = detalle.d_costo_antes, detalle.d_costo_despues
+        else:
+            costo_antes = costo_despues = costo_unitario
         resultados.append(
             {
                 "movimiento_inventario_id": movimiento.pk,
@@ -1090,7 +1102,7 @@ def reporte_movimientos(user, query_params):
                 "almacen_nombre": almacen.get("nombre"),
                 "ubicacion_id": getattr(ubicacion, "pk", None),
                 "ubicacion_nombre": str(ubicacion) if ubicacion else None,
-                **_lados_transferencia(detalle, tipo, almacenes),
+                **_lados_transferencia(detalle, tipo),
                 "ubicacion_origen_id": detalle.ubicacion_origen_id,
                 "ubicacion_origen_nombre": str(detalle.ubicacion_origen) if detalle.ubicacion_origen_id else None,
                 "ubicacion_destino_id": detalle.ubicacion_destino_id,
