@@ -1,4 +1,4 @@
-from django.db.models import Max, Prefetch
+from django.db.models import Prefetch
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from drf_spectacular.types import OpenApiTypes
@@ -1062,14 +1062,17 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         # lecturas visibles (mismo alcance, con ``lector`` pero sin ``solo_match`` ni
         # ``unicos``), no el de ``scans``: con el feed vacío o filtrado, arrancar en 0
         # o abajo dejaba entrar lecturas viejas que se ligan después a una etiqueta
-        # (``ligar_lecturas_previas``). Con cursor, sin consulta extra.
+        # (``ligar_lecturas_previas``). Con cursor, sin consulta extra. ``ORDER BY id
+        # DESC LIMIT 1`` y no ``MAX(id)``: con el filtro de sucursal de un no admin
+        # (OR sobre lector y etiqueta) el MAX recorría todas las lecturas de la
+        # empresa; así baja por la llave primaria hasta la primera visible.
         if despues_de_id is not None:
             cursor = max((s.pk for s in scans), default=despues_de_id)
         else:
             visibles = RfidScan.objects.visibles_para(user)
             if lector_id is not None:
                 visibles = visibles.filter(lector_id=lector_id)
-            cursor = visibles.aggregate(m=Max("id"))["m"] or 0
+            cursor = visibles.order_by("-id").values_list("id", flat=True).first() or 0
         # Mismo alcance que get_queryset: un no admin solo ve el detalle de las
         # etiquetas impresas en sus sucursales.
         sucursales = None

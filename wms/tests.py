@@ -1004,9 +1004,10 @@ class ScannerRFIDSeguridadTests(TestCase):
             api.get(self.SCANS_URL)
         with CaptureQueriesContext(connection) as con_cursor:
             api.get(self.SCANS_URL, {"despues_de_id": corte})
-        maximos = [q["sql"] for q in sin_cursor if "MAX(" in q["sql"]]
-        self.assertEqual(len(maximos), 1)
-        self.assertFalse([q for q in con_cursor if "MAX(" in q["sql"]])
+        # Una consulta extra solo sin ``despues_de_id``: la del id más alto visible.
+        self.assertEqual(len(sin_cursor), len(con_cursor) + 1)
+        tope = [q["sql"] for q in sin_cursor if q["sql"].startswith('SELECT "rfid_scans"."id" AS "id" FROM') and q["sql"].endswith("DESC LIMIT 1")]
+        self.assertEqual(len(tope), 1)
 
     def test_scans_no_admin_solo_ve_lectores_de_sus_sucursales(self):
         self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
