@@ -6,7 +6,7 @@ from inventarios.models import Almacen
 from nucleo.listados import nombre_para_mostrar_usuario
 from nucleo.models import SerieFolio
 from ventas.models import Pedido
-from wms.services.picking_pipeline.pendientes import tiene_pendiente_surtible
+from wms.services.picking_pipeline.pendientes import pedidos_por_surtir_q
 
 
 def folio_preview(empresa, sucursal, tipo_documento="Picking"):
@@ -230,18 +230,11 @@ def cargar_catalogos(user, empresa, es_staff, sucursal_ids, limite_pedidos=LIMIT
     para sugerir el origen/destino sin correr una segunda consulta.
     """
     pedido_qs = (
-        Pedido.objects.filter(
-            empresa=empresa,
-            activo=True,
-            estatus__in=[3, 4],
-            # Solo se surte lo que mesa de control ya programó (``PATCH /pedidos/{id}/programar/``).
-            programacion_conf__programaciones__0__isnull=False,
-            # Retenido por mesa de control: no se ofrece (el alta lo rechazaría).
-            retenido=False,
-        )
-        # Sin nada pendiente por surtir no se ofrece: el alta lo rechazaría (#823).
+        # Activo, autorizado o en proceso, programado, no retenido y con algo surtible
+        # pendiente (#823): misma regla que ``surtido-pedidos/?por_surtir=1`` (EC-988).
         # Va antes del tope, para que el corte cuente solo pedidos surtibles.
-        .filter(tiene_pendiente_surtible())
+        Pedido.objects.filter(empresa=empresa)
+        .filter(pedidos_por_surtir_q())
         # ``empresa`` además de cliente/sucursal: ``armar_header_preview`` lee
         # ``pedido.empresa`` para el preview del folio, y sin esto era una
         # consulta suelta por petición.
