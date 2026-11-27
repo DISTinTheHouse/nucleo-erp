@@ -74,6 +74,7 @@ from compras.api.serializers import (
     RecepcionRetrieveSerializer,
     RecepcionSerializer,
     RecepcionRFIDEncuadreSerializer,
+    RecepcionRFIDEncuadreCabeceraSerializer,
     RecepcionRFIDEncuadreSinLecturasSerializer,
     RecepcionRFIDEncuadreCreateSerializer,
     RecepcionRFIDEncuadreListSerializer,
@@ -4348,16 +4349,14 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     def _bloquear(self, encuadre):
-        """Relee el encuadre con su fila bloqueada (EC-981), en el mismo alcance y
-        con sus lecturas al día. ``aceptar/``, ``cancelar/`` y ``lecturas/`` toman
-        este mismo candado y deciden con el estatus de la fila bloqueada, no con
-        el que leyó ``get_object()``: un cambio confirmado en medio ya no se pisa.
+        """Relee el encuadre con su fila bloqueada (EC-981), en el mismo alcance.
+        ``aceptar/``, ``cancelar/`` y ``lecturas/`` toman este mismo candado y
+        deciden con el estatus de la fila bloqueada, no con el que leyó
+        ``get_object()``: un cambio confirmado en medio ya no se pisa. Sin las
+        lecturas: ``aceptar/`` y ``cancelar/`` responden solo la cabecera (EC-998).
         ``of=("self",)``: los JOIN de ``select_related`` son externos y Postgres no
         bloquea su lado NULL-able."""
-        return generics.get_object_or_404(
-            self.get_queryset().select_for_update(of=("self",)).prefetch_related(prefetch_lecturas_rfid()),
-            pk=encuadre.pk,
-        )
+        return generics.get_object_or_404(self.get_queryset().select_for_update(of=("self",)), pk=encuadre.pk)
 
     @action(detail=False, methods=["get"])
     def onboarding(self, request):
@@ -4505,6 +4504,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
                 raise ValidationError({campo: self.TAG_REPETIDO}) from exc
         return Response(RecepcionRFIDLecturaSerializer(lectura).data, status=status.HTTP_201_CREATED)
 
+    @extend_schema(responses=RecepcionRFIDEncuadreCabeceraSerializer)
     @action(detail=True, methods=["post"])
     def aceptar(self, request, pk=None):
         encuadre = self.get_object()
@@ -4518,9 +4518,10 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             encuadre.fecha_aceptacion = timezone.now()
             encuadre.save(update_fields=["estatus", "aceptado_por", "fecha_aceptacion", "updated_at"])
             self._auditar(request, encuadre, "ACEPTAR", {"estatus": "PENDIENTE"},
-                          {"estatus": encuadre.estatus, "lecturas": len(encuadre.lecturas.all())})
-        return Response(RecepcionRFIDEncuadreSerializer(encuadre).data)
+                          {"estatus": encuadre.estatus, "lecturas": encuadre.lecturas.count()})
+        return Response(RecepcionRFIDEncuadreCabeceraSerializer(encuadre).data)
 
+    @extend_schema(responses=RecepcionRFIDEncuadreCabeceraSerializer)
     @action(detail=True, methods=["post"])
     def cancelar(self, request, pk=None):
         """Cancela un encuadre pendiente, o aceptado que aún no generó recepción.
@@ -4550,7 +4551,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
                 "estatus", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por", "updated_at",
             ])
             self._auditar(request, encuadre, "CANCELAR", antes, {"estatus": encuadre.estatus, "motivo": motivo})
-        return Response(RecepcionRFIDEncuadreSerializer(encuadre).data)
+        return Response(RecepcionRFIDEncuadreCabeceraSerializer(encuadre).data)
 
     def _exigir_epc_libre_en_la_orden(self, encuadre, repetido):
         """#1453: una pieza (EPC) cuenta en un solo encuadre vigente (pendiente o

@@ -935,6 +935,17 @@ class RecepcionRFIDEncuadreSinLecturasSerializer(RecepcionRFIDEncuadreSerializer
         return resumen_agrupado_encuadre_rfid(obj)
 
 
+class RecepcionRFIDEncuadreCabeceraSerializer(RecepcionRFIDEncuadreSerializer):
+    """Respuesta de ``aceptar/`` y ``cancelar/`` (EC-998): el detalle sin
+    ``lecturas[]`` ni ``resumen``; el frontend solo usa el estatus y la cabecera."""
+
+    lecturas = None
+    resumen = None
+
+    class Meta(RecepcionRFIDEncuadreSerializer.Meta):
+        fields = [f for f in RecepcionRFIDEncuadreSerializer.Meta.fields if f not in ("lecturas", "resumen")]
+
+
 class RecepcionRFIDEncuadreListSerializer(RecepcionRFIDEncuadreSerializer):
     """Fila del listado (EC-981): los campos del detalle sin ``lecturas[]`` ni
     ``resumen``, con sus totales planos (mismos nombres y formato que en

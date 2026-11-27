@@ -4200,11 +4200,21 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
 
 class RecepcionRFIDEncuadreResumenYLecturasTests(_EncuadresRFIDFixture, TestCase):
     """EC-998: ``resumen/`` y ``?sin_lecturas=1`` dan el mismo ``resumen`` que el
-    detalle sin traer las lecturas; ``GET {id}/lecturas/`` las pagina. Todo en el
-    alcance de la empresa activa."""
+    detalle sin traer las lecturas; ``GET {id}/lecturas/`` las pagina; ``aceptar/``
+    y ``cancelar/`` responden solo la cabecera. Todo en el alcance de la empresa activa."""
 
     # get_object, renglones, recibido, rechazado y lo leído agrupado por renglón.
     CONSULTAS_RESUMEN = 5
+    CABECERA = {
+        "id", "tipo_origen", "orden_compra", "orden_compra_folio", "op", "op_folio",
+        "recepcion", "empresa", "sucursal", "proveedor", "proveedor_nombre",
+        "almacen", "almacen_nombre", "usuario", "usuario_nombre", "serie_codigo", "fecha_recepcion",
+        "remision", "factura_referencia", "observaciones", "estatus", "estatus_label",
+        "activo", "created_at", "updated_at",
+        "aceptado_por", "aceptado_por_nombre", "fecha_aceptacion", "motivo_cancelacion", "fecha_cancelacion",
+        "cancelado_por", "cancelado_por_nombre",
+    }
+
     def _url(self, encuadre, accion=""):
         return f"{self.URL_ENCUADRES}{encuadre.pk}/{accion}"
 
@@ -4255,6 +4265,33 @@ class RecepcionRFIDEncuadreResumenYLecturasTests(_EncuadresRFIDFixture, TestCase
         self._leer(self.e_oc_varias, self.r1, 20)
         with CaptureQueriesContext(connection) as muchas:
             api.get(self._url(self.e_oc_varias, "lecturas/"), {"limit": 50})
+        self.assertEqual(len(muchas), len(pocas))
+
+    def test_aceptar_y_cancelar_responden_la_cabecera(self):
+        api = self._api()
+        aceptado = api.post(self._url(self.e_oc_varias, "aceptar/"))
+        self.assertEqual(aceptado.status_code, 200, aceptado.content)
+        self.assertEqual(set(aceptado.json()), self.CABECERA)
+        self.assertEqual((aceptado.json()["estatus"], aceptado.json()["estatus_label"]), ("ACEPTADO", "Aceptado"))
+        self.assertIsNotNone(aceptado.json()["fecha_aceptacion"])
+        cancelado = api.post(self._url(self.e_oc_varias, "cancelar/"), {"motivo": "Escaneo duplicado"}, format="json")
+        self.assertEqual(cancelado.status_code, 200, cancelado.content)
+        self.assertEqual(set(cancelado.json()), self.CABECERA)
+        self.assertEqual(
+            (cancelado.json()["estatus"], cancelado.json()["motivo_cancelacion"], cancelado.json()["aceptado_por"]),
+            ("CANCELADO", "Escaneo duplicado", self.t["a"]["usuario"].pk),
+        )
+        # La bitácora sigue contando las lecturas, ahora sin traerlas.
+        evento = AuditoriaEvento.objects.get(accion="ACEPTAR", id_registro=str(self.e_oc_varias.pk))
+        self.assertEqual(evento.despues_json["lecturas"], 4)
+
+    def test_cancelar_no_crece_con_lecturas(self):
+        api = self._api()
+        with CaptureQueriesContext(connection) as pocas:
+            api.post(self._url(self.e_oc_una, "cancelar/"), {"motivo": "x"}, format="json")
+        self._leer(self.e_oc_varias, self.r1, 20)
+        with CaptureQueriesContext(connection) as muchas:
+            api.post(self._url(self.e_oc_varias, "cancelar/"), {"motivo": "x"}, format="json")
         self.assertEqual(len(muchas), len(pocas))
 
     def test_otra_empresa_es_404_tambien_para_el_superusuario(self):
@@ -4350,7 +4387,9 @@ class RecepcionRFIDEncuadreBloqueoTests(_EncuadresRFIDFixture, TestCase):
         data = resp.json()
         self.assertEqual((data["estatus"], data["aceptado_por"], data["motivo_cancelacion"]),
                          ("CANCELADO", usuario.pk, "Escaneo duplicado"))
-        self.assertEqual(len(data["lecturas"]), 1)
+        # Solo la cabecera (EC-998): sin ``lecturas[]`` ni ``resumen``.
+        self.assertNotIn("lecturas", data)
+        self.assertNotIn("resumen", data)
         evento = AuditoriaEvento.objects.get(id_registro=str(encuadre.pk), accion="CANCELAR")
         self.assertEqual(evento.antes_json, {"estatus": "ACEPTADO"})
 
