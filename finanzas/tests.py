@@ -113,6 +113,11 @@ NOTAS_CREDITO_URL = "/api/v1/finanzas/notas-credito/"
 FACTURAS_PROVEEDOR_URL = "/api/v1/finanzas/facturas-proveedor/"
 
 
+# Toda cancelación de finanzas exige ``motivo`` (#1356): body JSON o ``?motivo=`` en DELETE.
+MOTIVO_PRUEBA = "Prueba de cancelación"
+CLAVES_CANCELAR_FIN = ("CANCELAR-FIN-POLIZAS", "CANCELAR-FIN-COBROS", "CANCELAR-FIN-PAGOS", "CANCELAR-FIN-BANCOS")
+
+
 class FinanzasBase(TestCase):
     @classmethod
     def _tenant(cls, codigo, codigo_sucursal, email, *, sucursal_activa=True):
@@ -183,7 +188,9 @@ class FinanzasBase(TestCase):
         cls.b = cls._tenant("globex", "GDL", "b@globex.test")
         from seguridad.models import Permiso, UsuarioPermiso
 
-        for clave in ("E-FIN-FACTURAS", "R-CONTABILIDAD"):
+        # Cancelar exige además su ``CANCELAR-FIN-*`` (#1356, #1423); la regla de que sin
+        # él responde 403 la cubren las pruebas ``test_sin_cancelar_fin_*``.
+        for clave in ("E-FIN-FACTURAS", "R-CONTABILIDAD", *CLAVES_CANCELAR_FIN):
             permiso = Permiso.objects.get_or_create(clave=clave, defaults={"nombre": clave})[0]
             for t in (cls.a, cls.b):
                 UsuarioPermiso.objects.create(
@@ -194,6 +201,26 @@ class FinanzasBase(TestCase):
         client = APIClient()
         client.force_authenticate(user=user)
         return client
+
+    def _usuario_sin_cancelar(self, tenant=None):
+        """Escribe en finanzas (``E-FIN-FACTURAS``) pero sin ningún ``CANCELAR-FIN-*``."""
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        t = tenant or self.a
+        correo = f"sin-cancelar@{t['empresa'].codigo}.test"
+        user = Usuario.objects.create(
+            username=correo, email=correo, empresa=t["empresa"], sucursal_default=t["sucursal"],
+        )
+        for clave in ("E-FIN-FACTURAS", "R-CONTABILIDAD"):
+            UsuarioPermiso.objects.create(
+                usuario=user, permiso=Permiso.objects.get(clave=clave),
+                tipo=UsuarioPermiso.TIPO_GRANT, empresa=t["empresa"],
+            )
+        return user
+
+    def _assert_403_sin_cancelar(self, resp, clave):
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertIn(clave, str(resp.data["detail"]))
 
     def _crear_cuentas_contables(self, empresa):
         cuenta_cargo = CuentaContable.objects.create(
@@ -926,6 +953,16 @@ class Defecto4SucursalDefault(FinanzasBase):
         cls.c_sin_sucursal = Usuario.objects.create(
             username="sin@initech.test", email="sin@initech.test", empresa=cls.c["empresa"]
         )
+        # Escribir en finanzas exige ``E-FIN-FACTURAS`` en la empresa del usuario.
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        permiso = Permiso.objects.get(clave="E-FIN-FACTURAS")
+        for user in (cls.sin_sucursal, cls.c_sin_sucursal):
+            UsuarioPermiso.objects.create(
+                usuario=user, permiso=permiso, tipo=UsuarioPermiso.TIPO_GRANT, empresa=user.empresa,
+            )
+        # El respaldo solo es una sucursal que el usuario ve (#753).
+        cls.sin_sucursal.sucursales.add(cls.a["sucursal"])
 
     def test_sin_sucursal_default_usa_el_respaldo_y_factura(self):
         client = self._client(self.sin_sucursal)
@@ -973,6 +1010,13 @@ class Defecto4SucursalDefault(FinanzasBase):
             empresa=self.a["empresa"],
             sucursal_default=self.b["sucursal"],
         )
+        from seguridad.models import Permiso, UsuarioPermiso
+
+        UsuarioPermiso.objects.create(
+            usuario=usuario, permiso=Permiso.objects.get(clave="E-FIN-FACTURAS"),
+            tipo=UsuarioPermiso.TIPO_GRANT, empresa=self.a["empresa"],
+        )
+        usuario.sucursales.add(self.a["sucursal"])  # el respaldo solo es una sucursal que ve (#753)
         client = self._client(usuario)
         resp = client.post(
             DESDE_PEDIDO_URL, {"pedido": self.a["pedido"].pk}, format="json"
@@ -1623,7 +1667,7 @@ class Defecto7ErroresDeNegocioYTransacciones(FinanzasBase):
         client = self._client(self.a["usuario"])
         creada = self._poliza_cuadrada(client, centro_costo, cargo, abono)
 
-        resp = client.post(f"{POLIZAS_URL}{creada.data['id']}/cancelar/", {}, format="json")
+        resp = client.post(f"{POLIZAS_URL}{creada.data['id']}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         poliza = Poliza.objects.get(pk=creada.data["id"])
@@ -2004,7 +2048,7 @@ class Defecto8NotaCreditoCancelarRevierteCxC(FinanzasBase):
         self.assertEqual(cxc.saldo, Decimal("750.00"))
         self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PARCIAL)
 
-        resp = client.post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/", {}, format="json")
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(resp.data["estatus"], NotaCredito.Estatus.CANCELADA.value)
@@ -2028,7 +2072,7 @@ class Defecto8NotaCreditoCancelarRevierteCxC(FinanzasBase):
         self.assertEqual(cxc.saldo, Decimal("0.00"))
         self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PAGADA)
 
-        client.post(f"{NOTAS_CREDITO_URL}{resp.data['id']}/cancelar/", {}, format="json")
+        client.post(f"{NOTAS_CREDITO_URL}{resp.data['id']}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         cxc.refresh_from_db()
         self.assertEqual(cxc.saldo, Decimal("500.00"))
@@ -2042,7 +2086,7 @@ class Defecto8NotaCreditoCancelarRevierteCxC(FinanzasBase):
         )
         client = self._client(self.a["usuario"])
 
-        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         nota.refresh_from_db()
@@ -2063,11 +2107,13 @@ class Defecto8NotaCreditoCancelarRevierteCxC(FinanzasBase):
             format="json",
         )
         nota_id = resp.data["id"]
-        client.post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/", {}, format="json")
+        client.post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
-        resp = client.post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/", {}, format="json")
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
-        self.assertEqual(resp.status_code, 200, resp.data)
+        # Repetir la cancelación da 400 y no reescribe el rastro (#1356).
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("ya está cancelado", str(resp.data["estatus"]))
         cxc.refresh_from_db()
         self.assertEqual(cxc.saldo, Decimal("1000.00"))
 
@@ -2087,7 +2133,7 @@ class Defecto8NotaCreditoCancelarRevierteCxC(FinanzasBase):
         )
         client = self._client(self.a["usuario"])
 
-        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 404)
         nota.refresh_from_db()
@@ -2146,7 +2192,7 @@ class Defecto9NotaCreditoFechaEmisionYCxCFaltante(FinanzasBase):
         ayer = timezone.localdate() - timedelta(days=30)
         NotaCredito.objects.filter(pk=nota.pk).update(fecha_emision=ayer)
 
-        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         nota.refresh_from_db()
@@ -2269,7 +2315,7 @@ class NotaCreditoTimbraAntesDeGuardar(Defecto9NotaCreditoFechaEmisionYCxCFaltant
             factura=factura, cliente=self.a["cliente"],
             estatus="Emitida", total=Decimal("100.00"), cfdi_uuid="U-9",
         )
-        r = self._client(self.a["usuario"]).post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/")
+        r = self._client(self.a["usuario"]).post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
         self.assertEqual(r.status_code, 400, r.data)
 
     def test_emitida_no_edita_importes_ni_factura_cancelada_no_emite(self):
@@ -2496,7 +2542,7 @@ class Defecto10NotaCreditoDobleAplicacionConcurrente(FinanzasBase):
         obsoleta = NotaCredito.objects.get(pk=nota.pk)
         self.assertEqual(obsoleta.estatus, NotaCredito.Estatus.EMITIDA.value)
 
-        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
         self.assertEqual(resp.status_code, 200, resp.data)
         cxc.refresh_from_db()
         saldo_tras_la_primera = cxc.saldo
@@ -2504,7 +2550,7 @@ class Defecto10NotaCreditoDobleAplicacionConcurrente(FinanzasBase):
 
         with patch.object(NotaCreditoViewSet, "get_object", return_value=obsoleta):
             resp = client.post(
-                f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json",
+                f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json",
             )
 
         self.assertEqual(resp.status_code, 200, resp.data)
@@ -2526,7 +2572,7 @@ class Defecto10NotaCreditoDobleAplicacionConcurrente(FinanzasBase):
         self.assertEqual(cxc.saldo, Decimal("750.00"))
         self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PARCIAL)
 
-        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         cxc.refresh_from_db()
@@ -2579,7 +2625,7 @@ class Defecto10NotaCreditoDobleAplicacionConcurrente(FinanzasBase):
 
         with patch.object(NotaCreditoViewSet, "get_object", return_value=obsoleta):
             resp = client.post(
-                f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json",
+                f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json",
             )
 
         self.assertEqual(resp.status_code, 404, resp.data)
@@ -2709,7 +2755,7 @@ class Defecto11NotaCreditoTransicionesDeEstatus(FinanzasBase):
         self.assertEqual(nota.estatus, NotaCredito.Estatus.EMITIDA.value)
 
         # La puerta buena sigue abierta y sí devuelve el importe.
-        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         cxc.refresh_from_db()
@@ -2730,7 +2776,7 @@ class Defecto11NotaCreditoTransicionesDeEstatus(FinanzasBase):
         nota.refresh_from_db()
         self.assertEqual(nota.estatus, NotaCredito.Estatus.BORRADOR.value)
 
-        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         nota.refresh_from_db()
@@ -2791,7 +2837,7 @@ class Defecto11NotaCreditoTransicionesDeEstatus(FinanzasBase):
         self.assertEqual(cxc.saldo, Decimal("750.00"))
         self.assertEqual(cxc.estatus, CuentaPorCobrar.EstatusCxC.PARCIAL)
 
-        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {}, format="json")
+        resp = client.post(f"{NOTAS_CREDITO_URL}{nota.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
         self.assertEqual(resp.status_code, 200, resp.data)
         cxc.refresh_from_db()
         self.assertEqual(cxc.saldo, Decimal("1000.00"))
@@ -3334,6 +3380,13 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
     def _patch(self, url, data):
         return self._client(self.a["usuario"]).patch(url, data, format="json")
 
+    def _cancelar_factura(self, factura):
+        """Desde #1356 una factura de proveedor se cancela con ``POST cancelar/`` y motivo; el
+        ``PATCH`` a ``Cancelada`` responde 400 y una Registrada ya no se borra."""
+        return self._client(self.a["usuario"]).post(
+            f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json"
+        )
+
     # -- Origen automático ------------------------------------------------------
 
     def test_creating_invoice_as_registered_generates_one_account(self):
@@ -3552,7 +3605,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
     def test_cancelling_the_payment_lifts_the_freeze(self):
         proveedor, _, cxp = self._account("1000.00")
         pago = self._pay(proveedor, cxp, "400.00")
-        resp = self._client(self.a["usuario"]).post(f"{PAGOS_URL}{pago.pk}/cancelar/", {}, format="json")
+        resp = self._client(self.a["usuario"]).post(f"{PAGOS_URL}{pago.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
         self.assertEqual(resp.status_code, 200, resp.data)
 
         resp = self._patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {"saldo": "900.00"})
@@ -3614,15 +3667,15 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         _, factura, cxp = self._account("1000.00")
         resp = self._patch(
             f"{self.ACCOUNTS_URL}{cxp.pk}/",
-            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+            {"motivo": MOTIVO_PRUEBA, "estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
         )
         self.assertEqual(resp.status_code, 200, resp.data)
 
         url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
-        for data in ({"total": "999.00"}, {"estatus": "Cancelada"}):
-            with self.subTest(data=data):
-                resp = self._patch(url, data)
-                self.assertEqual(resp.status_code, 200, resp.data)
+        resp = self._patch(url, {"total": "999.00"})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        resp = self._cancelar_factura(factura)  # cancelar va por POST cancelar/ (#1356)
+        self.assertEqual(resp.status_code, 200, resp.data)
 
         factura.refresh_from_db()
         self.assertEqual((factura.total, factura.estatus), (Decimal("999.00"), "Cancelada"))
@@ -3633,7 +3686,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         proveedor, factura, cxp = self._account("1000.00")
         self._patch(
             f"{self.ACCOUNTS_URL}{cxp.pk}/",
-            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+            {"motivo": MOTIVO_PRUEBA, "estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
         )
         cxp.refresh_from_db()
         original_fecha_emision = cxp.fecha_emision
@@ -3685,7 +3738,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         pago = self._pay(proveedor, cxp, "300.00", estatus=Pago.Estatus.BORRADOR.value)
         self._patch(
             f"{self.ACCOUNTS_URL}{cxp.pk}/",
-            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+            {"motivo": MOTIVO_PRUEBA, "estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
         )
         FacturaProveedor.objects.filter(pk=factura.pk).update(
             estatus=FacturaProveedor.FacturaProveedorStatus.BORRADOR,
@@ -3754,10 +3807,10 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         proveedor, factura, cxp = self._account("1000.00")
         resp = self._patch(
             f"{self.ACCOUNTS_URL}{cxp.pk}/",
-            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+            {"motivo": MOTIVO_PRUEBA, "estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
         )
         self.assertEqual(resp.status_code, 200, resp.data)
-        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": "Cancelada"})
+        resp = self._cancelar_factura(factura)
         self.assertEqual(resp.status_code, 200, resp.data)
         return proveedor, factura, cxp
 
@@ -3926,7 +3979,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
         resp = self._patch(
             f"{self.ACCOUNTS_URL}{cxp.pk}/",
-            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+            {"motivo": MOTIVO_PRUEBA, "estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
         )
         self.assertEqual(resp.status_code, 200, resp.data)
         resp = self._patch(url, {"estatus": "Borrador"})
@@ -3973,7 +4026,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
                 _, factura, cxp = self._account("1000.00")
                 invoice_url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
                 account_url = f"{self.ACCOUNTS_URL}{cxp.pk}/"
-                resp = self._patch(account_url, {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value})
+                resp = self._patch(account_url, {"motivo": MOTIVO_PRUEBA, "estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value})
                 self.assertEqual(resp.status_code, 200, resp.data)
                 resp = self._patch(invoice_url, {"estatus": "Borrador"})
                 self.assertEqual(resp.status_code, 200, resp.data)
@@ -3997,7 +4050,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
 
         resp = self._patch(
             f"{self.ACCOUNTS_URL}{cxp.pk}/",
-            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value, "observaciones": "nota"},
+            {"motivo": MOTIVO_PRUEBA, "estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value, "observaciones": "nota"},
         )
 
         self.assertEqual(resp.status_code, 200, resp.data)
@@ -4009,7 +4062,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
     def test_cancelled_account_of_registered_invoice_can_still_be_reactivated(self):
         _, _, cxp = self._account("1000.00")
         url = f"{self.ACCOUNTS_URL}{cxp.pk}/"
-        resp = self._patch(url, {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value})
+        resp = self._patch(url, {"motivo": MOTIVO_PRUEBA, "estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value})
         self.assertEqual(resp.status_code, 200, resp.data)
 
         resp = self._patch(url, {"estatus": CuentaPorPagar.EstatusCxP.PENDIENTE.value})
@@ -4035,10 +4088,13 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
     def _cancel_account_and_move_invoice_to(self, cxp, factura, invoice_status):
         resp = self._patch(
             f"{self.ACCOUNTS_URL}{cxp.pk}/",
-            {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
+            {"motivo": MOTIVO_PRUEBA, "estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value},
         )
         self.assertEqual(resp.status_code, 200, resp.data)
-        resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": invoice_status})
+        if invoice_status == "Cancelada":
+            resp = self._cancelar_factura(factura)  # cancelar va por POST cancelar/ (#1356)
+        else:
+            resp = self._patch(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/", {"estatus": invoice_status})
         self.assertEqual(resp.status_code, 200, resp.data)
 
     def _assert_account_still_cancelled(self, cxp, saldo, fecha_ultimo_pago=None):
@@ -4082,7 +4138,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
     def test_payment_deleted_then_reapplied_cannot_revive_account(self):
         proveedor, factura, cxp = self._account("1000.00")
         pago = self._pay(proveedor, cxp, "400.00")
-        resp = self._client(self.a["usuario"]).delete(f"{PAGOS_URL}{pago.pk}/")
+        resp = self._client(self.a["usuario"]).delete(f"{PAGOS_URL}{pago.pk}/?motivo=Prueba")
         self.assertEqual(resp.status_code, 204, resp.data)
         self._cancel_account_and_move_invoice_to(cxp, factura, "Cancelada")
 
@@ -4132,7 +4188,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         cxp.refresh_from_db()
         self.assertEqual(cxp.estatus, CuentaPorPagar.EstatusCxP.PENDIENTE)
 
-        resp = self._patch(url, {"estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value})
+        resp = self._patch(url, {"motivo": MOTIVO_PRUEBA, "estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value})
 
         self.assertEqual(resp.status_code, 200, resp.data)
 
@@ -4185,14 +4241,13 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         _, factura, cxp = self._account("1000.00")
         url = f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/"
 
-        for estatus in (
-            FacturaProveedor.FacturaProveedorStatus.BORRADOR,
-            FacturaProveedor.FacturaProveedorStatus.CANCELADA,
-        ):
-            with self.subTest(estatus=estatus):
-                resp = self._patch(url, {"estatus": estatus.value})
-                self.assertEqual(resp.status_code, 400, resp.data)
-                self.assertIsInstance(resp.data["estatus"], list)
+        resp = self._patch(url, {"estatus": FacturaProveedor.FacturaProveedorStatus.BORRADOR.value})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIsInstance(resp.data["estatus"], list)
+        # Cancelar ya no va por PATCH (#1356): el 400 manda a POST cancelar/.
+        resp = self._patch(url, {"estatus": FacturaProveedor.FacturaProveedorStatus.CANCELADA.value})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("POST cancelar/", str(resp.data["estatus"]))
 
         # Si la petición trae varios cambios bloqueados, se reportan todos.
         resp = self._patch(url, {"estatus": "Borrador", "total": "999.00"})
@@ -4238,11 +4293,16 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
             {"proveedor": other_proveedor.pk},
             {"moneda": otra_moneda.pk},
             {"estatus": "Borrador"},
-            {"estatus": "Cancelada"},
         ):
             with self.subTest(data=data):
                 resp = self._patch(url, data)
                 self.assertEqual(resp.status_code, 200, resp.data)
+        # Cancelar ya no va por PATCH (#1356): el 400 manda a POST cancelar/.
+        resp = self._patch(url, {"estatus": "Cancelada"})
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("POST cancelar/", str(resp.data["estatus"]))
+        resp = self._cancelar_factura(factura)
+        self.assertEqual(resp.status_code, 200, resp.data)
 
         factura.refresh_from_db()
         self.assertEqual(
@@ -4290,7 +4350,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         proveedor, _, cxp = self._account("1000.00")
         self._pay(proveedor, cxp, "400.00")
 
-        resp = self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/")
+        resp = self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/?motivo=Prueba")
 
         self.assertEqual(resp.status_code, 400, resp.data)
         self.assertIsInstance(resp.data, list)
@@ -4300,7 +4360,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
     def test_deleting_account_without_applied_payment_is_allowed(self):
         _, _, cxp = self._account()
 
-        resp = self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/")
+        resp = self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/?motivo=Prueba")
 
         self.assertEqual(resp.status_code, 204)
         self.assertFalse(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
@@ -4309,36 +4369,45 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         proveedor, factura, cxp = self._account("1000.00")
         self._pay(proveedor, cxp, "400.00")
 
+        # Una Registrada no se borra (#1356), y cancelarla con un pago aplicado tampoco procede.
         resp = self._client(self.a["usuario"]).delete(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("POST cancelar/", str(resp.data["estatus"]))
+        resp = self._cancelar_factura(factura)
 
         self.assertEqual(resp.status_code, 400, resp.data)
-        self.assertIsInstance(resp.data, list)
+        self.assertIn("pagos aplicados", str(resp.data))
         self.assertTrue(FacturaProveedor.objects.filter(pk=factura.pk).exists())
         self.assertTrue(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
         self.assertEqual(PagoDetalle.objects.filter(cxp=cxp).count(), 1)
 
-    def test_deleting_invoice_without_applied_payment_cascades_to_account(self):
+    def test_cancelling_invoice_without_applied_payment_cancels_its_account(self):
+        # Desde #1356 una Registrada no se borra: se cancela, y su CxP con el mismo motivo (#1399).
         _, factura, cxp = self._account()
 
         resp = self._client(self.a["usuario"]).delete(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        resp = self._cancelar_factura(factura)
 
-        self.assertEqual(resp.status_code, 204)
-        self.assertFalse(FacturaProveedor.objects.filter(pk=factura.pk).exists())
-        self.assertFalse(CuentaPorPagar.objects.filter(pk=cxp.pk).exists())
+        self.assertEqual(resp.status_code, 200, resp.data)
+        factura.refresh_from_db()
+        cxp.refresh_from_db()
+        self.assertEqual(factura.estatus, FacturaProveedor.FacturaProveedorStatus.CANCELADA)
+        self.assertEqual((cxp.estatus, cxp.motivo_cancelacion), (CuentaPorPagar.EstatusCxP.CANCELADA, MOTIVO_PRUEBA))
 
     def _cancelled_payment(self):
         proveedor, factura, cxp = self._account("1000.00")
         pago = self._pay(proveedor, cxp, "400.00")
-        resp = self._client(self.a["usuario"]).post(f"{PAGOS_URL}{pago.pk}/cancelar/", {}, format="json")
+        resp = self._client(self.a["usuario"]).post(f"{PAGOS_URL}{pago.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
         self.assertEqual(resp.status_code, 200, resp.data)
         return factura, cxp, pago
 
-    def test_deleting_invoice_with_cancelled_payment_cancels_instead_of_deleting(self):
+    def test_cancelling_invoice_with_cancelled_payment_cancels_both_documents(self):
         factura, cxp, pago = self._cancelled_payment()
 
-        resp = self._client(self.a["usuario"]).delete(f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/")
+        resp = self._cancelar_factura(factura)  # una Registrada no se borra (#1356)
 
-        self.assertEqual(resp.status_code, 204)
+        self.assertEqual(resp.status_code, 200, resp.data)
         factura.refresh_from_db()
         cxp.refresh_from_db()
         self.assertEqual(factura.estatus, FacturaProveedor.FacturaProveedorStatus.CANCELADA)
@@ -4348,7 +4417,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
     def test_deleting_account_with_cancelled_payment_cancels_instead_of_deleting(self):
         _, cxp, pago = self._cancelled_payment()
 
-        resp = self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/")
+        resp = self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/?motivo=Prueba")
 
         self.assertEqual(resp.status_code, 204)
         cxp.refresh_from_db()
@@ -4366,7 +4435,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         pago = self._pay(proveedor, cxp, "400.00")
         saldo_banco_aplicado = self._saldo_banco(pago)
 
-        resp = self._patch(f"{PAGOS_URL}{pago.pk}/", {"estatus": Pago.Estatus.CANCELADO.value})
+        resp = self._patch(f"{PAGOS_URL}{pago.pk}/", {"estatus": Pago.Estatus.CANCELADO.value, "motivo": MOTIVO_PRUEBA})
 
         self.assertEqual(resp.status_code, 200, resp.data)
         pago.refresh_from_db()
@@ -4396,7 +4465,7 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         pago = self._pay(proveedor, cxp, "400.00", estatus=Pago.Estatus.BORRADOR.value)
         saldo_banco = self._saldo_banco(pago)
 
-        resp = self._client(self.a["usuario"]).post(f"{PAGOS_URL}{pago.pk}/cancelar/")
+        resp = self._client(self.a["usuario"]).post(f"{PAGOS_URL}{pago.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         pago.refresh_from_db()
@@ -4405,19 +4474,22 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
         self.assertEqual(cxp.saldo, Decimal("1000.00"))
         self.assertEqual(self._saldo_banco(pago), saldo_banco)
 
-    def test_borrar_un_pago_aplicado_lo_cancela_y_lo_saca_del_listado(self):
+    def test_borrar_un_pago_aplicado_lo_cancela_y_sigue_visible(self):
         proveedor, _, cxp = self._account("1000.00")
         pago = self._pay(proveedor, cxp, "400.00")
 
-        resp = self._client(self.a["usuario"]).delete(f"{PAGOS_URL}{pago.pk}/")
+        resp = self._client(self.a["usuario"]).delete(f"{PAGOS_URL}{pago.pk}/?motivo=Prueba")
 
         self.assertEqual(resp.status_code, 204)
         pago.refresh_from_db()
         cxp.refresh_from_db()
         self.assertEqual(pago.estatus, Pago.Estatus.CANCELADO)
-        self.assertFalse(pago.activo)
+        # #1396: queda Cancelado y visible, con su motivo, igual que con ``POST cancelar/``.
+        self.assertTrue(pago.activo)
+        self.assertEqual(pago.motivo_cancelacion, "Prueba")
         self.assertEqual(cxp.saldo, Decimal("1000.00"))
-        self.assertEqual(self._client(self.a["usuario"]).get(f"{PAGOS_URL}{pago.pk}/").status_code, 404)
+        detalle = self._client(self.a["usuario"]).get(f"{PAGOS_URL}{pago.pk}/")
+        self.assertEqual((detalle.status_code, detalle.data["estatus"]), (200, Pago.Estatus.CANCELADO))
 
     # -- Migración 0013 ---------------------------------------------------------
 
@@ -4829,6 +4901,28 @@ class AccountsPayableOriginationAndGuardsTests(FinanzasBase):
                 self.assertIn(field, update_fields)
                 self.assertIn(field, patch_fields)
 
+    def test_sin_cancelar_fin_pagos_no_cancela_cxp_pago_ni_factura(self):
+        # #1356/#1423: además de ``E-FIN-FACTURAS``, cancelar exige ``CANCELAR-FIN-PAGOS``.
+        _, factura, cxp = self._account("1000.00")
+        proveedor, _, cxp_pagada = self._account("500.00")
+        pago = self._pay(proveedor, cxp_pagada, "100.00")
+        antes = (cxp.estatus, factura.estatus, pago.estatus)
+        client = self._client(self._usuario_sin_cancelar())
+        for nombre, llamar in (
+            ("cxp", lambda: client.patch(f"{self.ACCOUNTS_URL}{cxp.pk}/", {
+                "estatus": CuentaPorPagar.EstatusCxP.CANCELADA.value, "motivo": MOTIVO_PRUEBA}, format="json")),
+            ("factura", lambda: client.post(
+                f"{FACTURAS_PROVEEDOR_URL}{factura.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")),
+            ("pago", lambda: client.post(f"{PAGOS_URL}{pago.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")),
+            ("pago-delete", lambda: client.delete(f"{PAGOS_URL}{pago.pk}/?motivo=Prueba")),
+        ):
+            with self.subTest(nombre):
+                self._assert_403_sin_cancelar(llamar(), "CANCELAR-FIN-PAGOS")
+        cxp.refresh_from_db()
+        factura.refresh_from_db()
+        pago.refresh_from_db()
+        self.assertEqual((cxp.estatus, factura.estatus, pago.estatus), antes)
+
 
 class ConcurrencyConflictMappingTests(FinanzasBase):
     """Choques con otra transacción: 409, nunca un 500 sin mapear.
@@ -4870,7 +4964,7 @@ class ConcurrencyConflictMappingTests(FinanzasBase):
         )
 
     def _delete_account(self, cxp):
-        return self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/")
+        return self._client(self.a["usuario"]).delete(f"{self.ACCOUNTS_URL}{cxp.pk}/?motivo=Prueba")
 
     def _guard_lock_mocks(self, failing, sqlstate):
         # Sustituye los modelos que usa el guard: la consulta de bloqueo de
@@ -5545,6 +5639,21 @@ class ConciliacionSaldoLibrosTests(FinanzasBase):
 
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(resp.data["estatus"], ConciliacionBancaria.Estatus.CERRADA.value)
+
+    def test_sin_cancelar_fin_bancos_no_cancela_el_movimiento(self):
+        cuenta = self._crear_cuenta_bancaria(self.a["empresa"])
+        mb = self._movimiento(cuenta, timezone.localdate(), Decimal("50.00"), MovimientoBancario.TipoMovimiento.ABONO)
+        antes = mb.estatus
+        client = self._client(self._usuario_sin_cancelar())
+        for nombre, llamar in (
+            ("cancelar", lambda: client.post(
+                f"{MOVIMIENTOS_URL}{mb.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")),
+            ("delete", lambda: client.delete(f"{MOVIMIENTOS_URL}{mb.pk}/?motivo=Prueba")),
+        ):
+            with self.subTest(nombre):
+                self._assert_403_sin_cancelar(llamar(), "CANCELAR-FIN-BANCOS")
+                mb.refresh_from_db()
+                self.assertEqual(mb.estatus, antes)
 
 
 class ConciliacionPrepararIdempotenteTests(FinanzasBase):
@@ -6946,7 +7055,7 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         cobro = Cobro.objects.get(pk=resp.data["id"])
         banco_aplicado = self._banco(cobro)
 
-        resp = self._patch(cobro, {"estatus": Cobro.Estatus.CANCELADO.value})
+        resp = self._patch(cobro, {"estatus": Cobro.Estatus.CANCELADO.value, "motivo": MOTIVO_PRUEBA})
 
         self.assertEqual(resp.status_code, 200, resp.data)
         cobro.refresh_from_db()
@@ -6992,7 +7101,7 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         cobro = Cobro.objects.get(pk=self._cobrar(cxc, "40.00").data["id"])
         CuentaPorCobrar.objects.filter(pk=cxc.pk).update(estatus=CuentaPorCobrar.EstatusCxC.CANCELADA)
 
-        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/")
+        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         cxc.refresh_from_db()
@@ -7009,9 +7118,9 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
             banco = self._banco(cobro)
             url = f"{COBROS_URL}{cobro.pk}/"
             caminos = {
-                "cancelar": lambda: cliente.post(url + "cancelar/"),
-                "patch": lambda: cliente.patch(url, {"estatus": "Cancelado"}, format="json"),
-                "delete": lambda: cliente.delete(url),
+                "cancelar": lambda: cliente.post(url + "cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json"),
+                "patch": lambda: cliente.patch(url, {"estatus": "Cancelado", "motivo": MOTIVO_PRUEBA}, format="json"),
+                "delete": lambda: cliente.delete(url + "?motivo=Prueba"),
             }
             for nombre, llamar in caminos.items():
                 with self.subTest(campos=campos, camino=nombre):
@@ -7033,7 +7142,7 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
             Cobro.objects.filter(pk=cobro.pk).update(
                 **{"rep_uuid": f"REP-UUID-{cobro.pk}", "rep_facturama_id": "REP-ID", **campos}
             )
-        datos = {} if motivo_sat is None else {"motivo_sat": motivo_sat}
+        datos = {"motivo": MOTIVO_PRUEBA} if motivo_sat is None else {"motivo_sat": motivo_sat, "motivo": MOTIVO_PRUEBA}
         with self.settings(FACTURAMA_EMPRESA_CODIGO=self.a["empresa"].codigo), patch(
             "finanzas.services.factura_timbrado_service.FacturamaService"
         ) as servicio:
@@ -7056,7 +7165,7 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         self.assertEqual(resp.status_code, 200, resp.data)
         cancel.assert_called_once_with("REP-ID", "02")
         self.assertEqual((cobro.rep_uuid, cobro.rep_facturama_id, cobro.rep_pendiente), (None, None, False))
-        self.assertEqual(self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/").status_code, 200)
+        self.assertEqual(self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json").status_code, 200)
 
     def test_cancelar_rep_si_el_sat_no_cancela_no_se_toca_nada(self):
         casos = {
@@ -7173,14 +7282,14 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         segunda = {}
 
         def cancelar(*args):
-            segunda["resp"] = cliente.post(url, {"motivo_sat": "02"}, format="json")
+            segunda["resp"] = cliente.post(url, {"motivo_sat": "02", "motivo": MOTIVO_PRUEBA}, format="json")
             return {"Status": "canceled"}
 
         with self.settings(FACTURAMA_EMPRESA_CODIGO=self.a["empresa"].codigo), patch(
             "finanzas.services.factura_timbrado_service.FacturamaService"
         ) as servicio:
             servicio.return_value.cancel_cfdi.side_effect = cancelar
-            resp = cliente.post(url, {"motivo_sat": "03"}, format="json")
+            resp = cliente.post(url, {"motivo_sat": "03", "motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(segunda["resp"].status_code, 400, segunda["resp"].data)
@@ -7312,7 +7421,7 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         cobro = Cobro.objects.get(pk=resp.data["id"])
         banco = self._banco(cobro)
 
-        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/")
+        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         cobro.refresh_from_db()
@@ -7321,19 +7430,22 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         self.assertEqual(cxc.saldo, Decimal("100.00"))
         self.assertEqual(self._banco(cobro), banco)
 
-    def test_borrar_un_cobro_aplicado_lo_cancela_y_lo_saca_del_listado(self):
+    def test_borrar_un_cobro_aplicado_lo_cancela_y_sigue_visible(self):
         cxc = self._cxc()
         cobro = Cobro.objects.get(pk=self._cobrar(cxc, "60.00").data["id"])
 
-        resp = self._client(self.a["usuario"]).delete(f"{COBROS_URL}{cobro.pk}/")
+        resp = self._client(self.a["usuario"]).delete(f"{COBROS_URL}{cobro.pk}/?motivo=Prueba")
 
         self.assertEqual(resp.status_code, 204)
         cobro.refresh_from_db()
         cxc.refresh_from_db()
         self.assertEqual(cobro.estatus, Cobro.Estatus.CANCELADO)
-        self.assertFalse(cobro.activo)
+        # #1396: queda Cancelado y visible, con su motivo, igual que con ``POST cancelar/``.
+        self.assertTrue(cobro.activo)
+        self.assertEqual(cobro.motivo_cancelacion, "Prueba")
         self.assertEqual(cxc.saldo, Decimal("100.00"))
-        self.assertEqual(self._client(self.a["usuario"]).get(f"{COBROS_URL}{cobro.pk}/").status_code, 404)
+        detalle = self._client(self.a["usuario"]).get(f"{COBROS_URL}{cobro.pk}/")
+        self.assertEqual((detalle.status_code, detalle.data["estatus"]), (200, Cobro.Estatus.CANCELADO))
 
     # EC-537: moneda del cobro = la de su cuenta; fuera de MXN exige tipo de cambio y el REP lo usa.
     @property
@@ -7412,7 +7524,7 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
 
         cobro = Cobro.objects.get(pk=self._cobrar_usd(tipo_cambio="17.25").data["id"])
         Factura.objects.update(cfdi_uuid="UUID-USD")
-        ppd = SimpleNamespace(metodo_pago="PPD", cliente_rfc="XAXX010101000")
+        ppd = SimpleNamespace(metodo_pago="PPD", cliente_rfc="XAXX010101000", empresa_id=self.a["empresa"].pk)
         self.a["sucursal"].__class__.objects.filter(pk=self.a["sucursal"].pk).update(cp="64000")
         with patch.object(Factura, "pedido", ppd, create=True), patch.object(cfdi_payload, "_receptor", return_value={}):
             payload = cfdi_payload.construir_payload_rep(cobro)
@@ -7426,7 +7538,7 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
         from finanzas.services.facturama import cfdi_payload
 
         cobro = Cobro.objects.get(pk=self._cobrar_usd(tipo_cambio="17.25").data["id"])
-        ppd = SimpleNamespace(metodo_pago="PPD", cliente_rfc="XAXX010101000")
+        ppd = SimpleNamespace(metodo_pago="PPD", cliente_rfc="XAXX010101000", empresa_id=self.a["empresa"].pk)
         # EC-806: también con la cancelación reservada (en vuelo o sin respuesta de Facturama).
         for campos in ({"cfdi_cancelacion_solicitada": True}, {"cfdi_cancelacion_en_curso_desde": timezone.now()}):
             with self.subTest(campos=list(campos)):
@@ -7437,6 +7549,38 @@ class F0CobroEstatusYGuardsTests(FinanzasBase):
                 with patch.object(Factura, "pedido", ppd, create=True), patch.object(cfdi_payload, "_receptor", return_value={}):
                     with self.assertRaisesMessage(ErrorDeNegocio, "cancelación está en proceso"):
                         cfdi_payload.construir_payload_rep(cobro)
+
+    def test_cancelar_sin_motivo_o_con_mas_de_500_responde_400(self):
+        # #1356: el motivo es obligatorio por cualquier camino; #1399: más de 500 ya no se corta.
+        cobro = Cobro.objects.get(pk=self._cobrar(self._cxc(), "60.00").data["id"])
+        client = self._client(self.a["usuario"])
+        url = f"{COBROS_URL}{cobro.pk}/"
+        for nombre, llamar in (
+            ("cancelar", lambda: client.post(url + "cancelar/", {}, format="json")),
+            ("cancelar-largo", lambda: client.post(url + "cancelar/", {"motivo": "x" * 501}, format="json")),
+            ("patch", lambda: client.patch(url, {"estatus": "Cancelado"}, format="json")),
+            ("delete", lambda: client.delete(url)),
+        ):
+            with self.subTest(nombre):
+                resp = llamar()
+                self.assertEqual(resp.status_code, 400, resp.data)
+                self.assertIn("motivo", resp.data)
+                cobro.refresh_from_db()
+                self.assertEqual(cobro.estatus, Cobro.Estatus.APLICADO)
+
+    def test_sin_cancelar_fin_cobros_no_cancela_el_cobro(self):
+        cobro = Cobro.objects.get(pk=self._cobrar(self._cxc(), "60.00").data["id"])
+        client = self._client(self._usuario_sin_cancelar())
+        url = f"{COBROS_URL}{cobro.pk}/"
+        for nombre, llamar in (
+            ("cancelar", lambda: client.post(url + "cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")),
+            ("patch", lambda: client.patch(url, {"estatus": "Cancelado", "motivo": MOTIVO_PRUEBA}, format="json")),
+            ("delete", lambda: client.delete(url + "?motivo=Prueba")),
+        ):
+            with self.subTest(nombre):
+                self._assert_403_sin_cancelar(llamar(), "CANCELAR-FIN-COBROS")
+                cobro.refresh_from_db()
+                self.assertEqual(cobro.estatus, Cobro.Estatus.APLICADO)
 
 
 class F0CuentaPorCobrarSoloLecturaTests(FinanzasBase):
@@ -7625,7 +7769,8 @@ class F1MotorDePolizasTests(MotorPolizasBase):
 
     def test_costo_fijo_de_consultas_por_poliza(self):
         self._generar()  # abre la serie de folios
-        with self.assertNumQueries(15):
+        # 18 fijas: +3 desde la bitácora de documentos (SAVEPOINT, INSERT del alta, RELEASE).
+        with self.assertNumQueries(18):
             self._generar(origen_id=self.factura.pk + 1000)
 
     # -- contrapóliza ------------------------------------------------------
@@ -7676,7 +7821,7 @@ class F1MotorDePolizasTests(MotorPolizasBase):
     def test_endpoint_cancelar_devuelve_la_contrapoliza(self):
         original = self._generar()
 
-        resp = self._client(self.a["usuario"]).post(f"{POLIZAS_URL}{original.pk}/cancelar/")
+        resp = self._client(self.a["usuario"]).post(f"{POLIZAS_URL}{original.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(resp.data["estatus"], Poliza.PolizaStatus.CANCELADA)
@@ -7697,6 +7842,16 @@ class F1MotorDePolizasTests(MotorPolizasBase):
             self.assertEqual(cliente.get(POLIZAS_URL).status_code, 200)
 
         self.assertEqual(len(pocas), len(muchas))
+
+    def test_sin_cancelar_fin_polizas_no_cancela_la_poliza(self):
+        poliza = self._generar()
+        antes = poliza.estatus
+        resp = self._client(self._usuario_sin_cancelar()).post(
+            f"{POLIZAS_URL}{poliza.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json"
+        )
+        self._assert_403_sin_cancelar(resp, "CANCELAR-FIN-POLIZAS")
+        poliza.refresh_from_db()
+        self.assertEqual(poliza.estatus, antes)
 
 
 class F2PolizaDeFacturaTests(MotorPolizasBase):
@@ -7852,7 +8007,7 @@ class F3PolizaDeCobroYPagoTests(MotorPolizasBase):
         cobro_id = self._cobrar().data["id"]
         original = Poliza.objects.get(origen_tipo="Cobro", origen_id=cobro_id)
 
-        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro_id}/cancelar/")
+        resp = self._client(self.a["usuario"]).post(f"{COBROS_URL}{cobro_id}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         original.refresh_from_db()
@@ -7866,7 +8021,7 @@ class F3PolizaDeCobroYPagoTests(MotorPolizasBase):
     def test_cancelar_por_patch_tambien_genera_la_contrapoliza(self):
         cobro_id = self._cobrar().data["id"]
 
-        resp = self._client(self.a["usuario"]).patch(f"{COBROS_URL}{cobro_id}/", {"estatus": "Cancelado"}, format="json")
+        resp = self._client(self.a["usuario"]).patch(f"{COBROS_URL}{cobro_id}/", {"estatus": "Cancelado", "motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(Poliza.objects.filter(poliza_reversa_de__isnull=False).count(), 1)
@@ -7882,7 +8037,7 @@ class F3PolizaDeCobroYPagoTests(MotorPolizasBase):
             "cobro_detalles": [{"cxc": cxc.pk, "importe_aplicado": "100.00"}],
         }, format="json")
 
-        self._client(self.a["usuario"]).post(f"{COBROS_URL}{resp.data['id']}/cancelar/")
+        self._client(self.a["usuario"]).post(f"{COBROS_URL}{resp.data['id']}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertFalse(Poliza.objects.exists())
 
@@ -7905,7 +8060,7 @@ class F3PolizaDeCobroYPagoTests(MotorPolizasBase):
         resp, _ = self._pagar()
         original = Poliza.objects.get(origen_tipo="Pago", origen_id=resp.data["id"])
 
-        self._client(self.a["usuario"]).post(f"{PAGOS_URL}{resp.data['id']}/cancelar/")
+        self._client(self.a["usuario"]).post(f"{PAGOS_URL}{resp.data['id']}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         original.refresh_from_db()
         self.assertEqual(original.estatus, Poliza.PolizaStatus.CANCELADA)
@@ -7986,7 +8141,7 @@ class F4PolizaDeNotaFacturaProveedorYMovimientoTests(MotorPolizasBase):
         nota_id = self._nota().data["id"]
         original = Poliza.objects.get(origen_tipo="NotaCredito", origen_id=nota_id)
 
-        resp = self._client(self.a["usuario"]).post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/")
+        resp = self._client(self.a["usuario"]).post(f"{NOTAS_CREDITO_URL}{nota_id}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         original.refresh_from_db()
@@ -8100,7 +8255,7 @@ class F4PolizaDeNotaFacturaProveedorYMovimientoTests(MotorPolizasBase):
         movimiento_id = self._movimiento("Cargo", cuenta_contable_contrapartida=gastos.pk).data["id"]
         original = Poliza.objects.get(origen_tipo="MovimientoBancario", origen_id=movimiento_id)
 
-        resp = self._client(self.a["usuario"]).post(f"{MOVIMIENTOS_URL}{movimiento_id}/cancelar/")
+        resp = self._client(self.a["usuario"]).post(f"{MOVIMIENTOS_URL}{movimiento_id}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
 
         self.assertEqual(resp.status_code, 200, resp.data)
         original.refresh_from_db()
@@ -10058,7 +10213,7 @@ class ConciliarCfdiTests(TimbrarFacturaTests):
 
     def test_cancelar_con_pendiente_manda_a_conciliar(self):  # #904
         factura = self._pendiente()
-        resp = self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/cancelar/", {}, format="json")
+        resp = self._client(self.a["usuario"]).post(f"{FACTURAS_URL}{factura.pk}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("conciliar-cfdi/", str(resp.data["cfdi"]))
 
@@ -10309,7 +10464,7 @@ class LecturaJerarquicaFinanzasTests(LecturaJerarquicaBase):
                 self.assertEqual(resp.status_code, 403)
                 resp = client.patch(f"{self.URL}facturas/{a['facturas']}/", {}, format="json")
                 self.assertEqual(resp.status_code, 403)
-                self.assertEqual(client.post(f"{self.URL}cobros/{a['cobros']}/cancelar/").status_code, 403)
+                self.assertEqual(client.post(f"{self.URL}cobros/{a['cobros']}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json").status_code, 403)
         self.assertEqual(Cobro.objects.filter(empresa=self.a["empresa"]).count(), 1)
 
     def test_otra_empresa_404_en_detalle_y_fuera_del_listado(self):
@@ -10587,6 +10742,10 @@ class CobrosResumenTests(LecturaJerarquicaBase):
         sin_empresa = self._usuario_con("sin-empresa", ["R-CONTABILIDAD"])
         sin_empresa.empresa = None
         sin_empresa.save()
+        # Con el permiso global: uno por empresa deja de contar al quitarle la empresa (403).
+        from seguridad.models import UsuarioPermiso
+
+        UsuarioPermiso.objects.filter(usuario=sin_empresa).update(empresa=None)
         for user, query in (
             (root, ""), (root, f"?empresa_id={self.a['empresa'].pk}"), (root, f"?empresa={self.b['empresa'].pk}"),
             (sin_empresa, ""), (sin_empresa, f"?empresa_id={self.a['empresa'].pk}"),
@@ -10756,11 +10915,13 @@ class CxcDetallePolizasTests(LecturaJerarquicaBase):
 
     def test_los_permisos_se_resuelven_una_vez_por_peticion(self):
         """``PermisoFinanzas`` y ``get_polizas`` comparten el conjunto ya resuelto."""
-        from finanzas.api import permisos as permisos_finanzas
+        # La caché por petición vive en ``nucleo.permisos.permisos_de_la_peticion``: el
+        # espía va sobre el ``permisos_efectivos`` que esa función llama.
+        from nucleo import permisos as nucleo_permisos
 
         user = self._usuario_con("pol-una-vez", ["R-CONTABILIDAD"])
         with patch.object(
-            permisos_finanzas, "permisos_efectivos", wraps=permisos_finanzas.permisos_efectivos
+            nucleo_permisos, "permisos_efectivos", wraps=nucleo_permisos.permisos_efectivos
         ) as espia:
             self.assertEqual([p["folio"] for p in self._polizas(user)], ["POL-EC746"])
         self.assertEqual(espia.call_count, 1)
@@ -11664,7 +11825,7 @@ class RespuestasDeEscrituraSinCamposPdfTests(DatosPdfBase):
             ("update", lambda doc: self.client_a.patch(
                 f"{POLIZAS_URL}{doc['id']}/", {"concepto": "otro"}, format="json"), lambda d: d),
             ("contabilizar", lambda doc: self.client_a.post(f"{POLIZAS_URL}{doc['id']}/contabilizar/"), lambda d: d),
-            ("cancelar", lambda doc: self.client_a.post(f"{POLIZAS_URL}{doc['id']}/cancelar/"), lambda d: d),
+            ("cancelar", lambda doc: self.client_a.post(f"{POLIZAS_URL}{doc['id']}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json"), lambda d: d),
         ])
 
     # -- cobro -----------------------------------------------------------------
@@ -11697,7 +11858,9 @@ class RespuestasDeEscrituraSinCamposPdfTests(DatosPdfBase):
         def accion(url, metodo):
             def llamar(doc):
                 with patch(f"finanzas.api.views.FacturaTimbradoService.{metodo}"):
-                    return self.client_a.post(f"{COBROS_URL}{doc['id']}/{url}/", {"motivo_sat": "02"}, format="json")
+                    return self.client_a.post(
+                        f"{COBROS_URL}{doc['id']}/{url}/", {"motivo_sat": "02", "motivo": MOTIVO_PRUEBA}, format="json"
+                    )
             return llamar
 
         self._comparar("cobro", "CobroSerializer", "cobro_detalles", escenario, [
@@ -11706,7 +11869,7 @@ class RespuestasDeEscrituraSinCamposPdfTests(DatosPdfBase):
                 f"{COBROS_URL}{doc['id']}/", {"estatus": "Aplicado"}, format="json"), lambda d: d),
             ("timbrar-rep", accion("timbrar-rep", "timbrar_rep"), lambda d: d),
             ("cancelar-rep", accion("cancelar-rep", "cancelar_rep"), lambda d: d),
-            ("cancelar", lambda doc: self.client_a.post(f"{COBROS_URL}{doc['id']}/cancelar/"), lambda d: d),
+            ("cancelar", lambda doc: self.client_a.post(f"{COBROS_URL}{doc['id']}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json"), lambda d: d),
         ])
 
     # -- pago ------------------------------------------------------------------
@@ -11744,7 +11907,7 @@ class RespuestasDeEscrituraSinCamposPdfTests(DatosPdfBase):
             ("create", crear, lambda d: d),
             ("update", lambda doc: self.client_a.patch(
                 f"{PAGOS_URL}{doc['id']}/", {"observaciones": "otra"}, format="json"), lambda d: d),
-            ("cancelar", lambda doc: self.client_a.post(f"{PAGOS_URL}{doc['id']}/cancelar/"), lambda d: d),
+            ("cancelar", lambda doc: self.client_a.post(f"{PAGOS_URL}{doc['id']}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json"), lambda d: d),
         ])
 
     # -- nota de crédito -------------------------------------------------------
@@ -11800,7 +11963,7 @@ class RespuestasDeEscrituraSinCamposPdfTests(DatosPdfBase):
                 f"{NOTAS_CREDITO_URL}{doc['id']}/", {"observaciones": "otra"}, format="json"), lambda d: d),
             ("timbrar", timbrar, lambda d: d),
             ("conciliar-cfdi", conciliar, lambda d: d["nota_credito"]),
-            ("cancelar", lambda doc: self.client_a.post(f"{NOTAS_CREDITO_URL}{doc['id']}/cancelar/"), lambda d: d),
+            ("cancelar", lambda doc: self.client_a.post(f"{NOTAS_CREDITO_URL}{doc['id']}/cancelar/", {"motivo": MOTIVO_PRUEBA}, format="json"), lambda d: d),
         ])
 
     # -- factura de proveedor --------------------------------------------------
