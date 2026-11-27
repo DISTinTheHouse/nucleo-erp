@@ -29,6 +29,7 @@ from inventarios.models import (
     MovimientoInventario,
     MovimientoInventarioDetalle,
     AjusteInventario,
+    MotivoAjuste,
 )
 from catalogo.models import Producto, ProductoVariante, VarianteProductoProduccion
 from auditoria.models import AuditoriaEvento
@@ -798,6 +799,28 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
         return respuesta
 
 
+def motivo_clave_de(data):
+    """``motivo_clave`` del catálogo. Explícito y desconocido → 400. Sin él, se
+    infiere del texto de ``motivo`` (clave o nombre); si no coincide, ``OTRO``."""
+    import unicodedata
+
+    def normal(texto):
+        texto = unicodedata.normalize("NFKD", str(texto or "")).encode("ascii", "ignore").decode()
+        return texto.strip().upper().replace(" ", "_")
+
+    clave = data.get("motivo_clave")
+    if clave not in (None, ""):
+        clave = normal(clave)
+        if clave not in MotivoAjuste.values:
+            raise ValidationError({"motivo_clave": f"motivo_clave debe ser uno de: {', '.join(MotivoAjuste.values)}."})
+        return clave
+    texto = normal(data.get("motivo"))
+    for c, n in MotivoAjuste.choices:
+        if texto in (c, normal(n)):
+            return c
+    return MotivoAjuste.OTRO
+
+
 class OperacionInventarioViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticatedAndScoped]
 
@@ -1024,6 +1047,7 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             almacen=almacen,
             usuario=request.user,
             motivo=motivo,
+            motivo_clave=motivo_clave_de(request.data),
             observaciones=observaciones,
         )
         return ajuste.pk
@@ -1084,6 +1108,8 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         almacen = self._get_almacen(request)
         self._validar_empresa_sucursal_del_body(request, almacen)
         items = self._get_items(request, almacen)
+        if tipo == "AJUSTE":
+            motivo_clave_de(request.data)  # 400 antes de cualquier escritura
         # Pedido OPCIONAL: validado (y aislado por empresa) antes de tocar la BD.
         pedido = self._get_pedido(request, almacen)
 
@@ -1271,6 +1297,11 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=False, methods=["get"], url_path="motivos-ajuste")
+    def motivos_ajuste(self, request):
+        """Catálogo de motivos de ajuste (``motivo_clave`` de ``ajuste``)."""
+        return Response([{"clave": c, "nombre": n} for c, n in MotivoAjuste.choices])
 
     @action(detail=False, methods=["post"], url_path="entrada")
     def entrada(self, request):

@@ -120,6 +120,18 @@ class Serie(models.Model):
     def __str__(self):
         return self.codigo or str(self.id)
 
+class MotivoAjuste(models.TextChoices):
+    """Catálogo de motivos de ajuste: contabilidad los suma por clave."""
+    CONTEO = "CONTEO", "Conteo físico"
+    MERMA = "MERMA", "Merma"
+    DANO = "DANO", "Daño"
+    CADUCIDAD = "CADUCIDAD", "Caducidad"
+    ROBO = "ROBO", "Robo o extravío"
+    ERROR_CAPTURA = "ERROR_CAPTURA", "Error de captura"
+    CARGA_INICIAL = "CARGA_INICIAL", "Carga inicial"
+    OTRO = "OTRO", "Otro"
+
+
 class AjusteInventario(StatusLifecycleModel):
     empresa = models.ForeignKey(Empresa, on_delete=models.PROTECT, related_name="ajustes_inventario")
     sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, related_name="ajustes_inventario")
@@ -128,6 +140,8 @@ class AjusteInventario(StatusLifecycleModel):
     fecha_ajuste = models.DateTimeField(auto_now_add=True, null=True, blank=True)
     usuario = models.ForeignKey('usuarios.Usuario', on_delete=models.CASCADE)
     motivo = models.CharField(max_length=100)
+    # Clave del catálogo (``MotivoAjuste``); ``motivo`` queda como texto libre.
+    motivo_clave = models.CharField(max_length=20, choices=MotivoAjuste.choices, default=MotivoAjuste.OTRO)
     observaciones = models.TextField(max_length=150, null=True, blank=True)
 
     history = HistoricalRecords()

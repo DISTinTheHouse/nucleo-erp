@@ -772,7 +772,101 @@ _COLUMNAS_MOVIMIENTOS = (
     *(f"ubicacion_destino__{c}" for c in _UBICACION),
     "ubicacion_origen__almacen__id_almacen", "ubicacion_origen__almacen__nombre",
     "ubicacion_destino__almacen__id_almacen", "ubicacion_destino__almacen__nombre",
+    "lote_id", "movimiento_inventario__ajuste_inventario__motivo_clave",
 )
+
+M_ = "movimiento_inventario__"
+#: Tercero y tipo de producto, anotados en la misma consulta del detalle.
+_ANOTACIONES_CONTABLES = {
+    "c_cliente_id": Coalesce(f"{M_}pedido__cliente_id", f"{M_}factura__cliente_id"),
+    "c_cliente_nombre": Coalesce(
+        models.functions.NullIf(f"{M_}pedido__cliente__razon_social", models.Value("")),
+        f"{M_}pedido__cliente__nombre",
+        models.functions.NullIf(f"{M_}factura__cliente__razon_social", models.Value("")),
+        f"{M_}factura__cliente__nombre",
+    ),
+    "c_proveedor_id": Coalesce(f"{M_}recepcion__proveedor_id", f"{M_}recepcion__orden_compra__proveedor_id"),
+    "c_proveedor_nombre": Coalesce(
+        f"{M_}recepcion__proveedor__nombre", f"{M_}recepcion__orden_compra__proveedor__nombre",
+    ),
+    "c_tipo_producto": Coalesce(
+        "producto_variante__producto__tipo__codigo", "producto__tipo__codigo",
+    ),
+}
+
+#: Categoría contable: el almacén en proceso manda; si no, el tipo del producto
+#: (MP/PT) y, sin tipo, el del almacén.
+CATEGORIAS_INVENTARIO = ("MATERIA_PRIMA", "EN_PROCESO", "PRODUCTO_TERMINADO")
+
+
+def categoria_inventario(tipo_almacen, tipo_producto):
+    if tipo_almacen == "PROCESO":
+        return "EN_PROCESO"
+    if tipo_producto == "PT":
+        return "PRODUCTO_TERMINADO"
+    if tipo_producto == "MP":
+        return "MATERIA_PRIMA"
+    return {"PT": "PRODUCTO_TERMINADO", "MP": "MATERIA_PRIMA"}.get(tipo_almacen)
+
+
+def _documentos_contables(detalles):
+    """Facturas (proveedor por recepción, cliente por factura o pedido), sus
+    pólizas y el costo antes/después de cada renglón. Hasta 4 consultas fijas,
+    solo las que hagan falta."""
+    from finanzas.models import Factura, FacturaProveedor, Poliza
+    from inventarios.models import HistorialCostoInventario
+
+    recepcion_ids = {d.o_recepcion_id for d in detalles if d.o_recepcion_id}
+    factura_ids = {d.o_factura_id for d in detalles if d.o_factura_id}
+    pedido_ids = {d.o_pedido_id for d in detalles if d.o_pedido_id}
+
+    fact_prov = {}
+    if recepcion_ids:
+        for f in (
+            FacturaProveedor.objects.filter(recepcion_id__in=recepcion_ids)
+            .exclude(estatus="Cancelada").order_by("recepcion_id", "-id").values("id", "recepcion_id", "folio")
+        ):
+            fact_prov.setdefault(f["recepcion_id"], f)
+    fact_cli_id, fact_cli_pedido = {}, {}
+    if factura_ids or pedido_ids:
+        for f in (
+            Factura.objects.filter(models.Q(pk__in=factura_ids) | models.Q(pedido_id__in=pedido_ids))
+            .exclude(estatus="Cancelada").order_by("-id").values("id", "pedido_id", "folio", "cfdi_uuid")
+        ):
+            fact_cli_id[f["id"]] = f
+            if f["pedido_id"]:
+                fact_cli_pedido.setdefault(f["pedido_id"], f)
+    polizas = {}
+    origenes = models.Q(pk__in=[])
+    if fact_prov:
+        origenes |= models.Q(origen_tipo="FacturaProveedor", origen_id__in=[f["id"] for f in fact_prov.values()])
+    if fact_cli_id:
+        origenes |= models.Q(origen_tipo="Factura", origen_id__in=list(fact_cli_id))
+    if fact_prov or fact_cli_id:
+        for pz in Poliza.objects.filter(origenes).exclude(estatus="Cancelada").order_by("id").values(
+            "id", "folio", "origen_tipo", "origen_id",
+        ):
+            polizas[(pz["origen_tipo"], pz["origen_id"])] = pz
+    costos = {}
+    if detalles:
+        costos = {
+            h["movimiento_detalle_id"]: (h["costo_anterior"], h["costo_nuevo"])
+            for h in HistorialCostoInventario.objects.filter(
+                movimiento_detalle_id__in=[d.pk for d in detalles]
+            ).values("movimiento_detalle_id", "costo_anterior", "costo_nuevo")
+        }
+
+    def de(detalle, tipo):
+        """``(factura, poliza, factura_tipo)`` del renglón."""
+        if detalle.o_recepcion_id and detalle.o_recepcion_id in fact_prov:
+            f = fact_prov[detalle.o_recepcion_id]
+            return {**f, "cfdi_uuid": None}, polizas.get(("FacturaProveedor", f["id"])), "PROVEEDOR"
+        f = fact_cli_id.get(detalle.o_factura_id) or fact_cli_pedido.get(detalle.o_pedido_id)
+        if f:
+            return f, polizas.get(("Factura", f["id"])), "CLIENTE"
+        return None, None, None
+
+    return de, costos
 
 
 def reporte_movimientos(user, query_params):
@@ -810,7 +904,7 @@ def reporte_movimientos(user, query_params):
 
     almacenes = {
         a["id_almacen"]: a
-        for a in Almacen.objects.filter(pk__in=allowed_almacen_ids).values("id_almacen", "codigo", "nombre")
+        for a in Almacen.objects.filter(pk__in=allowed_almacen_ids).values("id_almacen", "codigo", "nombre", "tipo_almacen")
     }
     empresa_ids = empresa_ids_lectura(user)
 
@@ -870,7 +964,11 @@ def reporte_movimientos(user, query_params):
     filtro = models.Q()
     for nombre in anotaciones:
         filtro |= models.Q(**{f"{nombre}__in": allowed_almacen_ids})
-    detalles_qs = anotar_origen(detalles_qs.annotate(**anotaciones).filter(filtro)).order_by(*ordenamiento)
+    detalles_qs = (
+        anotar_origen(detalles_qs.annotate(**anotaciones).filter(filtro))
+        .annotate(**_ANOTACIONES_CONTABLES)
+        .order_by(*ordenamiento)
+    )
 
     detalles = list(detalles_qs)
     # Ajustes viejos sin cantidad antes/después: delta de la bitácora (1 consulta).
@@ -879,6 +977,10 @@ def reporte_movimientos(user, query_params):
         if d.movimiento_inventario.tipo_movimiento == "AJUSTE" and d.movimiento_inventario.ajuste_inventario_id
         and (d.cantidad_antes is None or d.cantidad_despues is None)
     })
+
+    documentos_de, costos_historial = _documentos_contables(detalles)
+    por_motivo = defaultdict(lambda: {"registros": 0, "piezas": Decimal("0"), "costo": Decimal("0")})
+    por_categoria = defaultdict(lambda: {"registros": 0, "piezas": Decimal("0"), "costo": Decimal("0")})
 
     resultados = []
     total_cantidad = neto_piezas = neto_costo = Decimal("0")
@@ -899,7 +1001,7 @@ def reporte_movimientos(user, query_params):
     if faltan:
         almacenes.update({
             a["id_almacen"]: a
-            for a in Almacen.objects.filter(pk__in=faltan).values("id_almacen", "codigo", "nombre")
+            for a in Almacen.objects.filter(pk__in=faltan).values("id_almacen", "codigo", "nombre", "tipo_almacen")
         })
 
     for detalle in detalles:
@@ -964,6 +1066,19 @@ def reporte_movimientos(user, query_params):
         usuario = movimiento.usuario
         ajuste = movimiento.ajuste_inventario
         vp = detalle.variante_produccion
+
+        categoria = categoria_inventario(almacen.get("tipo_almacen"), detalle.c_tipo_producto)
+        motivo_clave = getattr(ajuste, "motivo_clave", None) if tipo == "AJUSTE" else None
+        for grupo, llave in ((por_categoria, categoria or "SIN_CATEGORIA"), (por_motivo, motivo_clave)):
+            if llave:
+                grupo[llave]["registros"] += 1
+                grupo[llave]["piezas"] += signed
+                grupo[llave]["costo"] += costo_signed
+        factura, poliza, factura_tipo = documentos_de(detalle, tipo)
+        # Saldo de la fila afectada (ubicación, o el almacén si no hay ubicación)
+        # guardado al mover; null en transferencias y movimientos anteriores.
+        antes, despues = detalle.cantidad_antes, detalle.cantidad_despues
+        costo_antes, costo_despues = costos_historial.get(detalle.pk, (costo_unitario, costo_unitario))
         resultados.append(
             {
                 "movimiento_inventario_id": movimiento.pk,
@@ -976,6 +1091,29 @@ def reporte_movimientos(user, query_params):
                 "ubicacion_id": getattr(ubicacion, "pk", None),
                 "ubicacion_nombre": str(ubicacion) if ubicacion else None,
                 **_lados_transferencia(detalle, tipo, almacenes),
+                "ubicacion_origen_id": detalle.ubicacion_origen_id,
+                "ubicacion_origen_nombre": str(detalle.ubicacion_origen) if detalle.ubicacion_origen_id else None,
+                "ubicacion_destino_id": detalle.ubicacion_destino_id,
+                "ubicacion_destino_nombre": str(detalle.ubicacion_destino) if detalle.ubicacion_destino_id else None,
+                "saldo_antes": None if antes is None else str(quantize_qty(antes)),
+                "saldo_despues": None if despues is None else str(quantize_qty(despues)),
+                "saldo_nivel": None if despues is None else ("UBICACION" if ubicacion else "ALMACEN"),
+                "saldo_negativo": None if despues is None else despues < 0,
+                "valor_antes": None if antes is None else str(quantize_money(to_decimal(antes) * to_decimal(costo_antes))),
+                "valor_despues": None if despues is None else str(quantize_money(to_decimal(despues) * to_decimal(costo_despues))),
+                "cliente_id": detalle.c_cliente_id,
+                "cliente_nombre": detalle.c_cliente_nombre,
+                "proveedor_id": detalle.c_proveedor_id,
+                "proveedor_nombre": detalle.c_proveedor_nombre,
+                "lote_id": detalle.lote_id,
+                "categoria_inventario": categoria,
+                "factura_tipo": factura_tipo,
+                "factura_id": factura["id"] if factura else None,
+                "factura_folio": factura["folio"] if factura else None,
+                "factura_uuid": factura["cfdi_uuid"] if factura else None,
+                "poliza_id": poliza["id"] if poliza else None,
+                "poliza_folio": poliza["folio"] if poliza else None,
+                "motivo_ajuste_clave": motivo_clave,
                 "producto_id": getattr(producto, "pk", None),
                 "producto_variante_id": getattr(variante, "pk", None),
                 "sku": getattr(variante, "sku", None) or getattr(vp, "sku", None),
@@ -1014,4 +1152,6 @@ def reporte_movimientos(user, query_params):
         por_tipo, total_cantidad, neto_piezas, neto_costo, len(movimiento_ids), len(resultados),
         transferencias_lados,
     )
+    reporte["resumen"]["por_categoria"] = {k: _fmt_bucket(v) for k, v in sorted(por_categoria.items())}
+    reporte["resumen"]["por_motivo_ajuste"] = {k: _fmt_bucket(v) for k, v in sorted(por_motivo.items())}
     return reporte
