@@ -16,7 +16,9 @@ from rest_framework.viewsets import GenericViewSet
 from wms.api.serializers import (
     DespachoCreateSerializer,
     DespachoSerializer,
+    EtiquetaRFIDCantidadQuerySerializer,
     EtiquetaRFIDCreateSerializer,
+    EtiquetaRFIDListSerializer,
     EtiquetaRFIDSerializer,
     PackingCreateSerializer,
     TransferenciaListSerializer,
@@ -49,7 +51,7 @@ from nucleo.kpis import entero_param
 from nucleo.listados import PaginacionOpcionalLimitOffset
 from nucleo.scope import empresa_ids_lectura, sucursales_permitidas_q
 from wms.api.lectores_rfid import lectores_visibles
-from wms.api import pickings_listado
+from wms.api import etiquetas_rfid_listado, pickings_listado
 from wms.scope import documentos_wms_visibles
 from wms.services import cancelacion_service
 from wms.services.despacho_service import DespachoService
@@ -614,30 +616,59 @@ class DespachoViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveMo
 TOPE_CONTEO_STATS = 10000
 
 
+@extend_schema_view(list=extend_schema(parameters=[etiquetas_rfid_listado.PARAMETRO_STATUS_OPENAPI]))
 class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
+    """EC-989: el listado es ligero (``EtiquetaRFIDListSerializer``, sin ``etiquetas``
+    ni ``zpl_enviado``) y ``?limit=&offset=`` lo pagina (sin ``limit``, el arreglo
+    completo), con ``?search=``, ``?status=`` y ``?ordering=`` en servidor
+    (``wms/api/etiquetas_rfid_listado.py``). El detalle ``{id}/`` trae ambos, como
+    siempre. Las acciones propias (``buscar/``, ``onboarding/``, ``preview/``,
+    ``scans/``...) arman su respuesta sin ``paginate_queryset`` ni
+    ``filter_queryset``, así que paginación, búsqueda y orden no las tocan."""
+
     queryset = EtiquetaRFIDImpresion.objects.all()
     serializer_class = EtiquetaRFIDSerializer
+    pagination_class = PaginacionOpcionalLimitOffset
+    filter_backends = [
+        *[
+            b for b in GenericViewSet.filter_backends
+            if not issubclass(b, (OrderingFilter, SearchFilter))
+        ],
+        etiquetas_rfid_listado.BusquedaEtiquetasRFIDFilter,
+        etiquetas_rfid_listado.OrdenamientoEtiquetasRFIDFilter,
+    ]
+    search_fields = list(etiquetas_rfid_listado.CAMPOS_BUSQUEDA)
+    ordering_fields = list(etiquetas_rfid_listado.CAMPOS_ORDEN)
 
     def get_queryset(self):
         user = self.request.user
+        # Solo ``producto`` y ``producto_variante``: de empresa, sucursal y usuario
+        # el serializer lee el ``*_id``.
         qs = (
             super()
             .get_queryset()
-            .select_related("empresa", "sucursal", "usuario", "producto", "producto_variante")
-            .prefetch_related(
+            .select_related("producto", "producto_variante")
+            .order_by("-created_at", "-id")
+        )
+        # Los EPC solo los anida el detalle.
+        if self.action == "retrieve":
+            qs = qs.prefetch_related(
                 Prefetch(
                     "etiquetas",
                     queryset=EtiquetaRFIDDetalle.objects.order_by("id"),
                 )
             )
-            .order_by("-created_at", "-id")
-        )
 
         # Superusuario incluido: solo su empresa activa (EC-798, #1148).
         empresa = getattr(user, "empresa", None)
         if not empresa:
             return qs.none()
         qs = qs.filter(empresa=empresa)
+        # ``?status=`` sólo en el listado, encima del alcance: en el detalle un
+        # parámetro suelto daría 404 sobre una impresión visible. El listado no
+        # serializa ``zpl_enviado``: tampoco lo lee de la BD.
+        if self.action == "list":
+            qs = etiquetas_rfid_listado.filtrar_status(self.request, qs.defer("zpl_enviado"))
         if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(sucursal_id__in=user.sucursales_permitidas())
@@ -645,7 +676,17 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
     def get_serializer_class(self):
         if self.action in {"create", "registrar_impresion", "onboarding"} and self.request.method == "POST":
             return EtiquetaRFIDCreateSerializer
+        if self.action == "list":
+            return EtiquetaRFIDListSerializer
         return EtiquetaRFIDSerializer
+
+    @staticmethod
+    def _cantidad_query(request):
+        """``?cantidad=`` de GET ``onboarding/`` y ``preview/`` con el mismo campo que
+        el POST (EC-989): inválida o arriba de ``MAX_CANTIDAD_ETIQUETAS`` → 400."""
+        serializer = EtiquetaRFIDCantidadQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        return serializer.validated_data["cantidad"]
 
     @action(
         detail=False,
@@ -801,12 +842,13 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             user = request.user
             empresa = getattr(user, "empresa", None)
 
+            # Antes que el buscador y fuera del ``try`` de abajo: una ``cantidad``
+            # inválida responde 400 con su motivo, como el POST (EC-989).
+            cantidad = self._cantidad_query(request)
             q = (request.query_params.get("q") or "").strip()
             variante_id = request.query_params.get("variante") or request.query_params.get("variante_id")
             producto_id = request.query_params.get("producto") or request.query_params.get("producto_id")
-            cantidad_raw = request.query_params.get("cantidad")
             rfid_mode_raw = request.query_params.get("rfid_mode", "true")
-            cantidad = int(cantidad_raw) if (cantidad_raw and str(cantidad_raw).isdigit()) else 1
             rfid_mode = str(rfid_mode_raw).lower() not in {"0", "false", "no", "off"}
 
             buscar_payload = self.buscar(request).data
@@ -871,15 +913,14 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         url_name="preview",
     )
     def preview(self, request):
+        cantidad = self._cantidad_query(request)
         variante_id = request.query_params.get("variante") or request.query_params.get(
             "variante_id"
         )
         producto_id = request.query_params.get("producto") or request.query_params.get(
             "producto_id"
         )
-        cantidad_raw = request.query_params.get("cantidad")
         rfid_mode_raw = request.query_params.get("rfid_mode", "true")
-        cantidad = int(cantidad_raw) if (cantidad_raw and str(cantidad_raw).isdigit()) else 1
         rfid_mode = str(rfid_mode_raw).lower() not in {"0", "false", "no", "off"}
 
         payload = RFIDLabelService.onboarding_preview(request.user, variante_id=variante_id, producto_id=producto_id, cantidad=cantidad, rfid_mode=rfid_mode)

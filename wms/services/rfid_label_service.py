@@ -67,10 +67,16 @@ def zpl_rfid_vigente(zpl):
 # Intentos de regeneración ante colisión de EPC en la rama generada por backend.
 MAX_INTENTOS_EPC = 3
 
+# Etiquetas por impresión: tope único del POST (``EtiquetaRFIDCreateSerializer``) y
+# de ``cantidad`` en GET ``onboarding/`` y ``preview/`` (EC-989). El ``idx`` de cada
+# EPC (``_generate_epc_list``) ocupa 4 hex: arriba de 65535 el EPC salía de 25 hex y
+# ya no era de 96 bits. Sin tope en GET, 20000 respondían ~10 MB.
+MAX_CANTIDAD_ETIQUETAS = 10000
+
 # Filas por INSERT. Postgres no acota ``bulk_batch_size`` (sólo sqlite y oracle lo
 # sobreescriben), así que sin esto Django manda un único INSERT con todo el lote:
 # ``EtiquetaRFIDDetalle`` inserta 7 columnas y el serializer permite ``cantidad``
-# hasta 10000, o sea 70000 parámetros, por encima del tope de 65535 del protocolo
+# hasta ``MAX_CANTIDAD_ETIQUETAS``, o sea 70000 parámetros, por encima del tope de 65535 del protocolo
 # extendido de psycopg. Ese error es ``ProgrammingError``, no ``IntegrityError``,
 # así que se escapaba de los handlers de abajo y salía como 500.
 EPC_BATCH_SIZE = 1000
@@ -173,8 +179,8 @@ class RFIDLabelService:
         ts_chunk = f"{int(time.time()) & 0xFFFF:04X}"
         result = []
         for idx in range(1, max(1, int(cantidad)) + 1):
-            # ``idx`` se queda en 4 hex: el serializer topa ``cantidad`` en 10000
-            # (0x2710) y no cabría en menos. El donante tenía que ser ``ts_chunk``.
+            # ``idx`` se queda en 4 hex: ``MAX_CANTIDAD_ETIQUETAS`` (10000 = 0x2710)
+            # no cabría en menos. El donante tenía que ser ``ts_chunk``.
             serial = f"{idx:04X}{secrets.token_hex(4).upper()}"
             epc = f"{prefix}{ts_chunk}{serial}"
             result.append(

@@ -5237,3 +5237,459 @@ class LectorRFIDBlindajeTests(TestCase):
         self.assertEqual(purgar_lecturas_viejas(), 1)
         self.assertEqual(list(RfidScan.objects.values_list("epc", flat=True)), ["AAAABBBBCCCC0010"])
         self.assertEqual(RfidLecturaUltima.objects.count(), 1)
+
+
+class EtiquetasRFIDListadoDetalleEC989Tests(TestCase):
+    """EC-989: listado ligero (sin ``etiquetas`` ni ``zpl_enviado``) y paginación
+    opcional, detalle completo, ``cantidad`` de GET ``onboarding/``/``preview/`` con
+    el tope y el mensaje del POST, y alcance por empresa activa."""
+
+    URL = "/api/v1/wms/etiquetas-rfid/"
+    CAMPOS_LISTA = [
+        "id", "folio", "empresa", "sucursal", "usuario", "producto", "producto_variante",
+        "producto_nombre", "producto_variante_nombre", "sku", "codigo_producto", "cantidad",
+        "rfid_mode", "printer_name", "printer_address", "status", "observaciones",
+        "created_at", "updated_at",
+    ]
+    EPC = "000015D80438000188F0D54F"
+    ZPL_VIEJO = "\n".join([
+        "^XA", "^FO40,245^BCN,90,Y,N,N^FDPB01^FS",
+        "^RB96,,,1", "^RS8,E", "^RFW,E", f"^FD{EPC}^FS",
+        "^FO40,360^A0N,18,18^FDEPC^FS", "^XZ",
+    ])
+    # Rechazadas igual que en el POST: arriba del tope, cero, negativa, texto,
+    # decimal y un dígito Unicode (antes 500 por ``str.isdigit``).
+    INVALIDAS = ["10001", "0", "-1", "abc", "1.5", "²"]
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="ec989-a", razon_social="Empresa A")
+        cls.otra_empresa = Empresa.objects.create(codigo="ec989-b", razon_social="Empresa B")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="A1", nombre="A1")
+        cls.sucursal_2 = Sucursal.objects.create(empresa=cls.empresa, codigo="A2", nombre="A2")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.otra_empresa, codigo="B1", nombre="B1")
+        cls.producto = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera", codigo="PB01"
+        )
+        cls.producto_b = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=cls.otra_empresa, nombre="Gorra", codigo="GB01"
+        )
+        cls.admin = Usuario.objects.create(
+            username="ec989-admin", email="ec989-admin@example.com", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.operador = Usuario.objects.create(
+            username="ec989-op", email="ec989-op@example.com", empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
+        cls.superusuario_b = Usuario.objects.create(
+            username="ec989-su", email="ec989-su@example.com", empresa=cls.otra_empresa,
+            is_superuser=True, is_staff=True,
+        )
+        cls.sin_empresa = Usuario.objects.create(username="ec989-nadie", email="ec989-nadie@example.com")
+
+        cls.impresion = EtiquetaRFIDImpresion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, usuario=cls.admin, producto=cls.producto,
+            cantidad=2, zpl_enviado=cls.ZPL_VIEJO,
+        )
+        EtiquetaRFIDDetalle.objects.create(
+            impresion=cls.impresion, epc=cls.EPC, barcode_value="PB01", serial="0001"
+        )
+        EtiquetaRFIDDetalle.objects.create(
+            impresion=cls.impresion, epc="000015D80438000288F0D54F", barcode_value="PB01", serial="0002"
+        )
+        cls.impresion_2 = EtiquetaRFIDImpresion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal_2, producto=cls.producto, cantidad=1, rfid_mode=False,
+        )
+        cls.impresion_3 = EtiquetaRFIDImpresion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, producto=cls.producto, cantidad=1, rfid_mode=False,
+        )
+        cls.impresion_b = EtiquetaRFIDImpresion.objects.create(
+            empresa=cls.otra_empresa, sucursal=cls.sucursal_b, producto=cls.producto_b, cantidad=1,
+        )
+        EtiquetaRFIDDetalle.objects.create(
+            impresion=cls.impresion_b, epc="BBBB15D80438000188F0D54F", barcode_value="GB01"
+        )
+
+    def _api(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    # ── Listado ───────────────────────────────────────────────────────
+
+    def test_listado_sin_etiquetas_ni_zpl_como_arreglo(self):
+        with self.assertNumQueries(1):
+            resp = self._api(self.admin).get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        datos = resp.json()
+        self.assertIsInstance(datos, list)
+        self.assertEqual(
+            [f["id"] for f in datos], [self.impresion_3.pk, self.impresion_2.pk, self.impresion.pk]
+        )
+        for fila in datos:
+            self.assertEqual(list(fila), self.CAMPOS_LISTA)
+        fila = datos[-1]
+        self.assertEqual(fila["folio"], f"LAB-{self.impresion.pk:06d}")
+        self.assertEqual(fila["producto_nombre"], "Playera")
+        self.assertEqual(fila["codigo_producto"], "PB01")
+        self.assertEqual(fila["cantidad"], 2)
+
+    def test_listado_paginado_con_limit_offset(self):
+        with self.assertNumQueries(2):
+            resp = self._api(self.admin).get(self.URL, {"limit": 2, "offset": 1})
+        self.assertEqual(resp.status_code, 200)
+        datos = resp.json()
+        self.assertEqual(list(datos), ["count", "next", "previous", "results"])
+        self.assertEqual(datos["count"], 3)
+        self.assertEqual([f["id"] for f in datos["results"]], [self.impresion_2.pk, self.impresion.pk])
+        self.assertEqual(list(datos["results"][0]), self.CAMPOS_LISTA)
+        self.assertEqual(self._api(self.admin).get(self.URL, {"limit": "x"}).status_code, 400)
+
+    def test_listado_operador_solo_sus_sucursales(self):
+        datos = self._api(self.operador).get(self.URL).json()
+        self.assertEqual([f["id"] for f in datos], [self.impresion_3.pk, self.impresion.pk])
+
+    # ── Detalle ───────────────────────────────────────────────────────
+
+    def test_detalle_con_epc_y_zpl_vigente(self):
+        from wms.services.rfid_label_service import zpl_rfid_vigente
+
+        with self.assertNumQueries(2):
+            resp = self._api(self.admin).get(f"{self.URL}{self.impresion.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        datos = resp.json()
+        self.assertEqual(
+            [c for c in datos if c not in ("etiquetas", "zpl_enviado")], self.CAMPOS_LISTA
+        )
+        self.assertEqual(datos["zpl_enviado"], zpl_rfid_vigente(self.ZPL_VIEJO))
+        self.assertNotEqual(datos["zpl_enviado"], self.ZPL_VIEJO)
+        self.assertEqual(
+            [(e["epc"], e["serial"]) for e in datos["etiquetas"]],
+            [(self.EPC, "0001"), ("000015D80438000288F0D54F", "0002")],
+        )
+        self.assertEqual(
+            sorted(datos["etiquetas"][0]),
+            sorted([
+                "id", "impresion", "epc", "barcode_value", "serial", "estado", "leida_at",
+                "created_at", "updated_at",
+            ]),
+        )
+
+    # ── Alcance ───────────────────────────────────────────────────────
+
+    def test_otra_empresa_404_en_detalle_y_fuera_del_listado(self):
+        api = self._api(self.admin)
+        self.assertEqual(api.get(f"{self.URL}{self.impresion_b.pk}/").status_code, 404)
+        self.assertNotIn(self.impresion_b.pk, [f["id"] for f in api.get(self.URL).json()])
+        self.assertNotIn(
+            self.impresion_b.pk, [f["id"] for f in api.get(self.URL, {"limit": 10}).json()["results"]]
+        )
+
+    def test_superusuario_con_otra_empresa_activa(self):
+        api = self._api(self.superusuario_b)
+        self.assertEqual([f["id"] for f in api.get(self.URL).json()], [self.impresion_b.pk])
+        self.assertEqual(api.get(f"{self.URL}{self.impresion.pk}/").status_code, 404)
+        self.assertEqual(api.get(f"{self.URL}{self.impresion_b.pk}/").status_code, 200)
+
+    def test_usuario_sin_empresa_no_ve_nada(self):
+        api = self._api(self.sin_empresa)
+        self.assertEqual(api.get(self.URL).json(), [])
+        self.assertEqual(api.get(self.URL, {"limit": 5}).json()["count"], 0)
+        self.assertEqual(api.get(f"{self.URL}{self.impresion.pk}/").status_code, 404)
+
+    # ── cantidad en GET onboarding/ y preview/ ───────────────────────
+
+    def test_preview_rechaza_cantidad_invalida(self):
+        api = self._api(self.admin)
+        for valor in self.INVALIDAS:
+            with self.subTest(cantidad=valor):
+                resp = api.get(f"{self.URL}preview/", {"producto": self.producto.pk, "cantidad": valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(list(resp.json()), ["cantidad"])
+
+    def test_onboarding_rechaza_cantidad_invalida_con_motivo(self):
+        api = self._api(self.admin)
+        for valor in self.INVALIDAS:
+            with self.subTest(cantidad=valor):
+                resp = api.get(f"{self.URL}onboarding/", {"producto": self.producto.pk, "cantidad": valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(list(resp.json()), ["cantidad"])
+                self.assertNotIn("Solicitud inválida", resp.content.decode())
+
+    def test_get_y_post_rechazan_con_el_mismo_mensaje(self):
+        from wms.services.rfid_label_service import MAX_CANTIDAD_ETIQUETAS
+
+        api = self._api(self.admin)
+        arriba = MAX_CANTIDAD_ETIQUETAS + 1
+        post = api.post(self.URL, {"producto": self.producto.pk, "cantidad": arriba}, format="json")
+        preview = api.get(f"{self.URL}preview/", {"producto": self.producto.pk, "cantidad": arriba})
+        onboarding = api.get(f"{self.URL}onboarding/", {"producto": self.producto.pk, "cantidad": arriba})
+        self.assertEqual(post.status_code, 400)
+        self.assertIn(str(MAX_CANTIDAD_ETIQUETAS), post.json()["cantidad"][0])
+        self.assertEqual(preview.json(), {"cantidad": post.json()["cantidad"]})
+        self.assertEqual(onboarding.json(), {"cantidad": post.json()["cantidad"]})
+        self.assertFalse(EtiquetaRFIDImpresion.objects.filter(cantidad=arriba).exists())
+
+    def test_post_usa_el_tope_compartido(self):
+        from wms.services.rfid_label_service import MAX_CANTIDAD_ETIQUETAS
+
+        campo = EtiquetaRFIDCreateSerializer().fields["cantidad"]
+        self.assertEqual((campo.min_value, campo.max_value), (1, MAX_CANTIDAD_ETIQUETAS))
+        ok = EtiquetaRFIDCreateSerializer(data={"producto": self.producto.pk, "cantidad": MAX_CANTIDAD_ETIQUETAS})
+        self.assertTrue(ok.is_valid(), ok.errors)
+
+    def test_cantidad_valida_o_ausente_sigue_igual(self):
+        api = self._api(self.admin)
+        resp = api.get(f"{self.URL}preview/", {"producto": self.producto.pk, "cantidad": 3})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["cantidad"], 3)
+        self.assertEqual(len(resp.json()["zpl_individual"]), 3)
+        for params in ({}, {"cantidad": ""}):
+            with self.subTest(params=params):
+                resp = api.get(f"{self.URL}onboarding/", {"producto": self.producto.pk, **params})
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.json()["preview"]["cantidad"], 1)
+
+    def test_onboarding_otros_errores_conservan_el_mensaje_generico(self):
+        resp = self._api(self.admin).get(f"{self.URL}onboarding/", {"producto": self.producto_b.pk})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"], "Solicitud inválida. Verifica los datos enviados.")
+
+    def test_acciones_propias_no_se_paginan(self):
+        api = self._api(self.admin)
+        buscar = api.get(f"{self.URL}buscar/", {"q": "Play", "limit": 1}).json()
+        self.assertEqual(sorted(buscar), ["q", "resultados", "sucursal_ids"])
+        onboarding = api.get(f"{self.URL}onboarding/", {"limit": 1}).json()
+        self.assertNotIn("results", onboarding)
+        self.assertIn("resultados", onboarding)
+        preview = api.get(f"{self.URL}preview/", {"producto": self.producto.pk, "limit": 1}).json()
+        self.assertIn("zpl_individual", preview)
+        self.assertIn("scans", api.get(f"{self.URL}scans/", {"limit": 1}).json())
+
+
+class EtiquetasRFIDListadoServidorEC989Tests(TestCase):
+    """EC-989 (modo servidor del historial): ``?search=`` (folio, SKU, producto,
+    variante), ``?status=`` y ``?ordering=`` en el listado, combinados con
+    ``?limit=&offset=``, siempre dentro de la empresa activa."""
+
+    URL = "/api/v1/wms/etiquetas-rfid/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from catalogo.models import Color, ProductoVariante, Talla
+
+        cls.empresa = Empresa.objects.create(codigo="ec989s-a", razon_social="Empresa A")
+        cls.otra_empresa = Empresa.objects.create(codigo="ec989s-b", razon_social="Empresa B")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="SA1", nombre="SA1")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.otra_empresa, codigo="SB1", nombre="SB1")
+        color = Color.objects.create(nombre="AZUL EC989", codigo="AZ9", codigo_hex="#0000FF")
+        talla = Talla.objects.create(nombre="M EC989")
+        cls.polo = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera Polo", codigo="PP01"
+        )
+        cls.gorra = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=cls.empresa, nombre="Gorra Trucker", codigo="GT01"
+        )
+        cls.variante = ProductoVariante.objects.create(
+            producto=cls.polo, empresa=cls.empresa, color=color, talla=talla,
+            nombre="Polo azul mediana", sku="PP01-AZ-M", precio_base=Decimal("100"),
+        )
+        # El nombre compuesto lo puede reescribir ``save()``: se fija sin pasar por él.
+        ProductoVariante.objects.filter(pk=cls.variante.pk).update(nombre="Polo azul mediana")
+        polo_b = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=cls.otra_empresa, nombre="Playera Polo B", codigo="PP01B"
+        )
+        variante_b = ProductoVariante.objects.create(
+            producto=polo_b, empresa=cls.otra_empresa, color=color, talla=talla,
+            nombre="Polo azul mediana B", sku="PP01-AZ-B", precio_base=Decimal("100"),
+        )
+        cls.admin = Usuario.objects.create(
+            username="ec989s-admin", email="ec989s-admin@example.com", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.superusuario_b = Usuario.objects.create(
+            username="ec989s-su", email="ec989s-su@example.com", empresa=cls.otra_empresa,
+            is_superuser=True, is_staff=True,
+        )
+
+        def impresion(empresa, sucursal, producto, variante, status, cantidad, horas):
+            obj = EtiquetaRFIDImpresion.objects.create(
+                empresa=empresa, sucursal=sucursal, producto=producto, producto_variante=variante,
+                status=status, cantidad=cantidad, rfid_mode=False,
+            )
+            # ``created_at`` fijo: el orden por fecha no depende de microsegundos.
+            EtiquetaRFIDImpresion.objects.filter(pk=obj.pk).update(
+                created_at=timezone.now() - timedelta(hours=horas)
+            )
+            return obj
+
+        E = EtiquetaRFIDImpresion.Estatus
+        cls.i1 = impresion(cls.empresa, cls.sucursal, cls.polo, cls.variante, E.EXITO, 5, 40)
+        cls.i2 = impresion(cls.empresa, cls.sucursal, cls.gorra, None, E.FALLIDO, 1, 30)
+        cls.i3 = impresion(cls.empresa, cls.sucursal, cls.polo, cls.variante, E.PENDIENTE, 3, 20)
+        cls.i4 = impresion(cls.empresa, cls.sucursal, cls.gorra, None, E.EXITO, 10, 10)
+        cls.ib = impresion(cls.otra_empresa, cls.sucursal_b, polo_b, variante_b, E.EXITO, 7, 5)
+
+    def _ids(self, params, user=None):
+        client = APIClient()
+        client.force_authenticate(user or self.admin)
+        resp = client.get(self.URL, params)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        datos = resp.json()
+        filas = datos["results"] if isinstance(datos, dict) else datos
+        return [f["id"] for f in filas]
+
+    # ── search ────────────────────────────────────────────────────────
+
+    def test_search_por_folio(self):
+        self.assertEqual(self._ids({"search": f"LAB-{self.i3.pk:06d}"}), [self.i3.pk])
+        # Sin distinguir mayúsculas; sólo las de la empresa activa.
+        self.assertEqual(
+            self._ids({"search": "lab-"}), [self.i4.pk, self.i3.pk, self.i2.pk, self.i1.pk]
+        )
+
+    def test_folio_sql_igual_al_de_python(self):
+        """La expresión de búsqueda arma el mismo texto que ``folio`` (``LAB-{pk:06d}``),
+        también arriba de 6 dígitos, donde ``LPAD`` recortaría."""
+        from django.db.models import IntegerField, Value
+
+        from wms.api.etiquetas_rfid_listado import folio_sql
+
+        for pk in (1, 42, 999999, 1000000, 12345678):
+            with self.subTest(pk=pk):
+                folio = (
+                    EtiquetaRFIDImpresion.objects.filter(pk=self.i1.pk)
+                    .annotate(f=folio_sql(Value(pk, output_field=IntegerField())))
+                    .values_list("f", flat=True)
+                    .get()
+                )
+                self.assertEqual(folio, f"LAB-{pk:06d}")
+        self.assertEqual(self.i1.folio, f"LAB-{self.i1.pk:06d}")
+
+    def test_search_por_sku_producto_y_variante(self):
+        self.assertEqual(self._ids({"search": "pp01-az"}), [self.i3.pk, self.i1.pk])
+        self.assertEqual(self._ids({"search": "GORRA"}), [self.i4.pk, self.i2.pk])
+        self.assertEqual(self._ids({"search": "azul mediana"}), [self.i3.pk, self.i1.pk])
+        self.assertEqual(self._ids({"search": "no-existe"}), [])
+
+    def test_search_no_cruza_empresas(self):
+        # ``PP01-AZ-B`` y "Polo azul mediana B" son de la otra empresa.
+        self.assertNotIn(self.ib.pk, self._ids({"search": "PP01-AZ"}))
+        self.assertNotIn(self.ib.pk, self._ids({"search": f"LAB-{self.ib.pk:06d}"}))
+        self.assertEqual(self._ids({"search": "PP01-AZ"}, user=self.superusuario_b), [self.ib.pk])
+        self.assertEqual(self._ids({"search": f"LAB-{self.i1.pk:06d}"}, user=self.superusuario_b), [])
+
+    # ── status ────────────────────────────────────────────────────────
+
+    def test_status_uno_o_varios(self):
+        self.assertEqual(self._ids({"status": "EXITO"}), [self.i4.pk, self.i1.pk])
+        self.assertEqual(self._ids({"status": "pendiente,FALLIDO"}), [self.i3.pk, self.i2.pk])
+        self.assertEqual(len(self._ids({"status": ""})), 4)
+
+    def test_status_invalido_400(self):
+        client = APIClient()
+        client.force_authenticate(self.admin)
+        for valor in ("NADA", "EXITO,NADA", ","):
+            with self.subTest(status=valor):
+                resp = client.get(self.URL, {"status": valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(list(resp.json()), ["status"])
+
+    # ── ordering ──────────────────────────────────────────────────────
+
+    def test_orden_por_defecto_mas_reciente_primero(self):
+        self.assertEqual(self._ids({}), [self.i4.pk, self.i3.pk, self.i2.pk, self.i1.pk])
+        # Un campo fuera de la lista blanca se ignora (queda el orden por defecto).
+        self.assertEqual(
+            self._ids({"ordering": "zpl_enviado"}), [self.i4.pk, self.i3.pk, self.i2.pk, self.i1.pk]
+        )
+
+    def test_ordering_por_columnas(self):
+        i1, i2, i3, i4 = self.i1.pk, self.i2.pk, self.i3.pk, self.i4.pk
+        casos = {
+            "folio": [i1, i2, i3, i4],
+            "-folio": [i4, i3, i2, i1],
+            "cantidad": [i2, i3, i1, i4],
+            "-cantidad": [i4, i1, i3, i2],
+            "created_at": [i1, i2, i3, i4],
+            "-created_at": [i4, i3, i2, i1],
+            "producto_nombre": [i2, i4, i1, i3],
+            "status": [i1, i4, i2, i3],
+            # Sin variante (NULL) al final en ambas direcciones; empate por id.
+            "sku": [i1, i3, i2, i4],
+            "-sku": [i3, i1, i4, i2],
+            "producto_variante_nombre": [i1, i3, i2, i4],
+            "-producto_variante_nombre": [i3, i1, i4, i2],
+        }
+        for ordering, esperado in casos.items():
+            with self.subTest(ordering=ordering):
+                self.assertEqual(self._ids({"ordering": ordering}), esperado)
+
+    def test_ordering_con_el_desempate_del_front(self):
+        """``useServerTable`` manda ``ordering=<campo>,-id`` (``tiebreaker: "-id"``):
+        el ``-id`` se respeta en los empates, también en órdenes ascendentes."""
+        from catalogo.models import ProductoVariante
+
+        # i5 empata con i3 en cantidad y con i1/i3 en SKU.
+        i5 = EtiquetaRFIDImpresion.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, producto=self.polo,
+            producto_variante=ProductoVariante.objects.get(pk=self.variante.pk),
+            status=EtiquetaRFIDImpresion.Estatus.EXITO, cantidad=3, rfid_mode=False,
+        )
+        i1, i2, i3, i4, i5 = self.i1.pk, self.i2.pk, self.i3.pk, self.i4.pk, i5.pk
+        casos = {
+            "cantidad,-id": [i2, i5, i3, i1, i4],
+            "-cantidad,-id": [i4, i1, i5, i3, i2],
+            "sku,-id": [i5, i3, i1, i4, i2],
+            "-sku,-id": [i5, i3, i1, i4, i2],
+            "folio,-id": [i1, i2, i3, i4, i5],
+            "-folio,-id": [i5, i4, i3, i2, i1],
+        }
+        for ordering, esperado in casos.items():
+            with self.subTest(ordering=ordering):
+                self.assertEqual(self._ids({"ordering": ordering}), esperado)
+        # Con paginación, el empate de ``cantidad`` (i5, i3) no se parte ni se repite.
+        primera = self._ids({"ordering": "cantidad,-id", "limit": 2, "offset": 0})
+        segunda = self._ids({"ordering": "cantidad,-id", "limit": 2, "offset": 2})
+        self.assertEqual(primera + segunda, [i2, i5, i3, i1])
+
+    # ── combinados con paginación ─────────────────────────────────────
+
+    def test_search_status_y_ordering_con_paginacion(self):
+        client = APIClient()
+        client.force_authenticate(self.admin)
+        with self.assertNumQueries(2):
+            resp = client.get(
+                self.URL, {"search": "lab", "ordering": "cantidad", "limit": 2, "offset": 2}
+            )
+        datos = resp.json()
+        self.assertEqual(datos["count"], 4)
+        self.assertEqual([f["id"] for f in datos["results"]], [self.i1.pk, self.i4.pk])
+        self.assertNotIn("zpl_enviado", datos["results"][0])
+
+        datos = client.get(
+            self.URL, {"status": "EXITO", "ordering": "-cantidad", "limit": 1, "offset": 1}
+        ).json()
+        self.assertEqual(datos["count"], 2)
+        self.assertEqual([f["id"] for f in datos["results"]], [self.i1.pk])
+
+        datos = client.get(
+            self.URL, {"search": "polo", "status": "PENDIENTE,EXITO", "ordering": "-folio", "limit": 10}
+        ).json()
+        self.assertEqual(datos["count"], 2)
+        self.assertEqual([f["id"] for f in datos["results"]], [self.i3.pk, self.i1.pk])
+
+    def test_detalle_ignora_los_parametros_del_listado(self):
+        client = APIClient()
+        client.force_authenticate(self.admin)
+        resp = client.get(
+            f"{self.URL}{self.i1.pk}/", {"status": "FALLIDO", "search": "zzz", "ordering": "sku"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["id"], self.i1.pk)
+        self.assertEqual(client.get(f"{self.URL}{self.ib.pk}/", {"search": "PP01"}).status_code, 404)

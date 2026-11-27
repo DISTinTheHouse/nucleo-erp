@@ -24,7 +24,7 @@ from wms.models import (
     TransferenciaDetalle,
 )
 from ventas.services.pedido_vinculado import armar_pedido_vinculado
-from wms.services.rfid_label_service import zpl_rfid_vigente
+from wms.services.rfid_label_service import MAX_CANTIDAD_ETIQUETAS, zpl_rfid_vigente
 
 
 class _CanceladoPorNombreMixin(serializers.Serializer):
@@ -1053,9 +1053,37 @@ class EtiquetaRFIDSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         # El frontend reimprime ``zpl_enviado`` desde el historial: las
         # impresiones viejas traen un bloque RFID que no graba el chip.
-        if instance.rfid_mode:
-            data["zpl_enviado"] = zpl_rfid_vigente(data.get("zpl_enviado"))
+        if instance.rfid_mode and "zpl_enviado" in data:
+            data["zpl_enviado"] = zpl_rfid_vigente(data["zpl_enviado"])
         return data
+
+
+class EtiquetaRFIDListSerializer(EtiquetaRFIDSerializer):
+    """Fila del listado (EC-989): los campos del detalle, con los mismos nombres y
+    en el mismo orden, sin ``etiquetas[]`` (hasta 10000 EPC por impresión) ni
+    ``zpl_enviado``. Ambos siguen en ``GET /etiquetas-rfid/{id}/``."""
+
+    etiquetas = None
+
+    class Meta(EtiquetaRFIDSerializer.Meta):
+        fields = None
+        exclude = ["zpl_enviado"]
+
+
+def campo_cantidad_etiquetas():
+    """``cantidad`` de etiquetas RFID: el mismo campo para el POST y para el query
+    param de GET ``onboarding/`` y ``preview/`` (EC-989), así rechazan los mismos
+    valores con el mismo mensaje. Ausente (o vacío en query string) = 1."""
+    return serializers.IntegerField(
+        min_value=1, max_value=MAX_CANTIDAD_ETIQUETAS, required=False, default=1
+    )
+
+
+class EtiquetaRFIDCantidadQuerySerializer(serializers.Serializer):
+    """``?cantidad=`` de GET ``onboarding/`` y ``preview/``: inválido o arriba del
+    tope → 400 ``{"cantidad": [...]}``, igual que el POST."""
+
+    cantidad = campo_cantidad_etiquetas()
 
 
 class EtiquetaRFIDCreateSerializer(serializers.Serializer):
@@ -1078,7 +1106,7 @@ class EtiquetaRFIDCreateSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
-    cantidad = serializers.IntegerField(min_value=1, max_value=10000, required=False, default=1)
+    cantidad = campo_cantidad_etiquetas()
     rfid_mode = serializers.BooleanField(required=False, default=True)
     printer_name = serializers.CharField(
         max_length=128, required=False, allow_blank=True, allow_null=True
