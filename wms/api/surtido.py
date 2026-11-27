@@ -47,6 +47,7 @@ from django.db.models import (
     BooleanField, Case, CharField, Count, DecimalField, Exists, F, OuterRef, Q, Subquery, Sum, Value, When,
 )
 from django.db.models.functions import Cast, Coalesce, Greatest
+from django.db.models.lookups import Exact, GreaterThan
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -222,9 +223,29 @@ ETAPA_SQL = Case(
     output_field=CharField(),
 )
 
-# Surtido completo (pestaña "Surtidos", ``isSurtidoCompleto`` del front): algo pedido
-# y nada comprometido. ``comprometidas`` es Σ de términos ≥ 0, así que = 0 ≡ ≤ 0.
-COMPLETO_Q = Q(pedidas__gt=0, comprometidas=0)
+def _con_surtido():
+    """``Exists``: algún renglón de picking vivo con talla del pedido ``OuterRef("pk")`` y
+    ``cantidad_surtida > 0`` (las mismas filas que suma ``comprometidas``)."""
+    return Exists(_picking_vivo().filter(
+        pedido_detalle_talla__pedido_detalle__pedido_id=OuterRef("pk"), cantidad_surtida__gt=0,
+    ))
+
+
+def completo_sql(pedidas, comprometidas):
+    """Surtido completo (pestaña "Surtidos", ``isSurtidoCompleto`` del front): algo
+    pedido y nada comprometido. ``comprometidas`` es Σ de términos ≥ 0, así que
+    = 0 ≡ ≤ 0.
+
+    Con ``pedidas > 0`` y nada surtido, ``comprometidas`` es > 0: el ``CASE`` descarta
+    primero, con un ``EXISTS`` barato, los pedidos sin surtido (borradores, historial)
+    y sólo evalúa ``comprometidas`` (subconsultas por talla) en los que tienen
+    movimiento. Mismo resultado que ``pedidas > 0 AND comprometidas = 0``."""
+    return Case(
+        When(~_con_surtido(), then=Value(False)),
+        When(Q(GreaterThan(pedidas, CERO), Exact(comprometidas, CERO)), then=Value(True)),
+        default=Value(False),
+        output_field=BooleanField(),
+    )
 
 DESTINOS = tuple(Picking.ProgramacionDestino.values)
 
@@ -236,7 +257,8 @@ _CAMPOS_FILA = ("id", "folio", "cliente_nombre", "sucursal_id", "estatus", "fech
 
 
 def _bandera(params, nombre):
-    return params.get(nombre) in ("1", "true")
+    """Mismos valores que las banderas de ``PickingViewSet`` (``resumen``, ``solo_match``)."""
+    return str(params.get(nombre, "")).lower() in {"1", "true", "si"}
 
 
 def _id_param(params, nombre):
@@ -267,7 +289,7 @@ def poblacion(qs, params):
     if _bandera(params, "pendientes"):
         qs = qs.filter(comprometidas__gt=0)
     if _bandera(params, "completo"):
-        qs = qs.filter(COMPLETO_Q)
+        qs = qs.annotate(es_completo=completo_sql(F("pedidas"), F("comprometidas"))).filter(es_completo=True)
     return qs
 
 
@@ -327,27 +349,33 @@ def resumen_pestanas(qs):
     # las anotaciones, ``aggregate`` envuelve la consulta y el ``OuterRef`` de
     # ``tiene_pendiente_surtible`` dentro del ``FILTER`` ya no encuentra la tabla.
     return qs.annotate(
-        pedidas=_pedidas_pedido(), comprometidas=_comprometidas_por_talla(),
+        es_completo=completo_sql(_pedidas_pedido(), _comprometidas_por_talla()),
         es_por_surtir=Case(When(pedidos_por_surtir_q(), then=Value(True)), default=Value(False),
                            output_field=BooleanField()),
     ).order_by().aggregate(
         por_surtir=Count("id", filter=Q(es_por_surtir=True)),
-        surtidos=Count("id", filter=COMPLETO_Q),
+        surtidos=Count("id", filter=Q(es_completo=True)),
     )
 
 
 def catalogos_filtros(qs):
     """Clientes y sucursales con al menos un pedido en el conjunto: 2 consultas.
-    Mismo shape que ``pickings/filtros/`` (``[{id, nombre}]`` por nombre)."""
-    qs = qs.order_by()
-    clientes = qs.filter(cliente__isnull=False).values("cliente_id", "cliente__nombre").distinct()
-    sucursales = qs.filter(sucursal__isnull=False).values("sucursal_id", "sucursal__nombre").distinct()
+    Mismo shape que ``pickings/filtros/`` (``[{id, nombre}]`` por nombre).
+
+    El cliente se nombra con la foto ``Pedido.cliente_nombre`` (la que muestran las
+    filas y busca ``q``), la de su pedido más reciente del conjunto: una opción por
+    ``cliente_id`` con ``DISTINCT ON``."""
+    clientes = (
+        qs.filter(cliente__isnull=False).order_by("cliente_id", "-id").distinct("cliente_id")
+        .values("cliente_id", "cliente_nombre")
+    )
+    sucursales = qs.order_by().filter(sucursal__isnull=False).values("sucursal_id", "sucursal__nombre").distinct()
 
     def por_nombre(x):
         return ((x["nombre"] or "").upper(), x["id"])
 
     return {
-        "clientes": sorted(({"id": c["cliente_id"], "nombre": c["cliente__nombre"]} for c in clientes), key=por_nombre),
+        "clientes": sorted(({"id": c["cliente_id"], "nombre": c["cliente_nombre"]} for c in clientes), key=por_nombre),
         "sucursales": sorted(
             ({"id": s["sucursal_id"], "nombre": s["sucursal__nombre"]} for s in sucursales), key=por_nombre
         ),

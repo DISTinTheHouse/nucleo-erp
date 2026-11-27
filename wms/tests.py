@@ -3299,6 +3299,25 @@ class SurtidoPedidosPestanasEC988Tests(TestCase):
         self.assertEqual(data["sucursales"], [{"id": self.matriz.pk, "nombre": "Matriz 988"}])
         self.assertEqual([c["id"] for c in data["clientes"]], [self.alfa.pk, self.beta.pk])
 
+    def test_filtros_nombra_al_cliente_con_la_foto_del_pedido_mas_reciente(self):
+        """El nombre vivo del cliente no cuenta: la foto que muestran las filas y busca ``q``."""
+        from terceros.models import Cliente
+        from ventas.models import Pedido
+
+        Cliente.objects.filter(pk=self.alfa.pk).update(nombre="Alfa renombrado")
+        Pedido.objects.filter(pk=self.surtido.pk).update(cliente_nombre="Alfa nueva")  # más reciente que A-01
+        clientes = self.api.get(f"{SURTIDO_URL}filtros/", {"estatus": "todos"}).json()["clientes"]
+        self.assertEqual([c for c in clientes if c["id"] == self.alfa.pk], [{"id": self.alfa.pk, "nombre": "Alfa nueva"}])
+        self.assertEqual(len(clientes), len({c["id"] for c in clientes}))  # una opción por cliente
+        clientes = self.api.get(f"{SURTIDO_URL}filtros/", {"por_surtir": 1}).json()["clientes"]
+        self.assertIn({"id": self.alfa.pk, "nombre": "Alfa 988"}, clientes)  # sólo A-01 en el conjunto
+
+    def test_banderas_como_las_de_pickings(self):
+        for valor in ("True", "si", "SI", "1"):
+            self.assertEqual(set(self._ids(por_surtir=valor)), self.POR_SURTIR, valor)
+            self.assertEqual(set(self._ids(estatus="todos", completo=valor)), self.COMPLETOS, valor)
+        self.assertNotEqual(set(self._ids(por_surtir="no")), self.POR_SURTIR)
+
     def test_resumen_son_los_counts_de_las_pestanas(self):
         r = self.api.get(f"{SURTIDO_URL}resumen/", {"q": "nada", "cliente": self.alfa.pk, "estatus": "1"})
         self.assertEqual(r.status_code, 200, r.content)

@@ -6275,7 +6275,7 @@ Vista informativa de solo lectura de lo que cada pedido lleva en WMS (#1223, #12
 
 - **Endpoint**: `GET /api/v1/wms/surtido-pedidos/`
 - **Paginación**: `?page=&page_size=` (50 por omisión, máximo 200) → `{count, next, previous, results}`.
-- **Fila**: `id`, `folio`, `cliente_nombre`, `sucursal_id`, `estatus`, `estatus_display`, `fecha_confirmacion`, `created_at`, `etapa`, `pedidas`, `surtidas`, `comprometidas`, `empacadas`, `despachadas`, `pct_surtido`, `pct_empacado`, `pct_despachado`, `salidas_manuales`. Las cantidades son números; los `pct_*` van de 0 a 100 con 2 decimales, sin tope.
+- **Fila**: `id`, `folio`, `cliente_nombre`, `sucursal_id`, `estatus`, `estatus_display`, `fecha_confirmacion`, `created_at`, `etapa`, `pedidas`, `surtidas`, `comprometidas`, `empacadas`, `despachadas`, `pct_surtido`, `pct_empacado`, `pct_despachado`, `salidas_manuales`. Las cantidades son números; los `pct_*` son porcentajes con 2 decimales, sin tope en 100 (pueden pasar de 100 con sobre-surtido).
 - **Conjunto** (también lo usa `filtros/`):
 
 | Parámetro | Efecto |
@@ -6284,6 +6284,8 @@ Vista informativa de solo lectura de lo que cada pedido lleva en WMS (#1223, #12
 | `por_surtir=1` | Lo que ofrece el onboarding de picking, con la misma expresión (`pedidos_por_surtir_q`): estatus 3 o 4, programado por mesa de control, no retenido y con alguna talla surtible pendiente (línea con producto, o muestra con SKU de muestra activo, con pedida > asignada). Fija el estatus e **ignora `estatus`**. Un pedido cuyo único pendiente son muestras sin SKU no entra. |
 | `completo=1` | Surtido completo. La pestaña "Surtidos" usa `estatus=todos&completo=1`. |
 | `pendientes=1` | `comprometidas > 0`. |
+
+Las banderas (`por_surtir`, `completo`, `pendientes`) aceptan `1`, `true` o `si`, sin distinguir mayúsculas, como las de `pickings/`.
 
 - **Filtros de columna** (sólo el listado):
 
@@ -6308,6 +6310,7 @@ GET /api/v1/wms/surtido-pedidos/?estatus=todos&completo=1&etapa=DESPACHADO
 
 - **Endpoint**: `GET /api/v1/wms/surtido-pedidos/filtros/`
 - Clientes y sucursales con al menos un pedido en el conjunto (`estatus`, `por_surtir`, `completo`, `pendientes`); los filtros de columna se ignoran. Ordenados por nombre. 2 consultas.
+- El nombre del cliente es la foto `cliente_nombre` de su pedido más reciente del conjunto (la que muestran las filas y busca `q`), no el nombre vivo del cliente: una opción por cliente.
 
 ```json
 {"clientes": [{"id": 12, "nombre": "Cliente SA"}], "sucursales": [{"id": 1, "nombre": "Matriz"}]}
