@@ -9,7 +9,7 @@ from ventas.services.retencion_service import bloquear_pedido_vivo
 from ventas.models import Pedido
 from wms.utils.decimales import normalizar_decimal
 from wms.utils.folios import generate_folio
-from wms.models import Packing, PackingDetalle, Picking, PickingDetalle
+from wms.models import Packing, PackingCaja, PackingDetalle, Picking, PickingDetalle
 
 
 ALMACEN_APARTADOS = "APARTADOS"
@@ -382,11 +382,45 @@ class PackingService:
             for row in normalized_rows
         ]
 
+    @classmethod
+    def _validar_cajas_completas(cls, picking, filas):
+        """Con cajas, cada ``picking_detalle`` enviado debe empacarse completo:
+        la suma en todas las cajas es igual a lo surtido pendiente de empacar."""
+        suma = defaultdict(lambda: Decimal("0"))
+        for fila in filas:
+            suma[int(fila["picking_detalle"])] += cls._normalize_quantity(fila["cantidad_empacada"])
+        surtido = dict(
+            PickingDetalle.objects.filter(picking=picking, pk__in=list(suma)).values_list("pk", "cantidad_surtida")
+        )
+        empacado = cls._historical_packed_map(picking, picking_detalle_ids=list(suma))
+        errores = []
+        for pd_id, total in sorted(suma.items()):
+            pendiente = cls._normalize_quantity(surtido[pd_id]) - empacado[pd_id]
+            if total != pendiente:
+                errores.append(
+                    f"picking_detalle {pd_id}: las cajas suman {total} y lo pendiente de empacar es {pendiente}."
+                )
+        if errores:
+            raise ValidationError({"cajas": errores})
+
     @staticmethod
     @transaction.atomic
     def handle_store(data, user):
         picking_input = data.pop("picking")
-        packing_detalle = data.pop("packing_detalle")
+        cajas = data.pop("cajas", None) or []
+        packing_detalle = data.pop("packing_detalle", None) or []
+        if cajas:
+            # Formato por cajas: cada renglón de ``contenido`` es un packing_detalle
+            # con su caja; los totales del packing salen de las cajas.
+            packing_detalle = [
+                {
+                    "picking_detalle": fila["picking_detalle"],
+                    "cantidad_empacada": fila["cantidad"],
+                    "caja_numero": caja["numero"],
+                }
+                for caja in cajas
+                for fila in caja["contenido"]
+            ]
 
         # Tenencia antes de bloquear nada; después, el orden de bloqueo común a
         # packing y despacho (EC-574): Pedido -> Picking -> líneas de picking ->
@@ -408,7 +442,32 @@ class PackingService:
         if (actual.nombre or "").strip().upper() != ALMACEN_APARTADOS:
             raise ValidationError({"picking": (
                 f"El picking {picking.folio} está en {actual.nombre}; trasládalo a APARTADOS para empacarlo.")})
-        resolved_rows = PackingService._resolve_requested_rows(picking, packing_detalle)
+        if cajas:
+            try:
+                resolved_rows = PackingService._resolve_requested_rows(picking, packing_detalle)
+            except ValidationError as exc:
+                detalle = exc.detail.get("packing_detalle") if isinstance(exc.detail, dict) else None
+                raise ValidationError({"cajas": detalle if detalle is not None else exc.detail})
+            PackingService._validar_cajas_completas(picking, packing_detalle)
+            peso_total = sum((c["peso"] for c in cajas), Decimal("0"))
+            cajas_obj = []
+            for caja in cajas:
+                obj = PackingCaja(
+                    numero=caja["numero"],
+                    peso=caja["peso"],
+                    largo=caja.get("largo"),
+                    ancho=caja.get("ancho"),
+                    alto=caja.get("alto"),
+                    observaciones=caja.get("observaciones") or None,
+                )
+                obj.volumen = obj.calcular_volumen()
+                cajas_obj.append(obj)
+            data["numero_cajas"] = len(cajas_obj)
+            data["peso_total"] = peso_total
+            data["volumen_total"] = sum((c.volumen or Decimal("0") for c in cajas_obj), Decimal("0"))
+        else:
+            resolved_rows = PackingService._resolve_requested_rows(picking, packing_detalle)
+            cajas_obj = []
 
         folio = generate_folio(picking.empresa, picking.sucursal, "Packing")
         packing = Packing.objects.create(
@@ -422,14 +481,20 @@ class PackingService:
             **data,
         )
 
+        for caja in cajas_obj:
+            caja.packing = packing
+        # bulk_create no pasa por save(): el volumen ya se calculó arriba.
+        caja_por_numero = {c.numero: c for c in PackingCaja.objects.bulk_create(cajas_obj)}
+
         bulk_rows = [
             PackingDetalle(
                 packing=packing,
+                caja=caja_por_numero.get(requested.get("caja_numero")),
                 picking_detalle=item["picking_detalle"],
                 cantidad_empacada=item["cantidad_empacada"],
                 observaciones=item.get("observaciones", None),
             )
-            for item in resolved_rows
+            for item, requested in zip(resolved_rows, packing_detalle)
         ]
 
         PackingDetalle.objects.bulk_create(bulk_rows)

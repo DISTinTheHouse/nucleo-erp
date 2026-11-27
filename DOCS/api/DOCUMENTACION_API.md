@@ -6570,6 +6570,27 @@ GET /api/v1/wms/surtido-pedidos/?estatus=todos&completo=1&etapa=DESPACHADO
 - El frontend no necesita recalcular cantidades históricas; el backend devuelve `cantidad_ya_empacada` y `cantidad_pendiente_empacar`.
 - Si un usuario tiene acceso a varias sucursales, el backend valida contra sus sucursales permitidas, no solo contra `sucursal_default`.
 
+### 2.1) Packing por cajas
+
+`POST /api/v1/wms/packings/` (y `/packings/onboarding/`) acepta `cajas` en lugar de `packing_detalle`:
+
+```json
+{"picking": 12, "observaciones": "", "cajas": [
+  {"numero": 1, "peso": "12.500", "largo": "40", "ancho": "30", "alto": "20",
+   "contenido": [{"picking_detalle": 81, "cantidad": "6"}, {"picking_detalle": 82, "cantidad": "5"}]},
+  {"numero": 2, "peso": "8.000", "contenido": [{"picking_detalle": 81, "cantidad": "4"}]}
+]}
+```
+
+- El backend crea las cajas (`PackingCaja`) y un renglón de `packing_detalle` por cada `contenido`, con su `caja`. Calcula `numero_cajas`, `peso_total` (kg, suma de cajas) y `volumen_total` (cm³, suma de `largo×ancho×alto` de las cajas con medidas); lo que mande el cliente en esos campos se ignora.
+- `largo`/`ancho`/`alto` (cm) son opcionales; `volumen` queda `null` si falta alguna.
+- 400 con mensaje en `cajas`: por cada `picking_detalle` enviado, la suma en todas las cajas debe ser **igual** a lo surtido pendiente de empacar; cada caja con al menos una pieza (`contenido` no vacío) y `peso > 0`; números consecutivos desde 1 sin repetir; no se puede mandar `cajas` y `packing_detalle` a la vez.
+- El formato anterior (`packing_detalle` con `cantidad_empacada`, sin cajas) sigue funcionando; esos renglones quedan con `caja`/`caja_numero` en `null`.
+
+Lectura (list, retrieve y respuesta del alta): `cajas = [{id, numero, peso, largo, ancho, alto, volumen, piezas, contenido: [{picking_detalle, sku, producto_nombre, color_nombre, talla_nombre, cantidad}]}]` y `caja_numero` en cada renglón de `packing_detalle`. Costo fijo: 3 consultas en list/retrieve sin importar cajas ni renglones.
+
+`GET /api/v1/wms/packings/{id}/pdf/` → `application/pdf`: lista de empaque agrupada por caja (los renglones sin caja van en "Sin caja") y una página de etiqueta por caja ("Caja 1 de 2", folio, pedido, cliente, peso, piezas). Mismo alcance que el detalle (404 fuera de alcance).
+
 ### 3) Listar Packings
 
 - **Endpoint**: `GET /api/v1/wms/packings/`

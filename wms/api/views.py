@@ -1,3 +1,6 @@
+from django.http import HttpResponse
+from rest_framework.renderers import JSONRenderer
+from inventarios.api.views import ExportacionArchivoMixin, RendererPdf
 from django.db.models import Prefetch
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -32,6 +35,7 @@ from wms.models import (
     EtiquetaRFIDImpresion,
     LectorRFID,
     Packing,
+    PackingCaja,
     PackingDetalle,
     Picking,
     PickingDetalle,
@@ -391,7 +395,7 @@ class PickingViewSet(_ReleerAltaMixin, mixins.RetrieveModelMixin, mixins.ListMod
         response_data["ordenes_trabajo_generadas"] = ordenes_trabajo
         return Response(response_data, status=status.HTTP_201_CREATED)
 
-class PackingViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
+class PackingViewSet(ExportacionArchivoMixin, _ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
     queryset = Packing.objects.all()
     serializer_class = PackingSerializer
 
@@ -405,6 +409,7 @@ class PackingViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveMod
                 "cancelado_por",
             )
             .prefetch_related(
+                Prefetch("packing_cajas", queryset=PackingCaja.objects.order_by("numero")),
                 Prefetch(
                     "packing_detalle",
                     queryset=PackingDetalle.objects.select_related(
@@ -456,6 +461,18 @@ class PackingViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveMod
         serializer.is_valid(raise_exception=True)
         packing_instance = PackingService.handle_store(serializer.validated_data, request.user)
         return Response(PackingSerializer(self._releer(packing_instance)).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(responses={(200, "application/pdf"): OpenApiTypes.BINARY})
+    @action(detail=True, methods=["get"], url_path="pdf", url_name="pdf",
+            renderer_classes=[JSONRenderer, RendererPdf])
+    def pdf(self, request, pk=None):
+        """Lista de empaque agrupada por caja + una etiqueta por caja ("Caja 1 de N")."""
+        from wms.services.packing_pdf import generar_pdf_packing
+
+        packing = self.get_object()
+        response = HttpResponse(generar_pdf_packing(packing), content_type="application/pdf")
+        response["Content-Disposition"] = f'inline; filename="packing-{packing.folio}.pdf"'
+        return response
 
     @action(detail=True, methods=["post"], url_path="cancelar", url_name="cancelar")
     def cancelar(self, request, pk=None):
