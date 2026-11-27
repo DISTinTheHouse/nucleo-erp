@@ -968,11 +968,21 @@ Historial operativo de entradas, salidas y ajustes.
   - Clic en buscar
   - Con la misma respuesta generar PDF
 - **Query params**:
-  - `tipo_movimiento`: requerido, `ENTRADA`, `SALIDA`, `AJUSTE` o `TRANSFERENCIA`
+  - `tipo_movimiento`: opcional, `ENTRADA`, `SALIDA`, `AJUSTE`, `TRANSFERENCIA` o `TODOS`; sin mandarlo (o `TODOS`) trae los cuatro tipos juntos. Otro valor → `400 {"tipo_movimiento": ...}`.
   - `fecha_inicio`: requerido, formato `YYYY-MM-DD`
   - `fecha_final`: requerido, formato `YYYY-MM-DD`
   - `almacen_id` (alias `almacen`): opcional; si no se envía, el reporte incluye todos los almacenes visibles para el usuario. Mismas reglas que existencias (EC-822): primer alias no vacío, no numérico/`0`/negativo → `400 {"almacen": ...}`, ajeno o inexistente → `200` vacío.
+  - `sku`: SKU exacto (de catálogo o de producción).
+  - `producto_id` (alias `producto`), `usuario_id` (alias `usuario`), `ubicacion_id` (alias `ubicacion`, origen o destino): ids estrictos; no numérico/`0`/negativo → `400` con su clave.
+  - `referencia`: folio exacto del documento de origen (sin distinguir mayúsculas): pedido, recepción, transferencia, picking, OP o factura; también los folios sintéticos `AJ-<id>`, `DEV-<id>` y `MOV-<id>`.
+  - `q`: búsqueda libre; cada palabra debe estar en el SKU, el nombre del producto/variante, las observaciones o un folio.
+  - `ordering`: `fecha`, `tipo`, `sku`, `producto`, `cantidad`, `costo_unitario`, `usuario`, `movimiento`, con `-` para descendente y separados por coma (`ordering=sku,-fecha`). Default `-fecha`. Otro valor → `400 {"ordering": ...}`.
   - Permiso `R-CORE-REPORTES` (también en `exportar/`) y fecha inexistente → `400`, igual que existencias.
+  - `filtros` de la respuesta devuelve todos los filtros aplicados (`almacen_id`, `tipo_movimiento`, `sku`, `producto_id`, `usuario_id`, `ubicacion_id`, `referencia`, `q`).
+- **Signo y costo por renglón**: `cantidad` sigue siendo la del renglón (en `AJUSTE`, la cantidad final contada). `cantidad_signed` es el efecto en el almacén de la fila: `+` entrada, `−` salida, en `AJUSTE` la diferencia (`cantidad_despues − cantidad_antes`; en ajustes viejos, el `delta` de la bitácora) y en `TRANSFERENCIA` `−` si la fila es el almacén de origen, `+` si es el destino. `costo_total = cantidad_signed × costo_unitario`, con el mismo signo.
+- **Origen siempre lleno**: `origen_tipo` (`PEDIDO`, `RECEPCION`, `TRANSFERENCIA`, `AJUSTE`, `OP`, `PICKING`, `DEVOLUCION`), `origen_folio` y `origen_id`. Precedencia: recepción (`RECEPCION`; si es SALIDA, devolución a proveedor → `DEVOLUCION`) → transferencia (`PICKING` con el folio del picking si la generó uno, si no `TRANSFERENCIA`) → despacho de WMS (`PICKING`, folio del picking) → OP (`folio_op`) → devolución de cliente (`DEV-<id>`) → pedido → factura sin pedido (`DEVOLUCION`, folio de la factura) → ajuste (`AJ-<id>`) → sin documento (`AJUSTE`, `MOV-<id del movimiento>`). Además: `recepcion_folio` y `op_folio` junto a los `*_id` de siempre.
+- **Resumen por tipo**: `resumen.por_tipo` trae `entradas`, `salidas`, `ajustes_positivos`, `ajustes_negativos` y `transferencias`, cada uno `{registros, piezas, costo}` (piezas y costo en valor absoluto). También `neto_piezas` y `neto_costo` (suma con signo) además de `total_movimientos`, `total_registros` y `total_cantidad`.
+- **Rendimiento**: consultas fijas (alcance, almacenes, detalle y, solo si hay ajustes anteriores a `cantidad_antes`/`cantidad_despues`, la bitácora); los folios de origen se anotan en la misma consulta. Producción, oct–nov 2026: SALIDA 383 filas 3 → 4 consultas, 2.2 s → 0.7 s; `TODOS` 586 filas, 4 consultas, 0.7 s.
 - **Ejemplo**:
   - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=SALIDA&fecha_inicio=2026-07-01&fecha_final=2026-07-31&almacen_id=1`
   - `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/?tipo_movimiento=SALIDA&fecha_inicio=2026-07-01&fecha_final=2026-07-31`
@@ -1019,13 +1029,21 @@ Historial operativo de entradas, salidas y ajustes.
         "color": "NEGRO",
         "talla": "UNITALLA",
         "cantidad": "10.0000",
+        "cantidad_signed": "-10.0000",
         "costo_unitario": "140.00",
-        "costo_total": "1400.00",
+        "costo_total": "-1400.00",
+        "origen_tipo": "PEDIDO",
+        "origen_folio": "PED-49",
+        "origen_id": 49,
         "pedido_id": 49,
         "pedido_folio": "PED-49",
+        "transferencia_id": null,
+        "transferencia_folio": null,
         "recepcion_id": null,
+        "recepcion_folio": null,
         "ajuste_inventario_id": null,
         "op_id": null,
+        "op_folio": null,
         "usuario_id": 3,
         "usuario_nombre": "Desarrollo",
         "observaciones": "Salida por pedido autorizado",
@@ -1037,9 +1055,27 @@ Historial operativo de entradas, salidas y ajustes.
   ```
 
 - **Exportar a PDF o XLSX (EC-814)**: `GET /api/v1/inventarios/movimientos/reporte-movimientos-periodo/exportar/?formato=pdf|xlsx`
-  - Mismos query params, alcance y 400 que el JSON (`tipo_movimiento`, `fecha_inicio`, `fecha_final` requeridos; `almacen`/`almacen_id` opcional), con el reporte completo (sin `page`/`page_size`). `formato`: `pdf` (default) o `xlsx`; otro valor → `400 {"formato": ...}`.
-  - Columnas: Fecha (hora de México), Tipo, Producto (`producto_nombre`, si no `producto_base_nombre`), Almacén, Ubicación, Cantidad, Costo Total, Usuario. Encabezado con tipo, almacén, periodo, registros y fecha de generación; resumen con `total_movimientos`, `total_registros` y `total_cantidad`.
-  - Archivo: `reporte-movimientos-{tipo}-{almacén|todos}-{fecha_inicio}-a-{fecha_final}.{pdf|xlsx}` en `Content-Disposition: attachment`.
+  - Mismos query params, filtros, alcance y 400 que el JSON (`fecha_inicio`, `fecha_final` requeridos; `tipo_movimiento` opcional/`TODOS`), con el reporte completo (sin `page`/`page_size`). `formato`: `pdf` (default) o `xlsx`; otro valor → `400 {"formato": ...}`.
+  - Columnas PDF: Fecha (hora de México), Tipo, Producto, Almacén, Ubicación, Origen (tipo + folio), Cantidad (con signo), Costo Total (con signo), Usuario. XLSX agrega Folio y SKU en columnas propias. Resumen: `total_movimientos`, `total_registros`, el desglose por tipo (piezas y $) y el neto.
+  - Archivo: `reporte-movimientos-{tipo|TODOS}-{almacén|todos}-{fecha_inicio}-a-{fecha_final}.{pdf|xlsx}` en `Content-Disposition: attachment`.
+
+- **Historial valorizado de un SKU**: `GET /api/v1/inventarios/movimientos/historial-sku/?sku=&fecha_inicio=&fecha_final=&almacen_id=`
+  - Permiso `R-CORE-REPORTES`. Alcance: el del auxiliar (empresa activa + sucursales permitidas; el superusuario, su empresa activa). SKU de otra empresa o inexistente → `404`; sin `sku` → `400 {"sku": ...}`.
+  - `sku` (exacto) requerido. `fecha_inicio`/`fecha_final` opcionales (van juntas, mismas reglas que los reportes por periodo); sin ellas, toda la historia. `almacen_id` (alias `almacen`) opcional y estricto.
+  - Cabecera: `producto` (`producto_id`, `producto_variante_id`, `sku`, `descripcion`, `producto_nombre`, `color`, `talla`, `activo`, `costo_promedio_actual`).
+  - `saldo_inicial`: `{fecha (día anterior al rango), piezas, costo_unitario, valor}`, valuado al costo promedio vigente al inicio del rango.
+  - `results` (paginado con `page`/`page_size`, 200 por página, orden cronológico): `fecha`, `tipo_movimiento`, `efecto`, `origen_tipo`, `origen_folio`, `origen_id`, `almacen_id/codigo/nombre`, `ubicacion_id`, `ubicacion_codigo`, `entrada`, `salida`, `costo_unitario`, `entrada_valor`, `salida_valor`, `saldo` (piezas corridas, del almacén si se filtró), `saldo_almacen`, `costo_promedio` (vigente después del renglón), `saldo_valor`, `usuario`, `notas`.
+  - `totales`: `entradas`, `salidas`, `entradas_valor`, `salidas_valor`, `registros`.
+  - `saldo_final`: `{fecha, piezas, costo_unitario, valor, existencia_actual, cuadra_con_existencia}`. `cuadra_con_existencia` compara el saldo final con `Existencia` cuando el rango llega a hoy (`null` si el rango cierra antes). El stock cargado sin movimiento entra en el saldo inicial, como en el auxiliar.
+  - Mismo cálculo que `auxiliar/` (que ahora también trae `origen_tipo`, `origen_folio`, `origen_id` y `ubicacion_id` por renglón). Consultas fijas: 9 sin rango, ~14 con rango (costos al inicio y al cierre), sin importar cuántos movimientos tenga el SKU.
+  - **Exportar**: `GET /api/v1/inventarios/movimientos/historial-sku/exportar/?formato=pdf|xlsx&sku=...` (mismos parámetros, sin paginar). Archivo `historial-sku-{sku}-{fecha_inicio}-a-{fecha_final|completo}.{pdf|xlsx}`.
+
+- **Valuación al cierre (foto del inventario físico)**: `GET /api/v1/inventarios/existencias/valuacion-cierre/?fecha=YYYY-MM-DD&almacen_id=`
+  - Permiso `R-CORE-REPORTES`; mismo alcance y filtros que `reporte-existencias-periodo` (`almacen`, `sucursal`, `producto`, `producto_variante` y sus alias `*_id`).
+  - `fecha`: fecha de corte (hasta las 23:59:59 de México); por defecto hoy; futura → `400 {"fecha": ...}`.
+  - Es el reporte de existencias con `fecha_inicio = fecha_final = fecha`, sin los renglones en cero: `results` (paginado, 200 por página) con `almacen_id/codigo/nombre`, `producto_id`, `producto_variante_id`, `sku`, `producto_nombre`, `color`, `talla`, `existencia`, `costo_unitario` (costo promedio vigente a la fecha de corte) y `costo_total`.
+  - `resumen`: `{articulos, piezas, valor}`; `resumen_por_almacen`: lo mismo por almacén. Consultas fijas (11), las del reporte de existencias.
+  - **Exportar**: `GET /api/v1/inventarios/existencias/valuacion-cierre/exportar/?formato=pdf|xlsx&fecha=...&almacen=...`; el almacén es obligatorio (como en el export de existencias). Archivo `valuacion-inventario-{almacén}-{fecha}.{pdf|xlsx}`.
 
 ### Operaciones de Inventario
 

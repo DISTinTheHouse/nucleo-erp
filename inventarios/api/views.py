@@ -20,6 +20,7 @@ from rest_framework.response import Response
 
 from inventarios.services import costeo
 from inventarios.services import reportes_exportacion as exportacion_mod
+from inventarios.services import exportacion_historial as exportacion_historial_mod
 from inventarios.models import (
     Almacen,
     TipoAlmacen,
@@ -37,7 +38,9 @@ from nucleo.kpis import entero_param
 from nucleo.listados import PaginacionOpcionalLimitOffset
 from . import auxiliar as auxiliar_mod
 from . import existencias_por_almacen as por_almacen_mod
+from . import historial_sku as historial_sku_mod
 from . import reportes_periodo as reportes_mod
+from . import valuacion as valuacion_mod
 from .reportes_periodo import _almacenes_en_alcance as _almacenes_visibles
 from .serializers import (
     AlmacenSerializer,
@@ -166,6 +169,19 @@ PARAMETRO_FORMATO_EXPORTACION = OpenApiParameter(
 PARAMETROS_FECHAS_REPORTE = [
     OpenApiParameter("fecha_inicio", OpenApiTypes.DATE, required=True, description="YYYY-MM-DD."),
     OpenApiParameter("fecha_final", OpenApiTypes.DATE, required=True, description="YYYY-MM-DD."),
+]
+PARAMETROS_HISTORIAL_SKU = [
+    OpenApiParameter("sku", OpenApiTypes.STR, required=True, description="SKU exacto de la variante."),
+    OpenApiParameter("fecha_inicio", OpenApiTypes.DATE, description="YYYY-MM-DD; va con fecha_final. Sin rango: toda la historia."),
+    OpenApiParameter("fecha_final", OpenApiTypes.DATE, description="YYYY-MM-DD; va con fecha_inicio."),
+    OpenApiParameter("almacen_id", OpenApiTypes.INT, description="Solo ese almacén (alias almacen)."),
+]
+PARAMETROS_VALUACION = [
+    OpenApiParameter("fecha", OpenApiTypes.DATE, description="Fecha de corte YYYY-MM-DD (hoy por defecto; no futura)."),
+    OpenApiParameter("almacen", OpenApiTypes.INT, description="Almacén (alias almacen_id)."),
+    OpenApiParameter("sucursal", OpenApiTypes.INT, description="Sucursal (alias sucursal_id)."),
+    OpenApiParameter("producto", OpenApiTypes.INT, description="Producto (alias producto_id)."),
+    OpenApiParameter("producto_variante", OpenApiTypes.INT, description="Variante (alias producto_variante_id)."),
 ]
 RESPUESTAS_EXPORTACION = {
     (200, exportacion_mod.CONTENT_TYPES["pdf"]): OpenApiTypes.BINARY,
@@ -481,6 +497,45 @@ class ExistenciaViewSet(ExportacionArchivoMixin, viewsets.ModelViewSet):
         almacen_id = reportes_mod.almacen_requerido(request.query_params)
         reporte = reportes_mod.reporte_existencias(request.user, request.query_params, almacen_id)
         return respuesta_archivo(exportacion_mod.exportar_existencias(reporte, formato))
+
+    @extend_schema(
+        summary="Valuación del inventario al cierre",
+        description=(
+            "Existencia por almacén y artículo al final de `fecha` (hoy por defecto), con costo promedio "
+            "unitario vigente a esa hora y costo total. Sin renglones en cero. Paginado."
+        ),
+        parameters=PARAMETROS_VALUACION,
+    )
+    @action(
+        detail=False, methods=["get"], url_path="valuacion-cierre", permission_classes=PERMISOS_REPORTES,
+    )
+    def valuacion_cierre(self, request):
+        reporte = valuacion_mod.valuacion_cierre(request.user, request.query_params)
+        paginator = ReporteExistenciasPeriodoPagination()
+        page = paginator.paginate_queryset(reporte["results"], request, view=self)
+        response = paginator.get_paginated_response(page)
+        response.data["fecha"] = str(reporte["fecha"])
+        response.data["filtros"] = {"almacen_id": reporte["almacen_id"]}
+        response.data["resumen"] = reporte["resumen"]
+        response.data["resumen_por_almacen"] = reporte["resumen_por_almacen"]
+        return response
+
+    @extend_schema(
+        summary="Valuación del inventario al cierre en PDF o XLSX",
+        description="Mismos parámetros que valuacion-cierre/; el almacén es obligatorio (como el de existencias).",
+        parameters=[PARAMETRO_FORMATO_EXPORTACION, *PARAMETROS_VALUACION],
+        responses=RESPUESTAS_EXPORTACION,
+    )
+    @action(
+        detail=False, methods=["get"], url_path="valuacion-cierre/exportar",
+        renderer_classes=RENDERERS_EXPORTACION, permission_classes=PERMISOS_REPORTES,
+    )
+    def valuacion_cierre_exportar(self, request):
+        formato = exportacion_mod.formato_requerido(request.query_params)
+        valuacion_mod.fecha_de_corte(request.query_params)
+        almacen_id = reportes_mod.almacen_requerido(request.query_params)
+        reporte = valuacion_mod.valuacion_cierre(request.user, request.query_params, almacen_id)
+        return respuesta_archivo(exportacion_historial_mod.exportar_valuacion(reporte, formato))
 
     @action(detail=False, methods=["get"], url_path="reporte-existencias-produccion-compras")
     def reporte_existencias_produccion_compras(self, request):
@@ -1269,6 +1324,27 @@ class SkuMuestraViewSet(viewsets.ViewSet):
         ])
 
 
+PARAMETROS_REPORTE_MOVIMIENTOS = [
+    OpenApiParameter(
+        "tipo_movimiento", OpenApiTypes.STR,
+        enum=[*reportes_mod.TIPOS_MOVIMIENTO, reportes_mod.TODOS],
+        description="Tipo de movimiento; vacío o TODOS = los cuatro.",
+    ),
+    *PARAMETROS_FECHAS_REPORTE,
+    OpenApiParameter("almacen", OpenApiTypes.INT, description="Almacén (alias almacen_id)."),
+    OpenApiParameter("sku", OpenApiTypes.STR, description="SKU exacto (catálogo o de producción)."),
+    OpenApiParameter("producto_id", OpenApiTypes.INT, description="Producto (alias producto)."),
+    OpenApiParameter("usuario_id", OpenApiTypes.INT, description="Usuario que hizo el movimiento."),
+    OpenApiParameter("ubicacion_id", OpenApiTypes.INT, description="Ubicación de origen o destino."),
+    OpenApiParameter("referencia", OpenApiTypes.STR, description="Folio exacto del documento (también AJ-<id>, DEV-<id>, MOV-<id>)."),
+    OpenApiParameter("q", OpenApiTypes.STR, description="Búsqueda: SKU, producto, observaciones o folio."),
+    OpenApiParameter(
+        "ordering", OpenApiTypes.STR,
+        description="fecha, tipo, sku, producto, cantidad, costo_unitario, usuario, movimiento; - para descendente. Default -fecha.",
+    ),
+]
+
+
 class ReporteMovimientosPeriodoPagination(PageNumberPagination):
     # Instantiated explicitly inside reporte_movimientos_periodo, not set as
     # pagination_class on the ViewSet, so list()/detalles()/other actions are
@@ -1295,6 +1371,7 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
     def _movement_report_parse_dates(self, request):
         return reportes_mod.parse_fechas(request.query_params)
 
+    @extend_schema(parameters=PARAMETROS_REPORTE_MOVIMIENTOS)
     @action(
         detail=False, methods=["get"], url_path="reporte-movimientos-periodo",
         permission_classes=PERMISOS_REPORTES,
@@ -1308,7 +1385,7 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
                     "tipo_movimiento": reporte["tipo_movimiento"],
                     "fecha_inicio": str(reporte["fecha_inicio"]),
                     "fecha_final": str(reporte["fecha_final"]),
-                    "filtros": {"almacen_id": reporte["almacen_id"]},
+                    "filtros": reporte["filtros"],
                     "resumen": reporte["resumen"],
                     "count": 0,
                     "next": None,
@@ -1325,7 +1402,7 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
         response.data["tipo_movimiento"] = reporte["tipo_movimiento"]
         response.data["fecha_inicio"] = str(reporte["fecha_inicio"])
         response.data["fecha_final"] = str(reporte["fecha_final"])
-        response.data["filtros"] = {"almacen_id": reporte["almacen_id"]}
+        response.data["filtros"] = reporte["filtros"]
         response.data["resumen"] = reporte["resumen"]
         return response
 
@@ -1337,12 +1414,7 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
         ),
         parameters=[
             PARAMETRO_FORMATO_EXPORTACION,
-            OpenApiParameter(
-                "tipo_movimiento", OpenApiTypes.STR, required=True,
-                enum=list(reportes_mod.TIPOS_MOVIMIENTO), description="Tipo de movimiento.",
-            ),
-            *PARAMETROS_FECHAS_REPORTE,
-            OpenApiParameter("almacen", OpenApiTypes.INT, description="Almacén (alias almacen_id)."),
+            *PARAMETROS_REPORTE_MOVIMIENTOS,
         ],
         responses=RESPUESTAS_EXPORTACION,
     )
@@ -1354,6 +1426,46 @@ class MovimientoOperacionViewSet(ExportacionArchivoMixin, viewsets.ReadOnlyModel
         formato = exportacion_mod.formato_requerido(request.query_params)
         reporte = reportes_mod.reporte_movimientos(request.user, request.query_params)
         return respuesta_archivo(exportacion_mod.exportar_movimientos(reporte, formato))
+
+    @extend_schema(
+        summary="Historial valorizado de un SKU",
+        description=(
+            "Cabecera del artículo, saldo inicial (piezas y $) al día anterior al rango, movimientos en "
+            "orden cronológico con origen/folio, almacén, ubicación, entrada, salida y saldo corrido en "
+            "piezas y $, y saldo final (cuadra con Existencia si el rango llega a hoy). Paginado."
+        ),
+        parameters=PARAMETROS_HISTORIAL_SKU,
+    )
+    @action(
+        detail=False, methods=["get"], url_path="historial-sku", permission_classes=PERMISOS_REPORTES,
+    )
+    def historial_sku(self, request):
+        reporte = historial_sku_mod.historial_sku(request.user, request.query_params)
+        paginator = ReporteMovimientosPeriodoPagination()
+        page = paginator.paginate_queryset(reporte["results"], request, view=self)
+        response = paginator.get_paginated_response(page)
+        for clave in ("sku", "producto", "almacen_id", "saldo_inicial", "totales", "saldo_final"):
+            response.data[clave] = reporte[clave]
+        response.data["fecha_inicio"] = str(reporte["fecha_inicio"]) if reporte["fecha_inicio"] else None
+        response.data["fecha_final"] = str(reporte["fecha_final"]) if reporte["fecha_final"] else None
+        return response
+
+    @extend_schema(
+        summary="Historial de un SKU en PDF o XLSX",
+        parameters=[PARAMETRO_FORMATO_EXPORTACION, *PARAMETROS_HISTORIAL_SKU],
+        responses=RESPUESTAS_EXPORTACION,
+    )
+    @action(
+        detail=False, methods=["get"], url_path="historial-sku/exportar",
+        renderer_classes=RENDERERS_EXPORTACION, permission_classes=PERMISOS_REPORTES,
+    )
+    def historial_sku_exportar(self, request):
+        formato = exportacion_mod.formato_requerido(request.query_params)
+        reporte = historial_sku_mod.historial_sku(request.user, request.query_params)
+        almacen_nombre = None
+        if reporte["almacen_id"]:
+            almacen_nombre = Almacen.objects.filter(pk=reporte["almacen_id"]).values_list("nombre", flat=True).first()
+        return respuesta_archivo(exportacion_historial_mod.exportar_historial_sku(reporte, formato, almacen_nombre))
 
     def _auxiliar_id(self, qp, *nombres):
         # A diferencia de ``_report_to_int``, un id no numérico es 400: ignorarlo

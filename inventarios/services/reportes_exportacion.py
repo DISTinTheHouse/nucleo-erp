@@ -48,6 +48,7 @@ TIPOS_MOVIMIENTO_ETIQUETA = {
     "SALIDA": "Salida",
     "AJUSTE": "Ajuste",
     "TRANSFERENCIA": "Transferencia",
+    "TODOS": "Todos los tipos",
 }
 _MESES_CORTOS = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic")
 _SIN_DATO = "—"
@@ -326,7 +327,8 @@ def _resumen(celdas):
     estilo = [
         ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 6.5),
         ("TEXTCOLOR", (0, 0), (-1, 0), _C_TEXT_MUTED),
-        ("FONT", (0, 1), (-1, 1), "Helvetica-Bold", 11),
+        # Más de cuatro tarjetas (desglose por tipo): letra menor para que quepan.
+        ("FONT", (0, 1), (-1, 1), "Helvetica-Bold", 11 if n <= 4 else 7.5),
         ("TEXTCOLOR", (0, 1), (-1, 1), _C_BRAND),
         ("LEFTPADDING", (0, 0), (-1, -1), 10),
         ("RIGHTPADDING", (0, 0), (-1, -1), 10),
@@ -745,6 +747,7 @@ _COLUMNAS_MOVIMIENTOS_PDF = (
     ("Producto", 3.2, "LEFT", False, True),
     ("Almacén", 2.4, "LEFT", False, True),
     ("Ubicación", 2.0, "LEFT", False, True),
+    ("Origen", 1.8, "LEFT", False, True),
     ("Cantidad", 1.1, "RIGHT", True, False),
     ("Costo Total", 1.4, "RIGHT", False, False),
     ("Usuario", 2.2, "LEFT", False, True),
@@ -755,6 +758,9 @@ _COLUMNAS_MOVIMIENTOS_XLSX = (
     ("Producto", 40, None),
     ("Almacén", 26, None),
     ("Ubicación", 30, None),
+    ("Origen", 14, None),
+    ("Folio", 18, None),
+    ("SKU", 18, None),
     ("Cantidad", 12, _FMT_CANTIDAD),
     ("Costo Total", 15, _FMT_DINERO),
     ("Usuario", 28, None),
@@ -764,6 +770,15 @@ _COLUMNAS_MOVIMIENTOS_XLSX = (
 def _fecha_hora_excel(momento):
     # Excel no guarda zona horaria: hora de México, sin tz.
     return _local(momento).replace(tzinfo=None, microsecond=0) if momento else None
+
+
+_ETIQUETA_RESUMEN = {
+    "entradas": "Entradas",
+    "salidas": "Salidas",
+    "ajustes_positivos": "Ajustes +",
+    "ajustes_negativos": "Ajustes -",
+    "transferencias": "Transferencias",
+}
 
 
 def exportar_movimientos(reporte, formato, generado_en=None):
@@ -796,7 +811,12 @@ def exportar_movimientos(reporte, formato, generado_en=None):
             resumen=[
                 ("TOTAL MOVIMIENTOS", formato_cantidad(resumen["total_movimientos"])),
                 ("TOTAL REGISTROS", formato_cantidad(resumen["total_registros"])),
-                ("CANTIDAD TOTAL", formato_cantidad(resumen["total_cantidad"])),
+                *(
+                    (f"{_ETIQUETA_RESUMEN[k].upper()} (PZ / $)",
+                     f"{formato_cantidad(v['piezas'])} / {formato_dinero(v['costo'])}")
+                    for k, v in resumen["por_tipo"].items() if v["registros"]
+                ),
+                ("NETO (PZ / $)", f"{formato_cantidad(resumen['neto_piezas'])} / {formato_dinero(resumen['neto_costo'])}"),
             ],
             seccion="DETALLE DE MOVIMIENTOS",
             columnas=_COLUMNAS_MOVIMIENTOS_PDF,
@@ -810,7 +830,8 @@ def exportar_movimientos(reporte, formato, generado_en=None):
                     _texto(producto(f)),
                     _texto(f["almacen_nombre"]),
                     _texto(f["ubicacion_nombre"]),
-                    formato_cantidad(f["cantidad"]),
+                    f"{f['origen_tipo']}\n{_texto(f['origen_folio'])}",
+                    formato_cantidad(f["cantidad_signed"]),
                     formato_dinero(f["costo_total"]),
                     _texto(f["usuario_nombre"]),
                 ]
@@ -833,6 +854,16 @@ def exportar_movimientos(reporte, formato, generado_en=None):
                 ("Total movimientos", resumen["total_movimientos"], _FMT_ENTERO),
                 ("Total registros", resumen["total_registros"], _FMT_ENTERO),
                 ("Cantidad total", to_decimal(resumen["total_cantidad"]), _FMT_CANTIDAD),
+                *(
+                    item
+                    for k, v in resumen["por_tipo"].items()
+                    for item in (
+                        (f"{_ETIQUETA_RESUMEN[k]} (piezas)", to_decimal(v["piezas"]), _FMT_CANTIDAD),
+                        (f"{_ETIQUETA_RESUMEN[k]} ($)", to_decimal(v["costo"]), _FMT_DINERO),
+                    )
+                ),
+                ("Neto (piezas)", to_decimal(resumen["neto_piezas"]), _FMT_CANTIDAD),
+                ("Neto ($)", to_decimal(resumen["neto_costo"]), _FMT_DINERO),
             ],
             seccion="DETALLE DE MOVIMIENTOS",
             columnas=_COLUMNAS_MOVIMIENTOS_XLSX,
@@ -843,7 +874,10 @@ def exportar_movimientos(reporte, formato, generado_en=None):
                     producto(f),
                     f["almacen_nombre"],
                     f["ubicacion_nombre"],
-                    to_decimal(f["cantidad"]),
+                    f["origen_tipo"],
+                    f["origen_folio"],
+                    f["sku"],
+                    to_decimal(f["cantidad_signed"]),
                     to_decimal(f["costo_total"]),
                     f["usuario_nombre"],
                 ]

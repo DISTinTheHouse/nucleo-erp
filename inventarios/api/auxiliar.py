@@ -25,6 +25,8 @@ from auditoria.models import AuditoriaEvento
 from catalogo.models import ProductoVariante, VarianteProductoProduccion
 from inventarios.models import Existencia, MovimientoInventarioDetalle
 
+from .origen import anotar_origen, nombres_valores, resolver_origen
+
 CERO = Decimal("0")
 LIMITE_OPCIONES = 20
 
@@ -134,11 +136,12 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, al
     sucursal_ids)`` permitidos.
     """
     detalles = (
-        MovimientoInventarioDetalle.objects.filter(
+        anotar_origen(MovimientoInventarioDetalle.objects.filter(
             producto_variante_id=variante_id, movimiento_inventario__activo=True
-        )
+        ))
         .order_by("movimiento_inventario__fecha_movimiento", "id")
         .values(
+            *nombres_valores(),
             "id",
             "cantidad",
             "costo_unitario",
@@ -268,6 +271,9 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, al
                     afectaciones.append((None, None, None, None, signo))
 
         documento, folio = _documento(m)
+        origen_tipo, origen_folio, origen_id = resolver_origen(
+            tipo, m["movimiento_inventario_id"], lambda campo: m[f"o_{campo}"],
+        )
         usuario = (
             f"{m['movimiento_inventario__usuario__first_name'] or ''} {m['movimiento_inventario__usuario__last_name'] or ''}".strip()
             or m["movimiento_inventario__usuario__email"]
@@ -299,6 +305,10 @@ def kardex(user, variante_id, almacen_id=None, inicio_dt=None, final_dt=None, al
                 "documento": documento,
                 "folio_referencia": folio,
                 "tm": tipo,
+                "origen_tipo": origen_tipo,
+                "origen_folio": origen_folio,
+                "origen_id": origen_id,
+                "ubicacion_id": ub,
                 "costo_unitario": str(costo.quantize(Decimal("0.01"))),
                 "entradas": str(delta.quantize(Decimal("0.0001"))) if delta > 0 else "0.0000",
                 "salidas": str((-delta).quantize(Decimal("0.0001"))) if delta < 0 else "0.0000",
