@@ -13,6 +13,7 @@ from rest_framework.viewsets import GenericViewSet
 from wms.api.serializers import (
     DespachoCreateSerializer,
     DespachoSerializer,
+    EtiquetaRFIDCantidadQuerySerializer,
     EtiquetaRFIDCreateSerializer,
     EtiquetaRFIDSerializer,
     PackingCreateSerializer,
@@ -630,6 +631,14 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             return EtiquetaRFIDCreateSerializer
         return EtiquetaRFIDSerializer
 
+    @staticmethod
+    def _cantidad_query(request):
+        """``?cantidad=`` de GET ``onboarding/`` y ``preview/`` con el mismo campo que
+        el POST (EC-989): inválida o arriba de ``MAX_CANTIDAD_ETIQUETAS`` → 400."""
+        serializer = EtiquetaRFIDCantidadQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        return serializer.validated_data["cantidad"]
+
     @action(
         detail=False,
         methods=["get"],
@@ -784,12 +793,13 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             user = request.user
             empresa = getattr(user, "empresa", None)
 
+            # Antes que el buscador y fuera del ``try`` de abajo: una ``cantidad``
+            # inválida responde 400 con su motivo, como el POST (EC-989).
+            cantidad = self._cantidad_query(request)
             q = (request.query_params.get("q") or "").strip()
             variante_id = request.query_params.get("variante") or request.query_params.get("variante_id")
             producto_id = request.query_params.get("producto") or request.query_params.get("producto_id")
-            cantidad_raw = request.query_params.get("cantidad")
             rfid_mode_raw = request.query_params.get("rfid_mode", "true")
-            cantidad = int(cantidad_raw) if (cantidad_raw and str(cantidad_raw).isdigit()) else 1
             rfid_mode = str(rfid_mode_raw).lower() not in {"0", "false", "no", "off"}
 
             buscar_payload = self.buscar(request).data
@@ -854,15 +864,14 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         url_name="preview",
     )
     def preview(self, request):
+        cantidad = self._cantidad_query(request)
         variante_id = request.query_params.get("variante") or request.query_params.get(
             "variante_id"
         )
         producto_id = request.query_params.get("producto") or request.query_params.get(
             "producto_id"
         )
-        cantidad_raw = request.query_params.get("cantidad")
         rfid_mode_raw = request.query_params.get("rfid_mode", "true")
-        cantidad = int(cantidad_raw) if (cantidad_raw and str(cantidad_raw).isdigit()) else 1
         rfid_mode = str(rfid_mode_raw).lower() not in {"0", "false", "no", "off"}
 
         payload = RFIDLabelService.onboarding_preview(request.user, variante_id=variante_id, producto_id=producto_id, cantidad=cantidad, rfid_mode=rfid_mode)
