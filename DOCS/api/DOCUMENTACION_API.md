@@ -7209,8 +7209,17 @@ La impresión ya quedó registrada y se verá en `GET /api/v1/wms/etiquetas-rfid
 - **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/`
 - **Descripción**: listado ligero (EC-989) de las impresiones visibles, la más reciente primero (`-created_at`, `-id`). Cada fila trae los campos del detalle con los mismos nombres y en el mismo orden, **sin `etiquetas` ni `zpl_enviado`**: `id`, `folio`, `empresa`, `sucursal`, `usuario`, `producto`, `producto_variante`, `producto_nombre`, `producto_variante_nombre`, `sku`, `codigo_producto`, `cantidad`, `rfid_mode`, `printer_name`, `printer_address`, `status`, `observaciones`, `created_at`, `updated_at`. Los EPC y el ZPL se piden al detalle `{id}/`.
 - **Paginación opcional** (`PaginacionOpcionalLimitOffset`): sin `?limit=` regresa el arreglo completo; con `?limit=&offset=` regresa `{count, next, previous, results}` (`limit` topado en 500; `limit` u `offset` inválidos → `400`).
-- **Alcance**: empresa activa del usuario, superusuario incluido; superusuario y admin de empresa ven todas sus sucursales, el resto `sucursales_permitidas()`. Sin empresa: `[]`.
-- **Consultas**: 1 fija (2 con `?limit=`, por el `count`).
+- **Modo servidor** (EC-989, `wms/api/etiquetas_rfid_listado.py`; mismo mecanismo que encuadres RFID y pickings), combinables entre sí y con la paginación (`count` cuenta el conjunto filtrado):
+
+  | Parámetro | Valores | Notas |
+  |---|---|---|
+  | `search` | texto libre | Contiene, sin distinguir mayúsculas, en folio (`LAB-000042`, también parcial: `42`), SKU de la variante, nombre del producto y nombre de la variante. Varias palabras separadas por espacio: deben aparecer todas (cada una en cualquiera de los campos). |
+  | `status` | `PENDIENTE`, `EXITO`, `FALLIDO`; varios por coma (`PENDIENTE,FALLIDO`) | Sin distinguir mayúsculas. Vacío = sin filtro. Otro valor → `400 {"status": "Estatus inexistente. Usa PENDIENTE, EXITO o FALLIDO."}`. |
+  | `ordering` | `folio`, `sku`, `producto_nombre`, `producto_variante_nombre`, `cantidad`, `status`, `created_at`; `-` para descendente; varios por coma | `folio` ordena por `id`. `id` es el desempate (misma dirección que el primer campo). `sku` y `producto_variante_nombre` vacíos (impresión por producto) van al final en ambas direcciones. Un campo fuera de la lista se ignora. Sin `ordering`: `-created_at`, `-id`. |
+
+  Ejemplo: `GET /api/v1/wms/etiquetas-rfid/?search=polo&status=EXITO&ordering=-created_at&limit=20&offset=0`. Los tres solo aplican al listado: en el detalle `{id}/` se ignoran.
+- **Alcance**: empresa activa del usuario, superusuario incluido; superusuario y admin de empresa ven todas sus sucursales, el resto `sucursales_permitidas()`. Sin empresa: `[]`. La búsqueda y el orden corren sobre ese conjunto (los JOIN son al producto y variante de cada impresión), así que nunca traen ni delatan impresiones de otra empresa.
+- **Consultas**: 1 fija (2 con `?limit=`, por el `count`), con o sin `search`/`status`/`ordering`.
 
 ### 4) Detalle de Impresión
 
