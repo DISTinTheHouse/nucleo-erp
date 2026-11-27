@@ -921,6 +921,20 @@ class RecepcionRFIDEncuadreSerializer(_CancelacionRecepcionMixin, serializers.Mo
         return resumen_encuadre_rfid(obj, self.context.get("resumen_mapas"))
 
 
+class RecepcionRFIDEncuadreSinLecturasSerializer(RecepcionRFIDEncuadreSerializer):
+    """Detalle con ``?sin_lecturas=1`` (EC-998): el detalle sin ``lecturas[]``; el
+    ``resumen``, el mismo, con la consulta agrupada (no trae las lecturas)."""
+
+    lecturas = None
+
+    class Meta(RecepcionRFIDEncuadreSerializer.Meta):
+        fields = [f for f in RecepcionRFIDEncuadreSerializer.Meta.fields if f != "lecturas"]
+
+    def get_resumen(self, obj):
+        from compras.api.views import resumen_agrupado_encuadre_rfid
+        return resumen_agrupado_encuadre_rfid(obj)
+
+
 class RecepcionRFIDEncuadreListSerializer(RecepcionRFIDEncuadreSerializer):
     """Fila del listado (EC-981): los campos del detalle sin ``lecturas[]`` ni
     ``resumen``, con sus totales planos (mismos nombres y formato que en

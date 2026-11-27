@@ -74,6 +74,7 @@ from compras.api.serializers import (
     RecepcionRetrieveSerializer,
     RecepcionSerializer,
     RecepcionRFIDEncuadreSerializer,
+    RecepcionRFIDEncuadreSinLecturasSerializer,
     RecepcionRFIDEncuadreCreateSerializer,
     RecepcionRFIDEncuadreListSerializer,
     RecepcionRFIDLecturaSerializer,
@@ -4125,23 +4126,50 @@ def resumen_encuadre_rfid(encuadre, mapas=None):
     """
     if mapas is None:
         mapas = mapas_resumen_encuadres_rfid([encuadre])
-    lecturas = list(encuadre.lecturas.all())
+    filas = (
+        (l.orden_compra_detalle_id, l.orden_produccion_detalle_id, l.cantidad_leida)
+        for l in encuadre.lecturas.all()
+    )
+    return _armar_resumen_rfid(encuadre, mapas, filas)
+
+
+def resumen_agrupado_encuadre_rfid(encuadre, mapas=None):
+    """``resumen_encuadre_rfid`` sin traer las lecturas (EC-998): lo leído sale
+    de una consulta agrupada por renglón, así cuesta lo mismo con 5 que con 500
+    lecturas. Mismo resultado, campo por campo y con el mismo formato."""
+    if mapas is None:
+        mapas = mapas_resumen_encuadres_rfid([encuadre])
+    filas = (
+        RecepcionRFIDLectura.objects.filter(encuadre_id=encuadre.pk)
+        .values_list("orden_compra_detalle_id", "orden_produccion_detalle_id")
+        .annotate(t=Sum("cantidad_leida")).order_by()
+    )
+    return _armar_resumen_rfid(encuadre, mapas, filas)
+
+
+def _armar_resumen_rfid(encuadre, mapas, filas):
+    """El ``resumen`` del encuadre a partir de ``(renglón OC, renglón OP,
+    cantidad)``: una fila por lectura (detalle) o por renglón (agrupado)."""
+    lado = 0 if encuadre.orden_compra_id else 1
+    leido_por_renglon = {}
+    total_leido = Decimal("0")
+    total_sin_asignar = Decimal("0")
+    for fila in filas:
+        cantidad = Decimal(str(fila[2] or 0))
+        total_leido += cantidad
+        if not fila[0] and not fila[1]:
+            total_sin_asignar += cantidad
+        elif fila[lado]:
+            leido_por_renglon[fila[lado]] = leido_por_renglon.get(fila[lado], Decimal("0")) + cantidad
 
     detalles = []
     esperado_y_leido = []
     total_esperado = Decimal("0")
     for detalle, ordenado, ya_recibido, esperado in _renglones_esperados_rfid(encuadre, mapas):
+        leido = leido_por_renglon.get(detalle.pk, Decimal("0"))
         if encuadre.orden_compra_id:
-            leido = sum(
-                (Decimal(str(l.cantidad_leida or 0)) for l in lecturas if l.orden_compra_detalle_id == detalle.pk),
-                Decimal("0"),
-            )
             producto = detalle.producto
         else:
-            leido = sum(
-                (Decimal(str(l.cantidad_leida or 0)) for l in lecturas if l.orden_produccion_detalle_id == detalle.pk),
-                Decimal("0"),
-            )
             producto = getattr(detalle.producto_variante, "producto", None)
 
         total_esperado += esperado
@@ -4160,14 +4188,6 @@ def resumen_encuadre_rfid(encuadre, mapas=None):
             "leido": str(leido),
             "diferencia": str(esperado - leido),
         })
-
-    total_leido = Decimal("0")
-    total_sin_asignar = Decimal("0")
-    for l in lecturas:
-        cantidad = Decimal(str(l.cantidad_leida or 0))
-        total_leido += cantidad
-        if not l.orden_compra_detalle_id and not l.orden_produccion_detalle_id:
-            total_sin_asignar += cantidad
 
     return {
         "detalle": detalles,
@@ -4225,9 +4245,8 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         qs = self.queryset.select_related(
             "orden_compra", "op", "almacen", "proveedor", "sucursal", "usuario", "aceptado_por", "cancelado_por",
         )
-        # Solo el detalle anida ``lecturas[]``; aceptar/ y cancelar/ las traen
-        # al releer la fila bloqueada (``_bloquear``).
-        if self.action == "retrieve":
+        # Solo el detalle anida ``lecturas[]`` (y no con ``?sin_lecturas=1``, EC-998).
+        if self.action == "retrieve" and not self._sin_lecturas():
             qs = qs.prefetch_related(prefetch_lecturas_rfid())
         empresa = getattr(user, "empresa", None)
         if not empresa:
@@ -4286,7 +4305,29 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             return RecepcionRFIDEncuadreCreateSerializer
         if self.action == "list":
             return RecepcionRFIDEncuadreListSerializer
+        if self.action == "retrieve" and self._sin_lecturas():
+            return RecepcionRFIDEncuadreSinLecturasSerializer
         return RecepcionRFIDEncuadreSerializer
+
+    def _sin_lecturas(self):
+        """``?sin_lecturas=1`` (o ``true``/``si``) en el detalle (EC-998)."""
+        valor = self.request.query_params.get("sin_lecturas", "") if self.request else ""
+        return str(valor).strip().lower() in {"1", "true", "si"}
+
+    @extend_schema(parameters=[OpenApiParameter("sin_lecturas", OpenApiTypes.BOOL, description=(
+        "`1`: el detalle sin `lecturas[]` (EC-998); el `resumen` es el mismo, calculado sin traer "
+        "las lecturas. Las lecturas, paginadas, en `GET {id}/lecturas/`."
+    ))])
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+
+    @extend_schema(responses=OpenApiTypes.OBJECT, description=(
+        "El `resumen` del detalle (esperado contra leído por renglón y totales), con la misma forma, "
+        "sin traer las lecturas (EC-998)."
+    ))
+    @action(detail=True, methods=["get"])
+    def resumen(self, request, pk=None):
+        return Response(resumen_agrupado_encuadre_rfid(self.get_object()))
 
     def list(self, request, *args, **kwargs):
         # Fila ligera (EC-981): sin ``lecturas[]`` ni ``resumen``. ``total_esperado``
@@ -4376,8 +4417,22 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         return Response(RecepcionRFIDEncuadreSerializer(encuadre).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(
+        methods=["GET"],
+        parameters=[
+            OpenApiParameter("limit", OpenApiTypes.INT, description="Tamaño de página (tope 500)."),
+            OpenApiParameter("offset", OpenApiTypes.INT, description="Desde qué lectura."),
+        ],
+        responses={200: RecepcionRFIDLecturaSerializer(many=True)},
+        description=(
+            "Lecturas del encuadre en orden de captura (`id`), las mismas de `lecturas[]` del "
+            "detalle (EC-998). Sin `?limit=` la lista completa; con él, "
+            "`{count, next, previous, results}`."
+        ),
+    )
+    @extend_schema(
+        methods=["POST"],
         request=RecepcionRFIDLecturaInputSerializer,
-        responses={201: RecepcionRFIDLecturaSerializer},
+        responses={201: RecepcionRFIDLecturaSerializer, 200: OpenApiTypes.OBJECT},
         description=(
             "Una pieza leída. Manda exactamente uno de `epc` (recomendado) o `codigo_tag` "
             "(obsoleto); ambos o ninguno → 400. Con `epc`, la etiqueta impresa por el ERP "
@@ -4392,11 +4447,13 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             "además `epc`/`codigo_tag` o encuadre no pendiente → `400` y no se guarda nada."
         ),
     )
-    @action(detail=True, methods=["post"])
+    @action(detail=True, methods=["get", "post"])
     def lecturas(self, request, pk=None):
         # Sin el prefetch de lecturas (solo el retrieve lo hace): solo se
         # responde la lectura nueva.
         encuadre = self.get_object()
+        if request.method == "GET":
+            return self._lecturas_paginadas(encuadre)
         _exigir_permiso_oc(request, PERMISO_CREAR_RECEPCIONES)
         if hasattr(request.data, "get") and "epcs" in request.data:
             return self._lecturas_lote(request, encuadre)
@@ -4541,6 +4598,15 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             if etiqueta_id:
                 etiquetas.add(etiqueta_id)
         return tags, etiquetas
+
+    def _lecturas_paginadas(self, encuadre):
+        """``GET {id}/lecturas/`` (EC-998): las lecturas del detalle, paginadas con
+        la paginación opcional del listado (sin ``?limit=``, todas)."""
+        qs = encuadre.lecturas.select_related("producto", "producto_variante").order_by("id")
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(RecepcionRFIDLecturaSerializer(page, many=True).data)
+        return Response(RecepcionRFIDLecturaSerializer(qs, many=True).data)
 
     def _lecturas_lote(self, request, encuadre):
         """``{"epcs": [...]}`` (EC-998): una tanda bajo un solo candado del encuadre

@@ -4198,6 +4198,99 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
         self.assertEqual(root_a.get(f"{self.URL_ENCUADRES}{self.e_b.pk}/").status_code, 404)
 
 
+class RecepcionRFIDEncuadreResumenYLecturasTests(_EncuadresRFIDFixture, TestCase):
+    """EC-998: ``resumen/`` y ``?sin_lecturas=1`` dan el mismo ``resumen`` que el
+    detalle sin traer las lecturas; ``GET {id}/lecturas/`` las pagina. Todo en el
+    alcance de la empresa activa."""
+
+    # get_object, renglones, recibido, rechazado y lo leído agrupado por renglón.
+    CONSULTAS_RESUMEN = 5
+    def _url(self, encuadre, accion=""):
+        return f"{self.URL_ENCUADRES}{encuadre.pk}/{accion}"
+
+    def _encuadres_a(self):
+        return (self.e_oc_varias, self.e_oc_vacio, self.e_op_una, self.e_oc_una)
+
+    def test_resumen_y_sin_lecturas_iguales_al_detalle(self):
+        api = self._api()
+        for encuadre in self._encuadres_a():
+            with self.subTest(encuadre=encuadre.pk):
+                detalle = api.get(self._url(encuadre)).json()
+                self.assertEqual(api.get(self._url(encuadre, "resumen/")).json(), detalle["resumen"])
+                sin = api.get(self._url(encuadre), {"sin_lecturas": "1"}).json()
+                self.assertNotIn("lecturas", sin)
+                self.assertEqual(sin, {k: v for k, v in detalle.items() if k != "lecturas"})
+        for valor in ("true", "SI"):
+            self.assertNotIn("lecturas", api.get(self._url(self.e_oc_una), {"sin_lecturas": valor}).json())
+        for valor in ("", "0", "no"):
+            self.assertIn("lecturas", api.get(self._url(self.e_oc_una), {"sin_lecturas": valor}).json())
+
+    def test_resumen_no_trae_las_lecturas(self):
+        api = self._api()
+        self._leer(self.e_oc_varias, self.r1, 30)
+        for url, params in ((self._url(self.e_oc_varias, "resumen/"), {}),
+                            (self._url(self.e_oc_varias), {"sin_lecturas": "1"})):
+            with self.subTest(url=url, params=params):
+                with CaptureQueriesContext(connection) as ctx:
+                    self.assertEqual(api.get(url, params).status_code, 200)
+                self.assertEqual(len(ctx), self.CONSULTAS_RESUMEN)
+                de_lecturas = [q["sql"] for q in ctx if '"recepcion_rfid_lectura"' in q["sql"]]
+                self.assertEqual(len(de_lecturas), 1)
+                self.assertIn("GROUP BY", de_lecturas[0])
+
+    def test_lecturas_paginadas(self):
+        api = self._api()
+        detalle = api.get(self._url(self.e_oc_varias)).json()["lecturas"]
+        self.assertEqual(api.get(self._url(self.e_oc_varias, "lecturas/")).json(), detalle)
+        pagina = api.get(self._url(self.e_oc_varias, "lecturas/"), {"limit": 2, "offset": 1}).json()
+        self.assertEqual((pagina["count"], pagina["results"]), (len(detalle), detalle[1:3]))
+        self.assertIsNotNone(pagina["previous"])
+        self.assertEqual(api.get(self._url(self.e_oc_vacio, "lecturas/"), {"limit": 5}).json()["results"], [])
+        self.assertEqual(api.get(self._url(self.e_oc_varias, "lecturas/"), {"limit": "x"}).status_code, 400)
+
+    def test_lecturas_paginadas_no_crecen_con_las_lecturas(self):
+        api = self._api()
+        with CaptureQueriesContext(connection) as pocas:
+            api.get(self._url(self.e_oc_varias, "lecturas/"), {"limit": 50})
+        self._leer(self.e_oc_varias, self.r1, 20)
+        with CaptureQueriesContext(connection) as muchas:
+            api.get(self._url(self.e_oc_varias, "lecturas/"), {"limit": 50})
+        self.assertEqual(len(muchas), len(pocas))
+
+    def test_otra_empresa_es_404_tambien_para_el_superusuario(self):
+        superusuario = Usuario.objects.create(
+            username="ec998-su-778", email="ec998-su-778@ec998.test", empresa=self.t["a"]["empresa"],
+            is_superuser=True,
+        )
+        for usuario in (self.t["a"]["usuario"], superusuario):
+            api = APIClient()
+            api.force_authenticate(usuario)
+            for url, params in ((self._url(self.e_b, "resumen/"), {}), (self._url(self.e_b, "lecturas/"), {}),
+                                (self._url(self.e_b), {"sin_lecturas": "1"})):
+                with self.subTest(usuario=usuario.username, url=url):
+                    self.assertEqual(api.get(url, params).status_code, 404)
+            self.assertEqual(api.get(self._url(self.e_oc_una, "resumen/")).status_code, 200)
+
+    def test_lecturas_y_resumen_piden_el_permiso_de_lectura(self):
+        usuario = Usuario.objects.create(
+            username="ec998-sin", email="ec998-sin@ec998.test", empresa=self.t["a"]["empresa"],
+        )
+        api = APIClient()
+        api.force_authenticate(usuario)
+        for accion in ("resumen/", "lecturas/"):
+            with self.subTest(accion=accion):
+                self.assertEqual(api.get(self._url(self.e_oc_una, accion)).status_code, 403)
+        _conceder(usuario, "R-WMS-RECEPCIONES")
+        for accion in ("resumen/", "lecturas/"):
+            with self.subTest(accion=accion, permiso=True):
+                self.assertEqual(api.get(self._url(self.e_oc_una, accion)).status_code, 200)
+        # Leer no basta para escribir.
+        self.assertEqual(
+            api.post(self._url(self.e_oc_una, "lecturas/"), {"epcs": ["ABCDEF0123456789"]}, format="json").status_code,
+            403,
+        )
+
+
 class RecepcionRFIDEncuadreBloqueoTests(_EncuadresRFIDFixture, TestCase):
     """EC-981: ``aceptar/``, ``cancelar/`` y ``lecturas/`` deciden con el estatus de
     la fila bloqueada, no con el que leyó ``get_object()``. La carrera se simula
