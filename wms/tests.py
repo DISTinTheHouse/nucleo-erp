@@ -993,6 +993,35 @@ class ScannerRFIDSeguridadTests(TestCase):
         self.assertEqual(siguiente["scans"], [])
         self.assertEqual(self._ids_scans(self.admin_a, solo_match=1, despues_de_id=0), [vieja.pk])
 
+    def test_cursor_se_fija_antes_de_leer_scans(self):
+        """Una lectura que llega después de fijar el cursor sale en el siguiente
+        polling; una que llegó antes ya viene en la respuesta de arranque. Con el
+        cursor calculado después de leer ``scans``, la del medio quedaba debajo
+        del cursor sin haber salido nunca."""
+        from unittest import mock
+
+        from wms.api.views import EtiquetaRFIDViewSet
+
+        self._sembrar(self.empresa_a, self.lector_a, 2, "aaaa")
+        original = EtiquetaRFIDViewSet._cursor_de_arranque
+        llegadas = {}
+
+        def con_llegadas(user, lector_id):
+            llegadas["antes"] = RfidScan.objects.create(empresa=self.empresa_a, lector=self.lector_a, epc="ANTES0000000000000000001")
+            cursor = original(user, lector_id)
+            llegadas["despues"] = RfidScan.objects.create(empresa=self.empresa_a, lector=self.lector_a, epc="DESPU0000000000000000001")
+            return cursor
+
+        with mock.patch.object(EtiquetaRFIDViewSet, "_cursor_de_arranque", staticmethod(con_llegadas)):
+            inicio = self._scans(self.admin_a)
+        self.assertEqual(inicio["cursor"], llegadas["antes"].pk)
+        self.assertIn(llegadas["antes"].pk, [s["id"] for s in inicio["scans"]])
+        # La del medio queda arriba del cursor (puede venir también en el arranque,
+        # que el cliente descarta): el siguiente polling la trae.
+        self.assertGreater(llegadas["despues"].pk, inicio["cursor"])
+        siguiente = self._scans(self.admin_a, despues_de_id=inicio["cursor"])
+        self.assertEqual([s["id"] for s in siguiente["scans"]], [llegadas["despues"].pk])
+
     def test_cursor_cuesta_una_consulta_solo_sin_despues_de_id(self):
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
