@@ -5922,6 +5922,27 @@ class DevolucionProveedorContratoTests(TestCase):
                 self.assertEqual(resp.status_code, 400, resp.content[:300])
                 self.assertEqual(resp.json(), {"detalles": "Cada renglón lleva calidad_detalle y cantidad."})
 
+    def test_sin_proveedor_ni_oc_no_se_devuelve(self):
+        """#1477: lo rechazado de una recepción sin proveedor ni OC (p. ej. de una OP)."""
+        inspeccion = self._inspeccion()
+        Recepcion.objects.filter(pk=inspeccion.recepcion_id).update(proveedor=None)
+        self.assertEqual(self._pendientes(inspeccion), [])
+        self.assertIs(self._inspecciones()[inspeccion.pk], False)
+        resp = self._client().post(
+            self.URL, {"calidad_inspeccion": inspeccion.pk, "motivo": "Defecto"}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content[:300])
+        self.assertIn("calidad_inspeccion", resp.json())
+
+    def test_renglon_de_oc_sin_costo_es_400(self):
+        """#1471: con OC, un renglón sin ``orden_compra_detalle`` no se devuelve en 0."""
+        inspeccion = self._inspeccion()
+        oc = OrdenCompraCancelacionTests._oc(self, Estatus.AUTORIZADA)
+        Recepcion.objects.filter(pk=inspeccion.recepcion_id).update(orden_compra=oc)
+        resp = self._client().post(
+            self.URL, {"calidad_inspeccion": inspeccion.pk, "motivo": "Defecto"}, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content[:300])
+        self.assertIn("no está ligado a la orden de compra", resp.json()["detalles"])
+
     # --- bandera y filtro de calidad -------------------------------------------
 
     def test_bandera_y_filtro_con_la_regla_de_pendientes(self):
