@@ -5898,6 +5898,7 @@ Para que producción vea qué pedidos traen muestras/renglones sin SKU de catál
 
 - **Endpoint**: `GET /api/v1/wms/pickings/onboarding/`
 - **Solo pedidos programados**: `pedidos` trae únicamente los que mesa de control ya programó (`PATCH /ventas/pedidos/{id}/programar/`). Un `POST` con un pedido sin programar → `400 {"pedido": "El pedido no está programado; prográmalo antes de surtirlo."}`.
+- **Mismo conjunto que `surtido-pedidos/?por_surtir=1`** (EC-988): `pedidos` sale de la misma expresión (activo, estatus 3 o 4, programado, no retenido y con alguna talla surtible pendiente), aquí con tope `pedidos_limit` (50 por omisión, máximo 500) y `pedidos_truncado`. Para listar sin tope, paginado y con filtros, usar `surtido-pedidos` (ver _WMS - Avance de surtido por pedido_).
 - **Hacia dónde surtir**: cada pedido trae `programaciones: [{destino, cantidad, comentarios, almacen_sugerido}]`, tanto en el listado `pedidos[]` como en `pedido` (con `?pedido=`); para un mismo pedido ambas respuestas traen lo mismo. `almacen_sugerido` es `{id, nombre}` o `null` (ver _Regla de sugerencia de almacenes_ abajo). Front: mostrarlo como pista junto al selector de almacén destino, p. ej. "Programado: APARTADO · 4 pzs → APARTADOS".
 - **Objetivo (rediseño v2: _Tracker de prendas por pedido_)**: dar al frontend todo lo necesario para preparar un surtido parcial o total mediante un flujo onboarding de 4 pasos. El **picking** es el documento que _rastrea la ruta física_ de las prendas del pedido:
   - `almacen_origen` → de dónde se toman las prendas.
@@ -6256,6 +6257,76 @@ Por cada línea/talla se exponen tres booleanos + su JSON config:
   - `tipo_orden_label`: label humano del tipo (ej: `"Bordado"`).
   - `orden_bordado` / `orden_reflejante` / `orden_corte_manga`: FK id al módulo de producción correspondiente (dos serán `null`, uno tendrá valor).
   - `orden_bordado_folio` / `orden_reflejante_folio` / `orden_corte_manga_folio`: folio formateado de la OT asociada (o `null`).
+
+---
+
+## 📦 WMS - Avance de surtido por pedido (`surtido-pedidos`)
+
+Vista informativa de solo lectura de lo que cada pedido lleva en WMS (#1223, #1255). La usan Avance de surtido y las pestañas "Por surtir" y "Surtidos" de Pedidos WMS (EC-988). Reglas completas en el docstring de `wms/api/surtido.py`.
+
+- **Surtidas**: Σ `cantidad_surtida` de pickings y renglones no cancelados, sólo renglones con talla del pedido. Lo asignado cuenta como surtido desde que se crea el picking.
+- **Comprometidas**: Σ por talla de `max(pedida − surtida, 0)`: una talla sobre-surtida no compensa a otra.
+- **Empacadas** y **despachadas**: informativas. **Salidas manuales**: neto de salidas menos entradas ligadas al pedido fuera de WMS; no cuentan como surtido.
+- **Etapa**: `DESPACHADO` (lo despachado cubre cada talla), `SURTIDO` (lo surtido cubre cada talla), `PARCIAL` (algo surtido) o `SIN_SURTIR`.
+- **Surtido completo**: `pedidas > 0` y `comprometidas = 0`.
+- **Alcance**: pedidos `activo` de la empresa activa (`user.empresa`), superusuario incluido; dentro de ella el superusuario y el admin ven todas las sucursales y el resto `sucursales_permitidas()`. Sin empresa → `200` vacío. Otra empresa → `404` en el detalle y fuera del listado.
+
+### 1) Listado
+
+- **Endpoint**: `GET /api/v1/wms/surtido-pedidos/`
+- **Paginación**: `?page=&page_size=` (50 por omisión, máximo 200) → `{count, next, previous, results}`.
+- **Fila**: `id`, `folio`, `cliente_nombre`, `sucursal_id`, `estatus`, `estatus_display`, `fecha_confirmacion`, `created_at`, `etapa`, `pedidas`, `surtidas`, `comprometidas`, `empacadas`, `despachadas`, `pct_surtido`, `pct_empacado`, `pct_despachado`, `salidas_manuales`. Las cantidades son números; los `pct_*` van de 0 a 100 con 2 decimales, sin tope.
+- **Conjunto** (también lo usa `filtros/`):
+
+| Parámetro | Efecto |
+|---|---|
+| `estatus` | Estatus separados por coma o `todos`. Por omisión `3,4` (autorizados y en proceso). Lista inválida → `400`. |
+| `por_surtir=1` | Lo que ofrece el onboarding de picking, con la misma expresión (`pedidos_por_surtir_q`): estatus 3 o 4, programado por mesa de control, no retenido y con alguna talla surtible pendiente (línea con producto, o muestra con SKU de muestra activo, con pedida > asignada). Fija el estatus e **ignora `estatus`**. Un pedido cuyo único pendiente son muestras sin SKU no entra. |
+| `completo=1` | Surtido completo. La pestaña "Surtidos" usa `estatus=todos&completo=1`. |
+| `pendientes=1` | `comprometidas > 0`. |
+
+- **Filtros de columna** (sólo el listado):
+
+| Parámetro | Efecto |
+|---|---|
+| `q` | Contiene, en el folio o en `cliente_nombre`. |
+| `sucursal` | Id de la sucursal del pedido. No numérico → `400`. |
+| `cliente` | Id del cliente del pedido. No numérico → `400`. |
+| `destino` | `APARTADO`, `BORDADO`, `CORTE_MANGA`, `REFLEJANTE` o `EMBARQUE`, uno o varios separados por coma: pasa si **alguna** programación va a ese destino. Fuera de catálogo → `400`. |
+| `etapa` | `SIN_SURTIR`, `PARCIAL`, `SURTIDO` o `DESPACHADO`, una o varias separadas por coma, con la misma regla que la `etapa` de la fila. Fuera de catálogo → `400`. |
+| `ordering` | `id`, `folio`, `cliente_nombre`, `created_at` o `fecha_confirmacion`, `-` para descendente; desempate por `id` y los vacíos al final. Sin él (o con un campo fuera de la lista), `-id`. No se ordena por cifras. |
+
+- **Con `por_surtir=1`**, cada fila trae además `sucursal_nombre` y `programaciones: [{destino, cantidad, comentarios, almacen_sugerido, surtido, pendiente}]`, la misma forma que `pedidos[]` del onboarding de picking.
+- **Consultas**: 2 por petición (`count` + página) sin importar el tamaño de página; 4 con `por_surtir=1` (almacenes sugeridos y surtido por programación de la página, en bloque).
+
+```http
+GET /api/v1/wms/surtido-pedidos/?por_surtir=1&destino=BORDADO&ordering=folio&page_size=50
+GET /api/v1/wms/surtido-pedidos/?estatus=todos&completo=1&etapa=DESPACHADO
+```
+
+### 2) Catálogos de filtros
+
+- **Endpoint**: `GET /api/v1/wms/surtido-pedidos/filtros/`
+- Clientes y sucursales con al menos un pedido en el conjunto (`estatus`, `por_surtir`, `completo`, `pendientes`); los filtros de columna se ignoran. Ordenados por nombre. 2 consultas.
+
+```json
+{"clientes": [{"id": 12, "nombre": "Cliente SA"}], "sucursales": [{"id": 1, "nombre": "Matriz"}]}
+```
+
+### 3) Resumen (números de las pestañas)
+
+- **Endpoint**: `GET /api/v1/wms/surtido-pedidos/resumen/`
+- Sobre todo lo visible; `q`, los filtros y la paginación se ignoran. 1 consulta.
+- `por_surtir` = `count` de `?por_surtir=1`; `surtidos` = `count` de `?estatus=todos&completo=1`.
+
+```json
+{"generado_en": "2026-11-27T16:08:00Z", "por_surtir": 28, "surtidos": 13}
+```
+
+### 4) Detalle
+
+- **Endpoint**: `GET /api/v1/wms/surtido-pedidos/{pedido_id}/`
+- La fila del listado más `renglones`: uno por talla con `pedido_detalle_talla_id`, `pedido_detalle_id`, `producto_id`, `producto_nombre` (o el nombre capturado de la muestra), `producto_nombre_externo`, `sku`, `talla`, `color`, `etapa` y las mismas cifras. Los parámetros del listado no aplican.
 
 ---
 

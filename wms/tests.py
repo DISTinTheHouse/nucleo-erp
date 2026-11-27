@@ -3067,6 +3067,302 @@ class SurtidoPedidosTests(TestCase):
         self.assertEqual(sobre["comprometido"], Decimal("0"))
 
 
+class SurtidoPedidosPestanasEC988Tests(TestCase):
+    """EC-988: "Por surtir" y "Surtidos" de Pedidos WMS en ``surtido-pedidos``.
+
+    ``?por_surtir=1`` usa la misma expresión que el onboarding de picking
+    (``pedidos_por_surtir_q``); ``?completo=1`` es ``pedidas > 0`` y
+    ``comprometidas = 0``; ``?etapa=`` repite ``_etapa`` en SQL; ``filtros/`` y
+    ``resumen/`` van sobre el mismo alcance.
+    """
+
+    ONBOARDING = "/api/v1/wms/pickings/onboarding/"
+
+    @classmethod
+    def setUpTestData(cls):
+        from catalogo.models import Talla, VarianteProductoProduccion
+        from inventarios.models import Almacen
+        from nucleo.models import Moneda
+        from terceros.models import Cliente
+        from ventas.models import PedidoDetalle, PedidoDetalleTalla
+
+        cls.empresa = Empresa.objects.create(codigo="ec988", razon_social="EC988 SA")
+        cls.matriz = Sucursal.objects.create(empresa=cls.empresa, codigo="MTZ988", nombre="Matriz 988")
+        cls.norte = Sucursal.objects.create(empresa=cls.empresa, codigo="NTE988", nombre="Norte 988")
+        cls.usuario = Usuario.objects.create(
+            username="ec988@example.com", email="ec988@example.com", empresa=cls.empresa,
+            sucursal_default=cls.matriz, is_admin_empresa=True,
+        )
+        cls.almacen = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.matriz, codigo="PT988", nombre="Terminado 988", permite_salida=True,
+        )
+        # Para que ``programaciones`` traiga ``almacen_sugerido`` (APARTADO → APARTADOS).
+        cls.apartados = Almacen.objects.create(
+            empresa=cls.empresa, sucursal=cls.matriz, codigo="AP988", nombre="APARTADOS", permite_entrada=True,
+        )
+        cls.moneda, _ = Moneda.objects.get_or_create(codigo_iso="MXN", defaults={"nombre": "Peso"})
+        cls.beta = Cliente.objects.create(empresa=cls.empresa, nombre="Beta 988")
+        cls.alfa = Cliente.objects.create(empresa=cls.empresa, nombre="Alfa 988")
+        cls.producto = Producto.objects.create(tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera 988", codigo="PL988")
+        cls.talla = Talla.objects.create(nombre="M988")
+
+        p = cls._pedido
+        # Por surtir.
+        cls.pendiente, _ = p("A-01", destinos=("APARTADO", "BORDADO"), cliente=cls.alfa)
+        cls.en_proceso, t = p("A-02", estatus=4, destinos=("BORDADO",), sucursal=cls.norte)
+        cls._picking(cls.en_proceso, t, 1)  # 1 de 2: PARCIAL
+        cls.cancelado, t = p("A-03")
+        cls._picking(cls.cancelado, t, 2, estado_picking="Cancelado")  # no cuenta
+        cls.linea_cancelada, t = p("A-04")
+        cls._picking(cls.linea_cancelada, t, 2, estado_linea="CANCELADA")  # no cuenta
+        cls.muestra_con_sku, _ = p("A-05", talla=False)
+        linea = PedidoDetalle.objects.create(pedido=cls.muestra_con_sku, producto_nombre_externo="Muestra con SKU")
+        PedidoDetalleTalla.objects.create(pedido_detalle=linea, talla=cls.talla, cantidad=1)
+        VarianteProductoProduccion.objects.create(
+            empresa=cls.empresa, pedido_detalle=linea, talla=cls.talla, nombre="Muestra 988", sku="MP-988-A05",
+        )
+        # Fuera de "Por surtir".
+        cls.sin_programacion, _ = p("B-01", destinos=())
+        cls.retenido, _ = p("B-02", retenido=True)
+        cls.borrador, _ = p("B-03", estatus=1)
+        cls.muestra_sin_sku, _ = p("B-04", talla=False)  # su único pendiente: muestra sin SKU
+        linea = PedidoDetalle.objects.create(pedido=cls.muestra_sin_sku, producto_nombre_externo="Muestra sin SKU")
+        PedidoDetalleTalla.objects.create(pedido_detalle=linea, talla=cls.talla, cantidad=1)
+        cls.vacio, _ = p("B-05", talla=False)  # pedidas = 0
+        # Surtidos completos (cualquier estatus).
+        cls.surtido, t = p("C-01", cliente=cls.alfa)
+        cls._picking(cls.surtido, t, 2)
+        cls.surtido_borrador, t = p("C-02", estatus=1, destinos=())
+        cls._picking(cls.surtido_borrador, t, 2)
+        cls.despachado, t = p("C-03")
+        cls._despachar(cls.despachado, cls._picking(cls.despachado, t, 2), 2)
+
+        cls.POR_SURTIR = {cls.pendiente.pk, cls.en_proceso.pk, cls.cancelado.pk, cls.linea_cancelada.pk,
+                          cls.muestra_con_sku.pk}
+        cls.COMPLETOS = {cls.surtido.pk, cls.surtido_borrador.pk, cls.despachado.pk}
+
+        # Otra empresa con un pedido por surtir y uno completo: nunca visibles aquí.
+        cls.otra = _documentos_wms("988")
+        cls.otra_admin = cls.otra["usuario"]
+
+    @classmethod
+    def _pedido(cls, folio, *, estatus=3, destinos=("APARTADO",), retenido=False, cliente=None, sucursal=None,
+                talla=True):
+        from ventas.models import Pedido, PedidoDetalle, PedidoDetalleTalla
+
+        pedido = Pedido.objects.create(
+            empresa=cls.empresa, sucursal=sucursal or cls.matriz, cliente=cliente or cls.beta, moneda=cls.moneda,
+            folio=f"P988-{folio}", estatus=estatus, retenido=retenido,
+            cliente_nombre=(cliente or cls.beta).nombre,
+            programacion_conf={"programaciones": [{"destino": d, "cantidad": 2, "comentarios": ""} for d in destinos]},
+            persona_pagos="Pagos", correo_facturas="ec988@example.com", telefono_pagos="8100000000",
+            forma_pago="03", metodo_pago="PUE", uso_cfdi="G03",
+        )
+        if not talla:
+            return pedido, None
+        linea = PedidoDetalle.objects.create(pedido=pedido, producto=cls.producto)
+        return pedido, PedidoDetalleTalla.objects.create(pedido_detalle=linea, talla=cls.talla, cantidad=2)
+
+    @classmethod
+    def _picking(cls, pedido, talla, cantidad, *, estado_picking="Completado", estado_linea="SURTIDA"):
+        from wms.models import Picking, PickingDetalle
+
+        picking = Picking.objects.create(
+            folio=f"PK-{pedido.folio}", empresa=cls.empresa, sucursal=pedido.sucursal, pedido=pedido,
+            operador=cls.usuario, almacen=cls.almacen, usuario=cls.usuario, estado=estado_picking,
+            programacion_destino="APARTADO",
+        )
+        return PickingDetalle.objects.create(
+            picking=picking, pedido_detalle=talla.pedido_detalle, pedido_detalle_talla=talla, producto=cls.producto,
+            cantidad_solicitada=cantidad, cantidad_asignada=cantidad, cantidad_surtida=cantidad, estado=estado_linea,
+        )
+
+    @classmethod
+    def _despachar(cls, pedido, picking_detalle, cantidad):
+        from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle
+
+        packing = Packing.objects.create(
+            folio=f"PA-{pedido.folio}", empresa=cls.empresa, sucursal=pedido.sucursal, pedido=pedido,
+            picking=picking_detalle.picking, operador=cls.usuario, usuario=cls.usuario,
+        )
+        detalle = PackingDetalle.objects.create(packing=packing, picking_detalle=picking_detalle, cantidad_empacada=cantidad)
+        despacho = Despacho.objects.create(packing=packing)
+        DespachoDetalle.objects.create(despacho=despacho, packing_detalle=detalle)
+
+    def setUp(self):
+        self.api = _api_de(self.usuario)
+
+    def _lista(self, api=None, **params):
+        params.setdefault("page_size", 200)
+        r = (api or self.api).get(SURTIDO_URL, params)
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()
+
+    def _ids(self, **params):
+        return [x["id"] for x in self._lista(**params)["results"]]
+
+    # --- Por surtir -----------------------------------------------------------
+
+    def test_por_surtir_es_el_conjunto_del_onboarding(self):
+        """Mismos pedidos, mismo orden y mismas ``programaciones``/``sucursal_nombre``."""
+        onboarding = self.api.get(self.ONBOARDING, {"pedidos_limit": 500}).json()["pedidos"]
+        data = self._lista(por_surtir=1)
+        self.assertEqual(data["count"], len(self.POR_SURTIR))
+        self.assertEqual({x["id"] for x in data["results"]}, self.POR_SURTIR)
+        self.assertEqual([x["id"] for x in data["results"]], [p["id"] for p in onboarding])
+        por_id = {p["id"]: p for p in onboarding}
+        for fila in data["results"]:
+            self.assertEqual(fila["programaciones"], por_id[fila["id"]]["programaciones"], fila["folio"])
+            self.assertEqual(fila["sucursal_nombre"], por_id[fila["id"]]["sucursal_nombre"], fila["folio"])
+        fila = next(x for x in data["results"] if x["id"] == self.pendiente.pk)
+        self.assertEqual(fila["programaciones"][0]["almacen_sugerido"], {"id": self.apartados.pk, "nombre": "APARTADOS"})
+
+    def test_por_surtir_fija_el_estatus(self):
+        self.assertEqual(set(self._ids(por_surtir=1, estatus="1")), self.POR_SURTIR)
+        self.assertEqual(set(self._ids(por_surtir="true", estatus="todos")), self.POR_SURTIR)
+
+    def test_sin_por_surtir_la_fila_no_cambia(self):
+        fila = self._lista()["results"][0]
+        self.assertNotIn("programaciones", fila)
+        self.assertNotIn("sucursal_nombre", fila)
+        # Default intacto: estatus 3,4 con o sin pendiente.
+        self.assertIn(self.sin_programacion.pk, self._ids())
+        self.assertNotIn(self.borrador.pk, self._ids())
+
+    def test_muestra_sin_sku_queda_fuera_de_ambas_pestanas(self):
+        """Decisión de EC-988: pendiente sólo en muestras sin SKU → ni por surtir ni completo."""
+        self.assertNotIn(self.muestra_sin_sku.pk, self._ids(por_surtir=1))
+        self.assertNotIn(self.muestra_sin_sku.pk, self._ids(estatus="todos", completo=1))
+        self.assertIn(self.muestra_sin_sku.pk, self._ids(pendientes=1))
+
+    # --- Surtidos -------------------------------------------------------------
+
+    def test_completo_de_cualquier_estatus(self):
+        self.assertEqual(set(self._ids(estatus="todos", completo=1)), self.COMPLETOS)
+        # Con el estatus por omisión, el borrador surtido no entra.
+        self.assertEqual(set(self._ids(completo=1)), self.COMPLETOS - {self.surtido_borrador.pk})
+        self.assertNotIn(self.vacio.pk, self._ids(estatus="todos", completo=1))  # pedidas = 0
+        for fila in self._lista(estatus="todos", completo=1)["results"]:
+            self.assertGreater(fila["pedidas"], 0)
+            self.assertEqual(fila["comprometidas"], 0)
+
+    def test_etapa_igual_a_la_de_la_fila(self):
+        filas = self._lista(estatus="todos")["results"]
+        for etapa in ("SIN_SURTIR", "PARCIAL", "SURTIDO", "DESPACHADO"):
+            esperados = {x["id"] for x in filas if x["etapa"] == etapa}
+            self.assertTrue(esperados, etapa)  # el fixture cubre las cuatro
+            self.assertEqual(set(self._ids(estatus="todos", etapa=etapa)), esperados, etapa)
+        varias = {x["id"] for x in filas if x["etapa"] in ("SURTIDO", "DESPACHADO")}
+        self.assertEqual(set(self._ids(estatus="todos", etapa="SURTIDO,DESPACHADO")), varias)
+        self.assertEqual(varias, self.COMPLETOS)
+        self.assertEqual(self.api.get(SURTIDO_URL, {"etapa": "surtido"}).status_code, 400)
+
+    # --- Filtros de columna ---------------------------------------------------
+
+    def test_destino_alguna_programacion(self):
+        self.assertEqual(set(self._ids(por_surtir=1, destino="BORDADO")), {self.pendiente.pk, self.en_proceso.pk})
+        self.assertEqual(
+            set(self._ids(por_surtir=1, destino="BORDADO,APARTADO")), self.POR_SURTIR,
+        )
+        self.assertEqual(self._ids(por_surtir=1, destino="EMBARQUE"), [])
+        r = self.api.get(SURTIDO_URL, {"destino": "BORDADOS"})
+        self.assertEqual((r.status_code, list(r.json())), (400, ["destino"]))
+
+    def test_cliente_sucursal_y_q(self):
+        self.assertEqual(set(self._ids(estatus="todos", cliente=self.alfa.pk)), {self.pendiente.pk, self.surtido.pk})
+        self.assertEqual(self._ids(por_surtir=1, sucursal=self.norte.pk), [self.en_proceso.pk])
+        self.assertEqual(self._ids(estatus="todos", q="P988-C-03"), [self.despachado.pk])
+        self.assertEqual(set(self._ids(por_surtir=1, q="alfa 988")), {self.pendiente.pk})
+        for valor in ("x", "²", "-1"):
+            r = self.api.get(SURTIDO_URL, {"cliente": valor})
+            self.assertEqual((r.status_code, list(r.json())), (400, ["cliente"]), valor)
+
+    def test_ordering_con_lista_blanca(self):
+        folios = [x["folio"] for x in self._lista(estatus="todos", ordering="folio")["results"]]
+        self.assertEqual(folios, sorted(folios))
+        folios = [x["folio"] for x in self._lista(estatus="todos", ordering="-folio")["results"]]
+        self.assertEqual(folios, sorted(folios, reverse=True))
+        clientes = [x["cliente_nombre"] for x in self._lista(estatus="todos", ordering="cliente_nombre")["results"]]
+        self.assertEqual(clientes, sorted(clientes))
+        # Fuera de la lista (una cifra anotada): se ignora, queda ``-id``.
+        ids = self._ids(estatus="todos", ordering="pedidas")
+        self.assertEqual(ids, sorted(ids, reverse=True))
+        self.assertEqual(self._ids(estatus="todos"), sorted(ids, reverse=True))
+
+    # --- filtros/ y resumen/ --------------------------------------------------
+
+    def test_filtros_del_conjunto(self):
+        data = self.api.get(f"{SURTIDO_URL}filtros/", {"por_surtir": 1, "cliente": self.beta.pk, "q": "x"}).json()
+        self.assertEqual(data["clientes"], [{"id": self.alfa.pk, "nombre": "Alfa 988"}, {"id": self.beta.pk, "nombre": "Beta 988"}])
+        self.assertEqual(data["sucursales"], [{"id": self.matriz.pk, "nombre": "Matriz 988"}, {"id": self.norte.pk, "nombre": "Norte 988"}])
+        data = self.api.get(f"{SURTIDO_URL}filtros/", {"estatus": "todos", "completo": 1}).json()
+        self.assertEqual(data["sucursales"], [{"id": self.matriz.pk, "nombre": "Matriz 988"}])
+        self.assertEqual([c["id"] for c in data["clientes"]], [self.alfa.pk, self.beta.pk])
+
+    def test_resumen_son_los_counts_de_las_pestanas(self):
+        r = self.api.get(f"{SURTIDO_URL}resumen/", {"q": "nada", "cliente": self.alfa.pk, "estatus": "1"})
+        self.assertEqual(r.status_code, 200, r.content)
+        data = r.json()
+        self.assertIn("generado_en", data)
+        self.assertEqual(
+            (data["por_surtir"], data["surtidos"]),
+            (self._lista(por_surtir=1)["count"], self._lista(estatus="todos", completo=1)["count"]),
+        )
+        self.assertEqual((data["por_surtir"], data["surtidos"]), (len(self.POR_SURTIR), len(self.COMPLETOS)))
+
+    # --- Alcance --------------------------------------------------------------
+
+    def test_otra_empresa_no_ve_nada_y_superusuario_usa_su_empresa_activa(self):
+        propios = self.POR_SURTIR | self.COMPLETOS
+        otra = _api_de(self.otra_admin)
+        self.assertFalse(propios & {x["id"] for x in self._lista(api=otra, estatus="todos")["results"]})
+        self.assertFalse(propios & {x["id"] for x in self._lista(api=otra, por_surtir=1)["results"]})
+        super_otra = Usuario.objects.create(
+            username="su988@example.com", email="su988@example.com", empresa=self.otra["empresa"], is_superuser=True,
+        )
+        api = _api_de(super_otra)
+        self.assertFalse(propios & {x["id"] for x in self._lista(api=api, estatus="todos")["results"]})
+        self.assertEqual(api.get(f"{SURTIDO_URL}{self.surtido.pk}/").status_code, 404)
+        resumen = api.get(f"{SURTIDO_URL}resumen/").json()
+        self.assertEqual((resumen["por_surtir"], resumen["surtidos"]), (0, 1))  # el pedido surtido del fixture
+        clientes = api.get(f"{SURTIDO_URL}filtros/", {"estatus": "todos"}).json()["clientes"]
+        self.assertEqual([c["id"] for c in clientes], [self.otra["cliente"].pk])
+
+    def test_sin_empresa_responde_vacio(self):
+        api = _api_de(Usuario.objects.create(username="sin988@example.com", email="sin988@example.com", is_superuser=True))
+        self.assertEqual(self._lista(api=api, por_surtir=1)["count"], 0)
+        self.assertEqual(self._lista(api=api, estatus="todos", completo=1)["count"], 0)
+        r = api.get(f"{SURTIDO_URL}resumen/")
+        self.assertEqual((r.status_code, r.json()["por_surtir"], r.json()["surtidos"]), (200, 0, 0))
+        self.assertEqual(api.get(f"{SURTIDO_URL}filtros/").json(), {"clientes": [], "sucursales": []})
+
+    def test_usuario_de_una_sucursal(self):
+        operador = Usuario.objects.create(
+            username="norte988@example.com", email="norte988@example.com", empresa=self.empresa,
+            sucursal_default=self.norte,
+        )
+        api = _api_de(operador)
+        self.assertEqual([x["id"] for x in self._lista(api=api, por_surtir=1)["results"]], [self.en_proceso.pk])
+        self.assertEqual(api.get(f"{SURTIDO_URL}resumen/").json()["por_surtir"], 1)
+
+    # --- Consultas ------------------------------------------------------------
+
+    def test_consultas_constantes(self):
+        casos = (
+            ({"estatus": "todos"}, 2),
+            ({"estatus": "todos", "completo": 1, "etapa": "SURTIDO,DESPACHADO", "ordering": "folio"}, 2),
+            ({"por_surtir": 1, "destino": "APARTADO,BORDADO"}, 4),  # + almacenes y surtido de la página
+        )
+        for params, esperadas in casos:
+            for page_size in (1, 200):
+                with self.assertNumQueries(esperadas, msg=f"{params} page_size={page_size}"):
+                    self.api.get(SURTIDO_URL, {**params, "page_size": page_size})
+        with self.assertNumQueries(2):
+            self.api.get(f"{SURTIDO_URL}filtros/", {"por_surtir": 1})
+        with self.assertNumQueries(1):
+            self.api.get(f"{SURTIDO_URL}resumen/")
+
+
 class TransferenciaPickingBackfillTests(TestCase):
     """EC-916: ``Transferencia.picking`` de las TR en null (migración ``0021`` y
     ``manage.py ligar_transferencias_picking``, ``transferencia_picking_service``).

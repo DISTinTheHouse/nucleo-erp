@@ -110,6 +110,27 @@ def tiene_pendiente_surtible():
     return Exists(tallas)
 
 
+def pedidos_por_surtir_q():
+    """``Q`` de ``Pedido`` "por surtir": lo que el onboarding de picking ofrece y lo
+    que ``/wms/surtido-pedidos/?por_surtir=1`` lista (EC-988). Una sola definición
+    para los dos, en SQL (pagina y cuenta en la consulta, nunca por fila):
+
+    - ``activo`` y estatus AUTORIZADA o EN PROCESO;
+    - programado por mesa de control (``PATCH /pedidos/{id}/programar/``);
+    - no retenido (el alta lo rechazaría);
+    - con alguna talla surtible pendiente (``tiene_pendiente_surtible``, #823): un
+      pedido cuyo único pendiente son muestras sin SKU no se ofrece.
+
+    No acota empresa ni sucursal: eso es del llamador."""
+    from ventas.models import Pedido
+
+    return Q(
+        Q(activo=True, estatus__in=[Pedido.ESTATUS_AUTORIZADA, Pedido.ESTATUS_EN_PROCESO], retenido=False,
+          programacion_conf__programaciones__0__isnull=False),
+        tiene_pendiente_surtible(),
+    )
+
+
 def historical_maps(pedido, talla_ids=None):
     """Cantidad asignada y surtida históricamente por ``PedidoDetalleTalla``.
 
