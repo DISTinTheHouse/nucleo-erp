@@ -3265,7 +3265,9 @@ class EncuadreRFIDLecturaEPCTests(TestCase):
             self._leer_ok({"codigo_tag": "C982a-G"})
         with CaptureQueriesContext(connection) as por_epc:
             self._leer_ok({"epc": self.EPC_G})
-        self.assertLessEqual(len(por_epc), len(por_codigo))
+        # Más las 2 fijas de "pieza única por orden" (#1453, ``_exigir_epc_libre_en_la_orden``):
+        # el candado de la orden y la búsqueda del EPC en otros encuadres.
+        self.assertLessEqual(len(por_epc), len(por_codigo) + 2)
 
 
 class ComprasDashboardRetiradoTests(TestCase):
@@ -3939,7 +3941,9 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
 
         sin_empresa = APIClient()
         sin_empresa.force_authenticate(Usuario.objects.create(username="sin778", email="sin778@ec778.test"))
-        self.assertEqual(sin_empresa.get(self.URL_ENCUADRES).json(), [])
+        # Sin empresa ni permisos: el ``R-WMS-RECEPCIONES`` de los GET (#1451) responde
+        # 403 antes del alcance.
+        self.assertEqual(sin_empresa.get(self.URL_ENCUADRES).status_code, 403)
         # EC-798 (2ad952c): el superusuario ve solo su empresa activa; sin empresa, nada.
         root = APIClient()
         root.force_authenticate(Usuario.objects.create(username="su778", email="su778@ec778.test", is_superuser=True))

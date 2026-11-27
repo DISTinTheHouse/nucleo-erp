@@ -1250,7 +1250,9 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
 
         Solo superusuario o administrador de empresa. El superusuario también
         borra sólo las de su empresa activa (EC-884); sin empresa, ``deleted: 0``.
-        Las lecturas sin empresa no se borran aquí. Un solo ``DELETE`` filtrado.
+        Las lecturas sin empresa no se borran aquí. Un ``DELETE`` filtrado, más el
+        de sus ``RfidLecturaUltima`` en cascada (#1460); ``deleted`` cuenta solo
+        lecturas (#1458).
         """
         user = request.user
         if not (getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False)):
@@ -1270,6 +1272,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 filtros[lookup] = int(valor)
             except (TypeError, ValueError):
                 raise ValidationError({campo: "Debe ser un número entero."})
-        deleted, _ = qs.filter(**filtros).delete()
+        _, por_modelo = qs.filter(**filtros).delete()
+        deleted = por_modelo.get(RfidScan._meta.label, 0)
         return Response({"status": "success", "deleted": deleted, "filtros": {
             "lector": filtros.get("lector_id"), "hasta_id": filtros.get("pk__lte")}})

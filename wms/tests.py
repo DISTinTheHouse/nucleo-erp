@@ -531,6 +531,8 @@ class ScannerRFIDSeguridadTests(TestCase):
     SCANS_URL = "/api/v1/wms/etiquetas-rfid/scans/"
     CLEAR_URL = "/api/v1/wms/etiquetas-rfid/scans/clear/"
     STATS_URL = "/api/v1/wms/etiquetas-rfid/scanner-stats/"
+    # ``scans/clear`` responde también los filtros aplicados (#1455).
+    SIN_FILTROS = {"lector": None, "hasta_id": None}
 
     @classmethod
     def setUpTestData(cls):
@@ -1131,7 +1133,7 @@ class ScannerRFIDSeguridadTests(TestCase):
         resp = self._api(self.superuser).post(self.CLEAR_URL)
 
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"status": "success", "deleted": 2})
+        self.assertEqual(resp.json(), {"status": "success", "deleted": 2, "filtros": self.SIN_FILTROS})
         self.assertFalse(RfidScan.objects.filter(empresa=self.empresa_a).exists())
         self.assertEqual(RfidScan.objects.filter(empresa=self.empresa_b).count(), 3)
 
@@ -1149,7 +1151,7 @@ class ScannerRFIDSeguridadTests(TestCase):
 
         resp = self._api(user).post(self.CLEAR_URL)
 
-        self.assertEqual(resp.json(), {"status": "success", "deleted": 3})
+        self.assertEqual(resp.json(), {"status": "success", "deleted": 3, "filtros": self.SIN_FILTROS})
         self.assertFalse(RfidScan.objects.filter(empresa=self.empresa_b).exists())
         self.assertEqual(RfidScan.objects.filter(empresa=self.empresa_a).count(), 2)
 
@@ -1164,7 +1166,7 @@ class ScannerRFIDSeguridadTests(TestCase):
         resp = api.post(self.CLEAR_URL)
 
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"status": "success", "deleted": 0})
+        self.assertEqual(resp.json(), {"status": "success", "deleted": 0, "filtros": self.SIN_FILTROS})
         self.assertEqual(RfidScan.objects.count(), 6)
 
     def _assert_clear_no_borra_huerfanas(self, user):
@@ -1215,11 +1217,18 @@ class ScannerRFIDSeguridadTests(TestCase):
         )
 
     def test_clear_es_un_solo_delete(self):
+        """Un ``DELETE`` de lecturas y uno de sus ``RfidLecturaUltima`` en cascada
+        (#1460), sin importar cuántas filas; ``deleted`` cuenta solo lecturas."""
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
+        from django.utils import timezone
 
         self._sembrar(self.empresa_a, self.lector_a, 3, "aaaa")
         self._sembrar(self.empresa_b, self.lector_b, 2, "bbbb")
+        RfidLecturaUltima.objects.bulk_create([
+            RfidLecturaUltima(empresa=self.empresa_a, lector=self.lector_a, epc=s.epc, scan=s, visto=timezone.now())
+            for s in RfidScan.objects.filter(empresa=self.empresa_a)
+        ])
         api = self._api(self.superuser)
 
         with CaptureQueriesContext(connection) as ctx:
@@ -1227,8 +1236,10 @@ class ScannerRFIDSeguridadTests(TestCase):
 
         self.assertEqual(resp.json()["deleted"], 3)
         deletes = [q["sql"] for q in ctx.captured_queries if q["sql"].lstrip().upper().startswith("DELETE")]
-        self.assertEqual(len(deletes), 1, deletes)
-        self.assertIn('"rfid_scans"', deletes[0])
+        self.assertEqual(len(deletes), 2, deletes)
+        self.assertIn('"rfid_lecturas_ultimas"', deletes[0])
+        self.assertIn('"rfid_scans"', deletes[1])
+        self.assertFalse(RfidLecturaUltima.objects.exists())
 
     def test_clear_solo_borra_la_empresa_propia(self):
         self._sembrar(self.empresa_a, self.lector_a, 2, "aaaa")
@@ -1638,10 +1649,10 @@ class OnboardingAlmacenSugeridoTests(TestCase):
     def test_listado_trae_almacen_sugerido_por_sucursal(self):
         pedidos = {p["id"]: p for p in self._get()["pedidos"]}
         # Matriz: APARTADOS activo de menor pk (no el INACTIVO, no el duplicado);
-        # BORDADOS inactivo -> null; EMBARQUE no tiene almacén -> null.
+        # BORDADOS inactivo -> null; EMBARQUE también sale de APARTADOS (bf979686).
         self.assertEqual(
             self._sugeridos(pedidos[self.pedido_matriz.pk]["programaciones"]),
-            [("APARTADO", self.apartados.pk), ("BORDADO", None), ("EMBARQUE", None)],
+            [("APARTADO", self.apartados.pk), ("BORDADO", None), ("EMBARQUE", self.apartados.pk)],
         )
         # Norte: sin APARTADOS propio (el de otra empresa no cuenta) -> null; el
         # BORDADOS sin ``permite_entrada`` se salta aunque tenga menor pk.
@@ -2085,8 +2096,12 @@ class PackingDespachoEC574Tests(TestCase):
 
     def _despachar(self, packing):
         lineas = [{"packing_detalle": d["id"]} for d in packing["packing_detalle"]]
+        # ``tipo_envio`` es obligatorio (paquetería pide paquetería y guía).
         return self.api.post(
-            "/api/v1/wms/despachos/", {"packing": packing["id"], "despacho_detalle": lineas}, format="json"
+            "/api/v1/wms/despachos/",
+            {"packing": packing["id"], "despacho_detalle": lineas,
+             "tipo_envio": "PAQUETERIA", "paqueteria": "ESTAFETA", "guia": "G-574"},
+            format="json",
         )
 
     def _mensaje(self, resp, campo):
@@ -2932,7 +2947,7 @@ class SurtidoPedidosTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         cls.d = _documentos_wms("srt")
-        cls.otra = _documentos_wms("srt2")
+        cls.otra = _documentos_wms("sr2")  # Producto.codigo es de 5: "CH" + codigo
 
     def setUp(self):
         self.api = _api_de(self.d["usuario"])
@@ -3032,10 +3047,10 @@ class SurtidoPedidosTests(TestCase):
 
         with CaptureQueriesContext(connection) as una:
             self.api.get(SURTIDO_URL, {"estatus": "todos"})
-        _documentos_wms("srt3")
+        _documentos_wms("sr3")
         from ventas.models import Pedido
 
-        Pedido.objects.filter(folio="P-srt3").update(empresa=self.d["empresa"])
+        Pedido.objects.filter(folio="P-sr3").update(empresa=self.d["empresa"])
         with CaptureQueriesContext(connection) as dos:
             self.api.get(SURTIDO_URL, {"estatus": "todos"})
         self.assertEqual(len(una), len(dos))
@@ -3789,8 +3804,10 @@ class CancelacionesEC949Tests(TestCase):
         packing_vivo = self._packing_orm("PACK-949-B", vivo)
         despacho = self._despacho_orm(packing)
         despacho_vivo = self._despacho_orm(packing_vivo)
-        tr = self._tr_manual(self.terminado, self.bordados)
+        # La viva primero: una TR posterior al mismo destino bloquearía la reversa
+        # (movimientos ajenos, ``_movimientos_ajenos_posteriores``).
         tr_viva = self._tr_manual(self.terminado, self.bordados)
+        tr = self._tr_manual(self.terminado, self.bordados)
 
         # De atrás hacia adelante, por la API: un admin con nombre y otro sin nombre.
         self.assertEqual(self._cancelar(self.URL_DESPACHOS, despacho.pk).status_code, 200)
@@ -3863,8 +3880,9 @@ class CancelacionesEC949Tests(TestCase):
     # --- enlace original ↔ reversa -------------------------------------------------
 
     def test_reversa_y_reversa_de_con_folio(self):
-        original = self._tr_manual(self.terminado, self.bordados)
+        # La intacta primero: una TR posterior al mismo destino bloquearía la reversa.
         intacta = self._tr_manual(self.terminado, self.bordados)
+        original = self._tr_manual(self.terminado, self.bordados)
         resp = self._revertir(original)
         self.assertEqual(resp.status_code, 201, resp.content)
         reversa_id, reversa_folio = resp.json()["reversa"]["id"], resp.json()["reversa"]["folio"]
@@ -4080,11 +4098,19 @@ class CancelacionesEC949Tests(TestCase):
         self.assertEqual(Transferencia.objects.get(pk=alta.pk).status, Transferencia.TransferenciaStatus.COMPLETADA)
 
     def test_tr_manual_no_tiene_regla_de_cadena(self):
+        """Una TR manual posterior no la bloquea (no hay cadena); sí la regla de
+        movimientos ajenos en su destino, como a cualquier TR."""
         vieja = self._tr_manual(self.terminado, self.bordados)
-        self._tr_manual(self.terminado, self.bordados)
+        self._tr_manual(self.terminado, self.apartados)  # posterior, a otro destino
         resp = self._revertir(vieja)
         self.assertEqual(resp.status_code, 201, resp.content)
         self.assertEqual(resp.json()["original"]["status"], "CANCELADA")
+
+        otra = self._tr_manual(self.terminado, self.bordados)
+        self._tr_manual(self.terminado, self.bordados)  # entra al mismo destino después
+        resp = self._revertir(otra)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("movimientos ajenos", resp.json()["transferencia"])
 
     def test_otra_empresa_recibe_404_en_los_cuatro(self):
         picking = self._picking_orm("PK-949-Z")
@@ -4528,10 +4554,19 @@ class LectorRFIDEscaneoPorLectorTests(TestCase):
         self.assertEqual(len(solo), 3)
 
     def test_scans_lector_combinable_con_unicos(self):
+        from django.utils import timezone
+
         RfidScan.objects.bulk_create(
             [RfidScan(empresa=self.empresa_a, lector=self.lector_a, epc="REPETIDO00001") for _ in range(3)]
             + [RfidScan(empresa=self.empresa_a, lector=self.lector_a2, epc="REPETIDO00001")]
         )
+        # ``unicos`` sale de ``RfidLecturaUltima`` (#1460), que llena ``receive``: una
+        # fila por lector y EPC con su última lectura.
+        for lector in (self.lector_a, self.lector_a2):
+            ultima = RfidScan.objects.filter(lector=lector).order_by("-id").first()
+            RfidLecturaUltima.objects.create(
+                empresa=self.empresa_a, lector=lector, epc=ultima.epc, scan=ultima, visto=timezone.now(),
+            )
         url = f"{self.SCANS_URL}?lector={self.lector_a.pk}&unicos=1"
         scans = self._api(self.admin_a).get(url).json()["scans"]
         self.assertEqual(len(scans), 1)
