@@ -6942,8 +6942,10 @@ ETAPAS DEL MISMO GET/POST:
 - `q`: texto libre, filtra buscador por SKU / nombre / código / cod_proscai.
 - `variante` o `variante_id`: ID de `ProductoVariante` seleccionada. Al mandar este param, el GET devuelve `tiene_seleccion=true` + `preview` completo.
 - `producto` o `producto_id`: ID de `Producto` si no hay variante.
-- `cantidad`: entero opcional, default `1`.
+- `cantidad`: entero opcional de `1` a `10000`, default `1` (ausente o vacío). Misma validación que el POST (EC-989): `0`, negativos, texto, decimales o más de `10000` → `400 {"cantidad": ["..."]}` con el mismo mensaje que el POST, aunque no haya selección.
 - `rfid_mode`: boolean `true|false`, default `true`.
+
+**Errores GET**: `cantidad` inválida → `400 {"cantidad": [...]}` (el motivo, como arriba). Variante o producto inexistente o de otra empresa → `400` con el cuerpo vacío del caso 1 más `"error": "Solicitud inválida. Verifica los datos enviados."`.
 
 **Respuestas GET shape**
 
@@ -7043,7 +7045,7 @@ La impresión ya quedó registrada y se verá en `GET /api/v1/wms/etiquetas-rfid
 
 - `variante` o `variante_id`: ID de `ProductoVariante` (si el producto usa variantes).
 - `producto` o `producto_id`: ID de `Producto` (si no existen variantes).
-- `cantidad`: opcional, entero, default `1`.
+- `cantidad`: opcional, entero de `1` a `10000`, default `1` (ausente o vacío). Inválida o arriba del tope → `400 {"cantidad": ["..."]}`, mismo campo y mensaje que el POST (EC-989).
 - `rfid_mode`: opcional, `true|false`, default `true`. Si `false`, solo gráfico + barcode.
 
 **Ejemplo**
@@ -7158,7 +7160,7 @@ La impresión ya quedó registrada y se verá en `GET /api/v1/wms/etiquetas-rfid
 **Campos**
 
 - `producto_variante` XOR `producto`: **obligatorio uno de los dos**.
-- `cantidad`: opcional, default `1`.
+- `cantidad`: opcional, entero de `1` a `10000`, default `1`; fuera de rango → `400 {"cantidad": ["..."]}`.
 - `rfid_mode`: opcional, default `true`. Si `false`, no se crean renglones en `etiquetas_rfid_detalle`.
 - `printer_name`, `printer_address`: opcionales, útiles para auditoría.
 - `status`: opcional, `PENDIENTE|EXITO|FALLIDO`, default `PENDIENTE`.
@@ -7205,12 +7207,15 @@ La impresión ya quedó registrada y se verá en `GET /api/v1/wms/etiquetas-rfid
 ### 3) Listar Impresiones
 
 - **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/`
-- **Descripción**: devuelve encabezado + `etiquetas` (detalle EPC) de las impresiones visibles para la empresa/sucursales del usuario.
+- **Descripción**: listado ligero (EC-989) de las impresiones visibles, la más reciente primero (`-created_at`, `-id`). Cada fila trae los campos del detalle con los mismos nombres y en el mismo orden, **sin `etiquetas` ni `zpl_enviado`**: `id`, `folio`, `empresa`, `sucursal`, `usuario`, `producto`, `producto_variante`, `producto_nombre`, `producto_variante_nombre`, `sku`, `codigo_producto`, `cantidad`, `rfid_mode`, `printer_name`, `printer_address`, `status`, `observaciones`, `created_at`, `updated_at`. Los EPC y el ZPL se piden al detalle `{id}/`.
+- **Paginación opcional** (`PaginacionOpcionalLimitOffset`): sin `?limit=` regresa el arreglo completo; con `?limit=&offset=` regresa `{count, next, previous, results}` (`limit` topado en 500; `limit` u `offset` inválidos → `400`).
+- **Alcance**: empresa activa del usuario, superusuario incluido; superusuario y admin de empresa ven todas sus sucursales, el resto `sucursales_permitidas()`. Sin empresa: `[]`.
+- **Consultas**: 1 fija (2 con `?limit=`, por el `count`).
 
 ### 4) Detalle de Impresión
 
 - **Endpoint**: `GET /api/v1/wms/etiquetas-rfid/{id}/`
-- **Descripción**: detalle completo de una impresión, incluyendo sus EPCs individuales.
+- **Descripción**: detalle completo de una impresión: los campos del listado más `zpl_enviado` (con el bloque RFID vigente, listo para reimprimir) y `etiquetas[]` con todos sus EPC (`id`, `impresion`, `epc`, `barcode_value`, `serial`, `estado`, `leida_at`, `created_at`, `updated_at`). Mismo shape que la respuesta `201` del POST. Mismo alcance que el listado: una impresión de otra empresa o de una sucursal ajena → `404`. 2 consultas fijas.
 
 ---
 
