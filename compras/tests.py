@@ -3519,9 +3519,11 @@ class EncuadreRFIDLecturasConcurrenciaTests(_EncuadreRFIDEPCFixture, Transaction
     dos tandas sobre encuadres de la misma OC se forman en el candado de la orden,
     y una tanda contra ``aceptar/`` en el del encuadre.
 
-    El hilo que llega primero se detiene con los candados tomados hasta que el
-    otro ya mandó su petición; así el segundo tiene que esperar el candado (se
-    comprueba con los tiempos), no solo llegar después."""
+    El hilo que llega primero se detiene con los candados tomados y anota
+    ``liberado`` al terminar la pausa, todavía dentro de su transacción (el COMMIT
+    viene después). El segundo arranca antes de ``liberado`` y solo puede tomar el
+    candado (o terminar) después del COMMIT: sus momentos quedan siempre después
+    de ``liberado`` si esperó, sin depender de cuánto tarde la respuesta HTTP."""
 
     # TransactionTestCase vacía las tablas al terminar: con ``serialized_rollback``
     # Django guarda el contenido inicial y aquí se repone también al final, para
@@ -3550,6 +3552,7 @@ class EncuadreRFIDLecturasConcurrenciaTests(_EncuadreRFIDEPCFixture, Transaction
     def _en_hilo(self, nombre, funcion, resultados):
         def correr():
             try:
+                resultados[f"{nombre}_inicio"] = time.monotonic()
                 resultados[nombre] = funcion()
                 resultados[f"{nombre}_fin"] = time.monotonic()
             finally:
@@ -3564,19 +3567,23 @@ class EncuadreRFIDLecturasConcurrenciaTests(_EncuadreRFIDEPCFixture, Transaction
         return api.post(url, body or {}, format="json")
 
     def _pausar_en(self, metodo, hilo_que_pausa, tomado, momentos):
-        """Envuelve ``metodo`` del viewset: en el hilo ``hilo_que_pausa`` avisa que ya
-        tiene el candado y se detiene ``PAUSA`` segundos con él tomado; en cualquier
-        hilo anota cuándo lo obtuvo."""
+        """Envuelve ``metodo`` del viewset: en cualquier hilo anota en
+        ``momentos[(metodo, hilo)]`` cuándo regresó (ya con el candado). En el hilo
+        ``hilo_que_pausa`` además avisa con ``tomado``, se detiene ``PAUSA`` segundos
+        con el candado tomado y anota ``momentos[("liberado", hilo)]`` al terminar,
+        antes del COMMIT."""
         from compras.api.views import RecepcionRFIDEncuadreViewSet
 
         original = getattr(RecepcionRFIDEncuadreViewSet, metodo)
 
         def envuelto(*args, **kwargs):
             resultado = original(*args, **kwargs)
-            momentos[threading.current_thread().name] = time.monotonic()
-            if threading.current_thread().name == hilo_que_pausa:
+            hilo = threading.current_thread().name
+            momentos[(metodo, hilo)] = time.monotonic()
+            if hilo == hilo_que_pausa:
                 tomado.set()
                 time.sleep(self.PAUSA)
+                momentos[("liberado", hilo)] = time.monotonic()
             return resultado
 
         return mock.patch.object(RecepcionRFIDEncuadreViewSet, metodo, staticmethod(envuelto)
@@ -3596,8 +3603,9 @@ class EncuadreRFIDLecturasConcurrenciaTests(_EncuadreRFIDEPCFixture, Transaction
             a.join(15)
             b.join(15)
         self.assertEqual((resultados["A"].status_code, resultados["B"].status_code), (200, 200))
-        # B obtuvo el candado de la OC hasta que A confirmó.
-        self.assertGreaterEqual(momentos["B"], resultados["A_fin"] - 0.05)
+        # B arrancó con A en pausa y obtuvo el candado de la OC hasta que A confirmó.
+        self.assertLess(resultados["B_inicio"], momentos[("liberado", "A")])
+        self.assertGreater(momentos[("_bloquear_orden", "B")], momentos[("liberado", "A")])
         data_a, data_b = resultados["A"].json(), resultados["B"].json()
         self.assertEqual((len(data_a["creadas"]), data_a["rechazadas"]), (4, []))
         self.assertEqual([c["codigo_tag"] for c in data_b["creadas"]], ["BBBB0000000000000000000B"])
@@ -3609,7 +3617,10 @@ class EncuadreRFIDLecturasConcurrenciaTests(_EncuadreRFIDEPCFixture, Transaction
     def test_tanda_que_llega_primero_entra_antes_de_aceptar(self):
         tomado, momentos, resultados = threading.Event(), {}, {}
         epcs = [self.EPC_G, self.EPC_PRODUCTO, "ABCDEF0123456789ABCDEF01"]
-        with self._pausar_en("_bloquear_orden", "tanda", tomado, momentos):
+        with (
+            self._pausar_en("_bloquear_orden", "tanda", tomado, momentos),
+            self._pausar_en("_bloquear", None, tomado, momentos),
+        ):
             tanda = self._en_hilo("tanda", lambda: self._post(
                 f"{self.URL}{self.encuadre.pk}/lecturas/", {"epcs": epcs}), resultados)
             self.assertTrue(tomado.wait(10))
@@ -3617,8 +3628,10 @@ class EncuadreRFIDLecturasConcurrenciaTests(_EncuadreRFIDEPCFixture, Transaction
             tanda.join(15)
             aceptar.join(15)
         self.assertEqual((resultados["tanda"].status_code, resultados["aceptar"].status_code), (200, 200))
-        # aceptar/ esperó el candado del encuadre y contó las tres lecturas.
-        self.assertGreaterEqual(resultados["aceptar_fin"], resultados["tanda_fin"])
+        # aceptar/ arrancó con la tanda en pausa, esperó el candado del encuadre y
+        # contó las tres lecturas.
+        self.assertLess(resultados["aceptar_inicio"], momentos[("liberado", "tanda")])
+        self.assertGreater(momentos[("_bloquear", "aceptar")], momentos[("liberado", "tanda")])
         evento = AuditoriaEvento.objects.get(accion="ACEPTAR", id_registro=str(self.encuadre.pk))
         self.assertEqual(evento.despues_json["lecturas"], 3)
         self.assertEqual(resultados["aceptar"].json()["estatus"], "ACEPTADO")
@@ -3635,7 +3648,10 @@ class EncuadreRFIDLecturasConcurrenciaTests(_EncuadreRFIDEPCFixture, Transaction
         self.assertEqual(resultados["aceptar"].status_code, 200)
         self.assertEqual(resultados["tanda"].status_code, 400, resultados["tanda"].content)
         self.assertEqual(resultados["tanda"].json(), {"estatus": "Solo se puede escanear un encuadre pendiente."})
-        self.assertGreaterEqual(resultados["tanda_fin"], resultados["aceptar_fin"])
+        # La tanda arrancó con aceptar/ en pausa y solo pudo leer el estatus (y
+        # terminar) después de su COMMIT.
+        self.assertLess(resultados["tanda_inicio"], momentos[("liberado", "aceptar")])
+        self.assertGreater(resultados["tanda_fin"], momentos[("liberado", "aceptar")])
         self.assertFalse(self.encuadre.lecturas.exists())
 
 
