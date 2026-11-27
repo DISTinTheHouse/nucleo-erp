@@ -15,6 +15,7 @@ from wms.api.serializers import (
     DespachoSerializer,
     EtiquetaRFIDCantidadQuerySerializer,
     EtiquetaRFIDCreateSerializer,
+    EtiquetaRFIDListSerializer,
     EtiquetaRFIDSerializer,
     PackingCreateSerializer,
     TransferenciaListSerializer,
@@ -599,23 +600,34 @@ TOPE_CONTEO_STATS = 10000
 
 
 class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
+    """EC-989: el listado es ligero (``EtiquetaRFIDListSerializer``, sin ``etiquetas``
+    ni ``zpl_enviado``) y ``?limit=&offset=`` lo pagina (sin ``limit``, el arreglo
+    completo). El detalle ``{id}/`` trae ambos, como siempre. Las acciones propias
+    (``buscar/``, ``onboarding/``, ``preview/``, ``scans/``...) arman su respuesta sin
+    ``paginate_queryset``, así que la paginación no las toca."""
+
     queryset = EtiquetaRFIDImpresion.objects.all()
     serializer_class = EtiquetaRFIDSerializer
+    pagination_class = PaginacionOpcionalLimitOffset
 
     def get_queryset(self):
         user = self.request.user
+        # Solo ``producto`` y ``producto_variante``: de empresa, sucursal y usuario
+        # el serializer lee el ``*_id``.
         qs = (
             super()
             .get_queryset()
-            .select_related("empresa", "sucursal", "usuario", "producto", "producto_variante")
-            .prefetch_related(
+            .select_related("producto", "producto_variante")
+            .order_by("-created_at", "-id")
+        )
+        # Los EPC solo los anida el detalle.
+        if self.action == "retrieve":
+            qs = qs.prefetch_related(
                 Prefetch(
                     "etiquetas",
                     queryset=EtiquetaRFIDDetalle.objects.order_by("id"),
                 )
             )
-            .order_by("-created_at", "-id")
-        )
 
         # Superusuario incluido: solo su empresa activa (EC-798, #1148).
         empresa = getattr(user, "empresa", None)
@@ -629,6 +641,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
     def get_serializer_class(self):
         if self.action in {"create", "registrar_impresion", "onboarding"} and self.request.method == "POST":
             return EtiquetaRFIDCreateSerializer
+        if self.action == "list":
+            return EtiquetaRFIDListSerializer
         return EtiquetaRFIDSerializer
 
     @staticmethod

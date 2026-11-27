@@ -965,9 +965,21 @@ class EtiquetaRFIDSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         # El frontend reimprime ``zpl_enviado`` desde el historial: las
         # impresiones viejas traen un bloque RFID que no graba el chip.
-        if instance.rfid_mode:
-            data["zpl_enviado"] = zpl_rfid_vigente(data.get("zpl_enviado"))
+        if instance.rfid_mode and "zpl_enviado" in data:
+            data["zpl_enviado"] = zpl_rfid_vigente(data["zpl_enviado"])
         return data
+
+
+class EtiquetaRFIDListSerializer(EtiquetaRFIDSerializer):
+    """Fila del listado (EC-989): los campos del detalle, con los mismos nombres y
+    en el mismo orden, sin ``etiquetas[]`` (hasta 10000 EPC por impresión) ni
+    ``zpl_enviado``. Ambos siguen en ``GET /etiquetas-rfid/{id}/``."""
+
+    etiquetas = None
+
+    class Meta(EtiquetaRFIDSerializer.Meta):
+        fields = None
+        exclude = ["zpl_enviado"]
 
 
 def campo_cantidad_etiquetas():
