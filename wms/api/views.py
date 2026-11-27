@@ -918,9 +918,15 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                              description="Máximo de lecturas (1-200, default 50)."),
             OpenApiParameter("despues_de_id", OpenApiTypes.INT, description=(
                 "Cursor (EC-982): solo lecturas con `id` mayor. Para ignorar lo leído antes de "
-                "empezar una captura, manda el `id` más alto que ya viste. Con `unicos`, la última "
-                "lectura de cada EPC sale solo si es posterior al cursor; `limite` se aplica "
-                "después. Entero >= 0; inválido → 400."
+                "empezar una captura, manda el `id` más alto que ya viste. Con cursor el orden es "
+                "por `id` ascendente (lo más viejo primero, EC-984) y `limite` toma las primeras: "
+                "avanzar el cursor al `id` más alto de cada respuesta recorre las lecturas aunque "
+                "lleguen más de `limite` entre dos pollings. Puede perder lecturas que se "
+                "confirman fuera de orden de `id` (dos `scans/receive/` simultáneos) o que se "
+                "ligan después a su empresa o etiqueta (`ligar_lecturas_previas`). Sin cursor, "
+                "lo más nuevo primero. Con `unicos`, la última lectura (por `id`) de cada EPC "
+                "entre los lectores visibles, solo si es posterior al cursor. Entero >= 0; "
+                "inválido → 400."
             )),
             OpenApiParameter("epc", OpenApiTypes.STR,
                              description="Debug: busca este EPC entre las lecturas devueltas."),
@@ -939,7 +945,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         Filtros opcionales: ``lector=<id>`` (solo ese lector),
         ``solo_match=1`` (solo etiquetas impresas por el ERP),
         ``unicos=1`` (última lectura por EPC), ``limite`` (1-200, default 50) y
-        ``despues_de_id`` (EC-982: solo lecturas con ``id`` mayor; inválido → 400).
+        ``despues_de_id`` (EC-982: solo lecturas con ``id`` mayor; inválido → 400;
+        con él, orden por ``id`` ascendente, EC-984).
 
         Acotado a la empresa activa del usuario, superusuario incluido (EC-884,
         ``RfidScan.objects.visibles_para``); no admin: lectores de sus sucursales.
@@ -966,7 +973,8 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         base = RfidScan.objects.visibles_para(user)
         # ``solo_match=1``: solo lecturas de etiquetas impresas por el ERP; los tags
         # ajenos cerca del lector llenaban las 50 en un minuto.
-        if str(params.get("solo_match", "")).lower() in {"1", "true", "si"}:
+        solo_match = str(params.get("solo_match", "")).lower() in {"1", "true", "si"}
+        if solo_match:
             base = base.filter(etiqueta__isnull=False)
         # ``despues_de_id`` (EC-982): solo lecturas con ``id`` mayor. Con ``unicos``
         # sale la última lectura de cada EPC (``RfidLecturaUltima``) solo si es
@@ -983,6 +991,10 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 raise ValidationError({"lector": "Debe ser el id numérico de un lector."})
             lector_id = int(lector_param)
             base = base.filter(lector_id=lector_id)
+        try:
+            limite = min(max(int(params.get("limite", 50)), 1), 200)
+        except (TypeError, ValueError):
+            limite = 50
         # ``unicos=1``: la última lectura de cada EPC, desde ``RfidLecturaUltima``
         # (una fila por lector y EPC): el costo depende de cuántos tags distintos
         # hay, no de cuántas lecturas acumula la tabla.
@@ -991,12 +1003,34 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             if lector_id is not None:
                 ultimas = ultimas.filter(lector_id=lector_id)
             else:
-                ultimas = ultimas.order_by("epc", "-visto").distinct("epc")
-            base = base.filter(pk__in=ultimas.values("scan_id"))
-        try:
-            limite = min(max(int(params.get("limite", 50)), 1), 200)
-        except (TypeError, ValueError):
-            limite = 50
+                # Solo lectores visibles ANTES del ``distinct`` (EC-984): si no, la
+                # última de un lector de otra sucursal tapaba la del propio y el EPC
+                # no salía para un no admin.
+                ultimas = ultimas.filter(lector_id__in=lectores_visibles(user).values("pk"))
+                if despues_de_id is not None:
+                    # Con cursor, la última por ``id`` (el mismo eje que el cursor),
+                    # no por ``visto``: una lectura posterior al cursor nunca la tapa
+                    # otra de ``id`` menor.
+                    ultimas = ultimas.filter(scan_id__gt=despues_de_id).order_by("epc", "-scan_id")
+                else:
+                    ultimas = ultimas.order_by("epc", "-visto")
+                ultimas = ultimas.distinct("epc")
+            if despues_de_id is not None:
+                # Con cursor, el recorte va dentro (EC-984): las primeras ``limite``
+                # por ``id`` posteriores al cursor (``solo_match`` incluido), en una
+                # consulta aparte (dos fijas por polling). Como subconsulta con
+                # LIMIT, Postgres no la convierte en semi-join y recorre todas las
+                # lecturas de la empresa cuando el cursor es bajo.
+                ultimas = RfidLecturaUltima.objects.filter(
+                    pk__in=ultimas.values("pk"), scan_id__gt=despues_de_id
+                )
+                if solo_match:
+                    ultimas = ultimas.filter(scan__etiqueta__isnull=False)
+                base = base.filter(
+                    pk__in=list(ultimas.order_by("scan_id").values_list("scan_id", flat=True)[:limite])
+                )
+            else:
+                base = base.filter(pk__in=ultimas.values("scan_id"))
         # El match ya viene ligado desde que se recibió la lectura (``etiqueta``):
         # una sola consulta, sin recalcular variantes de EPC en cada polling.
         scans = list(
@@ -1007,7 +1041,10 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 "etiqueta__impresion__producto_variante__color",
                 "etiqueta__impresion__producto_variante__talla",
             )
-            .order_by("-created_at", "-id")[:limite]
+            # Con cursor (EC-984), por ``id`` ascendente: si llegan más de ``limite``
+            # entre dos pollings, salen las más viejas y el siguiente cursor (el
+            # ``id`` más alto devuelto) recoge el resto sin saltarse ninguna.
+            .order_by(*(("id",) if despues_de_id is not None else ("-created_at", "-id")))[:limite]
         )
         # ``lector`` de otra empresa o de una sucursal ajena → 404, como el detalle
         # del lector. Solo se consulta si no hubo lecturas: con lecturas, el

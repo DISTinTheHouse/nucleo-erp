@@ -839,6 +839,10 @@ class RfidScan(models.Model):
             # Polling de ``scans/`` (lo más nuevo primero), por empresa y por lector.
             models.Index(fields=["empresa", "-created_at", "-id"], name="rfid_scan_emp_fecha_idx"),
             models.Index(fields=["lector", "-created_at", "-id"], name="rfid_scan_lector_fecha_idx"),
+            # Cursor ``despues_de_id`` (EC-984): ``id > N`` en orden ascendente,
+            # sin recorrer las lecturas de otras empresas u otros lectores.
+            models.Index(fields=["empresa", "id"], name="rfid_scan_emp_id_idx"),
+            models.Index(fields=["lector", "id"], name="rfid_scan_lector_id_idx"),
             # Retención: borra por antigüedad.
             models.Index(fields=["created_at"], name="rfid_scan_fecha_idx"),
         ]
