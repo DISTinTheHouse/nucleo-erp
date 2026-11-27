@@ -1125,6 +1125,20 @@ class EtiquetaRFIDCreateSerializer(serializers.Serializer):
     )
     etiquetas = EtiquetaRFIDDetalleInputSerializer(many=True, required=False)
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Un producto o variante de otra empresa responde igual que uno inexistente
+        # (no revela IDs, #1489). Sin empresa activa, queryset vacío.
+        user = getattr(self.context.get("request"), "user", None)
+        if user is not None:
+            empresa_id = getattr(user, "empresa_id", None)
+            self.fields["producto_variante"].queryset = ProductoVariante.objects.filter(
+                empresa_id=empresa_id
+            )
+            self.fields["producto"].queryset = Producto.objects.filter(
+                empresa_id=empresa_id
+            )
+
     def validate(self, attrs):
         producto = attrs.get("producto")
         producto_variante = attrs.get("producto_variante")

@@ -165,6 +165,27 @@ class LayerAValidacionSerializerTests(EtiquetaRFIDBaseTestCase):
 
         self.assertTrue(serializer.is_valid(), serializer.errors)
 
+    def test_producto_de_otra_empresa_responde_igual_que_inexistente(self):
+        """#1489: sin oráculo de existencia cross-tenant."""
+        from types import SimpleNamespace
+
+        ajeno = Producto.objects.create(
+            tipo=_tipo_producto(),
+            empresa=self.otra_empresa, nombre="Ajeno", codigo="AJ01"
+        )
+        contexto = {"request": SimpleNamespace(user=self.usuario)}
+
+        def errores(producto_id):
+            serializer = EtiquetaRFIDCreateSerializer(
+                data={"producto": producto_id, "cantidad": 1}, context=contexto
+            )
+            self.assertFalse(serializer.is_valid())
+            return {k: [str(m).replace(str(producto_id), "<id>") for m in v]
+                    for k, v in serializer.errors.items()}
+
+        self.assertEqual(errores(ajeno.pk), errores(ajeno.pk + 100000))
+        self.assertIn("producto", errores(ajeno.pk))
+
 
 class GeneracionEPCTests(EtiquetaRFIDBaseTestCase):
     """El presupuesto de 24 hex (96 bits / SGTIN-96) es intocable."""
