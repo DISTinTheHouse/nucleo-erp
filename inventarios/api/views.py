@@ -994,8 +994,9 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
         )
 
         renglones = []
+        detalles = []
         for item in detalle_movimientos:
-            detalle = MovimientoInventarioDetalle.objects.create(
+            detalle = MovimientoInventarioDetalle(
                 movimiento_inventario=movimiento,
                 producto_id=item["producto_id"],
                 producto_variante_id=item["producto_variante_id"],
@@ -1010,8 +1011,12 @@ class OperacionInventarioViewSet(viewsets.ViewSet):
                 cantidad_antes=item.get("cantidad_antes"),
                 cantidad_despues=item.get("cantidad_despues"),
             )
+            detalles.append(detalle)
             # En un ajuste ``cantidad`` es la final: el delta viaja aparte.
             renglones.append((detalle, item["delta"], None))
+        # Un INSERT para todos los renglones (antes, uno por renglón), en el mismo
+        # orden; ``costear`` necesita sus pk y ``bulk_create`` los asigna en Postgres.
+        MovimientoInventarioDetalle.objects.bulk_create(detalles)
         # Entradas, salidas y ajustes manuales al costo promedio vigente (#809).
         costeo.costear(empresa.pk, renglones, costeo.Origen.OPERACION)
         return movimiento

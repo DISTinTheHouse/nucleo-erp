@@ -228,14 +228,23 @@ def _reintegrar_salida(despacho, salida, user):
     detalles_salida = list(
         MovimientoInventarioDetalle.objects.filter(movimiento_inventario=salida).order_by("pk")
     )
+    # La fila de cada clave (la de menor pk, bloqueada, como ``get_existencia``) en
+    # lote por almacén: 2 consultas por almacén en vez de una por clave.
+    claves_por_almacen = {}
+    for d in detalles_salida:
+        claves_por_almacen.setdefault(d.almacen_id, []).append(
+            (d.producto_id, d.producto_variante_id, d.variante_produccion_id)
+        )
+    existentes = {}
+    for almacen_id, claves in claves_por_almacen.items():
+        for clave, fila in ExistenciaService.get_existencia_por_clave(almacen_id, claves).items():
+            existentes[(almacen_id, *clave)] = fila
     filas, nuevas = {}, []
     entradas = []
     for d in detalles_salida:
         llave = (d.almacen_id, d.producto_id, d.producto_variante_id, d.variante_produccion_id)
         if llave not in filas:
-            fila = ExistenciaService.get_existencia(
-                d.almacen_id, d.producto_id, d.producto_variante_id, d.variante_produccion_id
-            )
+            fila = existentes.get(llave)
             if fila is None:
                 fila = Existencia(
                     almacen_id=d.almacen_id, producto_id=d.producto_id,
@@ -255,11 +264,13 @@ def _reintegrar_salida(despacho, salida, user):
         )))
     if not entradas:
         return []
-    for fila in filas.values():
-        if fila.pk:
-            fila.save(update_fields=["cantidad"])
-        else:
-            fila.save()
+    # Las mismas escrituras en bloque: ``cantidad`` de las filas que ya existían (lo
+    # que hacía ``save(update_fields=["cantidad"])``) y un INSERT para las nuevas.
+    actualizar = {fila.pk: fila for fila in filas.values() if fila.pk}
+    if actualizar:
+        Existencia.objects.bulk_update(list(actualizar.values()), ["cantidad"])
+    if nuevas:
+        Existencia.objects.bulk_create(nuevas)
 
     packing = despacho.packing
     mov = MovimientoInventario.objects.create(
@@ -310,7 +321,10 @@ def _movimientos_ajenos_posteriores(tr, picking_id):
     """#1362: la reversa saca del destino lo que haya del SKU, no lo que trajo esta TR.
     Si después de ``tr`` algo ajeno (otra TR, picking, despacho, recepción, ajuste) movió
     esos SKU en el almacén destino, regresa su descripción y la reversa se bloquea.
-    No cuentan las TR de la cadena del mismo picking ni sus reversas. 2 consultas."""
+    No cuentan las TR de la cadena del mismo picking ni sus reversas, ni la salida y
+    el reintegro de un despacho **cancelado** de ese picking: se compensan, y sin
+    esto la reversa se bloqueaba tras cancelar despacho, packing y picking. Un
+    despacho activo sí cuenta (sus piezas ya no están). 2 consultas."""
     from wms.models import TransferenciaDetalle
 
     claves = set(tr.transferencia_detalle.values_list("producto_id", "producto_variante_id", "variante_produccion_id"))
@@ -337,12 +351,15 @@ def _movimientos_ajenos_posteriores(tr, picking_id):
     )
     if desde is None:
         return None
-    ajeno = (
+    ajenos = (
         MovimientoInventarioDetalle.objects.filter(q_sku, movimiento_inventario_id__gt=desde)
         .filter(Q(almacen_id=destino) | Q(ubicacion_origen__almacen_id=destino) | Q(ubicacion_destino__almacen_id=destino))
         .filter(movimiento_inventario__transferencia__isnull=True, movimiento_inventario__activo=True)
-        .order_by("pk").values_list("movimiento_inventario_id", "movimiento_inventario__tipo_movimiento").first()
     )
+    if picking_id:
+        ajenos = ajenos.exclude(movimiento_inventario__despacho_id__in=Despacho.objects.filter(
+            packing__picking_id=picking_id, estado=Despacho.Estado.CANCELADO).values("pk"))
+    ajeno = ajenos.order_by("pk").values_list("movimiento_inventario_id", "movimiento_inventario__tipo_movimiento").first()
     return f"el movimiento {ajeno[1].lower()} #{ajeno[0]}" if ajeno else None
 
 

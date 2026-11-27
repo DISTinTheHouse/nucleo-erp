@@ -98,6 +98,119 @@ class ExistenciaService:
             qs = qs.select_for_update()
         return list(qs.order_by("pk"))
 
+    @staticmethod
+    def _fila_es_de_clave(fila, clave):
+        """Mismo criterio que ``_key_filters``, sobre una fila ya leída.
+
+        ``fila``: un ``Existencia`` o un dict con ``producto_id``,
+        ``producto_variante_id`` y ``variante_produccion_id``.
+        """
+        leer = fila.get if isinstance(fila, dict) else (lambda campo: getattr(fila, campo))
+        producto_id, variante_id, muestra_id = clave
+        if muestra_id:
+            return leer("variante_produccion_id") == muestra_id
+        if variante_id:
+            return leer("producto_variante_id") == variante_id
+        return leer("producto_id") == producto_id and leer("producto_variante_id") is None
+
+    @classmethod
+    def _filtro_claves(cls, claves):
+        """``Q`` que trae, en una consulta, las filas de todas las ``claves``.
+
+        Es la unión de los ``_key_filters`` de cada clave; quien la use reparte
+        luego las filas con ``_fila_es_de_clave``.
+        """
+        por_variante, sin_variante, por_muestra = cls._split_keys(claves)
+        condiciones = []
+        if por_muestra:
+            condiciones.append(Q(variante_produccion_id__in=list(por_muestra)))
+        if por_variante:
+            condiciones.append(Q(producto_variante_id__in=list(por_variante)))
+        if sin_variante:
+            condiciones.append(Q(producto_id__in=list(sin_variante), producto_variante_id__isnull=True))
+        return cls._or_conditions(condiciones)
+
+    @classmethod
+    def _claves_en_lote(cls, claves):
+        """Claves distintas que se pueden consultar juntas (con algún id)."""
+        return [k for k in dict.fromkeys(tuple(cls._partes(k)) for k in claves) if any(k)]
+
+    @classmethod
+    def get_existencia_rows_por_clave(cls, almacen, claves, lock=False):
+        """``{clave: [filas por pk]}`` de varias claves en **una** consulta.
+
+        Equivale a ``get_existencia_rows`` clave por clave (mismo filtro, mismo
+        orden por pk) con un solo viaje a la BD. Con ``lock=True`` es un solo
+        ``SELECT ... FOR UPDATE`` que bloquea en orden de pk, así que dos
+        operaciones sobre las mismas claves ya no se bloquean en órdenes
+        cruzados. Una clave sin ningún id no se incluye: quien la necesite la
+        consulta aparte con ``get_existencia_rows``, como siempre.
+        """
+        validas = cls._claves_en_lote(claves)
+        resultado = {k: [] for k in validas}
+        if not validas:
+            return resultado
+        qs = Existencia.objects.filter(almacen_id=getattr(almacen, "pk", almacen)).filter(
+            cls._filtro_claves(validas)
+        )
+        if lock:
+            qs = qs.select_for_update()
+        for fila in qs.order_by("pk"):
+            for clave in validas:
+                if cls._fila_es_de_clave(fila, clave):
+                    resultado[clave].append(fila)
+        return resultado
+
+    @classmethod
+    def get_existencia_por_clave(cls, almacen, claves):
+        """``{clave: fila destino}`` de varias claves: lo de ``get_existencia`` en lote.
+
+        Cada clave recibe su fila de menor pk (``None`` si no tiene) y solo esa
+        queda bloqueada, como en ``get_existencia``: 2 consultas sin importar el
+        número de claves (una lee los pk, la otra bloquea en orden de pk; con una
+        sola clave, la consulta de ``get_existencia``). Si la
+        fila elegida desapareció entre ambas, esa clave se resuelve con
+        ``get_existencia``, que es lo que se habría hecho antes.
+        """
+        almacen_id = getattr(almacen, "pk", almacen)
+        claves = [tuple(cls._partes(k)) for k in claves]
+        if len(set(claves)) == 1:
+            # Una sola clave: la misma consulta de siempre (una, no dos).
+            clave = claves[0]
+            return {clave: cls.get_existencia(almacen_id, clave[0], clave[1], clave[2])}
+        validas = cls._claves_en_lote(claves)
+        elegido = {}
+        if validas:
+            filas = (
+                Existencia.objects.filter(almacen_id=almacen_id)
+                .filter(cls._filtro_claves(validas))
+                .order_by("pk")
+                .values("pk", "producto_id", "producto_variante_id", "variante_produccion_id")
+            )
+            for fila in filas:
+                for clave in validas:
+                    if clave not in elegido and cls._fila_es_de_clave(fila, clave):
+                        elegido[clave] = fila["pk"]
+        bloqueadas = {}
+        if elegido:
+            bloqueadas = {
+                fila.pk: fila
+                for fila in Existencia.objects.select_for_update()
+                .filter(pk__in=set(elegido.values()))
+                .order_by("pk")
+            }
+        resultado = {}
+        for clave in dict.fromkeys(claves):
+            pk = elegido.get(clave)
+            fila = bloqueadas.get(pk) if pk is not None else None
+            if fila is not None and fila.almacen_id == almacen_id and cls._fila_es_de_clave(fila, clave):
+                resultado[clave] = fila
+            elif clave in validas and pk is None:
+                resultado[clave] = None
+            else:
+                resultado[clave] = cls.get_existencia(almacen_id, clave[0], clave[1], clave[2])
+        return resultado
+
     @classmethod
     def get_existencia(cls, almacen, producto, producto_variante, variante_produccion=None):
         """Una sola fila de ``Existencia`` de la clave (la de menor pk).
@@ -284,6 +397,46 @@ class ExistenciaService:
         return fisica, reservada, disponible
 
     @classmethod
+    def get_disponible_por_clave(cls, almacen, claves):
+        """``{clave: disponible}`` de varias claves en 2 consultas.
+
+        Mismo número que ``get_existencia_agregada(...)[2]`` clave por clave. Los
+        helpers indexan por la forma de la clave (muestra, variante o producto sin
+        variante): si dos claves comparten forma, cada una recibe el total de esa
+        forma, igual que si se hubieran consultado por separado.
+        """
+        almacen_id = getattr(almacen, "pk", almacen)
+        forma_de = {}
+        representante = {}
+        for clave in dict.fromkeys(tuple(cls._partes(k)) for k in claves):
+            producto_id, variante_id, muestra_id = clave
+            if muestra_id is not None:
+                forma = ("m", muestra_id)
+            elif variante_id is not None:
+                forma = ("v", variante_id)
+            elif producto_id is not None:
+                forma = ("p", producto_id)
+            else:
+                forma = None  # sin ningún id: 0, como en get_existencia_agregada
+            forma_de[clave] = forma
+            if forma is not None:
+                representante.setdefault(forma, clave)
+        keys = list(representante.values())
+        fisica = cls._sum_existencia_por_clave(almacen_id, keys)
+        reservada = cls._sum_reservas_por_clave(almacen_id, keys)
+        resultado = {}
+        for clave, forma in forma_de.items():
+            rep = representante.get(forma)
+            if rep is None:
+                resultado[clave] = Decimal("0")
+                continue
+            disponible = cls._normalize(fisica.get(rep)) - cls._normalize(reservada.get(rep))
+            if disponible < Decimal("0"):
+                disponible = Decimal("0")
+            resultado[clave] = disponible
+        return resultado
+
+    @classmethod
     def get_existencia_batch(cls, almacen, tallas):
         """Calcula existencia para un batch de ``PedidoDetalleTalla``.
 
@@ -370,6 +523,25 @@ class SaldoExistenciaAlmacen:
         self._fila_por_pk = {}
         self._saldo_por_pk = {}
         self._consumido_por_pk = {}
+        self._precargadas = {}
+
+    def precargar(self, claves):
+        """Lee —y bloquea— de una vez las filas de varias claves.
+
+        Sin esto cada clave nueva cuesta una consulta en ``filas()``; con esto la
+        operación entera cuesta una, y el bloqueo se toma en orden de pk. No
+        cambia el reparto: cada clave sigue viendo sus mismas filas, en el mismo
+        orden, y solo entra al saldo cuando se pide por primera vez. Una clave
+        que ya estaba cargada no se vuelve a leer.
+        """
+        pendientes = [
+            clave for clave in (self._clave(*ExistenciaService._partes(k)) for k in claves)
+            if clave not in self._filas_por_clave and clave not in self._precargadas
+        ]
+        if pendientes:
+            self._precargadas.update(
+                ExistenciaService.get_existencia_rows_por_clave(self.almacen, pendientes, lock=self._lock)
+            )
 
     @staticmethod
     def _clave(producto, producto_variante, variante_produccion=None):
@@ -383,9 +555,12 @@ class SaldoExistenciaAlmacen:
         """Filas de la clave, ordenadas por pk. Se leen y bloquean una sola vez."""
         clave = self._clave(producto, producto_variante, variante_produccion)
         if clave not in self._filas_por_clave:
-            filas = ExistenciaService.get_existencia_rows(
-                self.almacen, clave[0], clave[1], lock=self._lock, variante_produccion=clave[2]
-            )
+            if clave in self._precargadas:
+                filas = self._precargadas.pop(clave)
+            else:
+                filas = ExistenciaService.get_existencia_rows(
+                    self.almacen, clave[0], clave[1], lock=self._lock, variante_produccion=clave[2]
+                )
             self._filas_por_clave[clave] = filas
             for fila in filas:
                 self._fila_por_pk[fila.pk] = fila

@@ -2,6 +2,7 @@ from nucleo.middleware import ip_auditoria
 from decimal import Decimal
 
 from django.db import transaction
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from auditoria.models import AuditoriaEvento
 from wms.models import Transferencia, TransferenciaDetalle
@@ -102,6 +103,18 @@ class TransferenciaService:
         saldos_origen = SaldoExistenciaAlmacen(almacen_origen, lock=True)
         destinos_por_clave = {}
 
+        # Las filas de todas las claves se leen y bloquean de una vez (origen: una
+        # consulta; destino: dos), en orden de pk, en lugar de una consulta por
+        # clave y renglón. El reparto y las validaciones de abajo no cambian.
+        claves = [
+            SaldoExistenciaAlmacen._clave(
+                row.get("producto"), row.get("producto_variante"), row.get("variante_produccion")
+            )
+            for row in transferencia_detalle_rows
+        ]
+        saldos_origen.precargar(claves)
+        destino_existente = ExistenciaService.get_existencia_por_clave(almacen_destino, claves)
+
         for row in transferencia_detalle_rows:
             producto = row.get("producto")
             producto_variante = row.get("producto_variante")
@@ -130,12 +143,7 @@ class TransferenciaService:
 
             clave = SaldoExistenciaAlmacen._clave(producto, producto_variante, muestra)
             if clave not in destinos_por_clave:
-                existencia_destino = ExistenciaService.get_existencia(
-                    almacen_destino,
-                    producto,
-                    producto_variante,
-                    muestra,
-                )
+                existencia_destino = destino_existente.get(clave)
                 if existencia_destino is None:
                     existencia_destino = Existencia(
                         producto=producto,
@@ -163,18 +171,41 @@ class TransferenciaService:
 
         # 3. Persistir existencias y preparar detalles
         #
-        # Una escritura por fila con el saldo ya acumulado de todos los renglones
+        # Un solo valor por fila con el saldo ya acumulado de todos los renglones
         # que compartían su clave. El reparto entre ubicaciones se hizo en la fase
         # 1, en orden de pk y sobre filas bloqueadas con select_for_update(),
         # mismo criterio que ReservaInventarioService.create_for_picking: la
         # reserva y el movimiento físico consumen las mismas filas en el mismo
         # orden.
+        #
+        # En bloque: un UPDATE para el origen, uno para las filas destino que ya
+        # existían y un INSERT para las nuevas, en lugar de una escritura por fila.
+        # Mismas columnas que antes: el origen solo ``cantidad`` (lo que escribía
+        # ``save(update_fields=["cantidad"])``); el destino, ``cantidad`` y la
+        # ``fecha_actualizacion`` que ponía ``auto_now`` (``bulk_update`` no la
+        # pone sola). ``Existencia`` no tiene señales ni historial que se salten.
+        filas_origen = []
         for existencia_origen, saldo_final in saldos_origen.filas_consumidas():
             existencia_origen.cantidad = saldo_final
-            existencia_origen.save(update_fields=["cantidad"])
+            filas_origen.append(existencia_origen)
+        if filas_origen:
+            Existencia.objects.bulk_update(filas_origen, ["cantidad"])
 
+        ahora = timezone.now()
+        destino_actualizar = {}
+        destino_nuevas = []
         for existencia_destino in destinos_por_clave.values():
-            existencia_destino.save()
+            if existencia_destino.pk is None:
+                destino_nuevas.append(existencia_destino)
+            else:
+                existencia_destino.fecha_actualizacion = ahora
+                destino_actualizar[existencia_destino.pk] = existencia_destino
+        if destino_actualizar:
+            Existencia.objects.bulk_update(
+                list(destino_actualizar.values()), ["cantidad", "fecha_actualizacion"]
+            )
+        if destino_nuevas:
+            Existencia.objects.bulk_create(destino_nuevas)
 
         TransferenciaDetalle.objects.bulk_create(
             [

@@ -3781,6 +3781,54 @@ class CancelacionesEC949Tests(TestCase):
             f"Sólo se revierte la última TR del picking {picking.folio}. Revierte primero {traslado.folio}."
         )})
 
+    def _movimiento_en_apartados(self, tipo, cantidad, despacho=None):
+        from inventarios.models import MovimientoInventario, MovimientoInventarioDetalle
+        mov = MovimientoInventario.objects.create(
+            empresa=self.empresa, sucursal=self.sucursal, pedido=self.pedido, despacho=despacho,
+            tipo_movimiento=tipo, usuario=self.admin,
+        )
+        MovimientoInventarioDetalle.objects.create(
+            movimiento_inventario=mov, producto=self.producto, almacen=self.apartados, cantidad=Decimal(cantidad),
+        )
+        return mov
+
+    def test_despacho_cancelado_del_picking_no_bloquea_la_reversa(self):
+        """#1362: la salida del despacho del propio picking y el reintegro de su
+        cancelación se compensan; no son movimientos ajenos y la reversa del traslado
+        procede (antes, 400 tras cancelar despacho, packing y picking)."""
+        from inventarios.models import TipoMovimiento
+        from wms.models import Despacho
+
+        picking = self._alta()
+        self._trasladar(picking, self.apartados)
+        picking.refresh_from_db()
+        traslado = picking.transferencia
+        packing = self._packing_orm("PACK-949-1362", picking)
+        despacho = self._despacho_orm(packing)
+        # Lo que dejan el alta del despacho (SALIDA) y su cancelación (ENTRADA).
+        self._movimiento_en_apartados(TipoMovimiento.SALIDA, "4", despacho)
+        self._movimiento_en_apartados(TipoMovimiento.ENTRADA, "4", despacho)
+        Despacho.objects.filter(pk=despacho.pk).update(estado=Despacho.Estado.CANCELADO)
+        self.assertEqual(self._cancelar(self.URL_PACKINGS, packing.pk).status_code, 200)
+        self.assertEqual(self._cancelar(self.URL_PICKINGS, picking.pk).status_code, 200)
+
+        resp = self._revertir(traslado)
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(self._existencias(), {
+            self.terminado.pk: Decimal("6"), self.bordados.pk: Decimal("14"), self.apartados.pk: Decimal("0"),
+        })
+
+    def test_salida_manual_posterior_si_bloquea_la_reversa(self):
+        """#1362: lo que no es de la cadena del picking —aquí, una salida manual del
+        mismo SKU en el destino— sí bloquea la reversa."""
+        from inventarios.models import TipoMovimiento
+
+        _picking, _alta, traslado = self._cancelado_con_traslado()
+        mov = self._movimiento_en_apartados(TipoMovimiento.SALIDA, "1")
+        resp = self._revertir(traslado)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn(f"el movimiento salida #{mov.pk}", resp.json()["transferencia"])
+
     def test_tr_ligada_entre_la_lectura_y_el_lock_responde_400(self):
         from wms.models import Transferencia
         from wms.services import cancelacion_service
