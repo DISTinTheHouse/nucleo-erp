@@ -1,4 +1,4 @@
-from django.db.models import Prefetch
+from django.db.models import Max, Prefetch
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from drf_spectacular.types import OpenApiTypes
@@ -926,7 +926,12 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 "ligan después a su empresa o etiqueta (`ligar_lecturas_previas`). Sin cursor, "
                 "lo más nuevo primero. Con `unicos`, la última lectura (por `id`) de cada EPC "
                 "entre los lectores visibles, solo si es posterior al cursor. Entero >= 0; "
-                "inválido → 400."
+                "inválido → 400. "
+                "La respuesta trae `cursor` (EC-998), el `id` con el que pedir lo siguiente: sin "
+                "`despues_de_id`, el más alto de todas las lecturas visibles (con el filtro de "
+                "`lector`, sin `solo_match` ni `unicos`; 0 si no hay ninguna), para arrancar una "
+                "captura sin depender de lo que traiga `scans`; con `despues_de_id`, el más alto "
+                "devuelto o, si no vino nada, el mismo `despues_de_id`."
             )),
             OpenApiParameter("epc", OpenApiTypes.STR,
                              description="Debug: busca este EPC entre las lecturas devueltas."),
@@ -957,6 +962,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
 
         Response shape:
             {
+              cursor: int (EC-998, ver ``despues_de_id``),
               scans: [
                 {id, epc, timestamp, antenna, rssi, reader_ip,
                  match_impresion: bool,
@@ -1052,6 +1058,18 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         if lector_id is not None and not scans:
             if not lectores_visibles(user).filter(pk=lector_id).exists():
                 raise NotFound({"lector": "No existe ese lector."})
+        # ``cursor`` (EC-998). Sin ``despues_de_id``, el ``id`` más alto de todas las
+        # lecturas visibles (mismo alcance, con ``lector`` pero sin ``solo_match`` ni
+        # ``unicos``), no el de ``scans``: con el feed vacío o filtrado, arrancar en 0
+        # o abajo dejaba entrar lecturas viejas que se ligan después a una etiqueta
+        # (``ligar_lecturas_previas``). Con cursor, sin consulta extra.
+        if despues_de_id is not None:
+            cursor = max((s.pk for s in scans), default=despues_de_id)
+        else:
+            visibles = RfidScan.objects.visibles_para(user)
+            if lector_id is not None:
+                visibles = visibles.filter(lector_id=lector_id)
+            cursor = visibles.aggregate(m=Max("id"))["m"] or 0
         # Mismo alcance que get_queryset: un no admin solo ve el detalle de las
         # etiquetas impresas en sus sucursales.
         sucursales = None
@@ -1127,7 +1145,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             "unique_epc_prefixes_head30": sorted({e[:4] for e in epcs})[:30],
             "query_epc_search": q_search_debug,
         }
-        return Response({"scans": data, "debug_get": debug_get})
+        return Response({"scans": data, "debug_get": debug_get, "cursor": cursor})
 
     @action(
         detail=False,

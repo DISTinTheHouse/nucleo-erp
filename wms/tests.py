@@ -927,6 +927,87 @@ class ScannerRFIDSeguridadTests(TestCase):
         self.assertEqual(self._ids_scans(self.superuser, despues_de_id=0), [propia])
         self.assertEqual(self._ids_scans(self.admin_a, despues_de_id=propia), [])
 
+    # ── ``cursor`` explícito (EC-998) ─────────────────────────────────
+
+    def _scans(self, user, **params):
+        resp = self._api(user).get(self.SCANS_URL, params)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def _max(self, **filtro):
+        return RfidScan.objects.filter(**filtro).order_by("-id").values_list("id", flat=True).first()
+
+    def test_cursor_sin_despues_de_id_es_el_mas_alto_visible(self):
+        self._sembrar(self.empresa_a, self.lector_a, 3, "aaaa")
+        self._sembrar(self.empresa_a, self.lector_a2, 2, "a2a2")
+        self._sembrar(self.empresa_b, self.lector_b, 4, "bbbb")  # ids más altos, de otra empresa
+        tope_a = self._max(empresa=self.empresa_a)
+        tope_lector_a = self._max(lector=self.lector_a)
+        for user in (self.admin_a, self.superuser):
+            with self.subTest(user=user.username):
+                data = self._scans(user)
+                self.assertEqual(set(data), {"scans", "debug_get", "cursor"})
+                self.assertEqual(data["cursor"], tope_a)
+                # ``solo_match`` vacía ``scans`` pero no mueve el cursor.
+                data = self._scans(user, solo_match=1, unicos=1)
+                self.assertEqual((data["scans"], data["cursor"]), ([], tope_a))
+                self.assertEqual(self._scans(user, lector=self.lector_a.pk)["cursor"], tope_lector_a)
+        # No admin: solo los lectores de sus sucursales.
+        self.assertEqual(self._scans(self.usuario_a)["cursor"], tope_lector_a)
+        self.assertEqual(self._scans(self.usuario_sin_sucursales)["cursor"], 0)
+
+    def test_cursor_con_el_feed_vacio(self):
+        self._sembrar(self.empresa_b, self.lector_b, 3, "bbbb")
+        for user in (self.admin_a, self.superuser, self.usuario_sin_empresa):
+            with self.subTest(user=user.username):
+                data = self._scans(user)
+                self.assertEqual((data["scans"], data["cursor"]), ([], 0))
+        self.assertEqual(self._scans(self.admin_a, despues_de_id=0)["cursor"], 0)
+
+    def test_cursor_con_despues_de_id(self):
+        self._sembrar(self.empresa_a, self.lector_a, 3, "viej")
+        corte = self._max()
+        self._sembrar(self.empresa_a, self.lector_a, 4, "nuev")
+        nuevas = list(RfidScan.objects.filter(pk__gt=corte).order_by("id").values_list("id", flat=True))
+        self.assertEqual(self._scans(self.admin_a, despues_de_id=corte)["cursor"], nuevas[-1])
+        # El más alto devuelto, no el más alto que existe.
+        self.assertEqual(self._scans(self.admin_a, despues_de_id=corte, limite=2)["cursor"], nuevas[1])
+        # Nada nuevo: el mismo cursor, también con un ``despues_de_id`` mayor que todo.
+        self.assertEqual(self._scans(self.admin_a, despues_de_id=nuevas[-1])["cursor"], nuevas[-1])
+        self.assertEqual(self._scans(self.admin_a, despues_de_id=nuevas[-1] + 100)["cursor"], nuevas[-1] + 100)
+        self.assertEqual(self._scans(self.admin_a, despues_de_id=corte, solo_match=1)["cursor"], corte)
+
+    def test_cursor_deja_fuera_lecturas_viejas_ligadas_despues(self):
+        """El caso del feed filtrado: arrancar con el ``id`` más alto de ``scans``
+        (vacío con ``solo_match``) dejaba entrar una lectura vieja que después se
+        liga a una etiqueta (``ligar_lecturas_previas``)."""
+        vieja = RfidScan.objects.create(empresa=self.empresa_a, lector=self.lector_a, epc="EEEE0000000000000000AAAA")
+        self._sembrar(self.empresa_a, self.lector_a, 2, "ajen")  # tags ajenos, sin etiqueta
+        inicio = self._scans(self.admin_a, solo_match=1)
+        self.assertEqual(inicio["scans"], [])
+        self.assertGreater(inicio["cursor"], vieja.pk)
+        impresion = EtiquetaRFIDImpresion.objects.create(empresa=self.empresa_a, sucursal=self.sucursal_a, cantidad=1)
+        detalle = EtiquetaRFIDDetalle.objects.create(impresion=impresion, epc=vieja.epc, barcode_value="X")
+        RfidScan.objects.filter(pk=vieja.pk).update(etiqueta=detalle)
+        siguiente = self._scans(self.admin_a, solo_match=1, despues_de_id=inicio["cursor"])
+        self.assertEqual(siguiente["scans"], [])
+        self.assertEqual(self._ids_scans(self.admin_a, solo_match=1, despues_de_id=0), [vieja.pk])
+
+    def test_cursor_cuesta_una_consulta_solo_sin_despues_de_id(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._sembrar(self.empresa_a, self.lector_a, 5, "aaaa")
+        corte = self._max()
+        api = self._api(self.admin_a)
+        with CaptureQueriesContext(connection) as sin_cursor:
+            api.get(self.SCANS_URL)
+        with CaptureQueriesContext(connection) as con_cursor:
+            api.get(self.SCANS_URL, {"despues_de_id": corte})
+        maximos = [q["sql"] for q in sin_cursor if "MAX(" in q["sql"]]
+        self.assertEqual(len(maximos), 1)
+        self.assertFalse([q for q in con_cursor if "MAX(" in q["sql"]])
+
     def test_scans_no_admin_solo_ve_lectores_de_sus_sucursales(self):
         self._sembrar(self.empresa_a, self.lector_a, 1, "aaaa")
         self._sembrar(self.empresa_a, self.lector_a2, 1, "a2a2")
