@@ -5237,3 +5237,232 @@ class LectorRFIDBlindajeTests(TestCase):
         self.assertEqual(purgar_lecturas_viejas(), 1)
         self.assertEqual(list(RfidScan.objects.values_list("epc", flat=True)), ["AAAABBBBCCCC0010"])
         self.assertEqual(RfidLecturaUltima.objects.count(), 1)
+
+
+class EtiquetasRFIDListadoDetalleEC989Tests(TestCase):
+    """EC-989: listado ligero (sin ``etiquetas`` ni ``zpl_enviado``) y paginación
+    opcional, detalle completo, ``cantidad`` de GET ``onboarding/``/``preview/`` con
+    el tope y el mensaje del POST, y alcance por empresa activa."""
+
+    URL = "/api/v1/wms/etiquetas-rfid/"
+    CAMPOS_LISTA = [
+        "id", "folio", "empresa", "sucursal", "usuario", "producto", "producto_variante",
+        "producto_nombre", "producto_variante_nombre", "sku", "codigo_producto", "cantidad",
+        "rfid_mode", "printer_name", "printer_address", "status", "observaciones",
+        "created_at", "updated_at",
+    ]
+    EPC = "000015D80438000188F0D54F"
+    ZPL_VIEJO = "\n".join([
+        "^XA", "^FO40,245^BCN,90,Y,N,N^FDPB01^FS",
+        "^RB96,,,1", "^RS8,E", "^RFW,E", f"^FD{EPC}^FS",
+        "^FO40,360^A0N,18,18^FDEPC^FS", "^XZ",
+    ])
+    # Rechazadas igual que en el POST: arriba del tope, cero, negativa, texto,
+    # decimal y un dígito Unicode (antes 500 por ``str.isdigit``).
+    INVALIDAS = ["10001", "0", "-1", "abc", "1.5", "²"]
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.empresa = Empresa.objects.create(codigo="ec989-a", razon_social="Empresa A")
+        cls.otra_empresa = Empresa.objects.create(codigo="ec989-b", razon_social="Empresa B")
+        cls.sucursal = Sucursal.objects.create(empresa=cls.empresa, codigo="A1", nombre="A1")
+        cls.sucursal_2 = Sucursal.objects.create(empresa=cls.empresa, codigo="A2", nombre="A2")
+        cls.sucursal_b = Sucursal.objects.create(empresa=cls.otra_empresa, codigo="B1", nombre="B1")
+        cls.producto = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=cls.empresa, nombre="Playera", codigo="PB01"
+        )
+        cls.producto_b = Producto.objects.create(
+            tipo=_tipo_producto(), empresa=cls.otra_empresa, nombre="Gorra", codigo="GB01"
+        )
+        cls.admin = Usuario.objects.create(
+            username="ec989-admin", email="ec989-admin@example.com", empresa=cls.empresa,
+            sucursal_default=cls.sucursal, is_admin_empresa=True,
+        )
+        cls.operador = Usuario.objects.create(
+            username="ec989-op", email="ec989-op@example.com", empresa=cls.empresa,
+            sucursal_default=cls.sucursal,
+        )
+        cls.superusuario_b = Usuario.objects.create(
+            username="ec989-su", email="ec989-su@example.com", empresa=cls.otra_empresa,
+            is_superuser=True, is_staff=True,
+        )
+        cls.sin_empresa = Usuario.objects.create(username="ec989-nadie", email="ec989-nadie@example.com")
+
+        cls.impresion = EtiquetaRFIDImpresion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, usuario=cls.admin, producto=cls.producto,
+            cantidad=2, zpl_enviado=cls.ZPL_VIEJO,
+        )
+        EtiquetaRFIDDetalle.objects.create(
+            impresion=cls.impresion, epc=cls.EPC, barcode_value="PB01", serial="0001"
+        )
+        EtiquetaRFIDDetalle.objects.create(
+            impresion=cls.impresion, epc="000015D80438000288F0D54F", barcode_value="PB01", serial="0002"
+        )
+        cls.impresion_2 = EtiquetaRFIDImpresion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal_2, producto=cls.producto, cantidad=1, rfid_mode=False,
+        )
+        cls.impresion_3 = EtiquetaRFIDImpresion.objects.create(
+            empresa=cls.empresa, sucursal=cls.sucursal, producto=cls.producto, cantidad=1, rfid_mode=False,
+        )
+        cls.impresion_b = EtiquetaRFIDImpresion.objects.create(
+            empresa=cls.otra_empresa, sucursal=cls.sucursal_b, producto=cls.producto_b, cantidad=1,
+        )
+        EtiquetaRFIDDetalle.objects.create(
+            impresion=cls.impresion_b, epc="BBBB15D80438000188F0D54F", barcode_value="GB01"
+        )
+
+    def _api(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    # ── Listado ───────────────────────────────────────────────────────
+
+    def test_listado_sin_etiquetas_ni_zpl_como_arreglo(self):
+        with self.assertNumQueries(1):
+            resp = self._api(self.admin).get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        datos = resp.json()
+        self.assertIsInstance(datos, list)
+        self.assertEqual(
+            [f["id"] for f in datos], [self.impresion_3.pk, self.impresion_2.pk, self.impresion.pk]
+        )
+        for fila in datos:
+            self.assertEqual(list(fila), self.CAMPOS_LISTA)
+        fila = datos[-1]
+        self.assertEqual(fila["folio"], f"LAB-{self.impresion.pk:06d}")
+        self.assertEqual(fila["producto_nombre"], "Playera")
+        self.assertEqual(fila["codigo_producto"], "PB01")
+        self.assertEqual(fila["cantidad"], 2)
+
+    def test_listado_paginado_con_limit_offset(self):
+        with self.assertNumQueries(2):
+            resp = self._api(self.admin).get(self.URL, {"limit": 2, "offset": 1})
+        self.assertEqual(resp.status_code, 200)
+        datos = resp.json()
+        self.assertEqual(list(datos), ["count", "next", "previous", "results"])
+        self.assertEqual(datos["count"], 3)
+        self.assertEqual([f["id"] for f in datos["results"]], [self.impresion_2.pk, self.impresion.pk])
+        self.assertEqual(list(datos["results"][0]), self.CAMPOS_LISTA)
+        self.assertEqual(self._api(self.admin).get(self.URL, {"limit": "x"}).status_code, 400)
+
+    def test_listado_operador_solo_sus_sucursales(self):
+        datos = self._api(self.operador).get(self.URL).json()
+        self.assertEqual([f["id"] for f in datos], [self.impresion_3.pk, self.impresion.pk])
+
+    # ── Detalle ───────────────────────────────────────────────────────
+
+    def test_detalle_con_epc_y_zpl_vigente(self):
+        from wms.services.rfid_label_service import zpl_rfid_vigente
+
+        with self.assertNumQueries(2):
+            resp = self._api(self.admin).get(f"{self.URL}{self.impresion.pk}/")
+        self.assertEqual(resp.status_code, 200)
+        datos = resp.json()
+        self.assertEqual(
+            [c for c in datos if c not in ("etiquetas", "zpl_enviado")], self.CAMPOS_LISTA
+        )
+        self.assertEqual(datos["zpl_enviado"], zpl_rfid_vigente(self.ZPL_VIEJO))
+        self.assertNotEqual(datos["zpl_enviado"], self.ZPL_VIEJO)
+        self.assertEqual(
+            [(e["epc"], e["serial"]) for e in datos["etiquetas"]],
+            [(self.EPC, "0001"), ("000015D80438000288F0D54F", "0002")],
+        )
+        self.assertEqual(
+            sorted(datos["etiquetas"][0]),
+            sorted([
+                "id", "impresion", "epc", "barcode_value", "serial", "estado", "leida_at",
+                "created_at", "updated_at",
+            ]),
+        )
+
+    # ── Alcance ───────────────────────────────────────────────────────
+
+    def test_otra_empresa_404_en_detalle_y_fuera_del_listado(self):
+        api = self._api(self.admin)
+        self.assertEqual(api.get(f"{self.URL}{self.impresion_b.pk}/").status_code, 404)
+        self.assertNotIn(self.impresion_b.pk, [f["id"] for f in api.get(self.URL).json()])
+        self.assertNotIn(
+            self.impresion_b.pk, [f["id"] for f in api.get(self.URL, {"limit": 10}).json()["results"]]
+        )
+
+    def test_superusuario_con_otra_empresa_activa(self):
+        api = self._api(self.superusuario_b)
+        self.assertEqual([f["id"] for f in api.get(self.URL).json()], [self.impresion_b.pk])
+        self.assertEqual(api.get(f"{self.URL}{self.impresion.pk}/").status_code, 404)
+        self.assertEqual(api.get(f"{self.URL}{self.impresion_b.pk}/").status_code, 200)
+
+    def test_usuario_sin_empresa_no_ve_nada(self):
+        api = self._api(self.sin_empresa)
+        self.assertEqual(api.get(self.URL).json(), [])
+        self.assertEqual(api.get(self.URL, {"limit": 5}).json()["count"], 0)
+        self.assertEqual(api.get(f"{self.URL}{self.impresion.pk}/").status_code, 404)
+
+    # ── cantidad en GET onboarding/ y preview/ ───────────────────────
+
+    def test_preview_rechaza_cantidad_invalida(self):
+        api = self._api(self.admin)
+        for valor in self.INVALIDAS:
+            with self.subTest(cantidad=valor):
+                resp = api.get(f"{self.URL}preview/", {"producto": self.producto.pk, "cantidad": valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(list(resp.json()), ["cantidad"])
+
+    def test_onboarding_rechaza_cantidad_invalida_con_motivo(self):
+        api = self._api(self.admin)
+        for valor in self.INVALIDAS:
+            with self.subTest(cantidad=valor):
+                resp = api.get(f"{self.URL}onboarding/", {"producto": self.producto.pk, "cantidad": valor})
+                self.assertEqual(resp.status_code, 400)
+                self.assertEqual(list(resp.json()), ["cantidad"])
+                self.assertNotIn("Solicitud inválida", resp.content.decode())
+
+    def test_get_y_post_rechazan_con_el_mismo_mensaje(self):
+        from wms.services.rfid_label_service import MAX_CANTIDAD_ETIQUETAS
+
+        api = self._api(self.admin)
+        arriba = MAX_CANTIDAD_ETIQUETAS + 1
+        post = api.post(self.URL, {"producto": self.producto.pk, "cantidad": arriba}, format="json")
+        preview = api.get(f"{self.URL}preview/", {"producto": self.producto.pk, "cantidad": arriba})
+        onboarding = api.get(f"{self.URL}onboarding/", {"producto": self.producto.pk, "cantidad": arriba})
+        self.assertEqual(post.status_code, 400)
+        self.assertIn(str(MAX_CANTIDAD_ETIQUETAS), post.json()["cantidad"][0])
+        self.assertEqual(preview.json(), {"cantidad": post.json()["cantidad"]})
+        self.assertEqual(onboarding.json(), {"cantidad": post.json()["cantidad"]})
+        self.assertFalse(EtiquetaRFIDImpresion.objects.filter(cantidad=arriba).exists())
+
+    def test_post_usa_el_tope_compartido(self):
+        from wms.services.rfid_label_service import MAX_CANTIDAD_ETIQUETAS
+
+        campo = EtiquetaRFIDCreateSerializer().fields["cantidad"]
+        self.assertEqual((campo.min_value, campo.max_value), (1, MAX_CANTIDAD_ETIQUETAS))
+        ok = EtiquetaRFIDCreateSerializer(data={"producto": self.producto.pk, "cantidad": MAX_CANTIDAD_ETIQUETAS})
+        self.assertTrue(ok.is_valid(), ok.errors)
+
+    def test_cantidad_valida_o_ausente_sigue_igual(self):
+        api = self._api(self.admin)
+        resp = api.get(f"{self.URL}preview/", {"producto": self.producto.pk, "cantidad": 3})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["cantidad"], 3)
+        self.assertEqual(len(resp.json()["zpl_individual"]), 3)
+        for params in ({}, {"cantidad": ""}):
+            with self.subTest(params=params):
+                resp = api.get(f"{self.URL}onboarding/", {"producto": self.producto.pk, **params})
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.json()["preview"]["cantidad"], 1)
+
+    def test_onboarding_otros_errores_conservan_el_mensaje_generico(self):
+        resp = self._api(self.admin).get(f"{self.URL}onboarding/", {"producto": self.producto_b.pk})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()["error"], "Solicitud inválida. Verifica los datos enviados.")
+
+    def test_acciones_propias_no_se_paginan(self):
+        api = self._api(self.admin)
+        buscar = api.get(f"{self.URL}buscar/", {"q": "Play", "limit": 1}).json()
+        self.assertEqual(sorted(buscar), ["q", "resultados", "sucursal_ids"])
+        onboarding = api.get(f"{self.URL}onboarding/", {"limit": 1}).json()
+        self.assertNotIn("results", onboarding)
+        self.assertIn("resultados", onboarding)
+        preview = api.get(f"{self.URL}preview/", {"producto": self.producto.pk, "limit": 1}).json()
+        self.assertIn("zpl_individual", preview)
+        self.assertIn("scans", api.get(f"{self.URL}scans/", {"limit": 1}).json())
