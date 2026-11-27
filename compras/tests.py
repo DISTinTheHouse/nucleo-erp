@@ -3272,9 +3272,25 @@ class EncuadreRFIDLecturaEPCTests(_EncuadreRFIDEPCFixture, TestCase):
             self._leer_ok({"codigo_tag": "C982a-G"})
         with CaptureQueriesContext(connection) as por_epc:
             self._leer_ok({"epc": self.EPC_G})
-        # Más las 2 fijas de "pieza única por orden" (#1453, ``_exigir_epc_libre_en_la_orden``):
-        # el candado de la orden y la búsqueda del EPC en otros encuadres.
+        # Las 2 fijas de "pieza única por orden" (#1453, ``_exigir_epc_libre_en_la_orden``)
+        # van en los dos caminos desde #1484.
         self.assertLessEqual(len(por_epc), len(por_codigo) + 2)
+
+    def test_codigo_tag_de_otro_encuadre_vigente_de_la_misma_orden(self):
+        """#1484: por ``codigo_tag`` (obsoleto) tampoco se cuenta en dos encuadres."""
+        t = self.t["a"]
+        otro = RecepcionRFIDEncuadre.objects.create(
+            tipo_origen="OC", orden_compra=self.oc, empresa=t["empresa"], sucursal=t["sucursal"],
+            proveedor=t["proveedor"], almacen=t["almacen"], usuario=t["usuario"], fecha_recepcion=timezone.now(),
+        )
+        resp = self.api.post(f"{self.URL}{otro.pk}/lecturas/", {"codigo_tag": "C982a-G"}, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        resp = self._leer({"codigo_tag": "C982a-G"})
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(
+            resp.json(), {"codigo_tag": f"Esta pieza ya se leyó en el encuadre {otro.pk} de la misma orden."})
+        RecepcionRFIDEncuadre.objects.filter(pk=otro.pk).update(estatus=RecepcionRFIDEncuadre.Estatus.CANCELADO)
+        self._leer_ok({"codigo_tag": "C982a-G"})
 
 
 class EncuadreRFIDLecturasLoteTests(_EncuadreRFIDEPCFixture, TestCase):
