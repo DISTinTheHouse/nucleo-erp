@@ -265,7 +265,11 @@ class Poliza(CancelacionFinanzasMixin, models.Model):
         db_table = "polizas"
         verbose_name = "Poliza"
         verbose_name_plural = "Polizas"
-        indexes = [models.Index(fields=["empresa", "fecha"], name="ix_poliza_empresa_fecha")]
+        indexes = [
+            models.Index(fields=["empresa", "fecha"], name="ix_poliza_empresa_fecha"),
+            # Póliza de un documento (factura, pago...): la buscan los reportes de inventario por renglón.
+            models.Index(fields=["origen_tipo", "origen_id"], name="ix_poliza_origen"),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=("origen_tipo", "origen_id"),
