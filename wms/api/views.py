@@ -47,7 +47,7 @@ from nucleo.kpis import entero_param
 from nucleo.listados import PaginacionOpcionalLimitOffset
 from nucleo.scope import empresa_ids_lectura, sucursales_permitidas_q
 from wms.api.lectores_rfid import lectores_visibles
-from wms.api import pickings_listado
+from wms.api import etiquetas_rfid_listado, pickings_listado
 from wms.scope import documentos_wms_visibles
 from wms.services import cancelacion_service
 from wms.services.despacho_service import DespachoService
@@ -599,16 +599,29 @@ class DespachoViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveMo
 TOPE_CONTEO_STATS = 10000
 
 
+@extend_schema_view(list=extend_schema(parameters=[etiquetas_rfid_listado.PARAMETRO_STATUS_OPENAPI]))
 class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
     """EC-989: el listado es ligero (``EtiquetaRFIDListSerializer``, sin ``etiquetas``
     ni ``zpl_enviado``) y ``?limit=&offset=`` lo pagina (sin ``limit``, el arreglo
-    completo). El detalle ``{id}/`` trae ambos, como siempre. Las acciones propias
-    (``buscar/``, ``onboarding/``, ``preview/``, ``scans/``...) arman su respuesta sin
-    ``paginate_queryset``, así que la paginación no las toca."""
+    completo), con ``?search=``, ``?status=`` y ``?ordering=`` en servidor
+    (``wms/api/etiquetas_rfid_listado.py``). El detalle ``{id}/`` trae ambos, como
+    siempre. Las acciones propias (``buscar/``, ``onboarding/``, ``preview/``,
+    ``scans/``...) arman su respuesta sin ``paginate_queryset`` ni
+    ``filter_queryset``, así que paginación, búsqueda y orden no las tocan."""
 
     queryset = EtiquetaRFIDImpresion.objects.all()
     serializer_class = EtiquetaRFIDSerializer
     pagination_class = PaginacionOpcionalLimitOffset
+    filter_backends = [
+        *[
+            b for b in GenericViewSet.filter_backends
+            if not issubclass(b, (OrderingFilter, SearchFilter))
+        ],
+        etiquetas_rfid_listado.BusquedaEtiquetasRFIDFilter,
+        etiquetas_rfid_listado.OrdenamientoEtiquetasRFIDFilter,
+    ]
+    search_fields = list(etiquetas_rfid_listado.CAMPOS_BUSQUEDA)
+    ordering_fields = list(etiquetas_rfid_listado.CAMPOS_ORDEN)
 
     def get_queryset(self):
         user = self.request.user
@@ -634,6 +647,11 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         if not empresa:
             return qs.none()
         qs = qs.filter(empresa=empresa)
+        # ``?status=`` sólo en el listado, encima del alcance: en el detalle un
+        # parámetro suelto daría 404 sobre una impresión visible. El listado no
+        # serializa ``zpl_enviado``: tampoco lo lee de la BD.
+        if self.action == "list":
+            qs = etiquetas_rfid_listado.filtrar_status(self.request, qs.defer("zpl_enviado"))
         if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
             return qs
         return qs.filter(sucursal_id__in=user.sucursales_permitidas())
