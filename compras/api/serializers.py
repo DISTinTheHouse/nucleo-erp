@@ -1003,6 +1003,51 @@ class RecepcionRFIDLecturaInputSerializer(serializers.Serializer):
         return attrs
 
 
+class RecepcionRFIDLecturaLigeraSerializer(RecepcionRFIDLecturaSerializer):
+    """Lectura creada en una tanda (EC-998): lo que el frontend lee de la
+    respuesta de ``lecturas/``, sin consultas (producto y variante ya en memoria)."""
+
+    class Meta(RecepcionRFIDLecturaSerializer.Meta):
+        fields = [
+            "id", "codigo_tag", "epc", "orden_compra_detalle", "orden_produccion_detalle",
+            "producto_nombre", "producto_variante_nombre", "metadata", "created_at",
+        ]
+
+
+class RecepcionRFIDLecturasLoteInputSerializer(serializers.Serializer):
+    """Tanda de lecturas del encuadre (EC-998): ``{"epcs": [...]}``, de 1 a
+    ``TOPE`` EPC. Un EPC vacío, una lista vacía o de más, o mandar además
+    ``epc``/``codigo_tag`` rechazan la tanda completa."""
+
+    TOPE = 200
+
+    epcs = serializers.ListField(
+        child=serializers.CharField(max_length=RecepcionRFIDLecturaInputSerializer.LARGO_MAXIMO),
+        allow_empty=False,
+        max_length=TOPE,
+        error_messages={
+            "not_a_list": "Manda una lista de EPC.",
+            "empty": "Manda al menos un EPC.",
+            "max_length": f"Máximo {TOPE} EPC por tanda.",
+        },
+        help_text=(
+            f"EPC leídos (1 a {TOPE}), con el mismo formato que `epc`. Cada uno se resuelve "
+            "por la etiqueta que imprimió el ERP en la empresa del encuadre."
+        ),
+    )
+
+    def validate_epcs(self, value):
+        vacios = {i: ["EPC vacío."] for i, epc in enumerate(value) if not normalizar_epc(epc)}
+        if vacios:
+            raise serializers.ValidationError(vacios)
+        return value
+
+    def validate(self, attrs):
+        if any(campo in self.initial_data for campo in ("epc", "codigo_tag")):
+            raise serializers.ValidationError({"epcs": "Manda solo epcs, sin epc ni codigo_tag."})
+        return attrs
+
+
 
 class OrdenCompraRutaCriticaSerializer(serializers.ModelSerializer):
     """Fecha real de recibo y comentario; ``oc_id`` solo de lectura."""

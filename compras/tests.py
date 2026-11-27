@@ -2976,9 +2976,9 @@ class OrdenCompraVariantesPTTests(TestCase):
         self.assertEqual((len(busqueda["proveedores"]), len(busqueda["productos"])), (1, 1))
 
 
-class EncuadreRFIDLecturaEPCTests(TestCase):
-    """EC-982: ``lecturas/`` por ``epc`` resuelto con la etiqueta impresa por el
-    ERP; ``codigo_tag`` queda obsoleto, con largo máximo y resolución determinista."""
+class _EncuadreRFIDEPCFixture:
+    """Dos empresas con etiquetas impresas y una OC de la empresa ``a`` con dos
+    renglones (CH y G) y un encuadre pendiente (EC-982, también EC-998)."""
 
     URL = "/api/v1/compras/recepcion-rfid-encuadres/"
     EPC_G = "11112222333344445555AAAA"
@@ -3065,6 +3065,11 @@ class EncuadreRFIDLecturaEPCTests(TestCase):
         resp = self._leer(body)
         self.assertEqual(resp.status_code, 201, resp.content)
         return resp.json()
+
+
+class EncuadreRFIDLecturaEPCTests(_EncuadreRFIDEPCFixture, TestCase):
+    """EC-982: ``lecturas/`` por ``epc`` resuelto con la etiqueta impresa por el
+    ERP; ``codigo_tag`` queda obsoleto, con largo máximo y resolución determinista."""
 
     def test_epc_con_variante_va_al_renglon_de_su_talla(self):
         # Impresa en otra sucursal de la empresa: no hay filtro por sucursal.
@@ -3268,6 +3273,243 @@ class EncuadreRFIDLecturaEPCTests(TestCase):
         # Más las 2 fijas de "pieza única por orden" (#1453, ``_exigir_epc_libre_en_la_orden``):
         # el candado de la orden y la búsqueda del EPC en otros encuadres.
         self.assertLessEqual(len(por_epc), len(por_codigo) + 2)
+
+
+class EncuadreRFIDLecturasLoteTests(_EncuadreRFIDEPCFixture, TestCase):
+    """EC-998: ``lecturas/`` con ``{"epcs": [...]}``. Repetidos y piezas de otro
+    encuadre vigente de la misma orden se rechazan por pieza y el resto se guarda;
+    los errores de estructura rechazan la tanda y no guardan nada."""
+
+    REPETIDO = "Este tag ya fue leído en este encuadre."
+    DESCONOCIDO = "ABCDEF0123456789ABCDEF01"
+    CAMPOS_CREADA = {
+        "id", "codigo_tag", "epc", "orden_compra_detalle", "orden_produccion_detalle",
+        "producto_nombre", "producto_variante_nombre", "metadata", "created_at",
+    }
+
+    def _lote(self, epcs, encuadre=None, **extra):
+        encuadre = encuadre or self.encuadre
+        return self.api.post(f"{self.URL}{encuadre.pk}/lecturas/", {"epcs": epcs, **extra}, format="json")
+
+    def _lote_ok(self, epcs, encuadre=None):
+        resp = self._lote(epcs, encuadre)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def _otro_encuadre(self, estatus=RecepcionRFIDEncuadre.Estatus.PENDIENTE):
+        t = self.t["a"]
+        return RecepcionRFIDEncuadre.objects.create(
+            tipo_origen="OC", orden_compra=self.oc, empresa=t["empresa"], sucursal=t["sucursal"],
+            proveedor=t["proveedor"], almacen=t["almacen"], usuario=t["usuario"], fecha_recepcion=timezone.now(),
+            estatus=estatus,
+        )
+
+    def test_todas_validas_se_resuelven_como_una_por_una(self):
+        epcs = [self.EPC_G, self.EPC_PRODUCTO, self.DESCONOCIDO, self.EPC_B]
+        data = self._lote_ok(epcs)
+        self.assertEqual(data["rechazadas"], [])
+        self.assertEqual([set(c) for c in data["creadas"]], [self.CAMPOS_CREADA] * 4)
+        # Lo mismo que cada EPC por ``{epc}`` en otro encuadre de la misma OC (cancelado
+        # el de la tanda, para que la pieza quede libre).
+        RecepcionRFIDEncuadre.objects.filter(pk=self.encuadre.pk).update(estatus=RecepcionRFIDEncuadre.Estatus.CANCELADO)
+        self.encuadre = self._otro_encuadre()
+        campos = sorted(self.CAMPOS_CREADA - {"id", "created_at"})
+        for epc, creada in zip(epcs, data["creadas"]):
+            with self.subTest(epc=epc):
+                una = self._leer_ok({"epc": epc})
+                self.assertEqual({c: creada[c] for c in campos}, {c: una[c] for c in campos})
+        guardadas = list(RecepcionRFIDLectura.objects.filter(pk__in=[c["id"] for c in data["creadas"]]).order_by("id"))
+        self.assertEqual([g.etiqueta_id for g in guardadas],
+                         [self.etiqueta_g.pk, self.etiqueta_producto.pk, None, None])
+
+    def test_tanda_en_op_va_al_renglon_de_su_variante(self):
+        from nucleo.models import UnidadMedida
+        from produccion.models import ListaMaterialBom, OrdenProduccion, OrdenProduccionDetalle
+
+        t = self.t["a"]
+        unidad = UnidadMedida.objects.create(clave="PZA-998", nombre="Pieza")
+        op = OrdenProduccion.objects.create(empresa=t["empresa"], sucursal=t["sucursal"], folio_op="OP-998")
+        renglones = {
+            talla: OrdenProduccionDetalle.objects.create(
+                op=op, producto_variante=t["variantes"][talla], cantidad=4, unidad=unidad,
+                bom=ListaMaterialBom.objects.create(empresa=t["empresa"], producto_variante=t["variantes"][talla], activo=True),
+            )
+            for talla in ("CH", "G")
+        }
+        encuadre = RecepcionRFIDEncuadre.objects.create(
+            tipo_origen="OP", op=op, empresa=t["empresa"], sucursal=t["sucursal"], almacen=t["almacen"],
+            usuario=t["usuario"], fecha_recepcion=timezone.now(),
+        )
+        data = self._lote_ok([self.EPC_G, self.EPC_PRODUCTO], encuadre)
+        self.assertEqual(
+            [(c["orden_produccion_detalle"], c["orden_compra_detalle"]) for c in data["creadas"]],
+            [(renglones["G"].op_detalle_id, None), (renglones["CH"].op_detalle_id, None)],
+        )
+
+    def test_repetidos_en_la_tanda_en_cualquier_forma(self):
+        epcs = [
+            self.EPC_G, self.EPC_G.lower(), f"{self.EPC_G}00000000", "11:11-2222 3333444455 55AAAA",
+            self.DESCONOCIDO, f"00000000{self.DESCONOCIDO}",
+        ]
+        data = self._lote_ok(epcs)
+        self.assertEqual([c["codigo_tag"] for c in data["creadas"]], [self.EPC_G, self.DESCONOCIDO])
+        self.assertEqual(
+            data["rechazadas"],
+            [{"epc": e, "motivo": "repetido_en_tanda", "mensaje": self.REPETIDO} for e in (epcs[1:4] + epcs[5:])],
+        )
+        self.assertEqual(self.encuadre.lecturas.count(), 2)
+
+    def test_ya_leidas_en_el_encuadre_se_rechazan_y_el_resto_se_guarda(self):
+        self._leer_ok({"epc": self.EPC_G})
+        self._leer_ok({"epc": f"{self.DESCONOCIDO}00000000"})
+        data = self._lote_ok([f"{self.EPC_G}00000000", self.EPC_PRODUCTO, self.DESCONOCIDO])
+        self.assertEqual([c["codigo_tag"] for c in data["creadas"]], [self.EPC_PRODUCTO])
+        self.assertEqual(data["rechazadas"], [
+            {"epc": f"{self.EPC_G}00000000", "motivo": "repetido_en_encuadre", "mensaje": self.REPETIDO},
+            {"epc": self.DESCONOCIDO, "motivo": "repetido_en_encuadre", "mensaje": self.REPETIDO},
+        ])
+        self.assertEqual(self.encuadre.lecturas.count(), 3)
+
+    def test_etiqueta_ya_ligada_en_el_encuadre_es_repetida(self):
+        RecepcionRFIDLectura.objects.create(
+            encuadre=self.encuadre, codigo_tag="ligada-a-mano", etiqueta=self.etiqueta_g, cantidad_leida=Decimal("1"),
+        )
+        data = self._lote_ok([self.EPC_G])
+        self.assertEqual((data["creadas"], [r["motivo"] for r in data["rechazadas"]]), ([], ["repetido_en_encuadre"]))
+
+    def test_pieza_de_otro_encuadre_vigente_de_la_misma_orden(self):
+        E = RecepcionRFIDEncuadre.Estatus
+        for estatus in (E.PENDIENTE, E.ACEPTADO):
+            with self.subTest(estatus=estatus):
+                RecepcionRFIDLectura.objects.all().delete()
+                otro = self._otro_encuadre()
+                self._lote_ok([self.EPC_G, self.DESCONOCIDO], otro)
+                RecepcionRFIDEncuadre.objects.filter(pk=otro.pk).update(estatus=estatus)
+                data = self._lote_ok([f"{self.EPC_G}00000000", self.EPC_PRODUCTO, self.DESCONOCIDO.lower()])
+                self.assertEqual([c["codigo_tag"] for c in data["creadas"]], [self.EPC_PRODUCTO])
+                mensaje = f"Esta pieza ya se leyó en el encuadre {otro.pk} de la misma orden."
+                self.assertEqual(data["rechazadas"], [
+                    {"epc": f"{self.EPC_G}00000000", "motivo": "en_otro_encuadre", "mensaje": mensaje, "encuadre": otro.pk},
+                    {"epc": self.DESCONOCIDO.lower(), "motivo": "en_otro_encuadre", "mensaje": mensaje, "encuadre": otro.pk},
+                ])
+
+    def test_pieza_de_un_encuadre_cancelado_entra(self):
+        otro = self._otro_encuadre()
+        self._lote_ok([self.EPC_G], otro)
+        RecepcionRFIDEncuadre.objects.filter(pk=otro.pk).update(estatus=RecepcionRFIDEncuadre.Estatus.CANCELADO)
+        data = self._lote_ok([self.EPC_G])
+        self.assertEqual((len(data["creadas"]), data["rechazadas"]), (1, []))
+
+    def test_errores_de_estructura_no_guardan_nada(self):
+        casos = {
+            "lista vacía": ({"epcs": []}, "epcs"),
+            "no es lista": ({"epcs": self.EPC_G}, "epcs"),
+            "epc vacío": ({"epcs": [self.EPC_G, " - : "]}, "epcs"),
+            "nulo": ({"epcs": [self.EPC_G, None]}, "epcs"),
+            "largo": ({"epcs": [self.EPC_G, "A" * 121]}, "epcs"),
+            "con epc": ({"epcs": [self.EPC_G], "epc": self.EPC_PRODUCTO}, "epcs"),
+            "con codigo_tag": ({"epcs": [self.EPC_G], "codigo_tag": "C982a-G"}, "epcs"),
+            "de más": ({"epcs": [f"{i:024X}" for i in range(1, 202)]}, "epcs"),
+        }
+        for nombre, (body, campo) in casos.items():
+            with self.subTest(caso=nombre):
+                resp = self.api.post(f"{self.URL}{self.encuadre.pk}/lecturas/", body, format="json")
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertIn(campo, resp.json())
+        self.assertEqual(
+            self.api.post(f"{self.URL}{self.encuadre.pk}/lecturas/", {"epcs": [self.EPC_G, ""]}, format="json").json(),
+            {"epcs": {"1": ["Este campo no puede estar en blanco."]}},
+        )
+        self.assertFalse(RecepcionRFIDLectura.objects.exists())
+
+    def test_tope_de_200(self):
+        data = self._lote_ok([f"{i:024X}" for i in range(1, 201)])
+        self.assertEqual((len(data["creadas"]), data["rechazadas"]), (200, []))
+        resp = self._lote([f"{i:024X}" for i in range(1000, 1201)])
+        self.assertEqual(resp.json(), {"epcs": ["Máximo 200 EPC por tanda."]})
+        self.assertEqual(self.encuadre.lecturas.count(), 200)
+
+    def test_encuadre_no_pendiente_rechaza_la_tanda(self):
+        E = RecepcionRFIDEncuadre.Estatus
+        for estatus in (E.ACEPTADO, E.CANCELADO):
+            with self.subTest(estatus=estatus):
+                RecepcionRFIDEncuadre.objects.filter(pk=self.encuadre.pk).update(estatus=estatus)
+                resp = self._lote([self.EPC_G])
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), {"estatus": "Solo se puede escanear un encuadre pendiente."})
+        self.assertFalse(RecepcionRFIDLectura.objects.exists())
+
+    def test_choque_de_unicidad_por_otro_camino_queda_como_repetida(self):
+        # Una lectura que la verificación no vio (escrita fuera del candado): el
+        # INSERT choca con ``uq_recepcion_rfid_lectura_encuadre_tag``, esa pieza pasa
+        # a repetida y el resto se guarda.
+        from unittest import mock
+
+        from compras.api.views import RecepcionRFIDEncuadreViewSet
+
+        RecepcionRFIDLectura.objects.create(encuadre=self.encuadre, codigo_tag=self.EPC_G, cantidad_leida=Decimal("1"))
+        with mock.patch.object(RecepcionRFIDEncuadreViewSet, "_ya_en_el_encuadre", return_value=(set(), set())):
+            data = self._lote_ok([self.EPC_PRODUCTO, self.EPC_G, self.DESCONOCIDO])
+        self.assertEqual([c["codigo_tag"] for c in data["creadas"]], [self.EPC_PRODUCTO, self.DESCONOCIDO])
+        self.assertEqual(data["rechazadas"], [{"epc": self.EPC_G, "motivo": "repetido_en_encuadre", "mensaje": self.REPETIDO}])
+        self.assertEqual(self.encuadre.lecturas.count(), 3)
+
+    def test_consultas_fijas_sin_importar_el_tamano(self):
+        from wms.models import EtiquetaRFIDDetalle, EtiquetaRFIDImpresion
+
+        t = self.t["a"]
+        impresion = EtiquetaRFIDImpresion.objects.create(
+            empresa=t["empresa"], sucursal=t["sucursal"], producto=t["producto"], producto_variante=t["variantes"]["CH"],
+        )
+        registrados = [f"E998{i:020X}" for i in range(150)]
+        EtiquetaRFIDDetalle.objects.bulk_create(
+            [EtiquetaRFIDDetalle(impresion=impresion, epc=e, barcode_value="X") for e in registrados]
+        )
+        otro = self._otro_encuadre()
+        self._lote_ok(registrados[100:110], otro)  # piezas en otro encuadre vigente
+        self._lote_ok(registrados[110:120])  # ya en el encuadre
+
+        def tanda(registrados_, desconocidos):
+            return registrados_ + [f"D998{i:020X}" for i in desconocidos] + registrados_[:2]
+
+        with CaptureQueriesContext(connection) as chica:
+            self._lote_ok(tanda(registrados[0:2] + registrados[100:101] + registrados[110:111], range(2)))
+        with CaptureQueriesContext(connection) as grande:
+            data = self._lote_ok(tanda(registrados[2:100] + registrados[101:110] + registrados[111:120], range(2, 60)))
+        self.assertEqual(len(data["creadas"]), 98 + 58)
+        self.assertEqual(len(grande), len(chica))
+        # get_object, candado del encuadre, etiquetas, renglones, repetidos en el
+        # encuadre, candado de la OC, otros encuadres, INSERT (+ los SAVEPOINT de
+        # ``atomic`` y del INSERT).
+        self.assertEqual(len([q for q in grande if "SAVEPOINT" not in q["sql"]]), 8)
+
+    def test_un_epc_sigue_igual(self):
+        data = self._leer_ok({"epc": self.EPC_G})
+        self.assertEqual(set(data), {
+            "id", "codigo_tag", "epc", "etiqueta", "orden_compra_detalle", "orden_produccion_detalle",
+            "producto", "producto_nombre", "producto_variante", "producto_variante_nombre",
+            "cantidad_leida", "metadata", "created_at",
+        })
+        self.assertEqual(self._leer({"epc": self.EPC_G}).json(), {"epc": self.REPETIDO})
+
+    def test_otra_empresa_es_404_tambien_para_el_superusuario(self):
+        tb = self.t["b"]
+        oc_b = OrdenCompra.objects.create(
+            empresa=tb["empresa"], sucursal=tb["sucursal"], proveedor=tb["proveedor"], moneda=self.moneda,
+            usuario=tb["usuario"], fecha_oc=timezone.localdate(), tipo_compra="PT",
+        )
+        ajeno = RecepcionRFIDEncuadre.objects.create(
+            tipo_origen="OC", orden_compra=oc_b, empresa=tb["empresa"], sucursal=tb["sucursal"],
+            proveedor=tb["proveedor"], almacen=tb["almacen"], usuario=tb["usuario"],
+        )
+        self.assertEqual(self._lote([self.EPC_B], ajeno).status_code, 404)
+        superusuario = Usuario.objects.create(
+            username="ec998-su", email="ec998-su@ec998.test", empresa=self.t["a"]["empresa"], is_superuser=True,
+        )
+        self.api.force_authenticate(superusuario)
+        self.assertEqual(self._lote([self.EPC_B], ajeno).status_code, 404)
+        self.assertEqual(self._lote_ok([self.EPC_G])["rechazadas"], [])
+        self.assertFalse(ajeno.lecturas.exists())
 
 
 class ComprasDashboardRetiradoTests(TestCase):
