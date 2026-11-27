@@ -1,3 +1,4 @@
+from decimal import Decimal
 from django.conf import settings
 import hashlib
 import secrets
@@ -285,16 +286,42 @@ class Packing(CancelacionMixin):
         return self.folio
 
 class PackingCaja(models.Model):
+    """Caja física de un packing: ``numero`` 1..N, peso en kg y medidas en cm.
+
+    ``volumen`` (cm³) se calcula al guardar cuando vienen las tres medidas.
+    """
+
     packing = models.ForeignKey(Packing, on_delete=models.CASCADE, related_name="packing_cajas")
     numero = models.PositiveIntegerField()
 
-    peso = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    peso = models.DecimalField(max_digits=18, decimal_places=3, default=0)
 
-    largo = models.DecimalField(max_digits=18, decimal_places=2, default=0)
-    ancho = models.DecimalField(max_digits=18, decimal_places=2, default=0)
-    alto = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    largo = models.DecimalField(max_digits=18, decimal_places=2, blank=True, null=True)
+    ancho = models.DecimalField(max_digits=18, decimal_places=2, blank=True, null=True)
+    alto = models.DecimalField(max_digits=18, decimal_places=2, blank=True, null=True)
+    volumen = models.DecimalField(max_digits=18, decimal_places=3, blank=True, null=True)
 
     observaciones = models.TextField(blank=True, null=True)
+
+    class Meta:
+        verbose_name = "Caja de packing"
+        verbose_name_plural = "Cajas de packing"
+        ordering = ["numero"]
+        constraints = [
+            models.UniqueConstraint(fields=["packing", "numero"], name="packing_caja_numero_unico"),
+        ]
+
+    def calcular_volumen(self):
+        if None in (self.largo, self.ancho, self.alto):
+            return None
+        return (self.largo * self.ancho * self.alto).quantize(Decimal("0.001"))
+
+    def save(self, *args, **kwargs):
+        self.volumen = self.calcular_volumen()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.packing_id}-{self.numero}"
 
 class PackingDetalle(models.Model):
     packing = models.ForeignKey(Packing, on_delete=models.CASCADE, related_name="packing_detalle")

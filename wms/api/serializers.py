@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+from wms.utils.decimales import normalizar_decimal
+
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
@@ -518,6 +520,9 @@ class PickingSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
     def get_pedido_vinculado(self, obj):
         return armar_pedido_vinculado(obj)
 
+    def get_cajas(self, obj):
+        return _cajas_de_packing(obj)
+
     def get_lote_nombre(self, obj):
         return str(obj.lote) if obj.lote_id else None
 
@@ -679,6 +684,45 @@ class PackingDetalleReadSerializer(_VarianteDeLineaWmsMixin, serializers.ModelSe
     def _linea_wms(self, obj):
         return obj.picking_detalle
 
+class PackingCajaContenidoSerializer(_VarianteDeLineaWmsMixin, serializers.Serializer):
+    """Renglón de ``packing.cajas[].contenido``: un ``packing_detalle`` de esa caja."""
+
+    picking_detalle = serializers.IntegerField(source="picking_detalle_id", read_only=True)
+    cantidad = serializers.DecimalField(
+        source="cantidad_empacada", max_digits=18, decimal_places=4, read_only=True
+    )
+
+    def _linea_wms(self, obj):
+        return obj.picking_detalle
+
+
+def _cajas_de_packing(packing):
+    """``cajas`` del packing armadas en memoria desde ``packing_cajas`` y
+    ``packing_detalle`` precargados: sin consultas por caja ni por renglón."""
+    por_caja = {}
+    for det in packing.packing_detalle.all():
+        if det.caja_id:
+            por_caja.setdefault(det.caja_id, []).append(det)
+    salida = []
+    for caja in sorted(packing.packing_cajas.all(), key=lambda c: c.numero):
+        renglones = por_caja.get(caja.pk, [])
+        salida.append({
+            "id": caja.pk,
+            "numero": caja.numero,
+            "peso": str(caja.peso),
+            "largo": None if caja.largo is None else str(caja.largo),
+            "ancho": None if caja.ancho is None else str(caja.ancho),
+            "alto": None if caja.alto is None else str(caja.alto),
+            "volumen": None if caja.volumen is None else str(caja.volumen),
+            "piezas": str(normalizar_decimal(sum((r.cantidad_empacada for r in renglones), Decimal("0")))),
+            "contenido": [
+                {k: v for k, v in fila.items() if k not in ("color_id", "talla_id")}
+                for fila in PackingCajaContenidoSerializer(renglones, many=True).data
+            ],
+        })
+    return salida
+
+
 class PackingSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
     """Serializer compartido de packing (``list``, ``retrieve`` y respuesta del alta).
 
@@ -687,6 +731,7 @@ class PackingSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
     """
 
     packing_detalle = PackingDetalleReadSerializer(many=True, read_only=True)
+    cajas = serializers.SerializerMethodField()
     pedido_folio = serializers.CharField(source="pedido.folio", read_only=True)
     pedido_vinculado = serializers.SerializerMethodField()
     picking_folio = serializers.CharField(source="picking.folio", read_only=True)
@@ -723,6 +768,9 @@ class PackingSerializer(_CanceladoPorNombreMixin, serializers.ModelSerializer):
     def get_usuario_nombre(self, obj):
         return _nombre_usuario(obj.usuario)
 
+    def get_cajas(self, obj):
+        return _cajas_de_packing(obj)
+
 
 class PackingCreateSerializer(serializers.ModelSerializer):
     """Alta de packing guiada por picking.
@@ -741,7 +789,46 @@ class PackingCreateSerializer(serializers.ModelSerializer):
         )
         observaciones = serializers.CharField(required=False, allow_blank=True)
 
-    packing_detalle = PackingCreateDetalleInputSerializer(many=True)
+    class PackingCreateCajaInputSerializer(serializers.Serializer):
+        class PackingCreateContenidoInputSerializer(serializers.Serializer):
+            picking_detalle = serializers.IntegerField(min_value=1)
+            cantidad = serializers.DecimalField(
+                max_digits=18, decimal_places=4, min_value=Decimal("0.0001")
+            )
+
+        numero = serializers.IntegerField(min_value=1)
+        peso = serializers.DecimalField(
+            max_digits=18, decimal_places=3, min_value=Decimal("0.001"),
+            error_messages={"min_value": "El peso de la caja debe ser mayor a 0."},
+        )
+        largo = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=Decimal("0"), required=False, allow_null=True)
+        ancho = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=Decimal("0"), required=False, allow_null=True)
+        alto = serializers.DecimalField(max_digits=18, decimal_places=2, min_value=Decimal("0"), required=False, allow_null=True)
+        observaciones = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+        contenido = PackingCreateContenidoInputSerializer(
+            many=True, allow_empty=False,
+            error_messages={"empty": "La caja debe llevar al menos una pieza."},
+        )
+
+    packing_detalle = PackingCreateDetalleInputSerializer(many=True, required=False)
+    cajas = PackingCreateCajaInputSerializer(many=True, required=False, allow_empty=False)
+
+    def validate(self, attrs):
+        if attrs.get("cajas") and attrs.get("packing_detalle"):
+            raise serializers.ValidationError(
+                {"cajas": "Envía cajas o packing_detalle, no ambos."}
+            )
+        if not attrs.get("cajas") and not attrs.get("packing_detalle"):
+            raise serializers.ValidationError(
+                {"cajas": "Debe enviar al menos una caja con contenido."}
+            )
+        cajas = attrs.get("cajas") or []
+        numeros = [c["numero"] for c in cajas]
+        if cajas and sorted(numeros) != list(range(1, len(cajas) + 1)):
+            raise serializers.ValidationError(
+                {"cajas": "Los números de caja deben ser consecutivos desde 1 y sin repetirse."}
+            )
+        return attrs
 
     class Meta:
         model = Packing
@@ -754,6 +841,7 @@ class PackingCreateSerializer(serializers.ModelSerializer):
             "fecha_fin",
             "observaciones",
             "packing_detalle",
+            "cajas",
         ]
 
 
