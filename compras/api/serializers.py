@@ -921,6 +921,31 @@ class RecepcionRFIDEncuadreSerializer(_CancelacionRecepcionMixin, serializers.Mo
         return resumen_encuadre_rfid(obj, self.context.get("resumen_mapas"))
 
 
+class RecepcionRFIDEncuadreSinLecturasSerializer(RecepcionRFIDEncuadreSerializer):
+    """Detalle con ``?sin_lecturas=1`` (EC-998): el detalle sin ``lecturas[]``; el
+    ``resumen``, el mismo, con la consulta agrupada (no trae las lecturas)."""
+
+    lecturas = None
+
+    class Meta(RecepcionRFIDEncuadreSerializer.Meta):
+        fields = [f for f in RecepcionRFIDEncuadreSerializer.Meta.fields if f != "lecturas"]
+
+    def get_resumen(self, obj):
+        from compras.api.views import resumen_agrupado_encuadre_rfid
+        return resumen_agrupado_encuadre_rfid(obj)
+
+
+class RecepcionRFIDEncuadreCabeceraSerializer(RecepcionRFIDEncuadreSerializer):
+    """Respuesta de ``aceptar/`` y ``cancelar/`` (EC-998): el detalle sin
+    ``lecturas[]`` ni ``resumen``; el frontend solo usa el estatus y la cabecera."""
+
+    lecturas = None
+    resumen = None
+
+    class Meta(RecepcionRFIDEncuadreSerializer.Meta):
+        fields = [f for f in RecepcionRFIDEncuadreSerializer.Meta.fields if f not in ("lecturas", "resumen")]
+
+
 class RecepcionRFIDEncuadreListSerializer(RecepcionRFIDEncuadreSerializer):
     """Fila del listado (EC-981): los campos del detalle sin ``lecturas[]`` ni
     ``resumen``, con sus totales planos (mismos nombres y formato que en
@@ -1000,6 +1025,55 @@ class RecepcionRFIDLecturaInputSerializer(serializers.Serializer):
     def validate(self, attrs):
         if ("epc" in attrs) == ("codigo_tag" in attrs):
             raise serializers.ValidationError({"epc": "Envía exactamente uno de epc o codigo_tag."})
+        return attrs
+
+
+class RecepcionRFIDLecturaLigeraSerializer(RecepcionRFIDLecturaSerializer):
+    """Lectura creada en una tanda (EC-998): lo que el frontend lee de la
+    respuesta de ``lecturas/``, sin consultas (producto y variante ya en memoria)."""
+
+    class Meta(RecepcionRFIDLecturaSerializer.Meta):
+        fields = [
+            "id", "codigo_tag", "epc", "orden_compra_detalle", "orden_produccion_detalle",
+            "producto_nombre", "producto_variante_nombre", "metadata", "created_at",
+        ]
+
+
+class RecepcionRFIDLecturasLoteInputSerializer(serializers.Serializer):
+    """Tanda de lecturas del encuadre (EC-998): ``{"epcs": [...]}``, de 1 a
+    ``TOPE`` EPC. Un EPC vacío, una lista vacía o de más, o mandar además
+    ``epc``/``codigo_tag`` rechazan la tanda completa."""
+
+    TOPE = 200
+
+    epcs = serializers.ListField(
+        # Sin recortar: ``rechazadas[].epc`` regresa el texto tal como se mandó;
+        # ``normalizar_epc`` quita los espacios para resolver y deduplicar.
+        child=serializers.CharField(
+            max_length=RecepcionRFIDLecturaInputSerializer.LARGO_MAXIMO, trim_whitespace=False,
+        ),
+        allow_empty=False,
+        max_length=TOPE,
+        error_messages={
+            "not_a_list": "Manda una lista de EPC.",
+            "empty": "Manda al menos un EPC.",
+            "max_length": f"Máximo {TOPE} EPC por tanda.",
+        },
+        help_text=(
+            f"EPC leídos (1 a {TOPE}), con el mismo formato que `epc`. Cada uno se resuelve "
+            "por la etiqueta que imprimió el ERP en la empresa del encuadre."
+        ),
+    )
+
+    def validate_epcs(self, value):
+        vacios = {i: ["EPC vacío."] for i, epc in enumerate(value) if not normalizar_epc(epc)}
+        if vacios:
+            raise serializers.ValidationError(vacios)
+        return value
+
+    def validate(self, attrs):
+        if any(campo in self.initial_data for campo in ("epc", "codigo_tag")):
+            raise serializers.ValidationError({"epcs": "Manda solo epcs, sin epc ni codigo_tag."})
         return attrs
 
 

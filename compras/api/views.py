@@ -10,7 +10,7 @@ from django.db.models import (
 )
 from django.db.models.functions import Coalesce, RowNumber
 from django.utils import timezone
-from rest_framework import generics, status, viewsets
+from rest_framework import generics, serializers as drf_serializers, status, viewsets
 from rest_framework.filters import OrderingFilter
 from rest_framework.decorators import action
 from rest_framework.permissions import SAFE_METHODS
@@ -18,7 +18,10 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from rest_framework.response import Response
 from inventarios.services import costeo
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
+from drf_spectacular.utils import (
+    OpenApiParameter, OpenApiResponse, PolymorphicProxySerializer, extend_schema, extend_schema_view,
+    inline_serializer,
+)
 from simple_history.utils import bulk_create_with_history
 
 from auditoria.models import AuditoriaEvento
@@ -74,10 +77,14 @@ from compras.api.serializers import (
     RecepcionRetrieveSerializer,
     RecepcionSerializer,
     RecepcionRFIDEncuadreSerializer,
+    RecepcionRFIDEncuadreCabeceraSerializer,
+    RecepcionRFIDEncuadreSinLecturasSerializer,
     RecepcionRFIDEncuadreCreateSerializer,
     RecepcionRFIDEncuadreListSerializer,
     RecepcionRFIDLecturaSerializer,
     RecepcionRFIDLecturaInputSerializer,
+    RecepcionRFIDLecturaLigeraSerializer,
+    RecepcionRFIDLecturasLoteInputSerializer,
 )
 from compras.services.orden_compra_view_service import (
     CAMPOS_CONTABILIDAD_OC,
@@ -3906,6 +3913,79 @@ def _renglon_tag_rfid(encuadre, producto, producto_variante):
     }
 
 
+def _resolver_epcs_rfid(encuadre, epcs):
+    """``_resolver_epc_rfid`` para una tanda (EC-998), en dos consultas fijas:
+    las etiquetas de todos los EPC y los renglones de la orden de sus productos.
+    Mismas reglas pieza por pieza (etiqueta de la empresa del encuadre, renglón
+    de la variante o, si no hay, el del producto sin variante; ``metadata``
+    igual). Devuelve una pieza por EPC, en el orden recibido, con ``formas``: las
+    formas equivalentes de su EPC, para detectar la misma pieza leída antes."""
+    normalizados = [normalizar_epc(epc) for epc in epcs]
+    etiquetas = etiquetas_por_epc(list(dict.fromkeys(normalizados)), encuadre.empresa_id, con_producto=True)
+    piezas = []
+    for epc, epc_normalizado in zip(epcs, normalizados):
+        etiqueta = etiquetas.get(epc_normalizado)
+        producto = producto_variante = None
+        if etiqueta is not None:
+            producto_variante = etiqueta.impresion.producto_variante
+            producto = producto_variante.producto if producto_variante else etiqueta.impresion.producto
+        metadata = {"resolved": bool(producto), "source": RecepcionRFIDLectura.FUENTE_EPC, "epc_leido": epc_normalizado}
+        if etiqueta is None:
+            metadata["motivo"] = "epc_no_registrado"
+        elif producto is None:
+            metadata["motivo"] = "etiqueta_sin_producto"
+        codigo_tag = etiqueta.epc if etiqueta is not None else epc_normalizado
+        piezas.append({
+            "epc": epc,
+            "codigo_tag": codigo_tag,
+            "etiqueta": etiqueta,
+            "producto": producto,
+            "producto_variante": producto_variante,
+            "metadata": metadata,
+            "formas": formas_equivalentes_epc(epc_normalizado) | formas_equivalentes_epc(codigo_tag),
+            "orden_compra_detalle_id": None,
+            "orden_produccion_detalle_id": None,
+        })
+
+    producto_ids = {p["producto"].pk for p in piezas if p["producto"] is not None}
+    if not producto_ids:
+        return piezas
+    # Renglones por producto, en el orden de ``_renglon_tag_rfid``.
+    por_producto = {}
+    if encuadre.orden_compra_id:
+        renglones = (
+            OrdenCompraDetalle.objects.filter(orden_compra_id=encuadre.orden_compra_id, producto_id__in=producto_ids)
+            .order_by("id").values_list("pk", "producto_id", "producto_variante_id")
+        )
+        campo = "orden_compra_detalle_id"
+    elif encuadre.op_id:
+        renglones = (
+            OrdenProduccionDetalle.objects.filter(
+                op_id=encuadre.op_id, activo=True, producto_variante__producto_id__in=producto_ids,
+            ).order_by("op_detalle_id").values_list("pk", "producto_variante__producto_id", "producto_variante_id")
+        )
+        campo = "orden_produccion_detalle_id"
+    else:
+        return piezas
+    for renglon_id, producto_id, variante_id in renglones:
+        por_producto.setdefault(producto_id, []).append((renglon_id, variante_id))
+
+    for pieza in piezas:
+        if pieza["producto"] is None:
+            continue
+        renglones = por_producto.get(pieza["producto"].pk, [])
+        variante_id = getattr(pieza["producto_variante"], "pk", None)
+        if variante_id is None:
+            elegido = renglones[0][0] if renglones else None
+        else:
+            elegido = next((r for r, v in renglones if v == variante_id), None)
+            if elegido is None and encuadre.orden_compra_id:
+                # OC: si la variante no tiene renglón, el del producto sin variante (#794).
+                elegido = next((r for r, v in renglones if v is None), None)
+        pieza[campo] = elegido
+    return piezas
+
+
 def prefetch_lecturas_rfid():
     """Lecturas del encuadre con producto y variante en la misma consulta (antes,
     dos consultas por lectura), en orden de captura: ``id`` explícito, porque sin
@@ -4050,23 +4130,50 @@ def resumen_encuadre_rfid(encuadre, mapas=None):
     """
     if mapas is None:
         mapas = mapas_resumen_encuadres_rfid([encuadre])
-    lecturas = list(encuadre.lecturas.all())
+    filas = (
+        (l.orden_compra_detalle_id, l.orden_produccion_detalle_id, l.cantidad_leida)
+        for l in encuadre.lecturas.all()
+    )
+    return _armar_resumen_rfid(encuadre, mapas, filas)
+
+
+def resumen_agrupado_encuadre_rfid(encuadre, mapas=None):
+    """``resumen_encuadre_rfid`` sin traer las lecturas (EC-998): lo leído sale
+    de una consulta agrupada por renglón, así cuesta lo mismo con 5 que con 500
+    lecturas. Mismo resultado, campo por campo y con el mismo formato."""
+    if mapas is None:
+        mapas = mapas_resumen_encuadres_rfid([encuadre])
+    filas = (
+        RecepcionRFIDLectura.objects.filter(encuadre_id=encuadre.pk)
+        .values_list("orden_compra_detalle_id", "orden_produccion_detalle_id")
+        .annotate(t=Sum("cantidad_leida")).order_by()
+    )
+    return _armar_resumen_rfid(encuadre, mapas, filas)
+
+
+def _armar_resumen_rfid(encuadre, mapas, filas):
+    """El ``resumen`` del encuadre a partir de ``(renglón OC, renglón OP,
+    cantidad)``: una fila por lectura (detalle) o por renglón (agrupado)."""
+    lado = 0 if encuadre.orden_compra_id else 1
+    leido_por_renglon = {}
+    total_leido = Decimal("0")
+    total_sin_asignar = Decimal("0")
+    for fila in filas:
+        cantidad = Decimal(str(fila[2] or 0))
+        total_leido += cantidad
+        if not fila[0] and not fila[1]:
+            total_sin_asignar += cantidad
+        elif fila[lado]:
+            leido_por_renglon[fila[lado]] = leido_por_renglon.get(fila[lado], Decimal("0")) + cantidad
 
     detalles = []
     esperado_y_leido = []
     total_esperado = Decimal("0")
     for detalle, ordenado, ya_recibido, esperado in _renglones_esperados_rfid(encuadre, mapas):
+        leido = leido_por_renglon.get(detalle.pk, Decimal("0"))
         if encuadre.orden_compra_id:
-            leido = sum(
-                (Decimal(str(l.cantidad_leida or 0)) for l in lecturas if l.orden_compra_detalle_id == detalle.pk),
-                Decimal("0"),
-            )
             producto = detalle.producto
         else:
-            leido = sum(
-                (Decimal(str(l.cantidad_leida or 0)) for l in lecturas if l.orden_produccion_detalle_id == detalle.pk),
-                Decimal("0"),
-            )
             producto = getattr(detalle.producto_variante, "producto", None)
 
         total_esperado += esperado
@@ -4085,14 +4192,6 @@ def resumen_encuadre_rfid(encuadre, mapas=None):
             "leido": str(leido),
             "diferencia": str(esperado - leido),
         })
-
-    total_leido = Decimal("0")
-    total_sin_asignar = Decimal("0")
-    for l in lecturas:
-        cantidad = Decimal(str(l.cantidad_leida or 0))
-        total_leido += cantidad
-        if not l.orden_compra_detalle_id and not l.orden_produccion_detalle_id:
-            total_sin_asignar += cantidad
 
     return {
         "detalle": detalles,
@@ -4131,7 +4230,12 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         "estatus", "tipo_origen", "orden_compra__folio", "op__folio_op", "proveedor__nombre", "almacen__nombre",
     ]
     TAG_REPETIDO = "Este tag ya fue leído en este encuadre."
+    MENSAJE_EN_OTRO_ENCUADRE = "Esta pieza ya se leyó en el encuadre {encuadre} de la misma orden."
     UNIQUE_TAG = "uq_recepcion_rfid_lectura_encuadre_tag"
+    # ``rechazadas[].motivo`` de una tanda de ``lecturas/`` (EC-998).
+    MOTIVO_REPETIDO_EN_TANDA = "repetido_en_tanda"
+    MOTIVO_REPETIDO_EN_ENCUADRE = "repetido_en_encuadre"
+    MOTIVO_EN_OTRO_ENCUADRE = "en_otro_encuadre"
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
@@ -4145,9 +4249,8 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         qs = self.queryset.select_related(
             "orden_compra", "op", "almacen", "proveedor", "sucursal", "usuario", "aceptado_por", "cancelado_por",
         )
-        # Solo el detalle anida ``lecturas[]``; aceptar/ y cancelar/ las traen
-        # al releer la fila bloqueada (``_bloquear``).
-        if self.action == "retrieve":
+        # Solo el detalle anida ``lecturas[]`` (y no con ``?sin_lecturas=1``, EC-998).
+        if self.action == "retrieve" and not self._sin_lecturas():
             qs = qs.prefetch_related(prefetch_lecturas_rfid())
         empresa = getattr(user, "empresa", None)
         if not empresa:
@@ -4206,7 +4309,29 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             return RecepcionRFIDEncuadreCreateSerializer
         if self.action == "list":
             return RecepcionRFIDEncuadreListSerializer
+        if self.action == "retrieve" and self._sin_lecturas():
+            return RecepcionRFIDEncuadreSinLecturasSerializer
         return RecepcionRFIDEncuadreSerializer
+
+    def _sin_lecturas(self):
+        """``?sin_lecturas=1`` (o ``true``/``si``) en el detalle (EC-998)."""
+        valor = self.request.query_params.get("sin_lecturas", "") if self.request else ""
+        return str(valor).strip().lower() in {"1", "true", "si"}
+
+    @extend_schema(parameters=[OpenApiParameter("sin_lecturas", OpenApiTypes.BOOL, description=(
+        "`1`: el detalle sin `lecturas[]` (EC-998); el `resumen` es el mismo, calculado sin traer "
+        "las lecturas. Las lecturas, paginadas, en `GET {id}/lecturas/`."
+    ))])
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+
+    @extend_schema(responses=OpenApiTypes.OBJECT, description=(
+        "El `resumen` del detalle (esperado contra leído por renglón y totales), con la misma forma, "
+        "sin traer las lecturas (EC-998)."
+    ))
+    @action(detail=True, methods=["get"])
+    def resumen(self, request, pk=None):
+        return Response(resumen_agrupado_encuadre_rfid(self.get_object()))
 
     def list(self, request, *args, **kwargs):
         # Fila ligera (EC-981): sin ``lecturas[]`` ni ``resumen``. ``total_esperado``
@@ -4227,16 +4352,14 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     def _bloquear(self, encuadre):
-        """Relee el encuadre con su fila bloqueada (EC-981), en el mismo alcance y
-        con sus lecturas al día. ``aceptar/``, ``cancelar/`` y ``lecturas/`` toman
-        este mismo candado y deciden con el estatus de la fila bloqueada, no con
-        el que leyó ``get_object()``: un cambio confirmado en medio ya no se pisa.
+        """Relee el encuadre con su fila bloqueada (EC-981), en el mismo alcance.
+        ``aceptar/``, ``cancelar/`` y ``lecturas/`` toman este mismo candado y
+        deciden con el estatus de la fila bloqueada, no con el que leyó
+        ``get_object()``: un cambio confirmado en medio ya no se pisa. Sin las
+        lecturas: ``aceptar/`` y ``cancelar/`` responden solo la cabecera (EC-998).
         ``of=("self",)``: los JOIN de ``select_related`` son externos y Postgres no
         bloquea su lado NULL-able."""
-        return generics.get_object_or_404(
-            self.get_queryset().select_for_update(of=("self",)).prefetch_related(prefetch_lecturas_rfid()),
-            pk=encuadre.pk,
-        )
+        return generics.get_object_or_404(self.get_queryset().select_for_update(of=("self",)), pk=encuadre.pk)
 
     @action(detail=False, methods=["get"])
     def onboarding(self, request):
@@ -4296,22 +4419,69 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
         return Response(RecepcionRFIDEncuadreSerializer(encuadre).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(
-        request=RecepcionRFIDLecturaInputSerializer,
-        responses={201: RecepcionRFIDLecturaSerializer},
+        methods=["GET"],
+        parameters=[
+            OpenApiParameter("limit", OpenApiTypes.INT, description="Tamaño de página (tope 500)."),
+            OpenApiParameter("offset", OpenApiTypes.INT, description="Desde qué lectura."),
+        ],
+        responses={200: RecepcionRFIDLecturaSerializer(many=True)},
+        description=(
+            "Lecturas del encuadre en orden de captura (`id`), las mismas de `lecturas[]` del "
+            "detalle (EC-998). Sin `?limit=` la lista completa; con él, "
+            "`{count, next, previous, results}`."
+        ),
+    )
+    @extend_schema(
+        methods=["POST"],
+        # Dos cuerpos (EC-998): una pieza (``{epc}``/``{codigo_tag}``) o una tanda (``{epcs}``).
+        request=PolymorphicProxySerializer(
+            component_name="RecepcionRFIDLecturaEntrada",
+            serializers=[RecepcionRFIDLecturaInputSerializer, RecepcionRFIDLecturasLoteInputSerializer],
+            resource_type_field_name=None,
+        ),
+        responses={
+            201: OpenApiResponse(RecepcionRFIDLecturaSerializer, description="Una pieza (`{epc}` o `{codigo_tag}`)."),
+            200: OpenApiResponse(
+                inline_serializer("RecepcionRFIDLecturasLoteRespuesta", {
+                    "creadas": RecepcionRFIDLecturaLigeraSerializer(many=True),
+                    "rechazadas": inline_serializer("RecepcionRFIDLecturaRechazada", {
+                        "epc": drf_serializers.CharField(help_text="El EPC tal como se mandó."),
+                        "motivo": drf_serializers.ChoiceField(choices=[
+                            "repetido_en_tanda", "repetido_en_encuadre", "en_otro_encuadre",
+                        ]),
+                        "mensaje": drf_serializers.CharField(),
+                        "encuadre": drf_serializers.IntegerField(
+                            required=False, help_text="Solo con `en_otro_encuadre`: el encuadre que ya la tiene.",
+                        ),
+                    }, many=True),
+                }),
+                description="Una tanda (`{epcs}`): las piezas guardadas y las rechazadas por pieza.",
+            ),
+        },
         description=(
             "Una pieza leída. Manda exactamente uno de `epc` (recomendado) o `codigo_tag` "
             "(obsoleto); ambos o ninguno → 400. Con `epc`, la etiqueta impresa por el ERP "
             "en la empresa del encuadre da producto y variante; un EPC no registrado se "
             "guarda sin asignar (`metadata.motivo = \"epc_no_registrado\"`). Repetido en el "
-            "encuadre → `400 {\"<campo enviado>\": \"Este tag ya fue leído en este encuadre.\"}`."
+            "encuadre → `400 {\"<campo enviado>\": \"Este tag ya fue leído en este encuadre.\"}`.\n\n"
+            "Tanda (EC-998): `{\"epcs\": [...]}` (1 a 200) → `200 {creadas: [lectura ligera], "
+            "rechazadas: [{epc, motivo, mensaje, encuadre?}]}`. Se rechaza por pieza (y el resto se "
+            "guarda) lo repetido en la tanda (`repetido_en_tanda`), lo ya leído en el encuadre "
+            "(`repetido_en_encuadre`) y lo leído en otro encuadre vigente de la misma orden "
+            "(`en_otro_encuadre`, con `encuadre`). Lista vacía, de más de 200, EPC vacío, mandar "
+            "además `epc`/`codigo_tag` o encuadre no pendiente → `400` y no se guarda nada."
         ),
     )
-    @action(detail=True, methods=["post"])
+    @action(detail=True, methods=["get", "post"])
     def lecturas(self, request, pk=None):
         # Sin el prefetch de lecturas (solo el retrieve lo hace): solo se
         # responde la lectura nueva.
         encuadre = self.get_object()
+        if request.method == "GET":
+            return self._lecturas_paginadas(encuadre)
         _exigir_permiso_oc(request, PERMISO_CREAR_RECEPCIONES)
+        if hasattr(request.data, "get") and "epcs" in request.data:
+            return self._lecturas_lote(request, encuadre)
         with transaction.atomic():
             # Mismo candado que aceptar/ y cancelar/ (EC-981): no entra una lectura
             # a un encuadre que se acaba de aceptar o cancelar, y dos envíos del
@@ -4360,6 +4530,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
                 raise ValidationError({campo: self.TAG_REPETIDO}) from exc
         return Response(RecepcionRFIDLecturaSerializer(lectura).data, status=status.HTTP_201_CREATED)
 
+    @extend_schema(responses=RecepcionRFIDEncuadreCabeceraSerializer)
     @action(detail=True, methods=["post"])
     def aceptar(self, request, pk=None):
         encuadre = self.get_object()
@@ -4373,9 +4544,10 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             encuadre.fecha_aceptacion = timezone.now()
             encuadre.save(update_fields=["estatus", "aceptado_por", "fecha_aceptacion", "updated_at"])
             self._auditar(request, encuadre, "ACEPTAR", {"estatus": "PENDIENTE"},
-                          {"estatus": encuadre.estatus, "lecturas": len(encuadre.lecturas.all())})
-        return Response(RecepcionRFIDEncuadreSerializer(encuadre).data)
+                          {"estatus": encuadre.estatus, "lecturas": encuadre.lecturas.count()})
+        return Response(RecepcionRFIDEncuadreCabeceraSerializer(encuadre).data)
 
+    @extend_schema(responses=RecepcionRFIDEncuadreCabeceraSerializer)
     @action(detail=True, methods=["post"])
     def cancelar(self, request, pk=None):
         """Cancela un encuadre pendiente, o aceptado que aún no generó recepción.
@@ -4405,28 +4577,180 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
                 "estatus", "motivo_cancelacion", "fecha_cancelacion", "cancelado_por", "updated_at",
             ])
             self._auditar(request, encuadre, "CANCELAR", antes, {"estatus": encuadre.estatus, "motivo": motivo})
-        return Response(RecepcionRFIDEncuadreSerializer(encuadre).data)
+        return Response(RecepcionRFIDEncuadreCabeceraSerializer(encuadre).data)
 
     def _exigir_epc_libre_en_la_orden(self, encuadre, repetido):
         """#1453: una pieza (EPC) cuenta en un solo encuadre vigente (pendiente o
         aceptado) de la misma OC u OP. Se bloquea la orden para que dos encuadres
         escaneando a la vez se formen. 2 consultas, solo para lecturas por EPC."""
-        if encuadre.orden_compra_id:
-            OrdenCompra.objects.select_for_update().filter(pk=encuadre.orden_compra_id).values_list("pk").first()
-            misma_orden = Q(encuadre__orden_compra_id=encuadre.orden_compra_id)
-        elif encuadre.op_id:
-            OrdenProduccion.objects.select_for_update().filter(pk=encuadre.op_id).values_list("pk").first()
-            misma_orden = Q(encuadre__op_id=encuadre.op_id)
-        else:
+        misma_orden = self._bloquear_orden(encuadre)
+        if misma_orden is None:
             return
         otro = (
-            RecepcionRFIDLectura.objects.filter(misma_orden, repetido)
-            .exclude(encuadre_id=encuadre.pk)
-            .filter(encuadre__estatus__in=[RecepcionRFIDEncuadre.Estatus.PENDIENTE, RecepcionRFIDEncuadre.Estatus.ACEPTADO])
+            self._lecturas_de_otros_encuadres_vigentes(encuadre, misma_orden).filter(repetido)
             .values_list("encuadre_id", flat=True).first()
         )
         if otro:
-            raise ValidationError({"epc": f"Esta pieza ya se leyó en el encuadre {otro} de la misma orden."})
+            raise ValidationError({"epc": self.MENSAJE_EN_OTRO_ENCUADRE.format(encuadre=otro)})
+
+    @staticmethod
+    def _bloquear_orden(encuadre):
+        """Candado de la OC u OP del encuadre (#1453), siempre después del del
+        encuadre. Devuelve el filtro de las lecturas de la misma orden, o ``None``
+        si el encuadre no tiene orden (no se bloquea nada)."""
+        if encuadre.orden_compra_id:
+            OrdenCompra.objects.select_for_update().filter(pk=encuadre.orden_compra_id).values_list("pk").first()
+            return Q(encuadre__orden_compra_id=encuadre.orden_compra_id)
+        if encuadre.op_id:
+            OrdenProduccion.objects.select_for_update().filter(pk=encuadre.op_id).values_list("pk").first()
+            return Q(encuadre__op_id=encuadre.op_id)
+        return None
+
+    @staticmethod
+    def _lecturas_de_otros_encuadres_vigentes(encuadre, misma_orden):
+        return (
+            RecepcionRFIDLectura.objects.filter(misma_orden)
+            .exclude(encuadre_id=encuadre.pk)
+            .filter(encuadre__estatus__in=[RecepcionRFIDEncuadre.Estatus.PENDIENTE, RecepcionRFIDEncuadre.Estatus.ACEPTADO])
+        )
+
+    @staticmethod
+    def _ya_en_el_encuadre(encuadre, formas, etiqueta_ids):
+        """Lecturas del encuadre que ya son alguna pieza de la tanda: ``(codigo_tags,
+        etiqueta_ids)`` de las que coinciden en cualquier forma del EPC o etiqueta."""
+        filas = encuadre.lecturas.filter(Q(codigo_tag__in=formas) | Q(etiqueta_id__in=etiqueta_ids))
+        tags, etiquetas = set(), set()
+        for codigo_tag, etiqueta_id in filas.values_list("codigo_tag", "etiqueta_id"):
+            tags.add(codigo_tag)
+            if etiqueta_id:
+                etiquetas.add(etiqueta_id)
+        return tags, etiquetas
+
+    def _lecturas_paginadas(self, encuadre):
+        """``GET {id}/lecturas/`` (EC-998): las lecturas del detalle, paginadas con
+        la paginación opcional del listado (sin ``?limit=``, todas)."""
+        qs = encuadre.lecturas.select_related("producto", "producto_variante").order_by("id")
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response(RecepcionRFIDLecturaSerializer(page, many=True).data)
+        return Response(RecepcionRFIDLecturaSerializer(qs, many=True).data)
+
+    def _lecturas_lote(self, request, encuadre):
+        """``{"epcs": [...]}`` (EC-998): una tanda bajo un solo candado del encuadre
+        y uno de la orden, en ese orden, con consultas fijas sin importar su tamaño.
+
+        Por pieza (el resto de la tanda se guarda): repetida en la tanda o ya en
+        el encuadre (cualquier forma equivalente del EPC o la misma etiqueta), o ya
+        leída en otro encuadre vigente de la misma orden. La tanda completa (nada
+        se guarda) con payload inválido o un encuadre no pendiente. Un EPC no
+        registrado se guarda sin asignar, como en ``{epc}``."""
+        entrada = RecepcionRFIDLecturasLoteInputSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        epcs = entrada.validated_data["epcs"]
+        E = RecepcionRFIDEncuadre.Estatus
+        with transaction.atomic():
+            estatus = (
+                RecepcionRFIDEncuadre.objects.select_for_update()
+                .values_list("estatus", flat=True).get(pk=encuadre.pk)
+            )
+            if estatus != E.PENDIENTE:
+                raise ValidationError({"estatus": "Solo se puede escanear un encuadre pendiente."})
+
+            piezas = _resolver_epcs_rfid(encuadre, epcs)
+            formas = set().union(*(p["formas"] for p in piezas))
+            etiqueta_ids = {p["etiqueta"].pk for p in piezas if p["etiqueta"] is not None}
+            tags_encuadre, etiquetas_encuadre = self._ya_en_el_encuadre(encuadre, formas, etiqueta_ids)
+            otras = []
+            misma_orden = self._bloquear_orden(encuadre)
+            if misma_orden is not None:
+                # Por ``id`` de lectura, como el ``first()`` de ``{epc}``.
+                otras = list(
+                    self._lecturas_de_otros_encuadres_vigentes(encuadre, misma_orden)
+                    .filter(Q(codigo_tag__in=formas) | Q(etiqueta_id__in=etiqueta_ids))
+                    .order_by("id").values_list("encuadre_id", "codigo_tag", "etiqueta_id")
+                )
+
+            aceptadas, rechazadas = [], []
+            tags_tanda, etiquetas_tanda = set(), set()
+
+            def es(pieza, tags, etiquetas):
+                etiqueta = pieza["etiqueta"]
+                return bool(pieza["formas"] & tags) or (etiqueta is not None and etiqueta.pk in etiquetas)
+
+            for i, pieza in enumerate(piezas):
+                if es(pieza, tags_encuadre, etiquetas_encuadre):
+                    rechazadas.append((i, self._rechazo(pieza, self.MOTIVO_REPETIDO_EN_ENCUADRE)))
+                    continue
+                if es(pieza, tags_tanda, etiquetas_tanda):
+                    rechazadas.append((i, self._rechazo(pieza, self.MOTIVO_REPETIDO_EN_TANDA)))
+                    continue
+                etiqueta = pieza["etiqueta"]
+                otro = next((
+                    encuadre_id for encuadre_id, codigo_tag, otra_etiqueta in otras
+                    if codigo_tag in pieza["formas"] or (etiqueta is not None and otra_etiqueta == etiqueta.pk)
+                ), None)
+                if otro:
+                    rechazadas.append((i, self._rechazo(pieza, self.MOTIVO_EN_OTRO_ENCUADRE, otro)))
+                    continue
+                tags_tanda.add(pieza["codigo_tag"])
+                if etiqueta is not None:
+                    etiquetas_tanda.add(etiqueta.pk)
+                aceptadas.append((i, pieza))
+
+            creadas = self._insertar_lote(encuadre, aceptadas, rechazadas)
+        rechazadas.sort(key=lambda par: par[0])
+        return Response({
+            "creadas": RecepcionRFIDLecturaLigeraSerializer(creadas, many=True).data,
+            "rechazadas": [rechazo for _, rechazo in rechazadas],
+        }, status=status.HTTP_200_OK)
+
+    def _insertar_lote(self, encuadre, aceptadas, rechazadas):
+        """Un solo ``INSERT ... RETURNING`` para las piezas aceptadas. Bajo los dos
+        candados no puede chocar con otra lectura del API; si algo escrito por otro
+        camino viola ``uq_recepcion_rfid_lectura_encuadre_tag``, se releen los tags
+        del encuadre, esas piezas pasan a repetidas y se intenta una vez más."""
+        for intento in (1, 2):
+            nuevas = [
+                RecepcionRFIDLectura(
+                    encuadre=encuadre,
+                    codigo_tag=pieza["codigo_tag"],
+                    etiqueta=pieza["etiqueta"],
+                    orden_compra_detalle_id=pieza["orden_compra_detalle_id"],
+                    orden_produccion_detalle_id=pieza["orden_produccion_detalle_id"],
+                    producto=pieza["producto"],
+                    producto_variante=pieza["producto_variante"],
+                    cantidad_leida=Decimal("1"),
+                    metadata=pieza["metadata"],
+                )
+                for _, pieza in aceptadas
+            ]
+            if not nuevas:
+                return []
+            try:
+                with transaction.atomic():
+                    return RecepcionRFIDLectura.objects.bulk_create(nuevas)
+            except IntegrityError as exc:
+                if intento == 2 or not self._es_tag_repetido(exc):
+                    raise
+                ya = set(
+                    encuadre.lecturas.filter(codigo_tag__in=[n.codigo_tag for n in nuevas])
+                    .values_list("codigo_tag", flat=True)
+                )
+                rechazadas.extend(
+                    (i, self._rechazo(pieza, self.MOTIVO_REPETIDO_EN_ENCUADRE))
+                    for i, pieza in aceptadas if pieza["codigo_tag"] in ya
+                )
+                aceptadas = [(i, pieza) for i, pieza in aceptadas if pieza["codigo_tag"] not in ya]
+        return []
+
+    def _rechazo(self, pieza, motivo, otro_encuadre=None):
+        rechazo = {"epc": pieza["epc"], "motivo": motivo}
+        if motivo == self.MOTIVO_EN_OTRO_ENCUADRE:
+            rechazo["mensaje"] = self.MENSAJE_EN_OTRO_ENCUADRE.format(encuadre=otro_encuadre)
+            rechazo["encuadre"] = otro_encuadre
+        else:
+            rechazo["mensaje"] = self.TAG_REPETIDO
+        return rechazo
 
     @classmethod
     def _es_tag_repetido(cls, exc):

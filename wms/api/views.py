@@ -30,6 +30,7 @@ from wms.models import (
     DespachoDetalle,
     EtiquetaRFIDDetalle,
     EtiquetaRFIDImpresion,
+    LectorRFID,
     Packing,
     PackingDetalle,
     Picking,
@@ -42,6 +43,7 @@ from wms.models import (
 )
 from nucleo.kpis import entero_param
 from nucleo.listados import PaginacionOpcionalLimitOffset
+from nucleo.scope import empresa_ids_lectura, sucursales_permitidas_q
 from wms.api.lectores_rfid import lectores_visibles
 from wms.api import pickings_listado
 from wms.scope import documentos_wms_visibles
@@ -926,7 +928,12 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 "ligan después a su empresa o etiqueta (`ligar_lecturas_previas`). Sin cursor, "
                 "lo más nuevo primero. Con `unicos`, la última lectura (por `id`) de cada EPC "
                 "entre los lectores visibles, solo si es posterior al cursor. Entero >= 0; "
-                "inválido → 400."
+                "inválido → 400. "
+                "La respuesta trae `cursor` (EC-998), el `id` con el que pedir lo siguiente: sin "
+                "`despues_de_id`, el más alto de todas las lecturas visibles (con el filtro de "
+                "`lector`, sin `solo_match` ni `unicos`; 0 si no hay ninguna), para arrancar una "
+                "captura sin depender de lo que traiga `scans`; con `despues_de_id`, el más alto "
+                "devuelto o, si no vino nada, el mismo `despues_de_id`."
             )),
             OpenApiParameter("epc", OpenApiTypes.STR,
                              description="Debug: busca este EPC entre las lecturas devueltas."),
@@ -957,6 +964,7 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
 
         Response shape:
             {
+              cursor: int (EC-998, ver ``despues_de_id``),
               scans: [
                 {id, epc, timestamp, antenna, rssi, reader_ip,
                  match_impresion: bool,
@@ -1031,6 +1039,11 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
                 )
             else:
                 base = base.filter(pk__in=ultimas.values("scan_id"))
+        # ``cursor`` sin ``despues_de_id`` (EC-998), ANTES de leer ``scans``: una
+        # lectura que se confirme entre las dos consultas queda arriba del cursor y
+        # sale en el siguiente polling; calculado después, quedaba debajo sin haber
+        # salido nunca.
+        cursor = self._cursor_de_arranque(user, lector_id) if despues_de_id is None else None
         # El match ya viene ligado desde que se recibió la lectura (``etiqueta``):
         # una sola consulta, sin recalcular variantes de EPC en cada polling.
         scans = list(
@@ -1052,6 +1065,9 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         if lector_id is not None and not scans:
             if not lectores_visibles(user).filter(pk=lector_id).exists():
                 raise NotFound({"lector": "No existe ese lector."})
+        # Con ``despues_de_id``, el ``id`` más alto devuelto, sin consulta extra.
+        if despues_de_id is not None:
+            cursor = max((s.pk for s in scans), default=despues_de_id)
         # Mismo alcance que get_queryset: un no admin solo ve el detalle de las
         # etiquetas impresas en sus sucursales.
         sucursales = None
@@ -1127,7 +1143,45 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
             "unique_epc_prefixes_head30": sorted({e[:4] for e in epcs})[:30],
             "query_epc_search": q_search_debug,
         }
-        return Response({"scans": data, "debug_get": debug_get})
+        return Response({"scans": data, "debug_get": debug_get, "cursor": cursor})
+
+    @staticmethod
+    def _cursor_de_arranque(user, lector_id):
+        """``cursor`` de ``scans/`` sin ``despues_de_id`` (EC-998): el ``id`` más alto
+        de todas las lecturas visibles (``visibles_para``, con ``lector`` pero sin
+        ``solo_match`` ni ``unicos``), 0 si no hay. No el de ``scans``: con el feed
+        vacío o filtrado, arrancar en 0 o abajo dejaba entrar lecturas viejas que se
+        ligan después a una etiqueta (``ligar_lecturas_previas``).
+
+        ``ORDER BY id DESC LIMIT 1``, no ``MAX(id)``. Para un no admin, el ``OR`` de
+        ``visibles_para`` (sucursal del lector, o sin lector la de la etiqueta) se
+        parte en sus dos ramas, el mismo conjunto: con el ``OR`` sobre dos JOIN,
+        Postgres bajaba por la llave primaria filtrando fila por fila, y si el
+        usuario no veía ninguna lectura recorría la tabla completa. Cada rama usa el
+        índice ``(lector, id)``: por los lectores de sus sucursales, y por
+        ``lector IS NULL`` las lecturas sin token."""
+        def tope(qs):
+            return qs.order_by("-id").values_list("id", flat=True).first() or 0
+
+        visibles = RfidScan.objects.visibles_para(user)
+        if lector_id is not None:
+            visibles = visibles.filter(lector_id=lector_id)
+        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
+            return tope(visibles)
+        empresa_ids = empresa_ids_lectura(user)
+        if not empresa_ids:
+            return 0
+        de_la_empresa = RfidScan.objects.filter(empresa_id__in=empresa_ids)
+        lectores = set(LectorRFID.objects.filter(sucursales_permitidas_q(user)).values_list("pk", flat=True))
+        if lector_id is not None:
+            lectores &= {lector_id}
+        maximo = tope(de_la_empresa.filter(lector_id__in=lectores)) if lectores else 0
+        if lector_id is None:
+            sin_lector = de_la_empresa.filter(
+                sucursales_permitidas_q(user, "etiqueta__impresion__sucursal_id"), lector__isnull=True,
+            )
+            maximo = max(maximo, tope(sin_lector))
+        return maximo
 
     @action(
         detail=False,
