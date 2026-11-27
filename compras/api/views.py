@@ -3992,6 +3992,51 @@ def total_esperado_encuadre_rfid(encuadre, mapas):
     return sum((esperado for *_, esperado in _renglones_esperados_rfid(encuadre, mapas)), Decimal("0"))
 
 
+def _completo_rfid(esperado_y_leido):
+    """``completo`` (#1464): hay algo esperado y cada renglón llegó a su esperado
+    con lo leído en ese renglón. Lo leído sin asignar, o de más en otro renglón,
+    ya no tapa lo que falta. Única copia de la regla: detalle y listado."""
+    hay_esperado = False
+    for esperado, leido in esperado_y_leido:
+        if esperado > 0:
+            if leido < esperado:
+                return False
+            hay_esperado = True
+    return hay_esperado
+
+
+def leido_por_renglon_encuadres_rfid(encuadre_ids):
+    """Lo leído por renglón de una página de encuadres, en una sola consulta
+    agrupada (#1464): ``{(encuadre_id, "oc"|"op", renglón_id): cantidad}``. Las
+    lecturas sin asignar no entran."""
+    leido = {}
+    if not encuadre_ids:
+        return leido
+    filas = (
+        RecepcionRFIDLectura.objects.filter(encuadre_id__in=encuadre_ids)
+        .filter(Q(orden_compra_detalle__isnull=False) | Q(orden_produccion_detalle__isnull=False))
+        .values_list("encuadre_id", "orden_compra_detalle_id", "orden_produccion_detalle_id")
+        .annotate(t=Sum("cantidad_leida")).order_by()
+    )
+    for encuadre_id, oc_detalle_id, op_detalle_id, cantidad in filas:
+        cantidad = Decimal(str(cantidad or 0))
+        for lado, renglon_id in (("oc", oc_detalle_id), ("op", op_detalle_id)):
+            if renglon_id:
+                clave = (encuadre_id, lado, renglon_id)
+                leido[clave] = leido.get(clave, Decimal("0")) + cantidad
+    return leido
+
+
+def completo_encuadre_rfid(encuadre, mapas, leido):
+    """``completo`` del listado, con ``leido_por_renglon_encuadres_rfid``: la misma
+    regla y los mismos renglones que el resumen del detalle."""
+    lado = "oc" if encuadre.orden_compra_id else "op"
+    return _completo_rfid(
+        (esperado, leido.get((encuadre.pk, lado, detalle.pk), Decimal("0")))
+        for detalle, *_, esperado in _renglones_esperados_rfid(encuadre, mapas)
+    )
+
+
 def resumen_encuadre_rfid(encuadre, mapas=None):
     """Esperado = ordenado - ya recibido (no solo lo contratado, ver B1 del audit).
 
@@ -4008,6 +4053,7 @@ def resumen_encuadre_rfid(encuadre, mapas=None):
     lecturas = list(encuadre.lecturas.all())
 
     detalles = []
+    esperado_y_leido = []
     total_esperado = Decimal("0")
     for detalle, ordenado, ya_recibido, esperado in _renglones_esperados_rfid(encuadre, mapas):
         if encuadre.orden_compra_id:
@@ -4024,6 +4070,7 @@ def resumen_encuadre_rfid(encuadre, mapas=None):
             producto = getattr(detalle.producto_variante, "producto", None)
 
         total_esperado += esperado
+        esperado_y_leido.append((esperado, leido))
         variante = detalle.producto_variante
         detalles.append({
             "detalle_id": detalle.pk,
@@ -4052,7 +4099,7 @@ def resumen_encuadre_rfid(encuadre, mapas=None):
         "total_esperado": str(total_esperado),
         "total_leido": str(total_leido),
         "total_sin_asignar": str(total_sin_asignar),
-        "completo": bool(total_esperado > 0 and total_leido >= total_esperado),
+        "completo": _completo_rfid(esperado_y_leido),
     }
 
 
@@ -4164,13 +4211,16 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         # Fila ligera (EC-981): sin ``lecturas[]`` ni ``resumen``. ``total_esperado``
         # sale de los renglones y el recibido de toda la página en bloque (las
-        # mismas consultas que el resumen del detalle); lo leído, de la anotación.
+        # mismas consultas que el resumen del detalle); lo leído, de la anotación,
+        # y ``completo`` por renglón con una consulta agrupada de la página (#1464).
         queryset = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(queryset)
         encuadres = list(page if page is not None else queryset)
         mapas = mapas_resumen_encuadres_rfid(encuadres, ligero=True)
+        leido = leido_por_renglon_encuadres_rfid([e.pk for e in encuadres])
         context = self.get_serializer_context()
         context["totales_esperados"] = {e.pk: total_esperado_encuadre_rfid(e, mapas) for e in encuadres}
+        context["completos"] = {e.pk: completo_encuadre_rfid(e, mapas, leido) for e in encuadres}
         serializer = self.get_serializer(encuadres, many=True, context=context)
         if page is not None:
             return self.get_paginated_response(serializer.data)

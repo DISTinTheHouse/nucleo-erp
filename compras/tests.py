@@ -3831,9 +3831,10 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
     mismo que el que el detalle calcula encuadre por encuadre."""
 
     # Listado (fila ligera, EC-981): encuadres con lo leído anotado; renglones
-    # de OC y de OP; recibido + rechazado de cada lado. Detalle: encuadre,
-    # lecturas, renglones, recibido y rechazado.
-    CONSULTAS_LISTADO = 7
+    # de OC y de OP; recibido + rechazado de cada lado; lo leído por renglón de
+    # la página para ``completo`` (#1464). Detalle: encuadre, lecturas,
+    # renglones, recibido y rechazado.
+    CONSULTAS_LISTADO = 8
     CONSULTAS_DETALLE = 5
 
     def test_listado_no_crece_con_encuadres_ni_lecturas(self):
@@ -3903,6 +3904,27 @@ class RecepcionRFIDEncuadreConsultasTests(_EncuadresRFIDFixture, TestCase):
         )
         self.assertEqual([(l["producto_nombre"], l["producto_variante_nombre"]) for l in op["lecturas"]],
                          [("Playera a", self.t["a"]["variantes"][1].nombre)])
+
+    def test_completo_por_renglon_sin_contar_lo_no_asignado(self):
+        """#1464: lecturas sin asignar, o de más en un renglón, no completan el
+        encuadre; ``completo`` solo cuando cada renglón llega a su esperado, igual
+        en listado y detalle."""
+        oc, (a, b) = self._oc("a", [5, 5])
+        encuadre = self._encuadre("a", orden_compra=oc)
+        api = self._api()
+
+        def completo():
+            fila = next(e for e in api.get(self.URL_ENCUADRES).json() if e["id"] == encuadre.pk)
+            resumen = api.get(f"{self.URL_ENCUADRES}{encuadre.pk}/").json()["resumen"]
+            self.assertEqual(fila["completo"], resumen["completo"])
+            return resumen["completo"]
+
+        self._leer(encuadre, None, 10)  # 10 tags sin resolver: total_leido = total_esperado
+        self.assertFalse(completo())
+        self._leer(encuadre, a, 10)  # A leído de más, B en cero
+        self.assertFalse(completo())
+        self._leer(encuadre, b, 5)
+        self.assertTrue(completo())
 
     def test_aislamiento_por_empresa(self):
         api = self._api()

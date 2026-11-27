@@ -3325,7 +3325,7 @@ El repetido regresa `400` también si llegan dos envíos simultáneos de la mism
   }
 }
 ```
-`esperado` = ordenado − ya recibido (no el total bruto de la OC/OP). `completo` es solo informativo; el backend no bloquea aceptar un encuadre incompleto.
+`esperado` = ordenado − ya recibido (no el total bruto de la OC/OP). `completo` = hay algo esperado y **cada renglón** llegó a su `esperado` con su propio `leido` (#1464): lo leído sin asignar (`total_sin_asignar`) o de más en otro renglón no tapa lo que falta. `total_leido` sigue siendo todo lo que pasó por la antena; lo asignado a renglones es `total_leido − total_sin_asignar`. Mismo valor en listado y detalle. `completo` es solo informativo; el backend no bloquea aceptar un encuadre incompleto.
 
 **4) Aceptar** — `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/aceptar/` (sin body). Pasa a `ACEPTADO`. **No mueve inventario ni crea `Recepcion`** — solo deja el conteo validado; la recepción formal se sigue haciendo con `recepciones/onboarding/` de siempre.
 

@@ -925,7 +925,8 @@ class RecepcionRFIDEncuadreListSerializer(RecepcionRFIDEncuadreSerializer):
     """Fila del listado (EC-981): los campos del detalle sin ``lecturas[]`` ni
     ``resumen``, con sus totales planos (mismos nombres y formato que en
     ``resumen``). ``total_leido``/``total_sin_asignar`` vienen anotados por el
-    viewset; ``total_esperado``, en ``context["totales_esperados"]``."""
+    viewset; ``total_esperado`` y ``completo``, en ``context["totales_esperados"]``
+    y ``context["completos"]``."""
 
     lecturas = None
     resumen = None
@@ -957,8 +958,8 @@ class RecepcionRFIDEncuadreListSerializer(RecepcionRFIDEncuadreSerializer):
 
     @extend_schema_field(OpenApiTypes.BOOL)
     def get_completo(self, obj):
-        esperado = self._esperado(obj)
-        return bool(esperado > 0 and obj.total_leido >= esperado)
+        # Por renglón, como el resumen del detalle (#1464).
+        return self.context["completos"].get(obj.pk, False)
 
 
 class RecepcionRFIDEncuadreCreateSerializer(serializers.ModelSerializer):
