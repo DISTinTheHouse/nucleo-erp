@@ -1022,6 +1022,41 @@ class ScannerRFIDSeguridadTests(TestCase):
         siguiente = self._scans(self.admin_a, despues_de_id=inicio["cursor"])
         self.assertEqual([s["id"] for s in siguiente["scans"]], [llegadas["despues"].pk])
 
+    def test_cursor_de_arranque_igual_al_de_visibles_para(self):
+        """El cursor de un no admin, partido en sus dos ramas (lectores de sus
+        sucursales y lecturas sin lector), es el mismo que el ``id`` más alto de
+        ``visibles_para`` para cualquier usuario y filtro de lector."""
+        from wms.api.views import EtiquetaRFIDViewSet
+
+        impresiones = {
+            suc: EtiquetaRFIDImpresion.objects.create(empresa=self.empresa_a, sucursal=suc, cantidad=1)
+            for suc in (self.sucursal_a, self.sucursal_a2)
+        }
+        etiquetas = {
+            suc: EtiquetaRFIDDetalle.objects.create(impresion=imp, epc=f"CAFE{suc.pk:020d}", barcode_value="X")
+            for suc, imp in impresiones.items()
+        }
+        self._sembrar(self.empresa_a, self.lector_a, 3, "aaaa")
+        self._sembrar(self.empresa_a, self.lector_a2, 3, "a2a2")
+        # Sin lector (sin token): visibles por la sucursal de su etiqueta; la última, de a2.
+        RfidScan.objects.create(empresa=self.empresa_a, epc=etiquetas[self.sucursal_a].epc, etiqueta=etiquetas[self.sucursal_a])
+        RfidScan.objects.create(empresa=self.empresa_a, epc=etiquetas[self.sucursal_a2].epc, etiqueta=etiquetas[self.sucursal_a2])
+        self._sembrar(self.empresa_b, self.lector_b, 2, "bbbb")
+        usuarios = (self.admin_a, self.superuser, self.usuario_a, self.usuario_sin_sucursales, self.usuario_sin_empresa)
+        for user in usuarios:
+            for lector_id in (None, self.lector_a.pk, self.lector_a2.pk, self.lector_b.pk):
+                with self.subTest(user=user.username, lector=lector_id):
+                    visibles = RfidScan.objects.visibles_para(user)
+                    if lector_id is not None:
+                        visibles = visibles.filter(lector_id=lector_id)
+                    esperado = visibles.order_by("-id").values_list("id", flat=True).first() or 0
+                    self.assertEqual(EtiquetaRFIDViewSet._cursor_de_arranque(user, lector_id), esperado)
+        # El no admin de la sucursal A: su lector y la lectura sin lector de A, no las de A2.
+        self.assertEqual(
+            EtiquetaRFIDViewSet._cursor_de_arranque(self.usuario_a, None),
+            RfidScan.objects.get(etiqueta=etiquetas[self.sucursal_a]).pk,
+        )
+
     def test_cursor_cuesta_una_consulta_solo_sin_despues_de_id(self):
         from django.db import connection
         from django.test.utils import CaptureQueriesContext

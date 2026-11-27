@@ -30,6 +30,7 @@ from wms.models import (
     DespachoDetalle,
     EtiquetaRFIDDetalle,
     EtiquetaRFIDImpresion,
+    LectorRFID,
     Packing,
     PackingDetalle,
     Picking,
@@ -42,6 +43,7 @@ from wms.models import (
 )
 from nucleo.kpis import entero_param
 from nucleo.listados import PaginacionOpcionalLimitOffset
+from nucleo.scope import empresa_ids_lectura, sucursales_permitidas_q
 from wms.api.lectores_rfid import lectores_visibles
 from wms.api import pickings_listado
 from wms.scope import documentos_wms_visibles
@@ -1149,13 +1151,37 @@ class EtiquetaRFIDViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Gene
         de todas las lecturas visibles (``visibles_para``, con ``lector`` pero sin
         ``solo_match`` ni ``unicos``), 0 si no hay. No el de ``scans``: con el feed
         vacío o filtrado, arrancar en 0 o abajo dejaba entrar lecturas viejas que se
-        ligan después a una etiqueta (``ligar_lecturas_previas``). ``ORDER BY id DESC
-        LIMIT 1`` y no ``MAX(id)``: con el filtro de sucursal de un no admin el MAX
-        recorría todas las lecturas de la empresa."""
+        ligan después a una etiqueta (``ligar_lecturas_previas``).
+
+        ``ORDER BY id DESC LIMIT 1``, no ``MAX(id)``. Para un no admin, el ``OR`` de
+        ``visibles_para`` (sucursal del lector, o sin lector la de la etiqueta) se
+        parte en sus dos ramas, el mismo conjunto: con el ``OR`` sobre dos JOIN,
+        Postgres bajaba por la llave primaria filtrando fila por fila, y si el
+        usuario no veía ninguna lectura recorría la tabla completa. Cada rama usa el
+        índice ``(lector, id)``: por los lectores de sus sucursales, y por
+        ``lector IS NULL`` las lecturas sin token."""
+        def tope(qs):
+            return qs.order_by("-id").values_list("id", flat=True).first() or 0
+
         visibles = RfidScan.objects.visibles_para(user)
         if lector_id is not None:
             visibles = visibles.filter(lector_id=lector_id)
-        return visibles.order_by("-id").values_list("id", flat=True).first() or 0
+        if getattr(user, "is_superuser", False) or getattr(user, "is_admin_empresa", False):
+            return tope(visibles)
+        empresa_ids = empresa_ids_lectura(user)
+        if not empresa_ids:
+            return 0
+        de_la_empresa = RfidScan.objects.filter(empresa_id__in=empresa_ids)
+        lectores = set(LectorRFID.objects.filter(sucursales_permitidas_q(user)).values_list("pk", flat=True))
+        if lector_id is not None:
+            lectores &= {lector_id}
+        maximo = tope(de_la_empresa.filter(lector_id__in=lectores)) if lectores else 0
+        if lector_id is None:
+            sin_lector = de_la_empresa.filter(
+                sucursales_permitidas_q(user, "etiqueta__impresion__sucursal_id"), lector__isnull=True,
+            )
+            maximo = max(maximo, tope(sin_lector))
+        return maximo
 
     @action(
         detail=False,
