@@ -4505,8 +4505,8 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             codigo_tag = resolved["codigo_tag"]
             if encuadre.lecturas.filter(resolved["repetido"]).exists():
                 raise ValidationError({campo: self.TAG_REPETIDO})
-            if campo == "epc":
-                self._exigir_epc_libre_en_la_orden(encuadre, resolved["repetido"])
+            # Por ``epc`` y por ``codigo_tag`` (obsoleto, #1484): la misma regla.
+            self._exigir_epc_libre_en_la_orden(encuadre, resolved["repetido"], campo)
 
             try:
                 with transaction.atomic():
@@ -4579,10 +4579,11 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             self._auditar(request, encuadre, "CANCELAR", antes, {"estatus": encuadre.estatus, "motivo": motivo})
         return Response(RecepcionRFIDEncuadreCabeceraSerializer(encuadre).data)
 
-    def _exigir_epc_libre_en_la_orden(self, encuadre, repetido):
-        """#1453: una pieza (EPC) cuenta en un solo encuadre vigente (pendiente o
-        aceptado) de la misma OC u OP. Se bloquea la orden para que dos encuadres
-        escaneando a la vez se formen. 2 consultas, solo para lecturas por EPC."""
+    def _exigir_epc_libre_en_la_orden(self, encuadre, repetido, campo="epc"):
+        """#1453: una pieza (EPC, o ``codigo_tag`` por el camino obsoleto, #1484)
+        cuenta en un solo encuadre vigente (pendiente o aceptado) de la misma OC u
+        OP. Se bloquea la orden para que dos encuadres escaneando a la vez se
+        formen. 2 consultas. El error va en el campo que se mandó."""
         misma_orden = self._bloquear_orden(encuadre)
         if misma_orden is None:
             return
@@ -4591,7 +4592,7 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
             .values_list("encuadre_id", flat=True).first()
         )
         if otro:
-            raise ValidationError({"epc": self.MENSAJE_EN_OTRO_ENCUADRE.format(encuadre=otro)})
+            raise ValidationError({campo: self.MENSAJE_EN_OTRO_ENCUADRE.format(encuadre=otro)})
 
     @staticmethod
     def _bloquear_orden(encuadre):
