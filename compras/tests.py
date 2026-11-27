@@ -3288,7 +3288,7 @@ class EncuadreRFIDLecturaEPCTests(_EncuadreRFIDEPCFixture, TestCase):
         resp = self._leer({"codigo_tag": "C982a-G"})
         self.assertEqual(resp.status_code, 400, resp.content)
         self.assertEqual(
-            resp.json(), {"codigo_tag": [f"Esta pieza ya se leyó en el encuadre {otro.pk} de la misma orden."]})
+            resp.json(), {"codigo_tag": f"Esta pieza ya se leyó en el encuadre {otro.pk} de la misma orden."})
         RecepcionRFIDEncuadre.objects.filter(pk=otro.pk).update(estatus=RecepcionRFIDEncuadre.Estatus.CANCELADO)
         self._leer_ok({"codigo_tag": "C982a-G"})
 
