@@ -2699,7 +2699,8 @@ class PedidoProgramarTests(TestCase):
     def test_total_piezas_incluye_lineas_de_muestra_sin_sku(self):
         """Una línea de MUESTRA (``producto_nombre_externo``, sin catálogo/SKU)
         cuenta para lo que mesa de control puede programar (#912): un pedido de
-        solo muestras también se programa. El tope sigue siendo el total.
+        solo muestras también se programa. El tope sigue siendo el total. Sin su
+        SKU de producción (``sku_muestra``) queda pendiente de SKU y no se programa.
         """
         pedido = self._pedido("P-000003")
         det_catalogo = PedidoDetalle.objects.create(pedido=pedido, producto=self.producto)
@@ -2710,12 +2711,18 @@ class PedidoProgramarTests(TestCase):
         det_muestra = PedidoDetalle.objects.create(
             pedido=pedido, producto_nombre_externo="Gorra edición especial sin SKU"
         )
-        PedidoDetalleTalla.objects.create(
+        talla_muestra = PedidoDetalleTalla.objects.create(
             pedido_detalle=det_muestra, talla=self.talla_l, cantidad=20,
             lleva_bordado=True, lleva_reflejante=True, lleva_corte_manga=True,
         )
+        pendiente = self._patch(
+            self.admin_mesa, {"programaciones": [{"destino": "BORDADO", "cantidad": 70}]}, pedido=pedido
+        )
+        self.assertEqual(pendiente.status_code, 400, pendiente.json())
+        self.assertIn("pendientes de SKU", str(pendiente.json()["programaciones"]))
+        PedidoDetalleTalla.objects.filter(pk=talla_muestra.pk).update(sku_muestra="GORRA-ESP-L")
 
-        # Las 20 piezas de muestra cuentan: el total programable es 50 + 20 = 70.
+        # Con su SKU de producción, las 20 piezas de muestra cuentan: 50 + 20 = 70.
         ok = self._patch(
             self.admin_mesa, {"programaciones": [{"destino": "BORDADO", "cantidad": 70}]}, pedido=pedido
         )
@@ -5068,14 +5075,14 @@ class PedidoReglasEstatusTests(TestCase):
             estado=inventario_reservas.Estado.ACTIVA, usuario=self.mesa,
         )
 
-        # 35 con inventario que devolver: los 22 de cancelar sin inventario más el
+        # 37 con inventario que devolver: los 24 de cancelar sin inventario más el
         # bloqueo de las existencias, su UPDATE en lote, el movimiento, su detalle y la
         # auditoría ENTRADA (5); el evento ``crear`` del movimiento en la bitácora
         # (savepoint + INSERT + release, 3; 28e6211) y el costeo promedio en bloque
         # (5; 379d5f0, #809: 3 cuando el artículo ya tiene costo). Medido igual con
         # 2 y con 8 productos (y 1 y 5 reservas): no crece con los renglones. Sin
         # cargar ``empresa`` ni ``sucursal`` (EC-803).
-        with self.assertNumQueries(35):
+        with self.assertNumQueries(37):
             resp = self._cancelar(self.mesa)
 
         self.assertEqual(resp.status_code, 200, resp.content)
@@ -5113,9 +5120,10 @@ class PedidoReglasEstatusTests(TestCase):
         # 22: bloqueo, documentos vivos, lectura de la auditoría de inventario (sin nada
         # que devolver: no hay bloqueo, UPDATE ni movimiento), reservas y auditoría
         # (EC-583), sin cargar ``pedido.empresa`` para la auditoría (EC-803); más los
-        # eventos ``estatus`` y ``baja`` del pedido en la bitácora (3 + 3; 28e6211).
+        # eventos ``estatus`` y ``baja`` del pedido en la bitácora (3 + 3; 28e6211); más
+        # la cascada de #1357: OC ligadas y pre-órdenes vivas (2, sin UPDATE si no hay).
         # Medido igual con 0 y con 5 reservas.
-        with self.assertNumQueries(22):
+        with self.assertNumQueries(24):
             self._cancelar(self.mesa)
         self.assertLess(time.perf_counter() - inicio, 0.5)
 
@@ -5457,6 +5465,8 @@ class PedidoTrazabilidadTests(TestCase):
 
     def test_vencido_es_rojo(self):
         pedido = self._pedido(clasificacion="A", dias_confirmado=10)  # A = 2-5 días
+        # El compromiso corre desde que se clasificó (a48b6f0c), no desde la confirmación.
+        Pedido.objects.filter(pk=pedido.pk).update(fecha_clasificacion=timezone.localdate() - timedelta(days=10))
         data = self._data(pedido)
         self.assertEqual(data["resumen"]["semaforo"], "rojo")
         self.assertTrue(data["resumen"]["motivos"][0].startswith("Vencido desde"))
@@ -5469,12 +5479,17 @@ class PedidoTrazabilidadTests(TestCase):
         for pedido in (cancelado, self._pedido(clasificacion=None), self._pedido(clasificacion="X")):
             self.assertEqual(self._data(pedido)["resumen"]["semaforo"], "gris")
 
-    def test_compromiso_corre_desde_fecha_confirmacion(self):
+    def test_compromiso_corre_desde_fecha_clasificacion(self):
+        """a48b6f0c: el compromiso corre desde el día en que se clasificó; mover
+        ``fecha_confirmacion`` no lo cambia, reclasificar sí."""
         pedido = self._pedido(clasificacion="A")
         pedido.fecha_confirmacion = timezone.now() + timedelta(days=3)
         pedido.save(update_fields=["fecha_confirmacion"])
-        esperado = timezone.localdate(pedido.fecha_confirmacion) + timedelta(days=5)
-        self.assertEqual(self._data(pedido)["pedido"]["fecha_compromiso"], esperado.isoformat())
+        hoy = timezone.localdate()
+        self.assertEqual(self._data(pedido)["pedido"]["fecha_compromiso"], (hoy + timedelta(days=5)).isoformat())
+        pedido.clasificacion = "B"  # B = 5-8 días
+        pedido.save(update_fields=["clasificacion"])
+        self.assertEqual(self._data(pedido)["pedido"]["fecha_compromiso"], (hoy + timedelta(days=8)).isoformat())
 
     # --- scope y costo ----------------------------------------------------
 
@@ -9131,19 +9146,19 @@ class VentasOrderingServidorTests(TestCase):
 
     def test_backends_con_ordering_de_lista_blanca(self):
         from django_filters.rest_framework import DjangoFilterBackend
-        from rest_framework.filters import SearchFilter
-        from nucleo.listados import OrdenamientoEstableFilter
+        from nucleo.listados import BusquedaSoloListadoFilter, OrdenamientoEstableFilter
         from ventas.api.views import MesaControlViewSet
 
         from ventas.api.cotizaciones_listado import OrdenamientoCotizacionesFilter
         from ventas.api.pedidos_listado import OrdenamientoPedidosFilter
 
         # Los globales sin el ``OrderingFilter`` de DRF, más el de lista blanca y desempate.
+        # La búsqueda solo en el listado, no en el detalle (#1261).
         for viewset in (CotizacionViewSet, MesaControlViewSet):
             with self.subTest(viewset=viewset.__name__):
                 self.assertEqual(
                     tuple(viewset.filter_backends),
-                    (DjangoFilterBackend, SearchFilter, OrdenamientoCotizacionesFilter),
+                    (DjangoFilterBackend, BusquedaSoloListadoFilter, OrdenamientoCotizacionesFilter),
                 )
                 # Los importes de cotización no se le ocultan a nadie: el orden por
                 # importe (agrupado por moneda, EC-811) sí entra; ``gran_total`` crudo no.
@@ -9153,7 +9168,8 @@ class VentasOrderingServidorTests(TestCase):
         # Pedidos (EC-782): el mismo desempate, y los importes solo para quien los ve
         # (#537: ordenar por un monto oculto dejaría deducirlo).
         self.assertEqual(
-            tuple(PedidoViewSet.filter_backends), (DjangoFilterBackend, SearchFilter, OrdenamientoPedidosFilter),
+            tuple(PedidoViewSet.filter_backends),
+            (DjangoFilterBackend, BusquedaSoloListadoFilter, OrdenamientoPedidosFilter),
         )
         self.assertTrue(issubclass(OrdenamientoPedidosFilter, OrdenamientoEstableFilter))
         self.assertLessEqual({"gran_total", "subtotal"}, set(PedidoViewSet.ordering_fields))
