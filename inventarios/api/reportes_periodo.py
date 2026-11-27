@@ -535,17 +535,20 @@ def reporte_existencias(user, query_params, almacen_id=_SIN_LEER):
 # --- Movimientos por periodo ---------------------------------------------------
 
 
-def tipo_movimiento_requerido(query_params):
+#: ``tipo_movimiento`` vacío o ``TODOS``: los cuatro tipos juntos.
+TODOS = "TODOS"
+
+
+def tipos_del_query(query_params):
+    """``(etiqueta, tipos)``: ``TODOS`` (o sin ``tipo_movimiento``) son los cuatro."""
     tipo_movimiento = (query_params.get("tipo_movimiento") or "").strip().upper()
+    if tipo_movimiento in ("", TODOS):
+        return TODOS, TIPOS_MOVIMIENTO
     if tipo_movimiento not in TIPOS_MOVIMIENTO:
         raise ValidationError(
-            {
-                "tipo_movimiento": (
-                    "tipo_movimiento es requerido y debe ser ENTRADA, SALIDA, AJUSTE o TRANSFERENCIA."
-                )
-            }
+            {"tipo_movimiento": "tipo_movimiento debe ser ENTRADA, SALIDA, AJUSTE, TRANSFERENCIA o TODOS."}
         )
-    return tipo_movimiento
+    return tipo_movimiento, (tipo_movimiento,)
 
 
 # Almacén de cada lado (origen/destino) de un renglón de movimiento, por tipo y
@@ -607,161 +610,360 @@ def anotar_almacenes(qs, tipo_movimiento, lados=None, campos=("codigo", "nombre"
     return qs.annotate(**anotaciones)
 
 
-def reporte_movimientos(user, query_params):
-    """Reporte de movimientos de un tipo en el periodo, completo y sin paginar.
+def _almacen_por_lado(tipos):
+    """Anotaciones ``almacen_origen_res``/``almacen_destino_res`` (id) para uno o
+    varios tipos, con las rutas de ``RUTAS_ALMACEN_POR_LADO``. El AJUSTE solo usa
+    el lado origen (los dos son el mismo almacén)."""
+    anotaciones = {}
+    for lado in ("origen", "destino"):
+        casos = []
+        for tipo in tipos:
+            if tipo == "AJUSTE" and lado == "destino":
+                continue
+            rutas = RUTAS_ALMACEN_POR_LADO[tipo].get(lado)
+            if not rutas:
+                continue
+            ids = [f"{ruta}_id" for ruta in rutas]
+            expr = Coalesce(*ids) if len(ids) > 1 else models.F(ids[0])
+            casos.append((tipo, expr))
+        if not casos:
+            continue
+        if len(tipos) == 1:
+            anotaciones[f"almacen_{lado}_res"] = casos[0][1]
+        else:
+            anotaciones[f"almacen_{lado}_res"] = models.Case(
+                *(models.When(movimiento_inventario__tipo_movimiento=t, then=e) for t, e in casos),
+                default=None, output_field=models.BigIntegerField(),
+            )
+    return anotaciones
 
-    Regresa ``tipo_movimiento``, ``fecha_inicio``/``fecha_final`` (``date``),
-    ``almacen_id`` (el filtro pedido), ``sin_almacenes``, ``results`` y
-    ``resumen`` con el mismo formato que la respuesta JSON.
+
+#: ``ordering`` permitido -> campo de la consulta (``-`` para descendente).
+ORDENAMIENTOS = {
+    "fecha": "movimiento_inventario__fecha_movimiento",
+    "tipo": "movimiento_inventario__tipo_movimiento",
+    "sku": "producto_variante__sku",
+    "producto": "producto_variante__producto__nombre",
+    "cantidad": "cantidad",
+    "costo_unitario": "costo_unitario",
+    "usuario": "movimiento_inventario__usuario__email",
+    "movimiento": "movimiento_inventario_id",
+}
+
+
+def _ordenamiento(query_params):
+    valor = (query_params.get("ordering") or "-fecha").strip()
+    campos = []
+    for parte in [p.strip() for p in valor.split(",") if p.strip()]:
+        desc = parte.startswith("-")
+        campo = ORDENAMIENTOS.get(parte.lstrip("-"))
+        if not campo:
+            raise ValidationError(
+                {"ordering": f"ordering admite: {', '.join(ORDENAMIENTOS)} (con - para descendente)."}
+            )
+        campos.append(f"-{campo}" if desc else campo)
+    desc_id = campos[0].startswith("-") if campos else True
+    return campos + ["-id" if desc_id else "id"]
+
+
+def _filtros_movimientos(query_params):
+    """Filtros opcionales del reporte de movimientos (ids estrictos: 400 si no son
+    enteros positivos)."""
+    qp = query_params
+    return {
+        "sku": (qp.get("sku") or "").strip() or None,
+        "producto_id": id_positivo(qp.get("producto_id") or qp.get("producto"), "producto_id"),
+        "usuario_id": id_positivo(qp.get("usuario_id") or qp.get("usuario"), "usuario_id"),
+        "ubicacion_id": id_positivo(qp.get("ubicacion_id") or qp.get("ubicacion"), "ubicacion_id"),
+        "referencia": (qp.get("referencia") or "").strip() or None,
+        "q": (qp.get("q") or "").strip() or None,
+    }
+
+
+TIPOS_RESUMEN = ("entradas", "salidas", "ajustes_positivos", "ajustes_negativos", "transferencias")
+
+
+def _bucket(tipo, signo):
+    if tipo == "ENTRADA":
+        return "entradas"
+    if tipo == "SALIDA":
+        return "salidas"
+    if tipo == "AJUSTE":
+        return "ajustes_negativos" if signo < 0 else "ajustes_positivos"
+    return "transferencias"
+
+
+def _deltas_ajuste_auditoria(empresa_ids, ajuste_ids):
+    """(ajuste, variante, ubicación) -> delta, de la bitácora, para ajustes sin
+    ``cantidad_antes``/``cantidad_despues`` (anteriores a esos campos). Una consulta."""
+    deltas = {}
+    if not ajuste_ids:
+        return deltas
+    eventos = AuditoriaEvento.objects.filter(
+        modulo="inventarios", tabla="existencias", accion="AJUSTE",
+        empresa_id__in=empresa_ids, despues_json__ajuste_id__in=sorted(ajuste_ids),
+    ).values_list("despues_json", flat=True)
+    for despues in eventos:
+        for item in (despues or {}).get("items") or []:
+            clave = (despues.get("ajuste_id"), to_int(item.get("producto_variante_id")), to_int(item.get("ubicacion_id")))
+            deltas.setdefault(clave, to_decimal(item.get("delta")))
+    return deltas
+
+
+def _resumen(por_tipo, total_cantidad, neto_piezas, neto_costo, movimientos, registros):
+    return {
+        "total_movimientos": movimientos,
+        "total_registros": registros,
+        "total_cantidad": str(quantize_qty(total_cantidad)),
+        "neto_piezas": str(quantize_qty(neto_piezas)),
+        "neto_costo": str(quantize_money(neto_costo)),
+        "por_tipo": {
+            k: {
+                "registros": por_tipo[k]["registros"],
+                "piezas": str(quantize_qty(por_tipo[k]["piezas"])),
+                "costo": str(quantize_money(por_tipo[k]["costo"])),
+            }
+            for k in TIPOS_RESUMEN
+        },
+    }
+
+
+def _por_tipo_en_cero():
+    return {k: {"registros": 0, "piezas": Decimal("0"), "costo": Decimal("0")} for k in TIPOS_RESUMEN}
+
+
+_UBICACION = ("id_ubicacion", "pasillo", "rack", "nivel", "posicion", "almacen_id")
+_COLUMNAS_MOVIMIENTOS = (
+    "id", "cantidad", "costo_unitario", "cantidad_antes", "cantidad_despues",
+    "producto_id", "producto_variante_id", "variante_produccion_id",
+    "ubicacion_origen_id", "ubicacion_destino_id", "movimiento_inventario_id",
+    *(f"movimiento_inventario__{c}" for c in (
+        "id", "tipo_movimiento", "fecha_movimiento", "observaciones", "ajuste_inventario_id", "usuario_id",
+    )),
+    *(f"movimiento_inventario__usuario__{c}" for c in ("id", "first_name", "last_name", "email")),
+    *(f"movimiento_inventario__ajuste_inventario__{c}" for c in ("id", "observaciones", "motivo")),
+    "producto__id", "producto__nombre",
+    *(f"producto_variante__{c}" for c in ("id", "sku", "nombre", "producto_id", "color_id", "talla_id")),
+    "producto_variante__producto__id", "producto_variante__producto__nombre",
+    "producto_variante__color__id", "producto_variante__color__nombre",
+    "producto_variante__talla__id", "producto_variante__talla__nombre",
+    *(f"variante_produccion__{c}" for c in ("id", "sku", "nombre")),
+    *(f"ubicacion_origen__{c}" for c in _UBICACION),
+    *(f"ubicacion_destino__{c}" for c in _UBICACION),
+    "ubicacion_origen__almacen__id_almacen", "ubicacion_origen__almacen__nombre",
+    "ubicacion_destino__almacen__id_almacen", "ubicacion_destino__almacen__nombre",
+)
+
+
+def reporte_movimientos(user, query_params):
+    """Reporte de movimientos del periodo, completo y sin paginar.
+
+    ``tipo_movimiento`` opcional (vacío o ``TODOS`` = los cuatro). Regresa
+    ``tipo_movimiento``, ``fecha_inicio``/``fecha_final`` (``date``),
+    ``almacen_id`` (el filtro pedido), ``filtros``, ``sin_almacenes``,
+    ``results`` y ``resumen`` (con ``por_tipo``) con el mismo formato que la
+    respuesta JSON. Consultas fijas: alcance, almacenes, detalle y, si hay
+    ajustes viejos sin cantidades antes/después, la bitácora.
     """
-    tipo_movimiento = tipo_movimiento_requerido(query_params)
+    from nucleo.scope import empresa_ids_lectura
+
+    from .origen import anotar_origen, filtro_busqueda, filtro_referencia, resolver_origen
+
+    etiqueta, tipos = tipos_del_query(query_params)
     fecha_inicio, fecha_final, inicio_dt, final_dt = parse_fechas(query_params)
+    filtros = _filtros_movimientos(query_params)
+    ordenamiento = _ordenamiento(query_params)
     allowed_almacen_ids, almacen_id = almacen_ids_movimientos(user, query_params)
 
     reporte = {
-        "tipo_movimiento": tipo_movimiento,
+        "tipo_movimiento": etiqueta,
         "fecha_inicio": fecha_inicio,
         "fecha_final": fecha_final,
         "almacen_id": almacen_id,
+        "filtros": {"almacen_id": almacen_id, "tipo_movimiento": etiqueta, **filtros},
         "sin_almacenes": not allowed_almacen_ids,
         "results": [],
-        "resumen": {
-            "total_movimientos": 0,
-            "total_registros": 0,
-            "total_cantidad": "0.0000",
-        },
+        "resumen": _resumen(_por_tipo_en_cero(), 0, 0, 0, 0, 0),
     }
     if not allowed_almacen_ids:
         return reporte
+
+    almacenes = {
+        a["id_almacen"]: a
+        for a in Almacen.objects.filter(pk__in=allowed_almacen_ids).values("id_almacen", "codigo", "nombre")
+    }
+    empresa_ids = empresa_ids_lectura(user)
 
     detalles_qs = (
         MovimientoInventarioDetalle.objects.select_related(
             "movimiento_inventario",
             "movimiento_inventario__usuario",
-            "movimiento_inventario__pedido",
-            # Observaciones/motivo del ajuste y folio de la transferencia. El
-            # almacén de la fila sale de ``anotar_almacenes``.
+            # Observaciones/motivo del ajuste.
             "movimiento_inventario__ajuste_inventario",
-            "movimiento_inventario__op",
-            "movimiento_inventario__transferencia",
             "producto",
             "producto_variante",
             "producto_variante__producto",
             "producto_variante__color",
             "producto_variante__talla",
+            "variante_produccion",
             # ``str(ubicacion)`` lleva el nombre de su almacén.
             "ubicacion_origen__almacen",
             "ubicacion_destino__almacen",
         )
+        # Solo las columnas que se usan: las filas completas de producto y
+        # variante multiplicaban lo que viaja desde la BD.
+        .only(*_COLUMNAS_MOVIMIENTOS)
         .filter(
             movimiento_inventario__activo=True,
-            movimiento_inventario__tipo_movimiento=tipo_movimiento,
             movimiento_inventario__fecha_movimiento__gte=inicio_dt,
             movimiento_inventario__fecha_movimiento__lte=final_dt,
+            # Defensa: además del almacén, el movimiento debe ser de la empresa
+            # activa del usuario, superusuario incluido (como el auxiliar).
+            movimiento_inventario__empresa_id__in=empresa_ids,
         )
-        .order_by("-movimiento_inventario__fecha_movimiento", "-id")
     )
+    if len(tipos) == 1:
+        detalles_qs = detalles_qs.filter(movimiento_inventario__tipo_movimiento=tipos[0])
 
-    # Defensa: además del almacén, el movimiento debe ser de la empresa activa del
-    # usuario, superusuario incluido (como el auxiliar).
-    from nucleo.scope import empresa_ids_lectura
-
-    detalles_qs = detalles_qs.filter(movimiento_inventario__empresa_id__in=empresa_ids_lectura(user))
+    if filtros["sku"]:
+        detalles_qs = detalles_qs.filter(
+            models.Q(producto_variante__sku=filtros["sku"]) | models.Q(variante_produccion__sku=filtros["sku"])
+        )
+    if filtros["producto_id"]:
+        detalles_qs = detalles_qs.filter(
+            models.Q(producto_id=filtros["producto_id"]) | models.Q(producto_variante__producto_id=filtros["producto_id"])
+        )
+    if filtros["usuario_id"]:
+        detalles_qs = detalles_qs.filter(movimiento_inventario__usuario_id=filtros["usuario_id"])
+    if filtros["ubicacion_id"]:
+        detalles_qs = detalles_qs.filter(
+            models.Q(ubicacion_origen_id=filtros["ubicacion_id"]) | models.Q(ubicacion_destino_id=filtros["ubicacion_id"])
+        )
+    if filtros["referencia"]:
+        detalles_qs = detalles_qs.filter(filtro_referencia(filtros["referencia"]))
+    if filtros["q"]:
+        detalles_qs = detalles_qs.filter(filtro_busqueda(filtros["q"]))
 
     # Un renglón entra si alguno de sus lados está en alcance, y se muestra con
-    # el primero que lo esté (origen antes que destino): en la transferencia,
-    # el origen si está en alcance, si no el destino. Una fila por renglón.
-    lados = tuple(RUTAS_ALMACEN_POR_LADO[tipo_movimiento])
-    if tipo_movimiento == "AJUSTE":
-        lados = ("origen",)  # los dos lados son el mismo almacén
+    # el primero que lo esté (origen antes que destino). Una fila por renglón.
+    anotaciones = _almacen_por_lado(tipos)
     filtro = models.Q()
-    for lado in lados:
-        filtro |= models.Q(**{f"almacen_{lado}_res__in": allowed_almacen_ids})
-    detalles_qs = anotar_almacenes(detalles_qs, tipo_movimiento, lados).filter(filtro)
+    for nombre in anotaciones:
+        filtro |= models.Q(**{f"{nombre}__in": allowed_almacen_ids})
+    detalles_qs = anotar_origen(detalles_qs.annotate(**anotaciones).filter(filtro)).order_by(*ordenamiento)
+
+    detalles = list(detalles_qs)
+    # Ajustes viejos sin cantidad antes/después: delta de la bitácora (1 consulta).
+    deltas_bitacora = _deltas_ajuste_auditoria(empresa_ids, {
+        d.movimiento_inventario.ajuste_inventario_id for d in detalles
+        if d.movimiento_inventario.tipo_movimiento == "AJUSTE" and d.movimiento_inventario.ajuste_inventario_id
+        and (d.cantidad_antes is None or d.cantidad_despues is None)
+    })
 
     resultados = []
-    total_cantidad = Decimal("0")
+    total_cantidad = neto_piezas = neto_costo = Decimal("0")
+    por_tipo = _por_tipo_en_cero()
     movimiento_ids = set()
 
-    for detalle in detalles_qs:
+    for detalle in detalles:
         movimiento = detalle.movimiento_inventario
+        tipo = movimiento.tipo_movimiento
         variante = detalle.producto_variante
         producto = getattr(variante, "producto", None) if variante else detalle.producto
 
-        # El filtro garantiza que alguno de los lados está en alcance.
-        lado = next(c for c in lados if getattr(detalle, f"almacen_{c}_res") in allowed_almacen_ids)
-        almacen_fila = {
-            "almacen_id": getattr(detalle, f"almacen_{lado}_res"),
-            "almacen_codigo": getattr(detalle, f"almacen_{lado}_res_codigo"),
-            "almacen_nombre": getattr(detalle, f"almacen_{lado}_res_nombre"),
-        }
-        if tipo_movimiento == "AJUSTE":
+        origen_id = getattr(detalle, "almacen_origen_res", None)
+        if origen_id in allowed_almacen_ids:
+            lado, almacen_fila_id = "origen", origen_id
+        else:
+            lado, almacen_fila_id = "destino", getattr(detalle, "almacen_destino_res", None)
+        almacen = almacenes.get(almacen_fila_id, {})
+        if tipo == "AJUSTE":
             ubicacion = detalle.ubicacion_destino or detalle.ubicacion_origen
         else:
             ubicacion = detalle.ubicacion_origen if lado == "origen" else detalle.ubicacion_destino
 
-        usuario = getattr(movimiento, "usuario", None)
-        pedido = getattr(movimiento, "pedido", None)
-        transferencia = getattr(movimiento, "transferencia", None)
         cantidad = to_decimal(detalle.cantidad)
         costo_unitario = to_decimal(detalle.costo_unitario)
+        if tipo == "ENTRADA":
+            signed = cantidad
+        elif tipo == "SALIDA":
+            signed = -cantidad
+        elif tipo == "TRANSFERENCIA":
+            # Con el almacén de la fila: sale del origen, entra al destino.
+            signed = -cantidad if lado == "origen" else cantidad
+        elif detalle.cantidad_antes is not None and detalle.cantidad_despues is not None:
+            # AJUSTE: ``cantidad`` es la cantidad final; el efecto es la diferencia.
+            signed = to_decimal(detalle.cantidad_despues) - to_decimal(detalle.cantidad_antes)
+        else:
+            signed = deltas_bitacora.get(
+                (movimiento.ajuste_inventario_id, detalle.producto_variante_id, getattr(ubicacion, "pk", None)),
+                cantidad,
+            )
+        costo_signed = quantize_money(signed * costo_unitario)
+
+        def o(campo, _d=detalle):
+            return getattr(_d, f"o_{campo}")
+
+        origen_tipo, origen_folio, origen_doc_id = resolver_origen(tipo, movimiento.pk, o)
+
         total_cantidad += cantidad
+        neto_piezas += signed
+        neto_costo += costo_signed
+        bucket = por_tipo[_bucket(tipo, signed)]
+        bucket["registros"] += 1
+        bucket["piezas"] += abs(signed)
+        bucket["costo"] += abs(costo_signed)
         movimiento_ids.add(movimiento.pk)
 
+        usuario = movimiento.usuario
+        ajuste = movimiento.ajuste_inventario
+        vp = detalle.variante_produccion
         resultados.append(
             {
                 "movimiento_inventario_id": movimiento.pk,
                 "movimiento_detalle_id": detalle.pk,
-                "tipo_movimiento": movimiento.tipo_movimiento,
+                "tipo_movimiento": tipo,
                 "fecha_movimiento": movimiento.fecha_movimiento,
-                **almacen_fila,
+                "almacen_id": almacen_fila_id,
+                "almacen_codigo": almacen.get("codigo"),
+                "almacen_nombre": almacen.get("nombre"),
                 "ubicacion_id": getattr(ubicacion, "pk", None),
                 "ubicacion_nombre": str(ubicacion) if ubicacion else None,
                 "producto_id": getattr(producto, "pk", None),
                 "producto_variante_id": getattr(variante, "pk", None),
-                "sku": getattr(variante, "sku", None),
+                "sku": getattr(variante, "sku", None) or getattr(vp, "sku", None),
                 "producto_nombre": (
-                    getattr(variante, "nombre", None)
-                    or getattr(producto, "nombre", None)
+                    getattr(variante, "nombre", None) or getattr(producto, "nombre", None) or getattr(vp, "nombre", None)
                 ),
                 "producto_base_nombre": getattr(producto, "nombre", None),
-                "color": getattr(getattr(variante, "color", None), "nombre", None)
-                if variante
-                else None,
-                "talla": getattr(getattr(variante, "talla", None), "nombre", None)
-                if variante
-                else None,
+                "color": getattr(getattr(variante, "color", None), "nombre", None) if variante else None,
+                "talla": getattr(getattr(variante, "talla", None), "nombre", None) if variante else None,
                 "cantidad": str(cantidad.quantize(Decimal("0.0001"))),
+                "cantidad_signed": str(signed.quantize(Decimal("0.0001"))),
                 "costo_unitario": str(costo_unitario.quantize(Decimal("0.01"))),
-                "costo_total": str((cantidad * costo_unitario).quantize(Decimal("0.01"))),
-                "pedido_id": getattr(pedido, "pk", None),
-                "pedido_folio": getattr(pedido, "folio", None),
-                "transferencia_id": getattr(transferencia, "pk", None),
-                "transferencia_folio": getattr(transferencia, "folio", None),
-                "recepcion_id": getattr(movimiento, "recepcion_id", None),
-                "ajuste_inventario_id": getattr(movimiento, "ajuste_inventario_id", None),
-                "op_id": getattr(movimiento, "op_id", None),
+                "costo_total": str(costo_signed),
+                "origen_tipo": origen_tipo,
+                "origen_folio": origen_folio,
+                "origen_id": origen_doc_id,
+                "pedido_id": o("pedido_id"),
+                "pedido_folio": o("pedido_folio"),
+                "transferencia_id": o("transferencia_id"),
+                "transferencia_folio": o("transferencia_folio"),
+                "recepcion_id": o("recepcion_id"),
+                "recepcion_folio": o("recepcion_folio"),
+                "ajuste_inventario_id": o("ajuste_id"),
+                "op_id": o("op_id"),
+                "op_folio": o("op_folio"),
                 "usuario_id": getattr(usuario, "pk", None),
-                "usuario_nombre": (
-                    usuario.get_full_name().strip() or usuario.email
-                    if usuario
-                    else None
-                ),
+                "usuario_nombre": (usuario.get_full_name().strip() or usuario.email) if usuario else None,
                 "observaciones": movimiento.observaciones,
-                "comentarios": (
-                    getattr(getattr(movimiento, "ajuste_inventario", None), "observaciones", None)
-                    or movimiento.observaciones
-                ),
-                "motivo_ajuste": getattr(
-                    getattr(movimiento, "ajuste_inventario", None), "motivo", None
-                ),
+                "comentarios": getattr(ajuste, "observaciones", None) or movimiento.observaciones,
+                "motivo_ajuste": getattr(ajuste, "motivo", None),
             }
         )
 
     reporte["results"] = resultados
-    reporte["resumen"] = {
-        "total_movimientos": len(movimiento_ids),
-        "total_registros": len(resultados),
-        "total_cantidad": str(total_cantidad.quantize(Decimal("0.0001"))),
-    }
+    reporte["resumen"] = _resumen(
+        por_tipo, total_cantidad, neto_piezas, neto_costo, len(movimiento_ids), len(resultados),
+    )
     return reporte

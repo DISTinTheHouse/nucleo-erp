@@ -2280,10 +2280,14 @@ class ReporteMovimientosPeriodoTests(ReportesPeriodoBase):
             self.assertEqual((antes[tipo][0], despues[tipo][0]), (1, 5), tipo)
             self.assertEqual(despues[tipo][1], antes[tipo][1], tipo)
 
-    def test_tipo_y_fechas_requeridos(self):
-        resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL)
+    def test_tipo_opcional_y_fechas_requeridas(self):
+        # Sin tipo (o TODOS) son los cuatro tipos; un tipo desconocido es 400.
+        resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": "OTRO"})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("tipo_movimiento", resp.json())
+        resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("fecha_inicio", resp.json())
         resp = self._get(self.a["usuario"], REPORTE_MOVIMIENTOS_PERIODO_URL, {"tipo_movimiento": "SALIDA", "fecha_inicio": ""})
         self.assertEqual(resp.status_code, 400)
         self.assertIn("fecha_inicio", resp.json())
