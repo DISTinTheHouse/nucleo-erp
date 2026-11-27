@@ -8157,7 +8157,10 @@ class OrdenBordadoOnboardingSkuTests(OrdenBordadoParcialidadesTests):
 
 
     def test_existencias_solo_cuentan_almacenes_pt_activos_de_las_sucursales_del_usuario(self):
-        """#518: MP, inactivos y otras sucursales no suman."""
+        """#518: MP, cuarentena, inactivos y otras empresas no suman. Otra sucursal
+        de la misma empresa solo suma para admin/superusuario, que ven todas las
+        de la empresa activa en el GET (#1446, #1449); un usuario sin
+        ``is_admin_empresa`` se queda en sus sucursales (#1465)."""
         from catalogo.models import Color, ProductoVariante
         from inventarios.models import Almacen, Existencia
 
@@ -8167,11 +8170,13 @@ class OrdenBordadoOnboardingSkuTests(OrdenBordadoParcialidadesTests):
         )
         PedidoDetalleTalla.objects.filter(pk=self.pdt_ch.pk).update(variante=variante)
         otra_suc = Sucursal.objects.create(empresa=self.empresa, codigo="OTR", nombre="Otra")
+        otra_empresa = Empresa.objects.create(codigo="otra", razon_social="Otra SA")
+        suc_otra_empresa = Sucursal.objects.create(empresa=otra_empresa, codigo="EXT", nombre="Externa")
 
-        def alm(codigo, **kw):
+        def alm(codigo, empresa=None, **kw):
             kw.setdefault("sucursal", self.sucursal)
             kw.setdefault("tipo_almacen", "PT")
-            a = Almacen.objects.create(empresa=self.empresa, codigo=codigo, nombre=codigo, **kw)
+            a = Almacen.objects.create(empresa=empresa or self.empresa, codigo=codigo, nombre=codigo, **kw)
             Existencia.objects.create(almacen=a, producto_variante=variante, cantidad=5)
             return a
 
@@ -8179,11 +8184,24 @@ class OrdenBordadoOnboardingSkuTests(OrdenBordadoParcialidadesTests):
         alm("MP", tipo_almacen="MP")                # no: materia prima
         alm("CUA", tipo_almacen="CUARENTENA")       # no: cuarentena
         alm("INA", estatus="INACTIVO")              # no: inactivo
-        alm("OTR", sucursal=otra_suc)               # no: sucursal fuera de alcance
+        alm("OTR", sucursal=otra_suc)               # solo admin: otra sucursal de la empresa
+        alm("EXT", empresa=otra_empresa, sucursal=suc_otra_empresa)  # no: otra empresa
 
-        linea = self._lineas_del_get()[self.talla_ch.pk]
+        no_admin = Usuario.objects.create(
+            username="operador-suc", email="operador-suc@acme.test", empresa=self.empresa,
+            sucursal_default=self.sucursal,
+        )
+        _conceder_permisos(no_admin, self.empresa, ["R-PRODUCCION-OB"])
 
-        self.assertEqual(linea["existencias"], 5.0)
+        def existencias(usuario):
+            client = APIClient()
+            client.force_authenticate(user=usuario)
+            data = client.get("/api/v1/produccion/orden-bordado/onboarding/").json()
+            pedido = next(p for p in data["pedidos"] if p["id"] == self.pedido.pk)
+            return {l["talla_id"]: l for l in pedido["detalles"]}[self.talla_ch.pk]["existencias"]
+
+        self.assertEqual(existencias(self.usuario), 10.0)  # admin: OK + OTR
+        self.assertEqual(existencias(no_admin), 5.0)       # sus sucursales: solo OK
 
     def test_sku_proscai_sale_del_producto_cuando_la_variante_no_lo_tiene(self):
         """#517: el dato real vive en ``Producto.cod_proscai``."""
