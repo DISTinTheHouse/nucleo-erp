@@ -10,13 +10,15 @@ producción en solo lectura o dentro de una transacción con rollback (ver
 """
 
 import copy
+import threading
+import time
 from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
-from django.db import connection
+from django.db import connection, connections
 from django.db.models import F
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -3510,6 +3512,131 @@ class EncuadreRFIDLecturasLoteTests(_EncuadreRFIDEPCFixture, TestCase):
         self.assertEqual(self._lote([self.EPC_B], ajeno).status_code, 404)
         self.assertEqual(self._lote_ok([self.EPC_G])["rechazadas"], [])
         self.assertFalse(ajeno.lecturas.exists())
+
+
+class EncuadreRFIDLecturasConcurrenciaTests(_EncuadreRFIDEPCFixture, TransactionTestCase):
+    """EC-998, concurrencia de verdad (dos conexiones a Postgres, un hilo cada una):
+    dos tandas sobre encuadres de la misma OC se forman en el candado de la orden,
+    y una tanda contra ``aceptar/`` en el del encuadre.
+
+    El hilo que llega primero se detiene con los candados tomados hasta que el
+    otro ya mandó su petición; así el segundo tiene que esperar el candado (se
+    comprueba con los tiempos), no solo llegar después."""
+
+    # TransactionTestCase vacía las tablas al terminar: con ``serialized_rollback``
+    # Django guarda el contenido inicial y aquí se repone también al final, para
+    # que ``--keepdb`` y las clases siguientes no encuentren la base vacía.
+    serialized_rollback = True
+    PAUSA = 0.6
+
+    def setUp(self):
+        type(self).setUpTestData()
+        super().setUp()
+
+    def _fixture_teardown(self):
+        super()._fixture_teardown()
+        for alias in self._databases_names(include_mirrors=False):
+            contenido = getattr(connections[alias], "_test_serialized_contents", None)
+            if contenido:
+                connections[alias].creation.deserialize_db_from_string(contenido)
+
+    def _otro_encuadre(self):
+        t = self.t["a"]
+        return RecepcionRFIDEncuadre.objects.create(
+            tipo_origen="OC", orden_compra=self.oc, empresa=t["empresa"], sucursal=t["sucursal"],
+            proveedor=t["proveedor"], almacen=t["almacen"], usuario=t["usuario"], fecha_recepcion=timezone.now(),
+        )
+
+    def _en_hilo(self, nombre, funcion, resultados):
+        def correr():
+            try:
+                resultados[nombre] = funcion()
+                resultados[f"{nombre}_fin"] = time.monotonic()
+            finally:
+                connection.close()
+        hilo = threading.Thread(target=correr, name=nombre)
+        hilo.start()
+        return hilo
+
+    def _post(self, url, body=None):
+        api = APIClient()
+        api.force_authenticate(self.t["a"]["usuario"])
+        return api.post(url, body or {}, format="json")
+
+    def _pausar_en(self, metodo, hilo_que_pausa, tomado, momentos):
+        """Envuelve ``metodo`` del viewset: en el hilo ``hilo_que_pausa`` avisa que ya
+        tiene el candado y se detiene ``PAUSA`` segundos con él tomado; en cualquier
+        hilo anota cuándo lo obtuvo."""
+        from compras.api.views import RecepcionRFIDEncuadreViewSet
+
+        original = getattr(RecepcionRFIDEncuadreViewSet, metodo)
+
+        def envuelto(*args, **kwargs):
+            resultado = original(*args, **kwargs)
+            momentos[threading.current_thread().name] = time.monotonic()
+            if threading.current_thread().name == hilo_que_pausa:
+                tomado.set()
+                time.sleep(self.PAUSA)
+            return resultado
+
+        return mock.patch.object(RecepcionRFIDEncuadreViewSet, metodo, staticmethod(envuelto)
+                                 if isinstance(RecepcionRFIDEncuadreViewSet.__dict__[metodo], staticmethod) else envuelto)
+
+    def test_dos_tandas_de_la_misma_orden_no_cuentan_la_pieza_dos_veces(self):
+        otro = self._otro_encuadre()
+        comunes = [self.EPC_G, self.EPC_PRODUCTO, "ABCDEF0123456789ABCDEF01"]
+        tomado, momentos, resultados = threading.Event(), {}, {}
+        with self._pausar_en("_bloquear_orden", "A", tomado, momentos):
+            a = self._en_hilo("A", lambda: self._post(
+                f"{self.URL}{self.encuadre.pk}/lecturas/", {"epcs": comunes + ["AAAA0000000000000000000A"]}), resultados)
+            self.assertTrue(tomado.wait(10))
+            b = self._en_hilo("B", lambda: self._post(
+                f"{self.URL}{otro.pk}/lecturas/", {"epcs": [f"{comunes[0]}00000000"] + comunes[1:] + ["BBBB0000000000000000000B"]}),
+                resultados)
+            a.join(15)
+            b.join(15)
+        self.assertEqual((resultados["A"].status_code, resultados["B"].status_code), (200, 200))
+        # B obtuvo el candado de la OC hasta que A confirmó.
+        self.assertGreaterEqual(momentos["B"], resultados["A_fin"] - 0.05)
+        data_a, data_b = resultados["A"].json(), resultados["B"].json()
+        self.assertEqual((len(data_a["creadas"]), data_a["rechazadas"]), (4, []))
+        self.assertEqual([c["codigo_tag"] for c in data_b["creadas"]], ["BBBB0000000000000000000B"])
+        self.assertEqual({(r["motivo"], r["encuadre"]) for r in data_b["rechazadas"]},
+                         {("en_otro_encuadre", self.encuadre.pk)})
+        self.assertEqual(len(data_b["rechazadas"]), 3)
+        self.assertEqual((self.encuadre.lecturas.count(), otro.lecturas.count()), (4, 1))
+
+    def test_tanda_que_llega_primero_entra_antes_de_aceptar(self):
+        tomado, momentos, resultados = threading.Event(), {}, {}
+        epcs = [self.EPC_G, self.EPC_PRODUCTO, "ABCDEF0123456789ABCDEF01"]
+        with self._pausar_en("_bloquear_orden", "tanda", tomado, momentos):
+            tanda = self._en_hilo("tanda", lambda: self._post(
+                f"{self.URL}{self.encuadre.pk}/lecturas/", {"epcs": epcs}), resultados)
+            self.assertTrue(tomado.wait(10))
+            aceptar = self._en_hilo("aceptar", lambda: self._post(f"{self.URL}{self.encuadre.pk}/aceptar/"), resultados)
+            tanda.join(15)
+            aceptar.join(15)
+        self.assertEqual((resultados["tanda"].status_code, resultados["aceptar"].status_code), (200, 200))
+        # aceptar/ esperó el candado del encuadre y contó las tres lecturas.
+        self.assertGreaterEqual(resultados["aceptar_fin"], resultados["tanda_fin"])
+        evento = AuditoriaEvento.objects.get(accion="ACEPTAR", id_registro=str(self.encuadre.pk))
+        self.assertEqual(evento.despues_json["lecturas"], 3)
+        self.assertEqual(resultados["aceptar"].json()["estatus"], "ACEPTADO")
+
+    def test_aceptar_que_llega_primero_rechaza_la_tanda_completa(self):
+        tomado, momentos, resultados = threading.Event(), {}, {}
+        with self._pausar_en("_auditar", "aceptar", tomado, momentos):
+            aceptar = self._en_hilo("aceptar", lambda: self._post(f"{self.URL}{self.encuadre.pk}/aceptar/"), resultados)
+            self.assertTrue(tomado.wait(10))
+            tanda = self._en_hilo("tanda", lambda: self._post(
+                f"{self.URL}{self.encuadre.pk}/lecturas/", {"epcs": [self.EPC_G, self.EPC_PRODUCTO]}), resultados)
+            aceptar.join(15)
+            tanda.join(15)
+        self.assertEqual(resultados["aceptar"].status_code, 200)
+        self.assertEqual(resultados["tanda"].status_code, 400, resultados["tanda"].content)
+        self.assertEqual(resultados["tanda"].json(), {"estatus": "Solo se puede escanear un encuadre pendiente."})
+        self.assertGreaterEqual(resultados["tanda_fin"], resultados["aceptar_fin"])
+        self.assertFalse(self.encuadre.lecturas.exists())
 
 
 class ComprasDashboardRetiradoTests(TestCase):
