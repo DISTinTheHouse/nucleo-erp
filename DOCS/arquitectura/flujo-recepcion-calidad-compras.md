@@ -2,7 +2,7 @@
 
 Repo: `nucleo-erp` (Django 6 + DRF). Apps: `compras`, `inventarios`, `produccion` (OP), `QA`, `hr`.
 
-**Estado: implementado** (el gate de Calidad de la sección 1; NO incluye el encuadre RFID/scanner de OP ni la política de rechazo — ver §5 y §6).
+**Estado: implementado** (el gate de Calidad de la sección 1; NO incluye la política de rechazo — ver §5 y §6; el encuadre RFID/scanner de OP se construyó después, ver §6).
 
 ## Resumen — flujo ACTUAL
 
@@ -98,7 +98,7 @@ Lo único que se agregó sin precedente en el modelo: `CalidadInspeccion.inspect
 
 ## 6. Lo que NO se construyó en este cambio (fuera de alcance, por decisión explícita de "no es para tanto")
 
-- **Encuadre RFID/scanner para OP.** `RecepcionRFIDEncuadre`/`RecepcionRFIDLectura` (`QA/views.py`, `/QA/rfid/recepciones/`) siguen siendo SOLO para OC — `crear_encuadre`, `_build_recepcion_summary` y `_resolver_tag_recepcion` solo miran `orden_compra`, aunque el modelo ya tiene `op`/`tipo_origen`. Sigue siendo una isla aparte, desconectada de `Recepcion`/`CalidadInspeccion` (nadie escribe `RecepcionRFIDEncuadre.recepcion`).
+- **Encuadre RFID/scanner para OP.** *Actualizado (#1457): ya se construyó después de este cambio.* El módulo `QA/views.py` (`/QA/rfid/recepciones/`) ya no existe. `RecepcionRFIDEncuadre`/`RecepcionRFIDLectura` viven en `compras/api/views.py` (`RecepcionRFIDEncuadreViewSet`, `/api/v1/compras/recepcion-rfid-encuadres/`), aceptan OC y OP, y resuelven cada lectura por EPC (`_resolver_epc_rfid`, EC-982) o por `codigo_tag` (`_resolver_tag_rfid`, obsoleto). Un encuadre `ACEPTADO` se liga a la `Recepcion` con `encuadre_rfid` en `recepciones/onboarding/` (`_ligar_encuadre_rfid`, #1441). Referencia del API: `DOCS/api/DOCUMENTACION_API.md`.
 - **Si el conteo por scanner debe ser obligatorio** (reemplazando la captura manual de `recepciones/onboarding/`) o quedarse como alternativa — sin decidir.
 - **Almacén fijo para producto terminado** ("almacén 00"). Sigue sin ser una regla de negocio forzada por el backend — el almacén se elige libremente al capturar la Recepción, igual para OC y para OP, mientras pertenezca a la empresa/sucursal correcta.
 - Cálculo de "pendiente por liberar calidad" (recibido − aprobado) como catálogo — hoy solo existe "pendiente por recibir" (ordenado − recibido) en `RecepcionViewSet.handle_get_onboarding` (:1003).
@@ -117,5 +117,5 @@ Lo único que se agregó sin precedente en el modelo: `CalidadInspeccion.inspect
 |---|---|---|
 | Recepción | `POST/GET /api/v1/compras/recepciones/onboarding/` | Solo conteo físico. Ya NO toca `Existencia`. |
 | Calidad | `POST/GET /api/v1/compras/calidad-inspecciones/onboarding/` | **Nuevo.** Único lugar que abona inventario. Inspección de todo el detalle en un solo envío, sin rondas. |
-| Encuadre RFID (scanner) | `/QA/rfid/recepciones/` (HTML, no REST) | Sigue solo para OC. No conectado a `Recepcion`/`CalidadInspeccion`. |
+| Encuadre RFID (scanner) | `/api/v1/compras/recepcion-rfid-encuadres/` | OC y OP. Lecturas por EPC o `codigo_tag`; el encuadre aceptado se liga a la `Recepcion` con `encuadre_rfid` en `recepciones/onboarding/` (#1441). |
 | Envío proveedor | — | No existe (mismo patrón, fuera de alcance). |
