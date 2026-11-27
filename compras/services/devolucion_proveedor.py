@@ -12,7 +12,7 @@ from collections import defaultdict
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Case, DecimalField, F, OuterRef, Subquery, Sum, Value, When
+from django.db.models import Case, DecimalField, F, OuterRef, Q, Subquery, Sum, Value, When
 from django.db.models.functions import Coalesce, Greatest
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -53,7 +53,11 @@ def _folio(empresa_id, sucursal_id):
 
 
 def _costo_oc(detalles_recepcion):
-    """Costo unitario en MXN por renglón de recepción, del renglón de su OC (1 consulta)."""
+    """Costo unitario en MXN por renglón de recepción, del renglón de su OC (1 consulta).
+
+    Sin costo (renglón sin ``orden_compra_detalle`` u OC en otra moneda sin
+    ``tipo_cambio``) el renglón no va en el resultado: ``crear`` lo rechaza (#1471).
+    El ``tipo_cambio`` es el de la entrada: la OC ya no se edita con recepciones."""
     ids = {d.orden_compra_detalle_id for d in detalles_recepcion if d.orden_compra_detalle_id}
     lineas = {
         l.pk: l for l in OrdenCompraDetalle.objects.filter(pk__in=ids).select_related("orden_compra__moneda")
@@ -66,7 +70,9 @@ def _costo_oc(detalles_recepcion):
         unitario = (linea.importe / linea.cantidad) if linea.cantidad else linea.precio
         oc = linea.orden_compra
         if (oc.moneda.codigo_iso or "").upper() != "MXN":
-            unitario = unitario * oc.tipo_cambio if oc.tipo_cambio else CERO
+            if not oc.tipo_cambio:
+                continue
+            unitario = unitario * oc.tipo_cambio
         costos[d.pk] = Decimal(str(unitario or 0))
     return costos
 
@@ -79,7 +85,10 @@ def renglones_devolvibles():
     Única regla de "pendiente de devolver" (EC-973): la usan ``pendientes`` (y por
     él el POST), la bandera ``tiene_devolucion_pendiente`` de la inspección y el
     filtro ``?devolucion_pendiente=`` de su listado. Sin acotar por empresa: quien
-    la usa filtra por la inspección o la anida en un queryset ya acotado."""
+    la usa filtra por la inspección o la anida en un queryset ya acotado.
+
+    Solo recepciones con proveedor u OC (#1477): lo rechazado de una OP no tiene a
+    quién devolverse."""
     decimal = DecimalField(max_digits=18, decimal_places=4)
     devuelto = (
         DevolucionProveedorDetalle.objects.filter(
@@ -94,6 +103,8 @@ def renglones_devolvibles():
     )
     return (
         CalidadInspeccionDetalle.objects.filter(resultado__in=RESULTADOS_DEVOLVIBLES)
+        .filter(Q(calidad_inspeccion__recepcion__proveedor_id__isnull=False)
+                | Q(calidad_inspeccion__recepcion__orden_compra_id__isnull=False))
         .exclude(calidad_inspeccion__estado=CalidadInspeccion.ESTADO_ANULADA)
         .annotate(cantidad_pendiente=Greatest(
             base - Coalesce(Subquery(devuelto, output_field=decimal), Value(CERO), output_field=decimal),
@@ -159,6 +170,10 @@ def crear(*, inspeccion, motivo, renglones, user, ip=None, user_agent=None):
     if inspeccion.estado == CalidadInspeccion.ESTADO_ANULADA:
         raise ValidationError({"calidad_inspeccion": "La inspección está anulada."})
     recepcion = inspeccion.recepcion
+    if not recepcion.proveedor_id and not recepcion.orden_compra_id:
+        raise ValidationError({"calidad_inspeccion": (
+            "La recepción no tiene proveedor ni orden de compra (p. ej. viene de una OP): "
+            "no hay a quién devolverle.")})
     disponibles = pendientes(inspeccion.pk)
     if not renglones:
         renglones = [{"calidad_detalle": k, "cantidad": v} for k, (_, v) in disponibles.items() if v > 0]
@@ -187,6 +202,15 @@ def crear(*, inspeccion, motivo, renglones, user, ip=None, user_agent=None):
 
     filas = {k: disponibles[k][0] for k in pedidos}
     costos = _costo_oc([f.recepcion_detalle for f in filas.values()])
+    if recepcion.orden_compra_id:
+        for cd_id in pedidos:
+            rd = filas[cd_id].recepcion_detalle
+            if rd.pk in costos:
+                continue
+            raise ValidationError({"detalles": (
+                f"{_articulo(filas[cd_id])}: sin costo, el renglón no está ligado a la orden de compra."
+                if not rd.orden_compra_detalle_id
+                else f"{_articulo(filas[cd_id])}: sin costo, la orden de compra no tiene tipo de cambio.")})
     unitarios = {cd_id: costos.get(filas[cd_id].recepcion_detalle_id, CERO) for cd_id in pedidos}
     importes = {cd_id: (cantidad * unitarios[cd_id]).quantize(CENT) for cd_id, cantidad in pedidos.items()}
     # El total va en el alta: la bitácora toma el ``total`` del INSERT (#1420).
