@@ -42,8 +42,10 @@ CAMPOS_BUSQUEDA = (
 
 # ``?ordering=`` con el nombre de la columna del front → ruta del ORM. ``folio``
 # ordena por ``id`` (crecen juntos); ``sku`` y la variante son NULL en las
-# impresiones por producto y van al final en ambas direcciones.
+# impresiones por producto y van al final en ambas direcciones. ``id`` es el
+# desempate que el front agrega (``ordering=<campo>,-id``), como en pickings y EC-981.
 CAMPOS_ORDEN = {
+    "id": "id",
     "folio": "id",
     "sku": "producto_variante__sku",
     "producto_nombre": "producto__nombre",
