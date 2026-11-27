@@ -3319,6 +3319,37 @@ Respuesta `201` (la lectura): los campos de siempre más `epc` (el EPC, `null` s
 
 El repetido regresa `400` también si llegan dos envíos simultáneos de la misma pieza (lector que manda doble; antes el segundo podía dar `500`, EC-981).
 
+**2b) Escanear una tanda (EC-998)** — el mismo `POST .../{id}/lecturas/` con `{"epcs": [...]}` (1 a 200 EPC, con el formato de `epc`). Cada EPC se resuelve exactamente como `{"epc"}` (etiqueta de la empresa del encuadre, renglón, sin asignar si no está registrado, `metadata` igual), pero toda la tanda va bajo **un solo** candado del encuadre y uno de la orden, con **8 consultas fijas** sin importar cuántos EPC traiga (una tarima de 500 piezas son 3 peticiones en vez de 500).
+
+```json
+{ "epcs": ["11112222333344445555AAAA", "11112222333344445555BBBB", "ABCDEF0123456789ABCDEF01"] }
+```
+Respuesta `200`:
+```json
+{
+  "creadas": [
+    { "id": 8, "codigo_tag": "11112222333344445555AAAA", "epc": "11112222333344445555AAAA",
+      "orden_compra_detalle": 12, "orden_produccion_detalle": null, "producto_nombre": "Camisa",
+      "producto_variante_nombre": "Camisa G", "metadata": { "resolved": true, "source": "EPC", "epc_leido": "11112222333344445555AAAA" },
+      "created_at": "2026-11-27T20:00:00Z" }
+  ],
+  "rechazadas": [
+    { "epc": "11112222333344445555BBBB", "motivo": "en_otro_encuadre",
+      "mensaje": "Esta pieza ya se leyó en el encuadre 41 de la misma orden.", "encuadre": 41 },
+    { "epc": "ABCDEF0123456789ABCDEF01", "motivo": "repetido_en_encuadre", "mensaje": "Este tag ya fue leído en este encuadre." }
+  ]
+}
+```
+- **Se rechaza por pieza y el resto se guarda** (`rechazadas[]`, en el orden en que llegaron; `epc` es el texto tal como se mandó):
+  - `repetido_en_tanda`: la misma pieza ya venía antes en la tanda (cualquier forma equivalente del EPC o la misma etiqueta).
+  - `repetido_en_encuadre`: el encuadre ya la tiene, con las mismas reglas que el `400` de `{"epc"}`.
+  - `en_otro_encuadre`: ya está en otro encuadre `PENDIENTE` o `ACEPTADO` de la misma OC/OP (#1453); trae `encuadre`. Las de encuadres cancelados entran.
+  - `mensaje` reutiliza los textos de `{"epc"}`.
+- **Se rechaza la tanda completa y no se guarda nada** (`400`): lista vacía (`{"epcs": ["Manda al menos un EPC."]}`), de más de 200 (`{"epcs": ["Máximo 200 EPC por tanda."]}`), algo que no es lista, un EPC vacío, nulo o de más de 120 caracteres (`{"epcs": {"<índice>": ["..."]}}`), mandar además `epc` o `codigo_tag`, o un encuadre que ya no está `PENDIENTE` (`{"estatus": "Solo se puede escanear un encuadre pendiente."}`).
+- `creadas[]` es una lectura ligera: los campos de la lectura que usa la pantalla (`id`, `codigo_tag`, `epc`, `orden_compra_detalle`, `orden_produccion_detalle`, `producto_nombre`, `producto_variante_nombre`, `metadata`, `created_at`). La lectura completa sale en `GET .../lecturas/`.
+- Reintentar una tanda cuya respuesta se perdió es seguro: lo que ya entró vuelve como `repetido_en_encuadre`.
+- `{"epc"}` y `{"codigo_tag"}` siguen exactamente igual (una pieza, `201` o `400`).
+
 **Listado** — `GET /api/v1/compras/recepcion-rfid-encuadres/` (EC-981). Fila ligera: los mismos campos del detalle **sin `lecturas[]` ni `resumen`**, más sus totales planos con los mismos nombres y formato que en `resumen`: `total_esperado`, `total_leido`, `total_sin_asignar` (texto decimal) y `completo` (bool). Para ver las lecturas usa el detalle.
 
 - Paginación opcional, como OC, recepciones y calidad: sin `?limit=` el arreglo completo; con `?limit=&offset=` → `{count, next, previous, results}` (`limit` tope 500; inválido → `400`).
@@ -3338,9 +3369,15 @@ El repetido regresa `400` también si llegan dos envíos simultáneos de la mism
   }
 }
 ```
+- `?sin_lecturas=1` (EC-998): el detalle **sin `lecturas[]`**; el `resumen` es el mismo, calculado con una consulta agrupada por renglón (no trae las lecturas). Sin el parámetro, el detalle no cambia.
+- `GET .../{id}/resumen/` (EC-998): solo el `resumen`, con la misma forma, 5 consultas fijas sin importar cuántas lecturas tenga. Para refrescar el avance durante la captura.
+- `GET .../{id}/lecturas/` (EC-998): las lecturas del detalle (misma forma que `lecturas[]`), en orden de captura (`id`). Paginación opcional como el listado: sin `?limit=` el arreglo completo; con `?limit=&offset=` → `{count, next, previous, results}` (`limit` tope 500; inválido → `400`).
+
 `esperado` = ordenado − ya recibido (no el total bruto de la OC/OP). `completo` = hay algo esperado y **cada renglón** llegó a su `esperado` con su propio `leido` (#1464): lo leído sin asignar (`total_sin_asignar`) o de más en otro renglón no tapa lo que falta. `total_leido` sigue siendo todo lo que pasó por la antena; lo asignado a renglones es `total_leido − total_sin_asignar`. Mismo valor en listado y detalle. `completo` es solo informativo; el backend no bloquea aceptar un encuadre incompleto.
 
 **4) Aceptar** — `POST /api/v1/compras/recepcion-rfid-encuadres/{id}/aceptar/` (sin body). Pasa a `ACEPTADO`. **No mueve inventario ni crea `Recepcion`** — solo deja el conteo validado; la recepción formal se sigue haciendo con `recepciones/onboarding/` de siempre.
+
+`aceptar/` y `cancelar/` responden **solo la cabecera** del encuadre (EC-998): los campos del detalle sin `lecturas[]` ni `resumen` (`estatus`, `estatus_label`, `aceptado_por*`, `fecha_aceptacion`, `motivo_cancelacion`, `fecha_cancelacion`, `cancelado_por*`, `updated_at` y el resto). Con 500 lecturas la respuesta bajaba ~222 KB.
 
 ---
 
@@ -3358,7 +3395,7 @@ Superuser y admin de empresa pasan siempre. Sin el permiso → `403 {"detail": "
 | Aceptar, cancelar y cerrar saldo de OC | `A-COMPRAS-OC` (sin cambio en aceptar y cancelar) |
 | Liberar calidad: `POST calidad-inspecciones/onboarding/` (es lo que mete la mercancía al inventario) | `C-WMS-RECEPCIONES` |
 | Encuadre RFID: crear, `lecturas/`, `aceptar/`, `cancelar/` | `C-WMS-RECEPCIONES` |
-| Encuadre RFID: listado, detalle y `onboarding/` (`GET`, #1439) | `R-WMS-RECEPCIONES` |
+| Encuadre RFID: listado, detalle, `onboarding/` (`GET`, #1439), `resumen/` y `GET lecturas/` (EC-998) | `R-WMS-RECEPCIONES` |
 
 Los demás `GET` no cambian.
 
@@ -7238,7 +7275,8 @@ No hay endpoint especial tipo onboarding. El modal consta de 3 partes:
   - `solo_match=1`: solo lecturas de etiquetas impresas por el ERP.
   - `unicos=1`: la última lectura de cada EPC (el FX repite el mismo tag cada pocos segundos); sin `lector`, entre los lectores que el usuario puede ver (un no admin, los de sus sucursales; EC-984).
   - `limite=N`: máximo de lecturas (1-200, default 50).
-  - `despues_de_id=N` (EC-982): cursor, solo lecturas con `id` mayor que `N` (entero ≥ 0; inválido → `400 {"despues_de_id"}`). Con `unicos=1`, la última lectura de cada EPC (por lector, de `RfidLecturaUltima`) sale solo si es posterior al cursor; se combina con `lector` y `solo_match`. **Con cursor el orden es por `id` ascendente** (lo más viejo primero, EC-984) y `limite` toma las primeras: si entre dos pollings llegan más de `limite` lecturas (una tarima frente a la antena), la respuesta trae las más viejas y el siguiente polling, con el `id` más alto devuelto como cursor, recoge las demás; con `unicos`, igual por el `id` de la última lectura de cada EPC (con cursor, la última por `id`, entre los lectores visibles para el usuario). **Límite del cursor por `id`**: puede perder una lectura que se confirma fuera de orden de `id` (dos `scans/receive/` simultáneos: el lote con `id` menor se confirma después de que el polling ya avanzó) o una que se liga más tarde a su empresa o etiqueta (`ligar_lecturas_previas`; también afecta a `solo_match`). Sin cursor, lo más nuevo primero, como siempre. Para ignorar lo leído antes de empezar una captura: al iniciarla toma el `id` más alto que regrese el feed (o `0` si viene vacío) y en cada polling manda como `despues_de_id` el `id` más alto visto hasta ese momento. `receive` descarta la misma etiqueta del mismo lector durante 30 s, así que una pieza que ya estaba frente a la antena antes de empezar puede tardar hasta 30 s en reaparecer. Sin el parámetro, la misma respuesta de siempre.
+  - `despues_de_id=N` (EC-982): cursor, solo lecturas con `id` mayor que `N` (entero ≥ 0; inválido → `400 {"despues_de_id"}`). Con `unicos=1`, la última lectura de cada EPC (por lector, de `RfidLecturaUltima`) sale solo si es posterior al cursor; se combina con `lector` y `solo_match`. **Con cursor el orden es por `id` ascendente** (lo más viejo primero, EC-984) y `limite` toma las primeras: si entre dos pollings llegan más de `limite` lecturas (una tarima frente a la antena), la respuesta trae las más viejas y el siguiente polling, con el `id` más alto devuelto como cursor, recoge las demás; con `unicos`, igual por el `id` de la última lectura de cada EPC (con cursor, la última por `id`, entre los lectores visibles para el usuario). **Límite del cursor por `id`**: puede perder una lectura que se confirma fuera de orden de `id` (dos `scans/receive/` simultáneos: el lote con `id` menor se confirma después de que el polling ya avanzó) o una que se liga más tarde a su empresa o etiqueta (`ligar_lecturas_previas`; también afecta a `solo_match`). Sin cursor, lo más nuevo primero, como siempre. Para ignorar lo leído antes de empezar una captura: al iniciarla toma el **`cursor`** de la respuesta (ver abajo) y en cada polling manda como `despues_de_id` el `cursor` de la respuesta anterior. (Tomar el `id` más alto de `scans`, o `0` si viene vacío, dejaba entrar lecturas viejas que se ligan después a una etiqueta cuando el feed venía vacío o filtrado por `solo_match`.) `receive` descarta la misma etiqueta del mismo lector durante 30 s, así que una pieza que ya estaba frente a la antena antes de empezar puede tardar hasta 30 s en reaparecer. Sin el parámetro, la misma respuesta de siempre.
+  - Respuesta `cursor` (EC-998, entero, junto a `scans` y `debug_get`, que no cambian): sin `despues_de_id`, el `id` más alto de **todas** las lecturas visibles para el usuario (mismo alcance que `scans`, con el filtro de `lector`, sin `solo_match` ni `unicos`; `0` si no hay ninguna; una consulta `MAX` más). Con `despues_de_id`, el `id` más alto devuelto o, si no vino nada, el mismo `despues_de_id` (sin consultas extra).
   - `epc=XXXX` (hex, debug): busca directo este EPC en el payload y devuelve `debug_get.query_epc_search.found_in_scans` (booleano rápido sin iterar).
 
 **Ejemplo URL de debug (recién impresa una etiqueta)**:
@@ -7251,6 +7289,7 @@ GET /api/v1/wms/etiquetas-rfid/scans/?epc=000012E32827000147C0C5F5
 
 ```json
 {
+  "cursor": 3856,
   "scans": [
     {
       "id": 3856,
