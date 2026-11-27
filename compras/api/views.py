@@ -10,7 +10,7 @@ from django.db.models import (
 )
 from django.db.models.functions import Coalesce, RowNumber
 from django.utils import timezone
-from rest_framework import generics, status, viewsets
+from rest_framework import generics, serializers as drf_serializers, status, viewsets
 from rest_framework.filters import OrderingFilter
 from rest_framework.decorators import action
 from rest_framework.permissions import SAFE_METHODS
@@ -18,7 +18,10 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from rest_framework.response import Response
 from inventarios.services import costeo
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
+from drf_spectacular.utils import (
+    OpenApiParameter, OpenApiResponse, PolymorphicProxySerializer, extend_schema, extend_schema_view,
+    inline_serializer,
+)
 from simple_history.utils import bulk_create_with_history
 
 from auditoria.models import AuditoriaEvento
@@ -4430,8 +4433,31 @@ class RecepcionRFIDEncuadreViewSet(viewsets.ModelViewSet):
     )
     @extend_schema(
         methods=["POST"],
-        request=RecepcionRFIDLecturaInputSerializer,
-        responses={201: RecepcionRFIDLecturaSerializer, 200: OpenApiTypes.OBJECT},
+        # Dos cuerpos (EC-998): una pieza (``{epc}``/``{codigo_tag}``) o una tanda (``{epcs}``).
+        request=PolymorphicProxySerializer(
+            component_name="RecepcionRFIDLecturaEntrada",
+            serializers=[RecepcionRFIDLecturaInputSerializer, RecepcionRFIDLecturasLoteInputSerializer],
+            resource_type_field_name=None,
+        ),
+        responses={
+            201: OpenApiResponse(RecepcionRFIDLecturaSerializer, description="Una pieza (`{epc}` o `{codigo_tag}`)."),
+            200: OpenApiResponse(
+                inline_serializer("RecepcionRFIDLecturasLoteRespuesta", {
+                    "creadas": RecepcionRFIDLecturaLigeraSerializer(many=True),
+                    "rechazadas": inline_serializer("RecepcionRFIDLecturaRechazada", {
+                        "epc": drf_serializers.CharField(help_text="El EPC tal como se mandó."),
+                        "motivo": drf_serializers.ChoiceField(choices=[
+                            "repetido_en_tanda", "repetido_en_encuadre", "en_otro_encuadre",
+                        ]),
+                        "mensaje": drf_serializers.CharField(),
+                        "encuadre": drf_serializers.IntegerField(
+                            required=False, help_text="Solo con `en_otro_encuadre`: el encuadre que ya la tiene.",
+                        ),
+                    }, many=True),
+                }),
+                description="Una tanda (`{epcs}`): las piezas guardadas y las rechazadas por pieza.",
+            ),
+        },
         description=(
             "Una pieza leída. Manda exactamente uno de `epc` (recomendado) o `codigo_tag` "
             "(obsoleto); ambos o ninguno → 400. Con `epc`, la etiqueta impresa por el ERP "
