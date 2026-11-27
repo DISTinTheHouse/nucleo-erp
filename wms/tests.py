@@ -772,13 +772,101 @@ class ScannerRFIDSeguridadTests(TestCase):
         self.assertEqual(resp.status_code, 404)
 
     def test_sin_cursor_orden_sin_cambios(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
         self._sembrar(self.empresa_a, self.lector_a, 5, "orde")
-        esperadas = list(
-            RfidScan.objects.order_by("-created_at", "-id").values_list("id", flat=True)
+        ids = list(RfidScan.objects.order_by("id").values_list("id", flat=True))
+        # ``created_at`` fuera del orden de ``id``: la más vieja por id es la más
+        # reciente por fecha, y dos comparten fecha (desempata ``-id``).
+        ahora = timezone.now()
+        RfidScan.objects.filter(pk=ids[0]).update(created_at=ahora + timedelta(hours=1))
+        RfidScan.objects.filter(pk__in=ids[1:3]).update(created_at=ahora - timedelta(hours=1))
+        esperadas = [ids[0], ids[4], ids[3], ids[2], ids[1]]
+        self.assertEqual(
+            list(RfidScan.objects.order_by("-created_at", "-id").values_list("id", flat=True)), esperadas
         )
+        self.assertNotEqual(esperadas, sorted(ids, reverse=True))
+
         self.assertEqual(self._ids_scans(self.admin_a), esperadas)
         self.assertEqual(self._ids_scans(self.admin_a, limite=2), esperadas[:2])
         self.assertEqual(self._ids_scans(self.admin_a, lector=self.lector_a.pk), esperadas)
+
+    def test_cursor_solo_match_recorre_las_etiquetas_impresas(self):
+        self._recibir(["0000AAAA00000000"])
+        corte = RfidScan.objects.order_by("-id").values_list("id", flat=True).first()
+        nuestras = [self._etiqueta_a(epc="6666AAAA%08d" % i).epc for i in range(5)]
+        ajenas = ["3035C9D3%08d" % i for i in range(4)]
+        # Intercaladas: etiqueta, ajena, etiqueta...
+        self._recibir([e for par in zip(nuestras, ajenas) for e in par] + [nuestras[-1]])
+        ligadas = list(
+            RfidScan.objects.filter(pk__gt=corte, etiqueta__isnull=False).order_by("id").values_list("id", flat=True)
+        )
+        self.assertEqual(len(ligadas), 5)
+
+        for extra in ({}, {"unicos": 1}, {"lector": self.lector_a.pk}):
+            with self.subTest(**extra):
+                polls = self._recorrer(self.admin_a, corte, limite=2, solo_match=1, **extra)
+                self.assertEqual([len(p) for p in polls], [2, 2, 1])
+                self.assertEqual([i for p in polls for i in p], ligadas)
+
+    def test_cursor_no_admin_recorre_solo_sus_sucursales(self):
+        self._recibir(["0000AAAA00000000"])
+        corte = RfidScan.objects.order_by("-id").values_list("id", flat=True).first()
+        self._recibir(["7777AAAA%08d" % i for i in range(3)], lector=self.lector_a)
+        self._recibir(["7777A2A2%08d" % i for i in range(3)], lector=self.lector_a2)
+        self._recibir(["7777AAAA%08d" % i for i in range(3, 5)], lector=self.lector_a)
+        propias = list(
+            RfidScan.objects.filter(pk__gt=corte, lector=self.lector_a).order_by("id").values_list("id", flat=True)
+        )
+        self.assertEqual(len(propias), 5)
+
+        for extra in ({}, {"unicos": 1}):
+            with self.subTest(**extra):
+                polls = self._recorrer(self.usuario_a, corte, limite=2, **extra)
+                self.assertEqual([len(p) for p in polls], [2, 2, 1])
+                self.assertEqual([i for p in polls for i in p], propias)
+
+    def test_unicos_no_admin_no_pierde_epc_leido_luego_en_otra_sucursal(self):
+        # EPC X: primero el lector de su sucursal (A), luego el de otra (A2). La
+        # última de la empresa es la de A2; un no admin de A debe ver la de A.
+        self._recibir(["0000AAAA00000000"])
+        corte = RfidScan.objects.order_by("-id").values_list("id", flat=True).first()
+        self._recibir(["8888ABCD00000001"], lector=self.lector_a)
+        propia = RfidScan.objects.get(epc="8888ABCD00000001", lector=self.lector_a).pk
+        self._recibir(["8888ABCD00000001"], lector=self.lector_a2)
+        ajena = RfidScan.objects.get(epc="8888ABCD00000001", lector=self.lector_a2).pk
+
+        # Sin cursor y con cursor: sale la de su lector, nunca la de A2.
+        for extra in ({}, {"despues_de_id": corte}):
+            with self.subTest(**extra):
+                ids = self._ids_scans(self.usuario_a, unicos=1, **extra)
+                self.assertIn(propia, ids)
+                self.assertNotIn(ajena, ids)
+        # El admin ve la más reciente de la empresa (la de A2), una sola vez.
+        ids_admin = self._ids_scans(self.admin_a, unicos=1, despues_de_id=corte)
+        self.assertIn(ajena, ids_admin)
+        self.assertNotIn(propia, ids_admin)
+
+    def test_cursor_unicos_elige_la_ultima_por_id(self):
+        # ``visto`` invertido respecto al ``id`` (dos receive simultáneos): con
+        # cursor manda el ``id``, así la lectura posterior al cursor no se pierde.
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        self._recibir(["9999ABCD00000001"], lector=self.lector_a)
+        vieja = RfidScan.objects.get(epc="9999ABCD00000001", lector=self.lector_a).pk
+        self._recibir(["9999ABCD00000001"], lector=self.lector_a2)
+        nueva = RfidScan.objects.get(epc="9999ABCD00000001", lector=self.lector_a2).pk
+        RfidLecturaUltima.objects.filter(scan_id=nueva).update(visto=timezone.now() - timedelta(hours=1))
+        RfidLecturaUltima.objects.filter(scan_id=vieja).update(visto=timezone.now())
+
+        self.assertEqual(self._ids_scans(self.admin_a, unicos=1, despues_de_id=vieja), [nueva])
+        self.assertEqual(self._ids_scans(self.admin_a, unicos=1, despues_de_id=0), [nueva])
+        # Sin cursor, como siempre: la de ``visto`` más reciente.
+        self.assertEqual(self._ids_scans(self.admin_a, unicos=1), [vieja])
 
     def test_cursor_con_unicos_busca_la_ultima_lectura_entre_las_nuevas(self):
         # Por ``scans/receive/`` con el token del lector: así se llena
