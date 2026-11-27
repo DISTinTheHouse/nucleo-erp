@@ -10,7 +10,7 @@ from hr.models import Empleado
 from ventas.models import PedidoDetalleTalla
 from ventas.services.sku_produccion_service import TALLAS_DE_LINEA_NO_MUESTRA_Q, linea_no_muestra_q
 from wms.models import Despacho, DespachoDetalle, Packing, PackingDetalle, PickingDetalle
-from inventarios.models import MovimientoInventario, MovimientoInventarioDetalle, TipoMovimiento
+from inventarios.models import Existencia, MovimientoInventario, MovimientoInventarioDetalle, TipoMovimiento
 from inventarios.services import costeo
 from wms.services.existencia_service import SaldoExistenciaAlmacen
 from ventas.services.retencion_service import bloquear_pedido_vivo
@@ -480,6 +480,15 @@ class DespachoService:
             d.pk: d for d in PickingDetalle.objects.filter(pk__in=[r.picking_detalle_id for r in rows])
             .select_related("producto")
         }
+        # Las filas de existencia de todas las claves que salen, en una consulta (y
+        # un bloqueo en orden de pk) en vez de una por clave; mismas claves que
+        # recorre el ciclo de abajo (los renglones sin piezas no bloquean nada).
+        saldo.precargar([
+            (pd.producto_id, pd.producto_variante_id, pd.variante_produccion_id)
+            for pd in (picking_dets.get(r.picking_detalle_id) for r in rows
+                       if Decimal(str(r.cantidad_empacada or 0)) > 0)
+            if pd is not None
+        ])
         for row in rows:
             pd = picking_dets[row.picking_detalle_id]
             cantidad = Decimal(str(row.cantidad_empacada or 0))
@@ -499,9 +508,14 @@ class DespachoService:
             ))
         if not detalles:
             return
+        # Un UPDATE para todas las filas (lo que hacía ``save(update_fields=["cantidad"])``
+        # fila por fila; ``Existencia`` no tiene señales).
+        consumidas = []
         for existencia, saldo_final in saldo.filas_consumidas():
             existencia.cantidad = saldo_final
-            existencia.save(update_fields=["cantidad"])
+            consumidas.append(existencia)
+        if consumidas:
+            Existencia.objects.bulk_update(consumidas, ["cantidad"])
         mov = MovimientoInventario.objects.create(
             empresa_id=packing.empresa_id, sucursal_id=packing.sucursal_id, pedido_id=packing.pedido_id,
             despacho=despacho,  # salida de WMS, no manual (#1250)

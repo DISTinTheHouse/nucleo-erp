@@ -63,7 +63,7 @@ from wms.services.rfid_label_service import RFIDLabelService
 class _ReleerAltaMixin:
     """``_releer``: el documento recién creado, leído con las precargas de ``get_queryset``.
 
-    Lo comparten ``PickingViewSet`` y ``PackingViewSet``. Serializar la instancia
+    Lo comparten ``PickingViewSet``, ``PackingViewSet`` y ``DespachoViewSet``. Serializar la instancia
     que devuelve el servicio resolvía cada FK de cada renglón con su propia
     consulta; releerla deja la respuesta del alta con el mismo costo fijo que el
     retrieve (EC-882), como ya hace ``trasladar``. El servicio ya validó empresa y
@@ -467,7 +467,7 @@ class PackingViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveMod
         return Response(PackingSerializer(self.get_queryset().get(pk=packing.pk)).data)
 
 
-class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
+class DespachoViewSet(_ReleerAltaMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericViewSet):
     queryset = Despacho.objects.all()
     serializer_class = DespachoSerializer
 
@@ -552,13 +552,13 @@ class DespachoViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, GenericV
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         despacho_instance = DespachoService.handle_store(serializer.validated_data, request.user)
-        return Response(DespachoSerializer(despacho_instance).data, status=status.HTTP_201_CREATED)
+        return Response(DespachoSerializer(self._releer(despacho_instance)).data, status=status.HTTP_201_CREATED)
 
     def create(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         despacho_instance = DespachoService.handle_store(serializer.validated_data, request.user)
-        return Response(DespachoSerializer(despacho_instance).data, status=status.HTTP_201_CREATED)
+        return Response(DespachoSerializer(self._releer(despacho_instance)).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], url_path="cancelar", url_name="cancelar")
     def cancelar(self, request, pk=None):

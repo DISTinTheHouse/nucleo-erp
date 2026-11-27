@@ -146,18 +146,15 @@ def _validar_por_clave_stock(requested_items, almacen_origen):
         return
 
     solicitado_por_clave = defaultdict(lambda: Decimal("0"))
-    disponible_por_clave = {}
     for item in requested_items:
-        clave = item["_clave_stock"]
-        solicitado_por_clave[clave] += item["cantidad"]
-        if clave not in disponible_por_clave:
-            _, _, dis = ExistenciaService.get_existencia_agregada(
-                almacen=almacen_origen,
-                producto=clave[0],
-                producto_variante=clave[1],
-                variante_produccion=clave[2],
-            )
-            disponible_por_clave[clave] = normalizar_decimal(dis)
+        solicitado_por_clave[item["_clave_stock"]] += item["cantidad"]
+    # Lo de ``get_existencia_agregada`` clave por clave, en 2 consultas para todas.
+    disponible_por_clave = {
+        clave: normalizar_decimal(dis)
+        for clave, dis in ExistenciaService.get_disponible_por_clave(
+            almacen_origen, list(solicitado_por_clave)
+        ).items()
+    }
 
     for clave, total_solicitado in solicitado_por_clave.items():
         total_disponible = disponible_por_clave.get(clave, Decimal("0"))
