@@ -710,8 +710,12 @@ def _deltas_ajuste_auditoria(empresa_ids, ajuste_ids):
     return deltas
 
 
-def _resumen(por_tipo, total_cantidad, neto_piezas, neto_costo, movimientos, registros):
-    return {
+def _fmt_bucket(b):
+    return {"registros": b["registros"], "piezas": str(quantize_qty(b["piezas"])), "costo": str(quantize_money(b["costo"]))}
+
+
+def _resumen(por_tipo, total_cantidad, neto_piezas, neto_costo, movimientos, registros, transferencias_lados=None):
+    resumen = {
         "total_movimientos": movimientos,
         "total_registros": registros,
         "total_cantidad": str(quantize_qty(total_cantidad)),
@@ -726,10 +730,26 @@ def _resumen(por_tipo, total_cantidad, neto_piezas, neto_costo, movimientos, reg
             for k in TIPOS_RESUMEN
         },
     }
+    if transferencias_lados is not None:
+        # Con ``almacen``: lo que salió de él y lo que entró a él por transferencia.
+        resumen["por_tipo"]["transferencias"].update(
+            {lado: _fmt_bucket(b) for lado, b in transferencias_lados.items()}
+        )
+    return resumen
 
 
 def _por_tipo_en_cero():
     return {k: {"registros": 0, "piezas": Decimal("0"), "costo": Decimal("0")} for k in TIPOS_RESUMEN}
+
+
+def _lados_transferencia(detalle, tipo, almacenes):
+    """``almacen_origen_*``/``almacen_destino_*`` de una transferencia (null en otros tipos)."""
+    datos = {}
+    for lado in ("origen", "destino"):
+        aid = getattr(detalle, f"almacen_{lado}_res", None) if tipo == "TRANSFERENCIA" else None
+        datos[f"almacen_{lado}_id"] = aid
+        datos[f"almacen_{lado}_nombre"] = (almacenes.get(aid) or {}).get("nombre")
+    return datos
 
 
 _UBICACION = ("id_ubicacion", "pasillo", "rack", "nivel", "posicion", "almacen_id")
@@ -863,7 +883,24 @@ def reporte_movimientos(user, query_params):
     resultados = []
     total_cantidad = neto_piezas = neto_costo = Decimal("0")
     por_tipo = _por_tipo_en_cero()
+    transferencias_lados = (
+        {lado: {"registros": 0, "piezas": Decimal("0"), "costo": Decimal("0")} for lado in ("salientes", "entrantes")}
+        if almacen_id else None
+    )
     movimiento_ids = set()
+
+    # Nombre de los almacenes de las transferencias fuera del alcance (el otro
+    # lado): una consulta, solo si hace falta.
+    faltan = {
+        getattr(d, f"almacen_{lado}_res", None)
+        for d in detalles if d.movimiento_inventario.tipo_movimiento == "TRANSFERENCIA"
+        for lado in ("origen", "destino")
+    } - set(almacenes) - {None}
+    if faltan:
+        almacenes.update({
+            a["id_almacen"]: a
+            for a in Almacen.objects.filter(pk__in=faltan).values("id_almacen", "codigo", "nombre")
+        })
 
     for detalle in detalles:
         movimiento = detalle.movimiento_inventario
@@ -889,8 +926,12 @@ def reporte_movimientos(user, query_params):
         elif tipo == "SALIDA":
             signed = -cantidad
         elif tipo == "TRANSFERENCIA":
-            # Con el almacén de la fila: sale del origen, entra al destino.
-            signed = -cantidad if lado == "origen" else cantidad
+            # Sin ``almacen``: la pieza no sale de la empresa, efecto 0 y fuera
+            # del neto. Con ``almacen``: − si sale de él, + si entra.
+            if not almacen_id:
+                signed = Decimal("0")
+            else:
+                signed = -cantidad if lado == "origen" else cantidad
         elif detalle.cantidad_antes is not None and detalle.cantidad_despues is not None:
             # AJUSTE: ``cantidad`` es la cantidad final; el efecto es la diferencia.
             signed = to_decimal(detalle.cantidad_despues) - to_decimal(detalle.cantidad_antes)
@@ -909,10 +950,15 @@ def reporte_movimientos(user, query_params):
         total_cantidad += cantidad
         neto_piezas += signed
         neto_costo += costo_signed
-        bucket = por_tipo[_bucket(tipo, signed)]
-        bucket["registros"] += 1
-        bucket["piezas"] += abs(signed)
-        bucket["costo"] += abs(costo_signed)
+        buckets = [por_tipo[_bucket(tipo, signed)]]
+        if tipo == "TRANSFERENCIA" and transferencias_lados is not None:
+            buckets.append(transferencias_lados["salientes" if lado == "origen" else "entrantes"])
+        # Piezas y costo movidos (sin signo); en la transferencia sin almacén el
+        # efecto es 0 pero sí se movieron.
+        for bucket in buckets:
+            bucket["registros"] += 1
+            bucket["piezas"] += cantidad if tipo == "TRANSFERENCIA" else abs(signed)
+            bucket["costo"] += abs(quantize_money(cantidad * costo_unitario)) if tipo == "TRANSFERENCIA" else abs(costo_signed)
         movimiento_ids.add(movimiento.pk)
 
         usuario = movimiento.usuario
@@ -929,6 +975,7 @@ def reporte_movimientos(user, query_params):
                 "almacen_nombre": almacen.get("nombre"),
                 "ubicacion_id": getattr(ubicacion, "pk", None),
                 "ubicacion_nombre": str(ubicacion) if ubicacion else None,
+                **_lados_transferencia(detalle, tipo, almacenes),
                 "producto_id": getattr(producto, "pk", None),
                 "producto_variante_id": getattr(variante, "pk", None),
                 "sku": getattr(variante, "sku", None) or getattr(vp, "sku", None),
@@ -965,5 +1012,6 @@ def reporte_movimientos(user, query_params):
     reporte["results"] = resultados
     reporte["resumen"] = _resumen(
         por_tipo, total_cantidad, neto_piezas, neto_costo, len(movimiento_ids), len(resultados),
+        transferencias_lados,
     )
     return reporte
